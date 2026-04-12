@@ -1,6 +1,12 @@
-# pi-speak-extension
+# pi-speak-pk
 
 Real `/speak` command for pi / pi-mono.
+
+## Install
+
+```text
+pi npm i pi-speak-pk
+```
 
 What it does:
 - toggles spoken assistant replies on and off

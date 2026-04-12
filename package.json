@@ -1,0 +1,29 @@
+{
+  "name": "pi-speak-pk",
+  "version": "0.1.0",
+  "description": "Real /speak command for Pi with ElevenLabs voice playback.",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "speech",
+    "elevenlabs"
+  ],
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.66.1",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}

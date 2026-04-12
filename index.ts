@@ -238,7 +238,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				enabled = true;
 				persistState();
 				setPhase("ready", ctx);
-				ctx.ui.notify(`Speech mode enabled (${DEFAULT_VOICE})`, "success");
+				ctx.ui.notify(`Speech mode enabled (${DEFAULT_VOICE})`, "info");
 				return;
 			}
 
@@ -267,14 +267,14 @@ export default function speakExtension(pi: ExtensionAPI) {
 				persistState();
 				setPhase("rewrite", ctx);
 				speakText("Hey, this is Adam using ElevenLabs through Pi speak mode.", ctx);
-				ctx.ui.notify(`Played speech test with ${DEFAULT_VOICE}`, "success");
+				ctx.ui.notify(`Played speech test with ${DEFAULT_VOICE}`, "info");
 				return;
 			}
 
 			enabled = true;
 			persistState();
 			setPhase("ready", ctx);
-			ctx.ui.notify(`Speech mode enabled (${DEFAULT_VOICE})`, "success");
+			ctx.ui.notify(`Speech mode enabled (${DEFAULT_VOICE})`, "info");
 			pi.sendUserMessage(raw);
 		},
 	});
