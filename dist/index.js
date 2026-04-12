@@ -361,19 +361,25 @@ function speakExtension(pi) {
         const target = ctx || lastCtx;
         switch (event.type) {
             case "wake":
-                voiceInputActive = event.state === "on";
-                updateMonoStatus(target);
-                if (voiceInputActive) {
-                    // Auto-enable speech output when voice input activates
+                if (event.state === "on") {
+                    voiceInputActive = true;
+                    updateMonoStatus(target);
                     if (!enabled) {
                         enabled = true;
                         persistState();
                         setPhase("ready", target);
                     }
-                    target?.ui?.notify?.("Voice input active", "info");
+                    target?.ui?.notify?.("Voice input active (say 'pi mono' to keep alive)", "info");
                 }
-                else {
-                    target?.ui?.notify?.("Voice input paused (say 'pi mono on' to resume)", "info");
+                else if (event.state === "ping") {
+                    // Keep-alive -- just update status to show it's still active
+                    updateMonoStatus(target);
+                }
+                else if (event.state === "off") {
+                    voiceInputActive = false;
+                    updateMonoStatus(target);
+                    const reason = event.reason === "timeout" ? " (timed out)" : "";
+                    target?.ui?.notify?.(`Voice input off${reason} — say 'pi mono' to reactivate`, "info");
                 }
                 break;
             case "transcribing":
@@ -458,7 +464,7 @@ function speakExtension(pi) {
             if (!lower || lower === "on" || lower === "start") {
                 startListener(ctx);
                 persistMonoState();
-                ctx.ui.notify("Voice listener started (say 'pi mono on' to activate)", "info");
+                ctx.ui.notify("Voice listener started — say 'pi mono' to activate (10s keep-alive)", "info");
                 return;
             }
             if (lower === "off" || lower === "stop") {

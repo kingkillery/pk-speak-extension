@@ -1,7 +1,10 @@
 """
 Two-tier voice listener for pi-speak-extension.
 
-Tier 1: Vosk (always-on, low CPU) listens for wake phrases "pi mono on" / "pi mono off".
+Tier 1: Vosk (always-on, low CPU) listens for wake phrase "pi mono".
+        Saying "pi mono" activates voice input. It stays active as long as
+        "pi mono" is heard again within ACTIVITY_TIMEOUT seconds (keep-alive).
+        Auto-deactivates after the timeout expires.
 Tier 2: faster-whisper (activated on demand) transcribes full speech for Pi messages.
 
 Outputs JSON lines to stdout for the Node.js extension to consume.
@@ -25,15 +28,16 @@ import sounddevice as sd
 SAMPLE_RATE = 16000
 VOSK_BLOCK_SIZE = 4000  # ~250ms chunks for Vosk
 WHISPER_MODEL = "tiny"
-WAKE_ON_RE = re.compile(r'\bpi mono on\b', re.IGNORECASE)
-WAKE_OFF_RE = re.compile(r'\bpi mono off\b', re.IGNORECASE)
+WAKE_RE = re.compile(r'\bpi mono\b', re.IGNORECASE)
 SILENCE_TIMEOUT = 2.0  # seconds of silence before finalizing a whisper segment
+ACTIVITY_TIMEOUT = 10.0  # seconds without "pi mono" before auto-deactivating
 ENERGY_THRESHOLD = 300  # RMS threshold for voice activity
 PRE_BUFFER_CHUNKS = 4  # ~1 second of lookback to capture utterance onset
 
 audio_queue: queue.Queue = queue.Queue()
 transcription_queue: queue.Queue = queue.Queue(maxsize=3)  # bounded: drop oldest if full
 active = False  # whether voice mode is on
+last_wake_time = 0.0  # wall-clock of last "pi mono" utterance
 running = True
 
 
@@ -79,9 +83,12 @@ def whisper_worker():
             emit("error", message=f"Transcription failed: {e}")
 
 
-def run_vosk_detector(on_wake_on, on_wake_off):
-    """Continuously process audio with Vosk. Detect wake phrases and enqueue
-    audio for whisper transcription when voice mode is active."""
+def run_vosk_detector(on_wake, on_timeout):
+    """Continuously process audio with Vosk. Detect "pi mono" wake phrase and
+    enqueue audio for whisper transcription while active. Auto-deactivates
+    after ACTIVITY_TIMEOUT seconds without hearing "pi mono" again."""
+    global last_wake_time
+
     from vosk import Model as VoskModel, KaldiRecognizer
 
     model_path = os.environ.get("VOSK_MODEL_PATH", "")
@@ -96,34 +103,44 @@ def run_vosk_detector(on_wake_on, on_wake_off):
     collecting_for_whisper = False
     whisper_buffer = bytearray()
     last_voice_time = time.time()
-    # Rolling pre-buffer to capture utterance onset
     pre_buffer: collections.deque = collections.deque(maxlen=PRE_BUFFER_CHUNKS)
 
     def flush_to_whisper():
         nonlocal collecting_for_whisper
-        if len(whisper_buffer) > SAMPLE_RATE * 2:  # at least 1 second of audio
+        if len(whisper_buffer) > SAMPLE_RATE * 2:
             audio_bytes = bytes(whisper_buffer)
             if transcription_queue.full():
                 try:
-                    transcription_queue.get_nowait()  # drop oldest segment
+                    transcription_queue.get_nowait()
                 except queue.Empty:
                     pass
             transcription_queue.put(audio_bytes)
         whisper_buffer.clear()
         collecting_for_whisper = False
 
+    def check_activity_timeout():
+        """Auto-deactivate if "pi mono" hasn't been heard within ACTIVITY_TIMEOUT."""
+        if active and last_wake_time > 0 and (time.time() - last_wake_time) > ACTIVITY_TIMEOUT:
+            on_timeout()
+            # Flush any pending audio before deactivating
+            nonlocal collecting_for_whisper
+            if collecting_for_whisper:
+                flush_to_whisper()
+
     while running:
         try:
             data = audio_queue.get(timeout=0.5)
         except queue.Empty:
+            check_activity_timeout()
             if collecting_for_whisper and (time.time() - last_voice_time) > SILENCE_TIMEOUT:
                 flush_to_whisper()
             continue
 
-        # Always maintain pre-buffer for onset capture
+        # Check activity timeout on every chunk
+        check_activity_timeout()
+
         pre_buffer.append(data)
 
-        # Feed to Vosk for wake detection
         if recognizer.AcceptWaveform(data):
             result = json.loads(recognizer.Result())
             text = result.get("text", "").lower().strip()
@@ -131,21 +148,17 @@ def run_vosk_detector(on_wake_on, on_wake_off):
             if not text:
                 continue
 
-            if WAKE_ON_RE.search(text):
-                on_wake_on()
-                collecting_for_whisper = False
-                whisper_buffer.clear()
-                continue
-
-            if WAKE_OFF_RE.search(text):
-                on_wake_off()
+            # "pi mono" acts as activate + keep-alive
+            if WAKE_RE.search(text):
+                last_wake_time = time.time()
+                on_wake()
+                # Don't capture the wake phrase itself as speech
                 collecting_for_whisper = False
                 whisper_buffer.clear()
                 continue
 
             if active:
                 if not collecting_for_whisper:
-                    # Prepend pre-buffer so utterance onset is captured
                     for chunk in pre_buffer:
                         whisper_buffer.extend(chunk)
                 collecting_for_whisper = True
@@ -207,18 +220,22 @@ def main():
 
     emit("status", message="Voice listener starting...")
 
-    def on_wake_on():
+    def on_wake():
         global active
-        if not active:
-            active = True
+        was_active = active
+        active = True
+        if not was_active:
             emit("wake", state="on")
             threading.Thread(target=get_whisper_model, daemon=True).start()
+        else:
+            # Keep-alive ping -- just reset the timer (done in run_vosk_detector)
+            emit("wake", state="ping")
 
-    def on_wake_off():
+    def on_timeout():
         global active
         if active:
             active = False
-            emit("wake", state="off")
+            emit("wake", state="off", reason="timeout")
 
     # Start whisper transcription worker thread
     worker = threading.Thread(target=whisper_worker, daemon=True)
@@ -255,7 +272,7 @@ def main():
         sys.exit(1)
 
     try:
-        run_vosk_detector(on_wake_on, on_wake_off)
+        run_vosk_detector(on_wake, on_timeout)
     except KeyboardInterrupt:
         pass
     finally:

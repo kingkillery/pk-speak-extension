@@ -18,7 +18,7 @@ type SessionRegistryState = {
 };
 
 type ListenerEvent =
-	| { type: "wake"; state: "on" | "off" }
+	| { type: "wake"; state: "on" | "off" | "ping"; reason?: string }
 	| { type: "speech"; text: string }
 	| { type: "transcribing" }
 	| { type: "status"; message: string }
@@ -392,18 +392,23 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 		switch (event.type) {
 			case "wake":
-				voiceInputActive = event.state === "on";
-				updateMonoStatus(target);
-				if (voiceInputActive) {
-					// Auto-enable speech output when voice input activates
+				if (event.state === "on") {
+					voiceInputActive = true;
+					updateMonoStatus(target);
 					if (!enabled) {
 						enabled = true;
 						persistState();
 						setPhase("ready", target);
 					}
-					target?.ui?.notify?.("Voice input active", "info");
-				} else {
-					target?.ui?.notify?.("Voice input paused (say 'pi mono on' to resume)", "info");
+					target?.ui?.notify?.("Voice input active (say 'pi mono' to keep alive)", "info");
+				} else if (event.state === "ping") {
+					// Keep-alive -- just update status to show it's still active
+					updateMonoStatus(target);
+				} else if (event.state === "off") {
+					voiceInputActive = false;
+					updateMonoStatus(target);
+					const reason = event.reason === "timeout" ? " (timed out)" : "";
+					target?.ui?.notify?.(`Voice input off${reason} — say 'pi mono' to reactivate`, "info");
 				}
 				break;
 
@@ -500,7 +505,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			if (!lower || lower === "on" || lower === "start") {
 				startListener(ctx);
 				persistMonoState();
-				ctx.ui.notify("Voice listener started (say 'pi mono on' to activate)", "info");
+				ctx.ui.notify("Voice listener started — say 'pi mono' to activate (10s keep-alive)", "info");
 				return;
 			}
 
