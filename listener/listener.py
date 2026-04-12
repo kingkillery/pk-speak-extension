@@ -13,9 +13,8 @@ import queue
 import threading
 import os
 import re
-import tempfile
 import time
-from pathlib import Path
+import collections
 
 import numpy as np
 import sounddevice as sd
@@ -26,12 +25,14 @@ import sounddevice as sd
 SAMPLE_RATE = 16000
 VOSK_BLOCK_SIZE = 4000  # ~250ms chunks for Vosk
 WHISPER_MODEL = "tiny"
-WAKE_ON = "pi mono on"
-WAKE_OFF = "pi mono off"
+WAKE_ON_RE = re.compile(r'\bpi mono on\b', re.IGNORECASE)
+WAKE_OFF_RE = re.compile(r'\bpi mono off\b', re.IGNORECASE)
 SILENCE_TIMEOUT = 2.0  # seconds of silence before finalizing a whisper segment
 ENERGY_THRESHOLD = 300  # RMS threshold for voice activity
+PRE_BUFFER_CHUNKS = 4  # ~1 second of lookback to capture utterance onset
 
 audio_queue: queue.Queue = queue.Queue()
+transcription_queue: queue.Queue = queue.Queue()  # audio bytes for whisper worker
 active = False  # whether voice mode is on
 running = True
 
@@ -60,16 +61,33 @@ def audio_callback(indata, frames, time_info, status):
 # ---------------------------------------------------------------------------
 # Vosk wake-word detector (Tier 1)
 # ---------------------------------------------------------------------------
-def run_vosk_detector(on_wake_on, on_wake_off, on_speech_while_active):
-    """Continuously process audio with Vosk. Detect wake phrases and forward
-    partial text when voice mode is active."""
+def whisper_worker():
+    """Background thread that pulls audio from transcription_queue and transcribes."""
+    while running:
+        try:
+            audio_bytes = transcription_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        if audio_bytes is None:  # poison pill
+            break
+        emit("transcribing")
+        try:
+            text = transcribe_audio(audio_bytes)
+            if text:
+                emit("speech", text=text)
+        except Exception as e:
+            emit("error", message=f"Transcription failed: {e}")
+
+
+def run_vosk_detector(on_wake_on, on_wake_off):
+    """Continuously process audio with Vosk. Detect wake phrases and enqueue
+    audio for whisper transcription when voice mode is active."""
     from vosk import Model as VoskModel, KaldiRecognizer
 
     model_path = os.environ.get("VOSK_MODEL_PATH", "")
     if model_path and os.path.isdir(model_path):
         model = VoskModel(model_path)
     else:
-        # Vosk auto-downloads a small English model if none is specified
         model = VoskModel(lang="en-us")
 
     recognizer = KaldiRecognizer(model, SAMPLE_RATE)
@@ -78,18 +96,26 @@ def run_vosk_detector(on_wake_on, on_wake_off, on_speech_while_active):
     collecting_for_whisper = False
     whisper_buffer = bytearray()
     last_voice_time = time.time()
+    # Rolling pre-buffer to capture utterance onset
+    pre_buffer: collections.deque = collections.deque(maxlen=PRE_BUFFER_CHUNKS)
+
+    def flush_to_whisper():
+        nonlocal collecting_for_whisper
+        if len(whisper_buffer) > SAMPLE_RATE * 2:  # at least 1 second of audio
+            transcription_queue.put(bytes(whisper_buffer))
+        whisper_buffer.clear()
+        collecting_for_whisper = False
 
     while running:
         try:
             data = audio_queue.get(timeout=0.5)
         except queue.Empty:
-            # Check silence timeout when collecting for whisper
             if collecting_for_whisper and (time.time() - last_voice_time) > SILENCE_TIMEOUT:
-                if len(whisper_buffer) > SAMPLE_RATE * 2:  # at least 1 second
-                    on_speech_while_active(bytes(whisper_buffer))
-                whisper_buffer.clear()
-                collecting_for_whisper = False
+                flush_to_whisper()
             continue
+
+        # Always maintain pre-buffer for onset capture
+        pre_buffer.append(data)
 
         # Feed to Vosk for wake detection
         if recognizer.AcceptWaveform(data):
@@ -99,40 +125,40 @@ def run_vosk_detector(on_wake_on, on_wake_off, on_speech_while_active):
             if not text:
                 continue
 
-            # Check wake phrases (always, regardless of active state)
-            if WAKE_ON in text:
+            if WAKE_ON_RE.search(text):
                 on_wake_on()
                 collecting_for_whisper = False
                 whisper_buffer.clear()
                 continue
 
-            if WAKE_OFF in text:
+            if WAKE_OFF_RE.search(text):
                 on_wake_off()
                 collecting_for_whisper = False
                 whisper_buffer.clear()
                 continue
 
-            # If active, collect audio for whisper transcription
             if active:
+                if not collecting_for_whisper:
+                    # Prepend pre-buffer so utterance onset is captured
+                    for chunk in pre_buffer:
+                        whisper_buffer.extend(chunk)
                 collecting_for_whisper = True
                 whisper_buffer.extend(data)
                 last_voice_time = time.time()
         else:
-            # Partial result -- keep collecting if active
             if active:
                 energy = rms(np.frombuffer(data, dtype=np.int16))
                 if energy > ENERGY_THRESHOLD:
+                    if not collecting_for_whisper:
+                        for chunk in pre_buffer:
+                            whisper_buffer.extend(chunk)
                     collecting_for_whisper = True
                     last_voice_time = time.time()
                 if collecting_for_whisper:
                     whisper_buffer.extend(data)
 
-                # Check silence timeout
                 if collecting_for_whisper and (time.time() - last_voice_time) > SILENCE_TIMEOUT:
-                    if len(whisper_buffer) > SAMPLE_RATE * 2:
-                        on_speech_while_active(bytes(whisper_buffer))
-                    whisper_buffer.clear()
-                    collecting_for_whisper = False
+                    flush_to_whisper()
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +206,6 @@ def main():
         if not active:
             active = True
             emit("wake", state="on")
-            # Pre-load whisper model in background
             threading.Thread(target=get_whisper_model, daemon=True).start()
 
     def on_wake_off():
@@ -189,16 +214,24 @@ def main():
             active = False
             emit("wake", state="off")
 
-    def on_speech(audio_bytes: bytes):
-        if not active:
-            return
-        emit("transcribing")
+    # Start whisper transcription worker thread
+    worker = threading.Thread(target=whisper_worker, daemon=True)
+    worker.start()
+
+    # Watch stdin for close (graceful shutdown signal from Node.js)
+    def watch_stdin():
+        global running
         try:
-            text = transcribe_audio(audio_bytes)
-            if text:
-                emit("speech", text=text)
-        except Exception as e:
-            emit("error", message=f"Transcription failed: {e}")
+            while True:
+                line = sys.stdin.readline()
+                if not line:  # stdin closed
+                    break
+        except Exception:
+            pass
+        running = False
+
+    stdin_watcher = threading.Thread(target=watch_stdin, daemon=True)
+    stdin_watcher.start()
 
     # Start audio stream
     try:
@@ -216,13 +249,15 @@ def main():
         sys.exit(1)
 
     try:
-        run_vosk_detector(on_wake_on, on_wake_off, on_speech)
+        run_vosk_detector(on_wake_on, on_wake_off)
     except KeyboardInterrupt:
         pass
     finally:
         running = False
+        transcription_queue.put(None)  # poison pill for worker
         stream.stop()
         stream.close()
+        worker.join(timeout=5.0)
         emit("status", message="Listener stopped")
 
 

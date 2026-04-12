@@ -106,7 +106,8 @@ $player.Close()
 }
 
 function getExtensionDir(): string {
-	return __dirname;
+	// __dirname is dist/ when running from compiled output; listener/ is a sibling of dist/
+	return join(__dirname, "..");
 }
 
 function getPython(): string {
@@ -128,6 +129,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	// Voice listener state
 	let listenerProcess: ChildProcess | undefined;
+	let listenerRl: ReturnType<typeof createInterface> | undefined;
 	let monoActive = false; // whether the listener background process is running
 	let voiceInputActive = false; // whether "pi mono on" has been heard (voice commands flowing)
 	let sessionRegistry: Record<string, string> = {}; // name -> sessionPath
@@ -247,12 +249,16 @@ export default function speakExtension(pi: ExtensionAPI) {
 			else {
 				cleanupAudioFiles();
 				setPhase("ready", ctx);
+				const target = ctx || lastCtx;
+				target?.ui?.notify?.(`Speech synthesis failed (exit code ${code})`, "error");
 			}
 		});
-		speakingProcess.on("error", () => {
+		speakingProcess.on("error", (err) => {
 			speakingProcess = undefined;
 			cleanupAudioFiles();
 			setPhase("ready", ctx);
+			const target = ctx || lastCtx;
+			target?.ui?.notify?.(`Speech synthesis error: ${err.message}`, "error");
 		});
 		speakingProcess.stdin?.write(trimmed);
 		speakingProcess.stdin?.end();
@@ -281,8 +287,21 @@ export default function speakExtension(pi: ExtensionAPI) {
 	};
 
 	const stopListener = (ctx?: any) => {
+		if (listenerRl) {
+			try { listenerRl.close(); } catch {}
+			listenerRl = undefined;
+		}
 		if (listenerProcess && !listenerProcess.killed) {
-			try { listenerProcess.kill(); } catch {}
+			const proc = listenerProcess;
+			// Close stdin to signal graceful shutdown to Python
+			try { proc.stdin?.end(); } catch {}
+			// Force kill after 3 seconds if still alive
+			const killTimer = setTimeout(() => {
+				if (!proc.killed) {
+					try { proc.kill(); } catch {}
+				}
+			}, 3000);
+			proc.on("exit", () => clearTimeout(killTimer));
 		}
 		listenerProcess = undefined;
 		monoActive = false;
@@ -303,25 +322,38 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 		const python = getPython();
 		listenerProcess = spawn(python, ["-u", listenerScript], {
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["pipe", "pipe", "pipe"],
 			detached: false,
 			windowsHide: true,
 			shell: false,
-			env: { ...process.env },
+			env: {
+				PATH: process.env.PATH || "",
+				SYSTEMROOT: process.env.SYSTEMROOT || "",
+				TEMP: process.env.TEMP || "",
+				TMP: process.env.TMP || "",
+				USERPROFILE: process.env.USERPROFILE || "",
+				HOME: process.env.HOME || "",
+				VOSK_MODEL_PATH: process.env.VOSK_MODEL_PATH || "",
+				WHISPER_DEVICE: process.env.WHISPER_DEVICE || "",
+				WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "",
+				WHISPER_MODEL: process.env.WHISPER_MODEL || "",
+			},
 		});
 
 		monoActive = true;
 		updateMonoStatus(ctx);
 
-		const rl = createInterface({ input: listenerProcess.stdout! });
-		rl.on("line", (line) => {
+		listenerRl = createInterface({ input: listenerProcess.stdout! });
+		listenerRl.on("line", (line) => {
 			let event: ListenerEvent;
 			try {
 				event = JSON.parse(line);
 			} catch {
 				return;
 			}
-			handleListenerEvent(event, ctx);
+			// Always use lastCtx so voice events target the current session, not the
+			// stale ctx from when startListener was called.
+			handleListenerEvent(event, undefined);
 		});
 
 		listenerProcess.stderr?.setEncoding("utf8");
@@ -433,12 +465,6 @@ export default function speakExtension(pi: ExtensionAPI) {
 	// -----------------------------------------------------------------------
 	// Session registry helpers
 	// -----------------------------------------------------------------------
-	const getSessionsDir = (): string | undefined => {
-		const home = process.env.USERPROFILE || process.env.HOME || "";
-		const piDir = join(home, ".pi", "sessions");
-		return existsSync(piDir) ? piDir : undefined;
-	};
-
 	const findSessionByName = (name: string): string | undefined => {
 		const lower = name.toLowerCase();
 		// Check registry first
@@ -505,6 +531,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 			if (sub === "new") {
 				const name = rest || `session-${Date.now()}`;
+				if (sessionRegistry[name]) {
+					ctx.ui.notify(`Warning: session "${name}" already exists and will be overwritten in registry`, "warning");
+				}
 				const result = await ctx.newSession();
 				if (!result.cancelled) {
 					pi.setSessionName(name);
