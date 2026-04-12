@@ -395,11 +395,23 @@ function speakExtension(pi) {
     };
     const routeVoiceInput = (text, ctx) => {
         const lower = text.toLowerCase().trim();
+        const target = ctx || lastCtx;
+        // Speech control -- always immediate, no agent interaction
+        if (lower === "stop speaking" || lower === "be quiet" || lower === "shut up" || lower === "shush") {
+            stopSpeaking(target);
+            return;
+        }
+        // Determine if agent is busy so we can queue instead of interrupt
+        const idle = target?.isIdle?.() ?? true;
+        const deliverAs = idle ? undefined : "followUp";
+        if (!idle) {
+            target?.ui?.setStatus?.("mono", "mono:queued");
+        }
         // Session commands via voice
         if (lower.startsWith("new session ")) {
             const name = text.slice("new session ".length).trim();
             if (name) {
-                pi.sendUserMessage(`/session new ${name}`);
+                pi.sendUserMessage(`/session new ${name}`, deliverAs ? { deliverAs } : undefined);
                 return;
             }
         }
@@ -407,21 +419,16 @@ function speakExtension(pi) {
             const prefix = lower.startsWith("switch to session ") ? "switch to session " : "switch session ";
             const name = text.slice(prefix.length).trim();
             if (name) {
-                pi.sendUserMessage(`/session switch ${name}`);
+                pi.sendUserMessage(`/session switch ${name}`, deliverAs ? { deliverAs } : undefined);
                 return;
             }
         }
         if (lower === "list sessions" || lower === "show sessions") {
-            pi.sendUserMessage("/session list");
+            pi.sendUserMessage("/session list", deliverAs ? { deliverAs } : undefined);
             return;
         }
-        // Speech control
-        if (lower === "stop speaking" || lower === "be quiet" || lower === "shut up" || lower === "shush") {
-            stopSpeaking(ctx);
-            return;
-        }
-        // Everything else -> user message to Pi
-        pi.sendUserMessage(text);
+        // Everything else -> user message to Pi (queued as followUp if busy)
+        pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
     };
     // -----------------------------------------------------------------------
     // Session registry helpers
