@@ -417,7 +417,7 @@ function speakExtension(pi) {
         if (lower.startsWith("new session ")) {
             const name = text.slice("new session ".length).trim();
             if (name) {
-                pi.sendUserMessage(`/session new ${name}`, deliverAs ? { deliverAs } : undefined);
+                pi.sendUserMessage(`/sess new ${name}`, deliverAs ? { deliverAs } : undefined);
                 return;
             }
         }
@@ -425,12 +425,12 @@ function speakExtension(pi) {
             const prefix = lower.startsWith("switch to session ") ? "switch to session " : "switch session ";
             const name = text.slice(prefix.length).trim();
             if (name) {
-                pi.sendUserMessage(`/session switch ${name}`, deliverAs ? { deliverAs } : undefined);
+                pi.sendUserMessage(`/sess switch ${name}`, deliverAs ? { deliverAs } : undefined);
                 return;
             }
         }
         if (lower === "list sessions" || lower === "show sessions") {
-            pi.sendUserMessage("/session list", deliverAs ? { deliverAs } : undefined);
+            pi.sendUserMessage("/sess list", deliverAs ? { deliverAs } : undefined);
             return;
         }
         // Everything else -> user message to Pi (queued as followUp if busy)
@@ -485,7 +485,7 @@ function speakExtension(pi) {
             ctx.ui.notify("Usage: /mono [on|off|status]", "error");
         },
     });
-    pi.registerCommand("session", {
+    pi.registerCommand("sess", {
         description: "Manage named sessions (new, switch, list, name)",
         getArgumentCompletions: (prefix) => {
             const options = ["new", "switch", "list", "name"];
@@ -516,7 +516,7 @@ function speakExtension(pi) {
             }
             if (sub === "switch") {
                 if (!rest) {
-                    ctx.ui.notify("Usage: /session switch <name>", "error");
+                    ctx.ui.notify("Usage: /sess switch <name>", "error");
                     return;
                 }
                 const sessionPath = findSessionByName(rest);
@@ -553,7 +553,7 @@ function speakExtension(pi) {
                 ctx.ui.notify(`Session named: ${rest}`, "info");
                 return;
             }
-            ctx.ui.notify("Usage: /session [new|switch|list|name] <args>", "error");
+            ctx.ui.notify("Usage: /sess [new|switch|list|name] <args>", "error");
         },
     });
     pi.registerCommand("speak", {
