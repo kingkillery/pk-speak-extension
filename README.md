@@ -24,6 +24,7 @@ After reloading pi:
 ```text
 /speak
 /speak test
+/speak stop
 /speak off
 /speak status
 /speak explain the auth flow
@@ -34,3 +35,21 @@ After reloading pi:
 - `speak11.py` / `speak11.cmd`
 - OpenRouter rewrite model: `openai/gpt-oss-20b:nitro`
 - ElevenLabs API voice output (default voice: `adam`)
+
+## Interrupting playback
+
+Use:
+
+```text
+/speak stop
+```
+
+That stops the current spoken reply immediately but keeps speak mode enabled.
+
+Use:
+
+```text
+/speak off
+```
+
+That stops playback and disables speak mode entirely.

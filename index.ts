@@ -225,7 +225,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.registerCommand("speak", {
 		description: "Enable real ElevenLabs voice mode for assistant replies",
 		getArgumentCompletions: (prefix) => {
-			const options = ["on", "off", "status", "test"];
+			const options = ["on", "off", "stop", "interrupt", "status", "test"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -242,7 +242,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			if (lower === "off" || lower === "disable" || lower === "stop") {
+			if (lower === "stop" || lower === "interrupt" || lower === "quiet" || lower === "shush") {
+				stopSpeaking(ctx);
+				ctx.ui.notify(enabled ? "Stopped current speech playback" : "No speech playback is active", "info");
+				return;
+			}
+
+			if (lower === "off" || lower === "disable") {
 				enabled = false;
 				persistState();
 				stopSpeaking(ctx);
