@@ -381,7 +381,7 @@ function speakExtension(pi) {
                 break;
             case "speech":
                 updateMonoStatus(target);
-                if (event.text) {
+                if (event.text && voiceInputActive) {
                     routeVoiceInput(event.text, target);
                 }
                 break;
@@ -626,8 +626,13 @@ function speakExtension(pi) {
     });
     pi.on("session_shutdown", async (_event, ctx) => {
         lastCtx = ctx;
+        // Snapshot the full session registry before shutdown so it survives restarts
+        if (Object.keys(sessionRegistry).length > 0) {
+            persistSessionRegistry();
+        }
         stopSpeaking(ctx);
-        stopListener(ctx);
+        // Don't stop the listener here -- it should survive session switches.
+        // It will be cleaned up when the extension process exits.
     });
     pi.on("before_agent_start", async (event, ctx) => {
         lastCtx = ctx;

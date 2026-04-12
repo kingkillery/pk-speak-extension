@@ -32,7 +32,7 @@ ENERGY_THRESHOLD = 300  # RMS threshold for voice activity
 PRE_BUFFER_CHUNKS = 4  # ~1 second of lookback to capture utterance onset
 
 audio_queue: queue.Queue = queue.Queue()
-transcription_queue: queue.Queue = queue.Queue()  # audio bytes for whisper worker
+transcription_queue: queue.Queue = queue.Queue(maxsize=3)  # bounded: drop oldest if full
 active = False  # whether voice mode is on
 running = True
 
@@ -102,7 +102,13 @@ def run_vosk_detector(on_wake_on, on_wake_off):
     def flush_to_whisper():
         nonlocal collecting_for_whisper
         if len(whisper_buffer) > SAMPLE_RATE * 2:  # at least 1 second of audio
-            transcription_queue.put(bytes(whisper_buffer))
+            audio_bytes = bytes(whisper_buffer)
+            if transcription_queue.full():
+                try:
+                    transcription_queue.get_nowait()  # drop oldest segment
+                except queue.Empty:
+                    pass
+            transcription_queue.put(audio_bytes)
         whisper_buffer.clear()
         collecting_for_whisper = False
 
