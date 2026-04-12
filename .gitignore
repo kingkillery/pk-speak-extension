@@ -1,3 +1,17 @@
 node_modules/
 __pycache__/
 *.pyc
+
+# Compiled output (rebuilt on install)
+dist/
+
+# npm debug logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Install helper scripts
+_install.ps1
