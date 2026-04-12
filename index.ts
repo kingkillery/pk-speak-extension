@@ -331,12 +331,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			windowsHide: true,
 			shell: false,
 			env: {
-				PATH: process.env.PATH || "",
-				SYSTEMROOT: process.env.SYSTEMROOT || "",
-				TEMP: process.env.TEMP || "",
-				TMP: process.env.TMP || "",
-				USERPROFILE: process.env.USERPROFILE || "",
-				HOME: process.env.HOME || "",
+				...process.env,
 				VOSK_MODEL_PATH: process.env.VOSK_MODEL_PATH || "",
 				WHISPER_DEVICE: process.env.WHISPER_DEVICE || "",
 				WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "",
