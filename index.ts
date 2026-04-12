@@ -106,8 +106,12 @@ $player.Close()
 }
 
 function getExtensionDir(): string {
-	// __dirname is dist/ when running from compiled output; listener/ is a sibling of dist/
-	return join(__dirname, "..");
+	// When loaded from dist/, listener/ is a sibling of dist/ → go up one level.
+	// When loaded directly (e.g. ~/.pi/agent/extensions/speak.ts), listener/ is a
+	// sibling of the .ts file → __dirname is already correct.
+	const candidate = join(__dirname, "..", "listener", "listener.py");
+	if (existsSync(candidate)) return join(__dirname, "..");
+	return __dirname;
 }
 
 function getPython(): string {

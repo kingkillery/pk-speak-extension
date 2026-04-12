@@ -80,8 +80,13 @@ $player.Close()
     return { command: "powershell.exe", args: ["-NoProfile", "-Command", ps] };
 }
 function getExtensionDir() {
-    // __dirname is dist/ when running from compiled output; listener/ is a sibling of dist/
-    return (0, node_path_1.join)(__dirname, "..");
+    // When loaded from dist/, listener/ is a sibling of dist/ → go up one level.
+    // When loaded directly (e.g. ~/.pi/agent/extensions/speak.ts), listener/ is a
+    // sibling of the .ts file → __dirname is already correct.
+    const candidate = (0, node_path_1.join)(__dirname, "..", "listener", "listener.py");
+    if ((0, node_fs_1.existsSync)(candidate))
+        return (0, node_path_1.join)(__dirname, "..");
+    return __dirname;
 }
 function getPython() {
     if ((0, node_fs_1.existsSync)("C:/Python314/python.exe"))
