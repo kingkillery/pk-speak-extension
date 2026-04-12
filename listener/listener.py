@@ -28,7 +28,7 @@ import sounddevice as sd
 SAMPLE_RATE = 16000
 VOSK_BLOCK_SIZE = 4000  # ~250ms chunks for Vosk
 WHISPER_MODEL = "tiny"
-WAKE_RE = re.compile(r'\bpi mono\b', re.IGNORECASE)
+WAKE_RE = re.compile(r'\bpi\s+mono(?:\s+(\S+))?', re.IGNORECASE)
 SILENCE_TIMEOUT = 2.0  # seconds of silence before finalizing a whisper segment
 ACTIVITY_TIMEOUT = 10.0  # seconds without "pi mono" before auto-deactivating
 ENERGY_THRESHOLD = 300  # RMS threshold for voice activity
@@ -148,10 +148,12 @@ def run_vosk_detector(on_wake, on_timeout):
             if not text:
                 continue
 
-            # "pi mono" acts as activate + keep-alive
-            if WAKE_RE.search(text):
+            # "pi mono [target]" acts as activate + keep-alive + target selection
+            match = WAKE_RE.search(text)
+            if match:
                 last_wake_time = time.time()
-                on_wake()
+                target_name = match.group(1) or None
+                on_wake(target_name)
                 # Don't capture the wake phrase itself as speech
                 collecting_for_whisper = False
                 whisper_buffer.clear()
@@ -220,16 +222,16 @@ def main():
 
     emit("status", message="Voice listener starting...")
 
-    def on_wake():
+    def on_wake(target_name=None):
         global active
         was_active = active
         active = True
         if not was_active:
-            emit("wake", state="on")
+            emit("wake", state="on", target=target_name or "")
             threading.Thread(target=get_whisper_model, daemon=True).start()
         else:
-            # Keep-alive ping -- just reset the timer (done in run_vosk_detector)
-            emit("wake", state="ping")
+            # Keep-alive ping -- pass target if changed
+            emit("wake", state="ping", target=target_name or "")
 
     def on_timeout():
         global active

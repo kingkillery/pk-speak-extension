@@ -18,7 +18,7 @@ type SessionRegistryState = {
 };
 
 type ListenerEvent =
-	| { type: "wake"; state: "on" | "off" | "ping"; reason?: string }
+	| { type: "wake"; state: "on" | "off" | "ping"; reason?: string; target?: string }
 	| { type: "speech"; text: string }
 	| { type: "transcribing" }
 	| { type: "status"; message: string }
@@ -136,6 +136,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let listenerRl: ReturnType<typeof createInterface> | undefined;
 	let monoActive = false; // whether the listener background process is running
 	let voiceInputActive = false; // whether "pi mono on" has been heard (voice commands flowing)
+	let voiceTarget: string | undefined; // session name to route voice input to (undefined = current session)
 	let sessionRegistry: Record<string, string> = {}; // name -> sessionPath
 
 	const updateStatus = (ctx?: any) => {
@@ -278,7 +279,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 			target.ui.setStatus("mono", "");
 			return;
 		}
-		const label = voiceInputActive ? "mono:on" : "mono:standby";
+		const label = voiceInputActive
+			? voiceTarget
+				? `mono:${voiceTarget}`
+				: "mono:on"
+			: "mono:standby";
 		target.ui.setStatus("mono", label);
 	};
 
@@ -310,6 +315,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		listenerProcess = undefined;
 		monoActive = false;
 		voiceInputActive = false;
+		voiceTarget = undefined;
 		updateMonoStatus(ctx);
 	};
 
@@ -369,6 +375,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			listenerProcess = undefined;
 			monoActive = false;
 			voiceInputActive = false;
+			voiceTarget = undefined;
 			updateMonoStatus(ctx);
 			if (code !== 0 && code !== null) {
 				const target = ctx || lastCtx;
@@ -380,6 +387,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			listenerProcess = undefined;
 			monoActive = false;
 			voiceInputActive = false;
+			voiceTarget = undefined;
 			updateMonoStatus(ctx);
 			const target = ctx || lastCtx;
 			target?.ui?.notify?.(`Voice listener error: ${err.message}`, "error");
@@ -393,18 +401,22 @@ export default function speakExtension(pi: ExtensionAPI) {
 			case "wake":
 				if (event.state === "on") {
 					voiceInputActive = true;
+					voiceTarget = event.target || undefined;
 					updateMonoStatus(target);
 					if (!enabled) {
 						enabled = true;
 						persistState();
 						setPhase("ready", target);
 					}
-					target?.ui?.notify?.("Voice input active (say 'pi mono' to keep alive)", "info");
+					const targetLabel = voiceTarget ? ` (target: ${voiceTarget})` : "";
+					target?.ui?.notify?.(`Voice input active${targetLabel} — say 'pi mono' or 'pi mono <name>' to keep alive`, "info");
 				} else if (event.state === "ping") {
-					// Keep-alive -- just update status to show it's still active
+					// Keep-alive — update target if provided
+					if (event.target) voiceTarget = event.target;
 					updateMonoStatus(target);
 				} else if (event.state === "off") {
 					voiceInputActive = false;
+					voiceTarget = undefined;
 					updateMonoStatus(target);
 					const reason = event.reason === "timeout" ? " (timed out)" : "";
 					target?.ui?.notify?.(`Voice input off${reason} — say 'pi mono' to reactivate`, "info");
@@ -432,7 +444,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const routeVoiceInput = (text: string, ctx?: any) => {
+	const routeVoiceInput = async (text: string, ctx?: any) => {
 		const lower = text.toLowerCase().trim();
 		const target = ctx || lastCtx;
 
@@ -472,7 +484,21 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 
 		// Everything else -> user message to Pi (queued as followUp if busy)
-		pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
+		if (voiceTarget) {
+			const sessionPath = findSessionByName(voiceTarget);
+			if (sessionPath) {
+				// Switch to target session and send the message
+				target?.ui?.notify?.(`Routing to session: ${voiceTarget}`, "info");
+				const result = await target?.switchSession?.(sessionPath);
+				if (!result?.cancelled) {
+					pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
+				}
+			} else {
+				target?.ui?.notify?.(`Unknown session \"${voiceTarget}\" — say 'pi mono' to reset to current`, "warning");
+			}
+		} else {
+			pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
+		}
 	};
 
 	// -----------------------------------------------------------------------
@@ -516,10 +542,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (lower === "status") {
+				const sessions = Object.keys(sessionRegistry).join(", ") || "none";
 				const status = monoActive
 					? voiceInputActive
-						? "Listener running, voice input active"
-						: "Listener running, waiting for wake phrase"
+						? voiceTarget
+							? `Listener running, voice active → ${voiceTarget} (known: ${sessions})`
+							: `Listener running, voice active → current session (known: ${sessions})`
+						: `Listener running, waiting for wake phrase (known: ${sessions})`
 					: "Listener not running";
 				ctx.ui.notify(status, "info");
 				return;
