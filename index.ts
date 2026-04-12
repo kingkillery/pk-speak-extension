@@ -3,10 +3,26 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createInterface } from "node:readline";
 
 type SpeakState = {
 	enabled: boolean;
 };
+
+type MonoState = {
+	listening: boolean;
+};
+
+type SessionRegistryState = {
+	sessions: Record<string, string>; // name -> sessionPath
+};
+
+type ListenerEvent =
+	| { type: "wake"; state: "on" | "off" }
+	| { type: "speech"; text: string }
+	| { type: "transcribing" }
+	| { type: "status"; message: string }
+	| { type: "error"; message: string };
 
 type ContentBlock = {
 	type?: string;
@@ -14,6 +30,8 @@ type ContentBlock = {
 };
 
 const STATE_TYPE = "elevenlabs-speak-state";
+const MONO_STATE_TYPE = "mono-listener-state";
+const SESSION_REGISTRY_TYPE = "session-registry";
 const DEFAULT_VOICE = "adam";
 const SPEECH_MODE_PROMPT = `Activate CodeChat mode for this conversation.
 
@@ -87,6 +105,18 @@ $player.Close()
 	return { command: "powershell.exe", args: ["-NoProfile", "-Command", ps] };
 }
 
+function getExtensionDir(): string {
+	return __dirname;
+}
+
+function getPython(): string {
+	if (existsSync("C:/Python314/python.exe")) return "C:/Python314/python.exe";
+	const home = process.env.USERPROFILE || process.env.HOME || "";
+	const localPy = join(home, "AppData", "Local", "Microsoft", "WindowsApps", "python3.exe");
+	if (existsSync(localPy)) return localPy;
+	return "python";
+}
+
 export default function speakExtension(pi: ExtensionAPI) {
 	let enabled = false;
 	let lastAssistantText = "";
@@ -95,6 +125,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let activeAudioDir: string | undefined;
 	let phase: "ready" | "llm" | "rewrite" | "voice" | "playing" = "ready";
 	let lastCtx: any;
+
+	// Voice listener state
+	let listenerProcess: ChildProcess | undefined;
+	let monoActive = false; // whether the listener background process is running
+	let voiceInputActive = false; // whether "pi mono on" has been heard (voice commands flowing)
+	let sessionRegistry: Record<string, string> = {}; // name -> sessionPath
 
 	const updateStatus = (ctx?: any) => {
 		const target = ctx || lastCtx;
@@ -222,6 +258,312 @@ export default function speakExtension(pi: ExtensionAPI) {
 		speakingProcess.stdin?.end();
 	};
 
+	// -----------------------------------------------------------------------
+	// Voice listener management
+	// -----------------------------------------------------------------------
+	const updateMonoStatus = (ctx?: any) => {
+		const target = ctx || lastCtx;
+		if (!target?.hasUI) return;
+		if (!monoActive) {
+			target.ui.setStatus("mono", "");
+			return;
+		}
+		const label = voiceInputActive ? "mono:on" : "mono:standby";
+		target.ui.setStatus("mono", label);
+	};
+
+	const persistMonoState = () => {
+		pi.appendEntry<MonoState>(MONO_STATE_TYPE, { listening: monoActive });
+	};
+
+	const persistSessionRegistry = () => {
+		pi.appendEntry<SessionRegistryState>(SESSION_REGISTRY_TYPE, { sessions: sessionRegistry });
+	};
+
+	const stopListener = (ctx?: any) => {
+		if (listenerProcess && !listenerProcess.killed) {
+			try { listenerProcess.kill(); } catch {}
+		}
+		listenerProcess = undefined;
+		monoActive = false;
+		voiceInputActive = false;
+		updateMonoStatus(ctx);
+	};
+
+	const startListener = (ctx?: any) => {
+		if (listenerProcess) return;
+
+		const extDir = getExtensionDir();
+		const listenerScript = join(extDir, "listener", "listener.py");
+		if (!existsSync(listenerScript)) {
+			const target = ctx || lastCtx;
+			target?.ui?.notify?.(`Listener script not found: ${listenerScript}`, "error");
+			return;
+		}
+
+		const python = getPython();
+		listenerProcess = spawn(python, ["-u", listenerScript], {
+			stdio: ["ignore", "pipe", "pipe"],
+			detached: false,
+			windowsHide: true,
+			shell: false,
+			env: { ...process.env },
+		});
+
+		monoActive = true;
+		updateMonoStatus(ctx);
+
+		const rl = createInterface({ input: listenerProcess.stdout! });
+		rl.on("line", (line) => {
+			let event: ListenerEvent;
+			try {
+				event = JSON.parse(line);
+			} catch {
+				return;
+			}
+			handleListenerEvent(event, ctx);
+		});
+
+		listenerProcess.stderr?.setEncoding("utf8");
+		listenerProcess.stderr?.on("data", (chunk: string) => {
+			for (const line of chunk.split(/\r?\n/)) {
+				if (line.trim()) {
+					const target = ctx || lastCtx;
+					target?.ui?.notify?.(`[listener] ${line.trim()}`, "warning");
+				}
+			}
+		});
+
+		listenerProcess.on("exit", (code) => {
+			listenerProcess = undefined;
+			monoActive = false;
+			voiceInputActive = false;
+			updateMonoStatus(ctx);
+			if (code !== 0 && code !== null) {
+				const target = ctx || lastCtx;
+				target?.ui?.notify?.(`Voice listener exited with code ${code}`, "error");
+			}
+		});
+
+		listenerProcess.on("error", (err) => {
+			listenerProcess = undefined;
+			monoActive = false;
+			voiceInputActive = false;
+			updateMonoStatus(ctx);
+			const target = ctx || lastCtx;
+			target?.ui?.notify?.(`Voice listener error: ${err.message}`, "error");
+		});
+	};
+
+	const handleListenerEvent = (event: ListenerEvent, ctx?: any) => {
+		const target = ctx || lastCtx;
+
+		switch (event.type) {
+			case "wake":
+				voiceInputActive = event.state === "on";
+				updateMonoStatus(target);
+				if (voiceInputActive) {
+					// Auto-enable speech output when voice input activates
+					if (!enabled) {
+						enabled = true;
+						persistState();
+						setPhase("ready", target);
+					}
+					target?.ui?.notify?.("Voice input active", "info");
+				} else {
+					target?.ui?.notify?.("Voice input paused (say 'pi mono on' to resume)", "info");
+				}
+				break;
+
+			case "transcribing":
+				target?.ui?.setStatus?.("mono", "mono:transcribing...");
+				break;
+
+			case "speech":
+				updateMonoStatus(target);
+				if (event.text) {
+					routeVoiceInput(event.text, target);
+				}
+				break;
+
+			case "status":
+				// Silent status updates -- just log to status bar
+				break;
+
+			case "error":
+				target?.ui?.notify?.(`[listener] ${event.message}`, "error");
+				break;
+		}
+	};
+
+	const routeVoiceInput = (text: string, ctx?: any) => {
+		const lower = text.toLowerCase().trim();
+
+		// Session commands via voice
+		if (lower.startsWith("new session ")) {
+			const name = text.slice("new session ".length).trim();
+			if (name) {
+				pi.sendUserMessage(`/session new ${name}`);
+				return;
+			}
+		}
+		if (lower.startsWith("switch to session ") || lower.startsWith("switch session ")) {
+			const prefix = lower.startsWith("switch to session ") ? "switch to session " : "switch session ";
+			const name = text.slice(prefix.length).trim();
+			if (name) {
+				pi.sendUserMessage(`/session switch ${name}`);
+				return;
+			}
+		}
+		if (lower === "list sessions" || lower === "show sessions") {
+			pi.sendUserMessage("/session list");
+			return;
+		}
+
+		// Speech control
+		if (lower === "stop speaking" || lower === "be quiet" || lower === "shut up" || lower === "shush") {
+			stopSpeaking(ctx);
+			return;
+		}
+
+		// Everything else -> user message to Pi
+		pi.sendUserMessage(text);
+	};
+
+	// -----------------------------------------------------------------------
+	// Session registry helpers
+	// -----------------------------------------------------------------------
+	const getSessionsDir = (): string | undefined => {
+		const home = process.env.USERPROFILE || process.env.HOME || "";
+		const piDir = join(home, ".pi", "sessions");
+		return existsSync(piDir) ? piDir : undefined;
+	};
+
+	const findSessionByName = (name: string): string | undefined => {
+		const lower = name.toLowerCase();
+		// Check registry first
+		for (const [regName, regPath] of Object.entries(sessionRegistry)) {
+			if (regName.toLowerCase() === lower) return regPath;
+		}
+		return undefined;
+	};
+
+	// -----------------------------------------------------------------------
+	// Commands
+	// -----------------------------------------------------------------------
+	pi.registerCommand("mono", {
+		description: "Control the always-on voice listener (Vosk + faster-whisper)",
+		getArgumentCompletions: (prefix) => {
+			const options = ["on", "off", "status"];
+			const matches = options.filter((opt) => opt.startsWith(prefix));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+		},
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const lower = args.trim().toLowerCase();
+
+			if (!lower || lower === "on" || lower === "start") {
+				startListener(ctx);
+				persistMonoState();
+				ctx.ui.notify("Voice listener started (say 'pi mono on' to activate)", "info");
+				return;
+			}
+
+			if (lower === "off" || lower === "stop") {
+				stopListener(ctx);
+				persistMonoState();
+				ctx.ui.notify("Voice listener stopped", "info");
+				return;
+			}
+
+			if (lower === "status") {
+				const status = monoActive
+					? voiceInputActive
+						? "Listener running, voice input active"
+						: "Listener running, waiting for wake phrase"
+					: "Listener not running";
+				ctx.ui.notify(status, "info");
+				return;
+			}
+
+			ctx.ui.notify("Usage: /mono [on|off|status]", "error");
+		},
+	});
+
+	pi.registerCommand("session", {
+		description: "Manage named sessions (new, switch, list, name)",
+		getArgumentCompletions: (prefix) => {
+			const options = ["new", "switch", "list", "name"];
+			const matches = options.filter((opt) => opt.startsWith(prefix));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+		},
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const parts = args.trim().split(/\s+/);
+			const sub = (parts[0] || "").toLowerCase();
+			const rest = parts.slice(1).join(" ").trim();
+
+			if (sub === "new") {
+				const name = rest || `session-${Date.now()}`;
+				const result = await ctx.newSession();
+				if (!result.cancelled) {
+					pi.setSessionName(name);
+					const sessionFile = ctx.sessionManager.getSessionFile();
+					if (sessionFile) {
+						sessionRegistry[name] = sessionFile;
+						persistSessionRegistry();
+					}
+					ctx.ui.notify(`New session: ${name}`, "info");
+				}
+				return;
+			}
+
+			if (sub === "switch") {
+				if (!rest) {
+					ctx.ui.notify("Usage: /session switch <name>", "error");
+					return;
+				}
+				const sessionPath = findSessionByName(rest);
+				if (!sessionPath) {
+					const available = Object.keys(sessionRegistry).join(", ") || "none";
+					ctx.ui.notify(`Session "${rest}" not found. Known: ${available}`, "error");
+					return;
+				}
+				const result = await ctx.switchSession(sessionPath);
+				if (!result.cancelled) {
+					ctx.ui.notify(`Switched to session: ${rest}`, "info");
+				}
+				return;
+			}
+
+			if (sub === "list") {
+				const names = Object.entries(sessionRegistry)
+					.map(([name, _path]) => name)
+					.join(", ");
+				ctx.ui.notify(names ? `Sessions: ${names}` : "No named sessions", "info");
+				return;
+			}
+
+			if (sub === "name") {
+				if (!rest) {
+					const current = pi.getSessionName();
+					ctx.ui.notify(current ? `Current: ${current}` : "No session name set", "info");
+					return;
+				}
+				pi.setSessionName(rest);
+				const sessionFile = ctx.sessionManager.getSessionFile();
+				if (sessionFile) {
+					sessionRegistry[rest] = sessionFile;
+					persistSessionRegistry();
+				}
+				ctx.ui.notify(`Session named: ${rest}`, "info");
+				return;
+			}
+
+			ctx.ui.notify("Usage: /session [new|switch|list|name] <args>", "error");
+		},
+	});
+
 	pi.registerCommand("speak", {
 		description: "Enable real ElevenLabs voice mode for assistant replies",
 		getArgumentCompletions: (prefix) => {
@@ -288,13 +630,33 @@ export default function speakExtension(pi: ExtensionAPI) {
 			if (entry.type === "custom" && entry.customType === STATE_TYPE && entry.data && typeof entry.data === "object") {
 				enabled = !!(entry.data as SpeakState).enabled;
 			}
+			if (entry.type === "custom" && entry.customType === MONO_STATE_TYPE && entry.data && typeof entry.data === "object") {
+				const mono = entry.data as MonoState;
+				if (mono.listening && !monoActive) {
+					startListener(ctx);
+				}
+			}
+			if (entry.type === "custom" && entry.customType === SESSION_REGISTRY_TYPE && entry.data && typeof entry.data === "object") {
+				const reg = entry.data as SessionRegistryState;
+				if (reg.sessions) {
+					sessionRegistry = { ...sessionRegistry, ...reg.sessions };
+				}
+			}
+		}
+		// Register current session in registry if it has a name
+		const currentName = pi.getSessionName();
+		const currentFile = ctx.sessionManager.getSessionFile();
+		if (currentName && currentFile) {
+			sessionRegistry[currentName] = currentFile;
 		}
 		updateStatus(ctx);
+		updateMonoStatus(ctx);
 	});
 
-	pi.on("session_shutdown", async (event, ctx) => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		lastCtx = ctx;
 		stopSpeaking(ctx);
+		stopListener(ctx);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
