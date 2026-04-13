@@ -139,6 +139,33 @@ export function describeTtsProvider(state?: SpeakRuntimeState) {
 	}
 }
 
+export function getTtsDiagnostics(state?: SpeakRuntimeState) {
+	return {
+		configuredProvider: state?.provider || process.env.PI_SPEAK_TTS_PROVIDER || "auto",
+		resolvedProvider: resolveTtsProvider(state),
+		rewriteEnabled: isRewriteEnabled(state),
+		providers: {
+			legacy: {
+				available: hasLegacySpeak11(),
+			},
+			edge: {
+				available: true,
+				voice: DEFAULT_EDGE_VOICE,
+			},
+			openai: {
+				available: !!getOpenAiAudioKey(),
+				model: DEFAULT_OPENAI_MODEL,
+				voice: DEFAULT_OPENAI_VOICE,
+			},
+			elevenlabs: {
+				available: !!process.env.ELEVENLABS_API_KEY,
+				model: DEFAULT_ELEVENLABS_MODEL_ID,
+				voiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+			},
+		},
+	};
+}
+
 async function rewriteForSpeech(text: string, signal?: AbortSignal) {
 	const apiKey = process.env.OPENROUTER_API_KEY || "";
 	if (!apiKey) return { text, applied: false };

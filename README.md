@@ -100,7 +100,8 @@ The web app:
 - sends audio to `/v1/turn/voice`
 - shows the transcript
 - plays the returned reply audio
-- stores the remote token locally if needed
+- stores the remote token in the current browser session by default
+- can explicitly remember the token on that device if you enable it in Settings
 
 For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel.
 
@@ -208,8 +209,8 @@ There are six main subsystems:
 2. `tts.ts`
    Multi-provider speech synthesis. Supports `legacy`, `edge`, `openai`, `elevenlabs`, and `auto`.
 
-3. `stt.ts` and `listener/transcribe_file.py`
-   Remote voice transcription for uploaded audio. `auto` prefers OpenAI when an API key is present, otherwise local `faster-whisper`.
+3. `stt.ts` and `listener/stt_worker.py`
+   Remote voice transcription for uploaded audio. `auto` prefers OpenAI when an API key is present, otherwise a warm local `faster-whisper` worker process.
 
 4. `listener/listener.py`
    The always-on two-tier listener:
@@ -282,7 +283,8 @@ Capabilities:
 - send typed fallback text
 - request spoken replies on each turn
 - autoplay returned audio when the browser allows it
-- save the remote token locally
+- keep the token in session storage by default
+- optionally remember the token on that device
 - install as a PWA on Android
 
 Token onboarding options:
@@ -294,7 +296,7 @@ Token onboarding options:
 /app/?token=YOUR_TOKEN
 ```
 
-The app will save the token and clean the URL.
+The app will save the token into the current browser session and clean the URL immediately.
 
 Secure-origin rules:
 
@@ -337,6 +339,7 @@ GET /app/icon.svg
 ```text
 GET  /v1/health
 GET  /v1/status
+GET  /v1/diagnostics
 
 GET  /v1/mono/on
 GET  /v1/mono/off
@@ -376,7 +379,25 @@ Remote clients must send one of:
 
 - `Authorization: Bearer <token>`
 - `X-Pi-Speak-Token: <token>`
-- `?token=<token>`
+
+Query-string token auth is reserved for:
+
+- `/app/?token=...` bootstrap onboarding
+- `/v1/audio/:id?token=...` reply-audio playback in the browser
+
+Remote control and turn endpoints should use headers, not query-string auth.
+
+### Hardening Defaults
+
+The production-oriented defaults are:
+
+- same-origin CORS unless `PI_SPEAK_HTTP_ALLOWED_ORIGINS` is set
+- request body limit for text turns: `64 KB`
+- request body limit for voice turns: `25 MB`
+- lightweight in-memory rate limits for non-local traffic
+- background cleanup of expired reply-audio artifacts
+- authenticated diagnostics at `/v1/diagnostics`
+- queue/backpressure for remote turns so Pi returns a deterministic busy response instead of piling up unlimited work
 
 Inspect the active token with:
 
@@ -504,6 +525,14 @@ PI_SPEAK_HTTP_HOST=0.0.0.0
 PI_SPEAK_HTTP_PORT=8767
 PI_SPEAK_HTTP_TOKEN=...
 PI_SPEAK_HTTP_AUDIO_TTL_MS=600000
+PI_SPEAK_HTTP_AUDIO_CLEANUP_MS=30000
+PI_SPEAK_HTTP_ALLOWED_ORIGINS=https://your-tailnet-host,https://your-tunnel-host
+PI_SPEAK_HTTP_TIMEOUT_MS=180000
+PI_SPEAK_HTTP_TEXT_BODY_LIMIT_BYTES=65536
+PI_SPEAK_HTTP_VOICE_BODY_LIMIT_BYTES=26214400
+PI_SPEAK_HTTP_RATE_LIMIT_WINDOW_MS=60000
+PI_SPEAK_HTTP_RATE_LIMIT_CONTROL=20
+PI_SPEAK_HTTP_RATE_LIMIT_VOICE=6
 ```
 
 ## Troubleshooting
@@ -532,6 +561,7 @@ You likely do not have the Python audio stack installed. The local listener depe
 Check these in order:
 
 1. `/remote status`
+2. `/v1/diagnostics`
 2. `/remote token`
 3. `PI_SPEAK_REMOTE_STT_PROVIDER`
 4. OpenAI key or local whisper setup
@@ -556,6 +586,36 @@ Use:
 ```
 
 Then link again with the fresh code.
+
+## Testing
+
+Run the automated production-readiness checks with:
+
+```text
+npm test
+```
+
+Current automated coverage includes:
+
+- non-local auth enforcement
+- localhost auth bypass
+- body-size rejection
+- voice content-type rejection
+- rate limiting
+- audio artifact expiry
+- Telegram link + text-turn handling
+- PWA token persistence rules
+- remote queue backpressure behavior
+
+## Manual Smoke Checklist
+
+Before treating a machine as production-ready, verify:
+
+1. `/mono on`
+2. local wake phrase: say `pi mono`
+3. `/phone on` then `/phone code`, then complete a Telegram text turn and voice-note turn
+4. `/remote on`, open `/app/`, complete a text turn and voice turn, and confirm reply audio playback
+5. over Tailscale or your HTTPS tunnel, confirm non-local requests fail without the token and succeed with it
 
 ## Files You Will Care About
 

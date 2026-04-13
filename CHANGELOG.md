@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Production-readiness hardening pass.
+
+Added:
+
+- authenticated `/v1/diagnostics`
+- in-memory remote turn queue with deterministic busy/backpressure behavior
+- warm local STT worker process for remote voice uploads
+- Telegram polling diagnostics and error tracking
+- automated tests for HTTP auth/limits, queue behavior, Telegram link flow, and PWA token persistence
+
+Improved:
+
+- remote auth now prefers header-based tokens for control and turn routes
+- PWA token handling now defaults to session-only storage with an explicit remember-device option
+- remote request limits, rate limits, content-type validation, and timeout handling
+- background cleanup for reply-audio artifacts
+- listener child-process env scoping and listener event validation
+- operator documentation for production remote use
+
 ## 0.2.0
 
 Major upgrade from the original single-path speech extension to a broader voice and remote-control package.

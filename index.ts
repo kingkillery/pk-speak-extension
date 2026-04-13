@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { ControlServer, type ControlServerState } from "./control-server.js";
-import { TelegramPhoneBridge, type PhoneBridgeState, type PhoneTurnResult } from "./phone-bridge.js";
-import { transcribeAudioBuffer } from "./stt.js";
+import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
+import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSummary } from "./remote-turn-manager.js";
+import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import {
 	describeTtsProvider,
 	getAudioMimeType,
+	getTtsDiagnostics,
 	isRewriteEnabled,
 	resolveTtsProvider,
 	synthesizeToFile,
@@ -31,11 +33,17 @@ type SessionRegistryState = {
 
 type RemoteState = ControlServerState;
 
-type PendingPhoneTurn = {
-	resolve: (result: PhoneTurnResult) => void;
+type PendingRemoteTurn = {
+	resolve: (result: RemoteTurnResult) => void;
 	reject: (error: Error) => void;
 	transcript?: string;
 	wantAudio?: boolean;
+	timings?: TurnTimingSummary;
+	providers?: {
+		stt?: string;
+		tts?: string;
+	};
+	warnings?: string[];
 };
 
 type ListenerEvent =
@@ -48,6 +56,25 @@ type ListenerEvent =
 type ContentBlock = {
 	type?: string;
 	text?: string;
+};
+
+type RuntimeDiagnostics = {
+	lastErrors: {
+		listener?: string;
+		phone?: string;
+		remote?: string;
+		stt?: string;
+		tts?: string;
+	};
+	recentTimings: {
+		lastRemoteTurn?: TurnTimingSummary;
+		lastRemoteSource?: string;
+	};
+	listener: {
+		lastStatus?: string;
+		lastStartedAt?: number;
+		lastExitedAt?: number;
+	};
 };
 
 const STATE_TYPE = "elevenlabs-speak-state";
@@ -165,6 +192,25 @@ function getTelegramBotToken() {
 	return process.env.PI_SPEAK_TELEGRAM_BOT_TOKEN?.trim() || process.env.TELEGRAM_BOT_TOKEN?.trim() || "";
 }
 
+function isListenerEvent(value: unknown): value is ListenerEvent {
+	if (!value || typeof value !== "object") return false;
+	const event = value as Record<string, unknown>;
+	if (typeof event.type !== "string") return false;
+	switch (event.type) {
+		case "wake":
+			return typeof event.state === "string";
+		case "speech":
+			return typeof event.text === "string";
+		case "transcribing":
+			return true;
+		case "status":
+		case "error":
+			return typeof event.message === "string";
+		default:
+			return false;
+	}
+}
+
 export default function speakExtension(pi: ExtensionAPI) {
 	let speakState: SpeakState = {
 		enabled: false,
@@ -192,9 +238,16 @@ export default function speakExtension(pi: ExtensionAPI) {
 		port: DEFAULT_REMOTE_PORT,
 		authToken: process.env.PI_SPEAK_HTTP_TOKEN || undefined,
 	};
-	let pendingPhoneTurn: PendingPhoneTurn | undefined;
-	let phoneTurnChain: Promise<unknown> = Promise.resolve();
+	let pendingRemoteTurn: PendingRemoteTurn | undefined;
+	const remoteTurnManager = new RemoteTurnManager({
+		onStateChange: () => updateRemoteStatus(),
+	});
 	let forceSpeechPromptNextTurn = false;
+	const diagnostics: RuntimeDiagnostics = {
+		lastErrors: {},
+		recentTimings: {},
+		listener: {},
+	};
 
 	const getSpeakRuntimeState = (): SpeakRuntimeState => ({
 		provider: speakState.provider,
@@ -253,7 +306,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 			target.ui.setStatus("remote", "");
 			return;
 		}
-		target.ui.setStatus("remote", `remote:${remoteState.port || DEFAULT_REMOTE_PORT}`);
+		const queue = remoteTurnManager.getSnapshot();
+		const suffix = queue.processing ? ` busy+${queue.queued}` : queue.queued > 0 ? ` q${queue.queued}` : "";
+		target.ui.setStatus("remote", `remote:${remoteState.port || DEFAULT_REMOTE_PORT}${suffix}`);
 	};
 
 	const setPhase = (next: typeof phase, ctx?: any) => {
@@ -392,20 +447,29 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (!trimmed) return undefined;
 		const audioDir = mkdtempSync(join(tmpdir(), "pi-phone-reply-"));
 		const outputPath = join(audioDir, "reply.mp3");
+		const startedAt = Date.now();
 		try {
-			await synthesizeToFile({
+			const synthesis = await synthesizeToFile({
 				text: trimmed,
 				outputPath,
 				state: getSpeakRuntimeState(),
 			});
-			return outputPath;
+			return {
+				audioPath: outputPath,
+				audioMimeType: getAudioMimeType(outputPath),
+				timings: { ttsMs: Date.now() - startedAt },
+				providers: { tts: synthesis.provider },
+			};
 		} catch (error) {
 			try {
 				rmSync(audioDir, { recursive: true, force: true });
 			} catch {}
+			diagnostics.lastErrors.tts = getErrorMessage(error);
 			const target = ctx || lastCtx;
 			target?.ui?.notify?.(`Phone audio synthesis failed: ${getErrorMessage(error)}`, "warning");
-			return undefined;
+			return {
+				warnings: [`Audio synthesis failed: ${getErrorMessage(error)}`],
+			};
 		}
 	};
 
@@ -418,14 +482,18 @@ export default function speakExtension(pi: ExtensionAPI) {
 	};
 
 	const waitForReadyTurnContext = async () => {
+		const startedAt = Date.now();
 		const deadline = Date.now() + PHONE_TURN_WAIT_TIMEOUT_MS;
 		while (Date.now() < deadline) {
 			const ctx = lastCtx;
 			if (ctx) {
 				const idle = ctx.isIdle?.() ?? true;
 				const hasPendingMessages = ctx.hasPendingMessages?.() ?? false;
-				if (idle && !hasPendingMessages && !pendingPhoneTurn) {
-					return ctx;
+				if (idle && !hasPendingMessages && !pendingRemoteTurn) {
+					return {
+						ctx,
+						waitMs: Date.now() - startedAt,
+					};
 				}
 			}
 			await sleep(250);
@@ -434,23 +502,34 @@ export default function speakExtension(pi: ExtensionAPI) {
 	};
 
 	const rejectPendingPhoneTurn = (reason: string) => {
-		if (!pendingPhoneTurn) return;
-		const pending = pendingPhoneTurn;
-		pendingPhoneTurn = undefined;
+		if (!pendingRemoteTurn) return;
+		const pending = pendingRemoteTurn;
+		pendingRemoteTurn = undefined;
 		pending.reject(new Error(reason));
 	};
 
 	const resolvePendingPhoneTurn = async (ctx?: any) => {
-		if (!pendingPhoneTurn) return;
-		const pending = pendingPhoneTurn;
-		pendingPhoneTurn = undefined;
+		if (!pendingRemoteTurn) return;
+		const pending = pendingRemoteTurn;
+		pendingRemoteTurn = undefined;
 		const replyText = lastAssistantText.trim() || "I finished the turn, but no assistant text was captured.";
-		const audioPath = pending.wantAudio ? await renderRemoteAudio(replyText, ctx) : undefined;
+		const audioResult = pending.wantAudio ? await renderRemoteAudio(replyText, ctx) : undefined;
+		const mergedTimings = {
+			...pending.timings,
+			...audioResult?.timings,
+		};
+		diagnostics.recentTimings.lastRemoteTurn = mergedTimings;
 		pending.resolve({
 			replyText,
-			audioPath,
-			audioMimeType: audioPath ? getAudioMimeType(audioPath) : undefined,
+			audioPath: audioResult?.audioPath,
+			audioMimeType: audioResult?.audioMimeType,
 			transcript: pending.transcript,
+			timings: mergedTimings,
+			providers: {
+				...pending.providers,
+				...audioResult?.providers,
+			},
+			warnings: [...(pending.warnings || []), ...(audioResult?.warnings || [])],
 		});
 	};
 
@@ -458,25 +537,56 @@ export default function speakExtension(pi: ExtensionAPI) {
 		text: string,
 		transcript?: string,
 		wantAudio = true,
-	): Promise<PhoneTurnResult> => {
+		timings?: TurnTimingSummary,
+		providers?: { stt?: string; tts?: string },
+		warnings?: string[],
+	): Promise<RemoteTurnResult> => {
 		const trimmed = text.trim();
 		if (!trimmed) {
 			return { replyText: "I did not receive any text to send to Pi.", transcript };
 		}
 
-		await waitForReadyTurnContext();
+		const readiness = await waitForReadyTurnContext();
+		const startedAt = Date.now();
 
-		return await new Promise<PhoneTurnResult>((resolve, reject) => {
-			pendingPhoneTurn = { resolve, reject, transcript, wantAudio };
+		return await new Promise<RemoteTurnResult>((resolve, reject) => {
+			pendingRemoteTurn = {
+				resolve,
+				reject,
+				transcript,
+				wantAudio,
+				timings: {
+					...timings,
+					agentWaitMs: readiness.waitMs,
+				},
+				providers,
+				warnings,
+			};
 			forceSpeechPromptNextTurn = true;
 			pi.sendUserMessage(trimmed);
-		});
+		}).then((result) => ({
+			...result,
+			timings: {
+				...result.timings,
+				agentRunMs: Date.now() - startedAt,
+				totalMs: (result.timings?.totalMs || 0) + (Date.now() - startedAt) + readiness.waitMs,
+			},
+		}));
 	};
 
-	const enqueuePhoneTurn = (text: string, transcript?: string, wantAudio = true) => {
-		const turnPromise = phoneTurnChain.then(() => executePhoneTurn(text, transcript, wantAudio));
-		phoneTurnChain = turnPromise.catch(() => {});
-		return turnPromise;
+	const enqueuePhoneTurn = async (
+		source: "http-text" | "http-voice" | "telegram-text" | "telegram-voice",
+		text: string,
+		transcript?: string,
+		wantAudio = true,
+		timings?: TurnTimingSummary,
+		providers?: { stt?: string; tts?: string },
+		warnings?: string[],
+	) => {
+		diagnostics.recentTimings.lastRemoteSource = source;
+		return await remoteTurnManager.enqueue(source, async () =>
+			await executePhoneTurn(text, transcript, wantAudio, timings, providers, warnings),
+		);
 	};
 
 	const getPhoneStatusText = () => {
@@ -496,6 +606,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 			linked ? "Phone is linked." : `Awaiting link code ${linkCode || "unknown"}.`,
 			`Speech replies: ${speakState.enabled ? "on" : "off"} via ${describeTtsProvider(getSpeakRuntimeState())} (${rewriteStatus}).`,
 			`Mono listener: ${monoStatus}.`,
+			runtimeStatus?.lastPollAt ? `Last Telegram poll: ${new Date(runtimeStatus.lastPollAt).toLocaleTimeString()}.` : "Last Telegram poll: none.",
+			runtimeStatus?.consecutivePollFailures
+				? `Telegram poll failures: ${runtimeStatus.consecutivePollFailures}.`
+				: "Telegram poll failures: 0.",
+			runtimeStatus?.lastError ? `Last phone error: ${runtimeStatus.lastError}.` : "",
 		].join(" ");
 	};
 
@@ -516,24 +631,38 @@ export default function speakExtension(pi: ExtensionAPI) {
 				state: phoneState,
 				getStatusText: getPhoneStatusText,
 				onStateChange: (patch) => {
-					const shouldPersist = Object.keys(patch).some((key) => key !== "lastUpdateId");
+					const shouldPersist = Object.keys(patch).some((key) => key !== "lastUpdateId" && key !== "lastPollAt");
 					syncPhoneState(patch, shouldPersist);
+					if (patch.lastError) diagnostics.lastErrors.phone = patch.lastError;
 				},
 				onTextTurn: async (text) => {
 					try {
-						return await enqueuePhoneTurn(text);
+						return await enqueuePhoneTurn("telegram-text", text);
 					} catch (error) {
+						if (error instanceof BusyError) {
+							return { replyText: "Pi is busy, retry shortly.", busy: true };
+						}
+						diagnostics.lastErrors.phone = getErrorMessage(error);
 						return { replyText: `Phone bridge error: ${getErrorMessage(error)}` };
 					}
 				},
 				onVoiceBuffer: async (buffer, mimeType) => {
 					try {
+						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
 						if (!transcription.text) {
 							return { replyText: "I could not understand that voice message." };
 						}
-						return await enqueuePhoneTurn(transcription.text, transcription.text);
+						return await enqueuePhoneTurn(
+							"telegram-voice",
+							transcription.text,
+							transcription.text,
+							true,
+							{ sttMs: transcription.durationMs, totalMs: Date.now() - sttStartedAt },
+							{ stt: transcription.provider },
+						);
 					} catch (error) {
+						diagnostics.lastErrors.stt = getErrorMessage(error);
 						return { replyText: `Voice transcription failed: ${getErrorMessage(error)}` };
 					}
 				},
@@ -595,21 +724,30 @@ export default function speakExtension(pi: ExtensionAPI) {
 		voiceInputActive,
 		target: voiceTarget,
 		keepAliveSeconds: MONO_KEEP_ALIVE_SECONDS,
+		status: !monoActive ? "off" : voiceInputActive ? "active" : "listening",
+		lastStatus: diagnostics.listener.lastStatus,
+		lastError: diagnostics.lastErrors.listener,
 	});
 
 	const getPhoneStatus = () => ({
 		enabled: phoneState.enabled,
 		linkedChatId: phoneState.linkedChatId,
 		linkCode: phoneState.linkCode,
+		lastPollAt: phoneState.lastPollAt,
+		consecutivePollFailures: phoneState.consecutivePollFailures || 0,
+		lastError: phoneState.lastError,
 	});
 
 	const getRemoteStatus = () => {
 		const runtime = remoteServer?.getRuntimeState();
+		const queue = remoteTurnManager.getSnapshot();
 		return {
 			enabled: !!runtime?.enabled || remoteState.enabled,
 			host: runtime?.host || remoteState.host || DEFAULT_REMOTE_HOST,
 			port: runtime?.port || remoteState.port || DEFAULT_REMOTE_PORT,
 			authRequired: !!(runtime?.authToken || remoteState.authToken),
+			busy: queue.processing,
+			queued: queue.queued,
 		};
 	};
 
@@ -622,6 +760,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			token ? `Token: ${token}.` : "Token: not required.",
 			"App: /app/.",
 			"Endpoints: /v1/status, /v1/turn/text, /v1/turn/voice.",
+			status.busy ? `Queue: busy with ${status.queued} queued.` : "Queue: idle.",
 		].join(" ");
 	};
 
@@ -784,16 +923,41 @@ export default function speakExtension(pi: ExtensionAPI) {
 					phone: getPhoneStatus(),
 					remote: getRemoteStatus(),
 				}),
+				getDiagnostics: () => ({
+					status: {
+						speak: getSpeakStatus(),
+						mono: getMonoStatus(),
+						phone: getPhoneStatus(),
+						remote: getRemoteStatus(),
+					},
+					lastErrors: diagnostics.lastErrors,
+					recentTimings: diagnostics.recentTimings,
+					queue: remoteTurnManager.getSnapshot(),
+					providers: getTtsDiagnostics(getSpeakRuntimeState()),
+				}),
 				onMonoAction: (action) => handleMonoAction(action, lastCtx),
 				onSpeakAction: (action, value) => handleSpeakAction(action, value, lastCtx),
 				onPhoneAction: (action) => handlePhoneAction(action, lastCtx),
-				onTextTurn: (text, includeAudio) => enqueuePhoneTurn(text, undefined, includeAudio),
+				onTextTurn: (text, includeAudio) => enqueuePhoneTurn("http-text", text, undefined, includeAudio),
 				onVoiceTurn: async (buffer, mimeType, includeAudio) => {
-					const transcription = await transcribeAudioBuffer(buffer, mimeType);
-					if (!transcription.text) {
-						return { replyText: "I could not understand that voice message." };
+					try {
+						const sttStartedAt = Date.now();
+						const transcription = await transcribeAudioBuffer(buffer, mimeType);
+						if (!transcription.text) {
+							return { replyText: "I could not understand that voice message." };
+						}
+						return await enqueuePhoneTurn(
+							"http-voice",
+							transcription.text,
+							transcription.text,
+							includeAudio,
+							{ sttMs: transcription.durationMs, totalMs: Date.now() - sttStartedAt },
+							{ stt: transcription.provider },
+						);
+					} catch (error) {
+						diagnostics.lastErrors.stt = getErrorMessage(error);
+						throw error;
 					}
-					return await enqueuePhoneTurn(transcription.text, transcription.text, includeAudio);
 				},
 			});
 		}
@@ -817,6 +981,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	};
 
 	const stopRemoteServer = async (ctx?: any, quiet = false) => {
+		remoteTurnManager.cancelAll("Remote API stopped before queued work completed");
 		if (remoteServer) {
 			await remoteServer.stop().catch(() => {});
 			remoteServer = undefined;
@@ -849,6 +1014,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		monoActive = false;
 		voiceInputActive = false;
 		voiceTarget = undefined;
+		diagnostics.listener.lastExitedAt = Date.now();
+		diagnostics.listener.lastStatus = "Listener stopped";
 		updateMonoStatus(ctx);
 	};
 
@@ -859,6 +1026,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const listenerScript = join(extDir, "listener", "listener.py");
 		if (!existsSync(listenerScript)) {
 			const target = ctx || lastCtx;
+			diagnostics.lastErrors.listener = `Listener script not found: ${listenerScript}`;
 			target?.ui?.notify?.(`Listener script not found: ${listenerScript}`, "error");
 			return;
 		}
@@ -870,8 +1038,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 			windowsHide: true,
 			shell: false,
 			env: {
-				...process.env,
+				PATH: process.env.PATH || "",
+				PYTHONPATH: process.env.PYTHONPATH || "",
 				VOSK_MODEL_PATH: process.env.VOSK_MODEL_PATH || "",
+				PI_SPEAK_MONO_ACTIVITY_TIMEOUT: process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || "",
+				MONO_ACTIVITY_TIMEOUT: process.env.MONO_ACTIVITY_TIMEOUT || "",
 				WHISPER_DEVICE: process.env.WHISPER_DEVICE || "",
 				WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "",
 				WHISPER_MODEL: process.env.WHISPER_MODEL || "",
@@ -879,16 +1050,20 @@ export default function speakExtension(pi: ExtensionAPI) {
 		});
 
 		monoActive = true;
+		diagnostics.listener.lastStartedAt = Date.now();
+		diagnostics.listener.lastStatus = "Voice listener starting";
+		diagnostics.lastErrors.listener = undefined;
 		updateMonoStatus(ctx);
 
 		listenerRl = createInterface({ input: listenerProcess.stdout! });
 		listenerRl.on("line", (line) => {
-			let event: ListenerEvent;
+			let event: unknown;
 			try {
 				event = JSON.parse(line);
 			} catch {
 				return;
 			}
+			if (!isListenerEvent(event)) return;
 			// Always use lastCtx so voice events target the current session, not the
 			// stale ctx from when startListener was called.
 			handleListenerEvent(event, undefined);
@@ -899,6 +1074,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			for (const line of chunk.split(/\r?\n/)) {
 				if (line.trim()) {
 					const target = ctx || lastCtx;
+					diagnostics.lastErrors.listener = line.trim();
 					target?.ui?.notify?.(`[listener] ${line.trim()}`, "warning");
 				}
 			}
@@ -912,6 +1088,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			updateMonoStatus(ctx);
 			if (code !== 0 && code !== null) {
 				const target = ctx || lastCtx;
+				diagnostics.lastErrors.listener = `Voice listener exited with code ${code}`;
 				target?.ui?.notify?.(`Voice listener exited with code ${code}`, "error");
 			}
 		});
@@ -923,6 +1100,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			voiceTarget = undefined;
 			updateMonoStatus(ctx);
 			const target = ctx || lastCtx;
+			diagnostics.lastErrors.listener = err.message;
 			target?.ui?.notify?.(`Voice listener error: ${err.message}`, "error");
 		});
 	};
@@ -957,6 +1135,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				break;
 
 			case "transcribing":
+				diagnostics.listener.lastStatus = "Transcribing";
 				target?.ui?.setStatus?.("mono", "mono:transcribing");
 				break;
 
@@ -968,10 +1147,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 				break;
 
 			case "status":
-				// Silent status updates -- just log to status bar
+				diagnostics.listener.lastStatus = event.message;
 				break;
 
 			case "error":
+				diagnostics.lastErrors.listener = event.message;
 				target?.ui?.notify?.(`[listener] ${event.message}`, "error");
 				break;
 		}
@@ -1425,6 +1605,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 				linkedChatId: status.linkedChatId,
 				linkCode: status.linkCode,
 				lastUpdateId: status.lastUpdateId,
+				lastPollAt: status.lastPollAt,
+				consecutivePollFailures: status.consecutivePollFailures,
+				lastError: status.lastError,
 			};
 		} else if (phoneState.enabled) {
 			await startPhoneBridge(ctx, true);
@@ -1457,7 +1640,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 			persistSessionRegistry();
 		}
 		rejectPendingPhoneTurn("Session changed before the phone reply was delivered");
+		remoteTurnManager.cancelAll("Session changed before queued remote work completed");
 		stopSpeaking(ctx);
+		await shutdownLocalSttWorker().catch(() => {});
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -1493,7 +1678,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				setPhase("ready", ctx);
 			}
 		}
-		if (pendingPhoneTurn) {
+		if (pendingRemoteTurn) {
 			await resolvePendingPhoneTurn(ctx);
 		}
 	});

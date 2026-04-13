@@ -1,14 +1,20 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 
 export type SttProvider = "auto" | "local" | "openai";
 
 export type SttResult = {
 	provider: Exclude<SttProvider, "auto">;
 	text: string;
+	durationMs: number;
+};
+
+type WorkerRequest = {
+	resolve: (text: string) => void;
+	reject: (error: Error) => void;
 };
 
 function getOpenAiAudioKey() {
@@ -22,6 +28,12 @@ function getPythonExecutable() {
 	const localPy = join(home, "AppData", "Local", "Microsoft", "WindowsApps", "python3.exe");
 	if (existsSync(localPy)) return localPy;
 	return "python";
+}
+
+function getExtensionDir() {
+	const parentCandidate = join(__dirname, "..", "listener", "stt_worker.py");
+	if (existsSync(parentCandidate)) return join(__dirname, "..");
+	return __dirname;
 }
 
 export function resolveSttProvider(): Exclude<SttProvider, "auto"> {
@@ -66,62 +78,153 @@ async function transcribeWithOpenAI(filePath: string, mimeType?: string, signal?
 	return normalizeTranscriptionText(json.text || "");
 }
 
-async function transcribeWithLocal(filePath: string, signal?: AbortSignal) {
-	return new Promise<string>((resolve, reject) => {
+class LocalSttWorker {
+	private child?: ChildProcessWithoutNullStreams;
+	private readonly pending = new Map<string, WorkerRequest>();
+	private booting?: Promise<void>;
+	private restarting = false;
+
+	async transcribe(filePath: string, signal?: AbortSignal) {
+		await this.ensureStarted();
+		return await new Promise<string>((resolve, reject) => {
+			const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			const abortHandler = () => {
+				this.pending.delete(id);
+				reject(new Error("Transcription aborted"));
+			};
+			signal?.addEventListener("abort", abortHandler, { once: true });
+			this.pending.set(id, {
+				resolve: (text) => {
+					signal?.removeEventListener("abort", abortHandler);
+					resolve(text);
+				},
+				reject: (error) => {
+					signal?.removeEventListener("abort", abortHandler);
+					reject(error);
+				},
+			});
+			this.child?.stdin.write(`${JSON.stringify({ id, file_path: filePath })}\n`);
+		});
+	}
+
+	async stop() {
+		for (const [id, request] of this.pending.entries()) {
+			this.pending.delete(id);
+			request.reject(new Error("STT worker stopped"));
+		}
+		if (!this.child) return;
+		try {
+			this.child.stdin.end();
+		} catch {}
+		try {
+			this.child.kill();
+		} catch {}
+		this.child = undefined;
+	}
+
+	private async ensureStarted() {
+		if (this.child && !this.child.killed) return;
+		if (!this.booting) {
+			this.booting = this.start();
+		}
+		try {
+			await this.booting;
+		} finally {
+			this.booting = undefined;
+		}
+	}
+
+	private async start() {
 		const python = getPythonExecutable();
-		const script = join(process.cwd(), "listener", "transcribe_file.py");
-		const child = spawn(python, [script, filePath], {
-			stdio: ["ignore", "pipe", "pipe"],
+		const script = join(getExtensionDir(), "listener", "stt_worker.py");
+		const child = spawn(python, ["-u", script], {
+			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
 			shell: false,
 			env: {
-				...process.env,
+				PATH: process.env.PATH || "",
+				PYTHONPATH: process.env.PYTHONPATH || "",
+				PI_SPEAK_REMOTE_WHISPER_MODEL: process.env.PI_SPEAK_REMOTE_WHISPER_MODEL || "",
+				WHISPER_MODEL: process.env.WHISPER_MODEL || "",
+				WHISPER_DEVICE: process.env.WHISPER_DEVICE || "",
+				WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "",
 			},
 		});
-
-		let stdout = "";
-		let stderr = "";
-
-		const abortHandler = () => {
-			try {
-				child.kill();
-			} catch {}
-			reject(new Error("Transcription aborted"));
-		};
-		signal?.addEventListener("abort", abortHandler, { once: true });
-
-		child.stdout?.setEncoding("utf8");
-		child.stderr?.setEncoding("utf8");
-		child.stdout?.on("data", (chunk) => {
-			stdout += String(chunk);
+		child.stdout.setEncoding("utf8");
+		let stdoutBuffer = "";
+		child.stdout.on("data", (chunk: string) => {
+			stdoutBuffer += chunk;
+			for (;;) {
+				const newline = stdoutBuffer.indexOf("\n");
+				if (newline < 0) break;
+				const line = stdoutBuffer.slice(0, newline).trim();
+				stdoutBuffer = stdoutBuffer.slice(newline + 1);
+				if (!line) continue;
+				try {
+					const payload = JSON.parse(line) as { id?: string; ok?: boolean; text?: string; error?: string };
+					if (!payload.id) continue;
+					const request = this.pending.get(payload.id);
+					if (!request) continue;
+					this.pending.delete(payload.id);
+					if (payload.ok) request.resolve(normalizeTranscriptionText(payload.text || ""));
+					else request.reject(new Error(payload.error || "Local transcription failed"));
+				} catch {}
+			}
 		});
-		child.stderr?.on("data", (chunk) => {
-			stderr += String(chunk);
+		child.stderr.setEncoding("utf8");
+		let lastStderr = "";
+		child.stderr.on("data", (chunk: string) => {
+			lastStderr = String(chunk).trim() || lastStderr;
 		});
-		child.on("error", reject);
 		child.on("exit", (code) => {
-			if (code !== 0) {
-				reject(new Error(stderr.trim() || `Local transcription failed (${code})`));
-				return;
-			}
-			try {
-				const json = JSON.parse(stdout) as { success?: boolean; text?: string; error?: string };
-				if (!json.success) {
-					reject(new Error(json.error || "Local transcription failed"));
-					return;
-				}
-				resolve(normalizeTranscriptionText(json.text || ""));
-			} catch (error) {
-				reject(error);
+			this.child = undefined;
+			const error = new Error(lastStderr || `Local STT worker exited (${code ?? "unknown"})`);
+			for (const [id, request] of this.pending.entries()) {
+				this.pending.delete(id);
+				request.reject(error);
 			}
 		});
-	});
+		child.on("error", (error) => {
+			this.child = undefined;
+			for (const [id, request] of this.pending.entries()) {
+				this.pending.delete(id);
+				request.reject(error);
+			}
+		});
+		this.child = child;
+	}
+
+	async transcribeWithRestart(filePath: string, signal?: AbortSignal) {
+		try {
+			return await this.transcribe(filePath, signal);
+		} catch (error) {
+			if (this.restarting) throw error;
+			this.restarting = true;
+			try {
+				await this.stop();
+				return await this.transcribe(filePath, signal);
+			} finally {
+				this.restarting = false;
+			}
+		}
+	}
+}
+
+const localWorker = new LocalSttWorker();
+
+async function transcribeWithLocal(filePath: string, signal?: AbortSignal) {
+	return await localWorker.transcribeWithRestart(filePath, signal);
+}
+
+export async function shutdownLocalSttWorker() {
+	await localWorker.stop();
 }
 
 export async function transcribeAudioBuffer(buffer: Buffer, mimeType?: string, signal?: AbortSignal): Promise<SttResult> {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-stt-"));
 	const extension = mimeTypeToExtension(mimeType);
 	const filePath = join(tempDir, `input${extension}`);
+	const startedAt = Date.now();
 	try {
 		await writeFile(filePath, buffer);
 		const provider = resolveSttProvider();
@@ -129,7 +232,7 @@ export async function transcribeAudioBuffer(buffer: Buffer, mimeType?: string, s
 			provider === "openai"
 				? await transcribeWithOpenAI(filePath, mimeType, signal)
 				: await transcribeWithLocal(filePath, signal);
-		return { provider, text };
+		return { provider, text, durationMs: Date.now() - startedAt };
 	} finally {
 		await rm(tempDir, { recursive: true, force: true });
 	}
