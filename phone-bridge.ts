@@ -1,19 +1,15 @@
-import { createReadStream } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { basename } from "node:path";
+import { RemoteTurnResult } from "./remote-turn-manager.js";
 
 export type PhoneBridgeState = {
 	enabled: boolean;
 	linkedChatId?: string;
 	linkCode?: string;
 	lastUpdateId?: number;
-};
-
-export type PhoneTurnResult = {
-	replyText: string;
-	audioPath?: string;
-	audioMimeType?: string;
-	transcript?: string;
+	lastPollAt?: number;
+	consecutivePollFailures?: number;
+	lastError?: string;
 };
 
 export type TelegramPhoneBridgeOptions = {
@@ -21,8 +17,8 @@ export type TelegramPhoneBridgeOptions = {
 	state: PhoneBridgeState;
 	getStatusText: () => string;
 	onStateChange: (state: Partial<PhoneBridgeState>) => void;
-	onTextTurn: (text: string) => Promise<PhoneTurnResult>;
-	onVoiceBuffer: (buffer: Buffer, mimeType?: string) => Promise<PhoneTurnResult>;
+	onTextTurn: (text: string) => Promise<RemoteTurnResult>;
+	onVoiceBuffer: (buffer: Buffer, mimeType?: string) => Promise<RemoteTurnResult>;
 };
 
 type TelegramUpdate = {
@@ -42,11 +38,14 @@ export class TelegramPhoneBridge {
 	private readonly token: string;
 	private readonly getStatusText: () => string;
 	private readonly onStateChange: (state: Partial<PhoneBridgeState>) => void;
-	private readonly onTextTurn: (text: string) => Promise<PhoneTurnResult>;
-	private readonly onVoiceBuffer: (buffer: Buffer, mimeType?: string) => Promise<PhoneTurnResult>;
+	private readonly onTextTurn: (text: string) => Promise<RemoteTurnResult>;
+	private readonly onVoiceBuffer: (buffer: Buffer, mimeType?: string) => Promise<RemoteTurnResult>;
 	private linkCode: string;
 	private linkedChatId?: string;
 	private lastUpdateId?: number;
+	private lastPollAt?: number;
+	private consecutivePollFailures = 0;
+	private lastError?: string;
 	private running = false;
 	private loopPromise?: Promise<void>;
 
@@ -59,12 +58,15 @@ export class TelegramPhoneBridge {
 		this.linkCode = options.state.linkCode || generateLinkCode();
 		this.linkedChatId = options.state.linkedChatId;
 		this.lastUpdateId = options.state.lastUpdateId;
+		this.lastPollAt = options.state.lastPollAt;
+		this.consecutivePollFailures = options.state.consecutivePollFailures || 0;
+		this.lastError = options.state.lastError;
 	}
 
 	start() {
 		if (this.running) return;
 		this.running = true;
-		this.onStateChange({ enabled: true, linkCode: this.linkCode, linkedChatId: this.linkedChatId });
+		this.onStateChange(this.getStatePatch({ enabled: true }));
 		this.loopPromise = this.pollLoop();
 	}
 
@@ -72,7 +74,7 @@ export class TelegramPhoneBridge {
 		this.running = false;
 		await this.loopPromise?.catch(() => {});
 		this.loopPromise = undefined;
-		this.onStateChange({ enabled: false, linkCode: this.linkCode, linkedChatId: this.linkedChatId });
+		this.onStateChange(this.getStatePatch({ enabled: false }));
 	}
 
 	getStatus() {
@@ -81,13 +83,16 @@ export class TelegramPhoneBridge {
 			linkedChatId: this.linkedChatId,
 			linkCode: this.linkCode,
 			lastUpdateId: this.lastUpdateId,
+			lastPollAt: this.lastPollAt,
+			consecutivePollFailures: this.consecutivePollFailures,
+			lastError: this.lastError,
 		};
 	}
 
 	resetLink() {
 		this.linkCode = generateLinkCode();
 		this.linkedChatId = undefined;
-		this.onStateChange({ linkCode: this.linkCode, linkedChatId: undefined });
+		this.onStateChange(this.getStatePatch({ linkCode: this.linkCode, linkedChatId: undefined }));
 		return this.linkCode;
 	}
 
@@ -95,12 +100,22 @@ export class TelegramPhoneBridge {
 		while (this.running) {
 			try {
 				const updates = await this.getUpdates();
+				this.lastPollAt = Date.now();
+				this.consecutivePollFailures = 0;
+				this.lastError = undefined;
+				this.onStateChange(this.getStatePatch());
 				for (const update of updates) {
 					this.lastUpdateId = update.update_id;
-					this.onStateChange({ lastUpdateId: this.lastUpdateId });
+					this.onStateChange(this.getStatePatch({ lastUpdateId: this.lastUpdateId }));
 					await this.handleUpdate(update);
 				}
+				if (updates.length === 0) {
+					await this.delay(50);
+				}
 			} catch (error) {
+				this.consecutivePollFailures += 1;
+				this.lastError = error instanceof Error ? error.message : String(error);
+				this.onStateChange(this.getStatePatch());
 				await this.delay(2500);
 			}
 		}
@@ -115,7 +130,7 @@ export class TelegramPhoneBridge {
 			const text = message.text?.trim() || "";
 			if (text.toLowerCase() === `/link ${this.linkCode.toLowerCase()}`) {
 				this.linkedChatId = chatId;
-				this.onStateChange({ linkedChatId: chatId });
+				this.onStateChange(this.getStatePatch({ linkedChatId: chatId }));
 				await this.sendMessage(chatId, "Phone bridge linked. Send text or voice messages to Pi.");
 			} else if (text.startsWith("/link ")) {
 				await this.sendMessage(chatId, "Link code rejected.");
@@ -158,7 +173,7 @@ export class TelegramPhoneBridge {
 		await this.deliverResult(chatId, result);
 	}
 
-	private async deliverResult(chatId: string, result: PhoneTurnResult) {
+	private async deliverResult(chatId: string, result: RemoteTurnResult) {
 		if (result.audioPath) {
 			try {
 				await this.sendAudio(chatId, result.audioPath);
@@ -166,9 +181,10 @@ export class TelegramPhoneBridge {
 				await rm(result.audioPath, { force: true });
 			}
 		}
+		const busyPrefix = result.busy ? "Pi is busy.\n\n" : "";
 		const text = result.transcript
-			? `Heard: "${result.transcript}"\n\n${result.replyText}`
-			: result.replyText;
+			? `${busyPrefix}Heard: "${result.transcript}"\n\n${result.replyText}`
+			: `${busyPrefix}${result.replyText}`;
 		if (text.trim()) {
 			await this.sendMessage(chatId, text);
 		}
@@ -235,6 +251,18 @@ export class TelegramPhoneBridge {
 			throw new Error(`Telegram ${method} failed (${response.status})`);
 		}
 		return (await response.json()) as T;
+	}
+
+	private getStatePatch(patch: Partial<PhoneBridgeState> = {}) {
+		return {
+			linkCode: this.linkCode,
+			linkedChatId: this.linkedChatId,
+			lastUpdateId: this.lastUpdateId,
+			lastPollAt: this.lastPollAt,
+			consecutivePollFailures: this.consecutivePollFailures,
+			lastError: this.lastError,
+			...patch,
+		};
 	}
 
 	private async delay(ms: number) {

@@ -3,19 +3,13 @@ import { readFile, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { BusyError, RemoteTurnResult } from "./remote-turn-manager.js";
 
 export type ControlServerState = {
 	enabled: boolean;
 	host?: string;
 	port?: number;
 	authToken?: string;
-};
-
-export type RemoteTurnResult = {
-	replyText: string;
-	audioPath?: string;
-	audioMimeType?: string;
-	transcript?: string;
 };
 
 export type ControlActionResult = {
@@ -36,10 +30,24 @@ export type ControlServerStatus = {
 	};
 };
 
+export type ControlServerDiagnostics = {
+	status: ControlServerStatus;
+	lastErrors?: Record<string, string | undefined>;
+	recentTimings?: unknown;
+	queue?: unknown;
+	auth?: {
+		authRequired: boolean;
+		allowQueryTokenForAudio: boolean;
+		allowedOrigins: string[];
+	};
+	providers?: unknown;
+};
+
 export type ControlServerOptions = {
 	state: ControlServerState;
 	onStateChange: (patch: Partial<ControlServerState>) => void;
 	getStatus: () => ControlServerStatus;
+	getDiagnostics: () => ControlServerDiagnostics;
 	onMonoAction: (action: "on" | "off" | "status") => Promise<ControlActionResult> | ControlActionResult;
 	onSpeakAction: (
 		action: "on" | "off" | "stop" | "status" | "test" | "providers" | "provider" | "rewrite",
@@ -59,32 +67,62 @@ type AudioArtifact = {
 	expiresAt: number;
 };
 
+type RateLimitBucket = {
+	windowStartedAt: number;
+	control: number;
+	voice: number;
+};
+
 const DEFAULT_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
 const AUDIO_TTL_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_AUDIO_TTL_MS || "600000", 10);
+const CLEANUP_INTERVAL_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_AUDIO_CLEANUP_MS || "30000", 10);
+const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_TIMEOUT_MS || "180000", 10);
+const TEXT_BODY_LIMIT_BYTES = Number.parseInt(process.env.PI_SPEAK_HTTP_TEXT_BODY_LIMIT_BYTES || "65536", 10);
+const VOICE_BODY_LIMIT_BYTES = Number.parseInt(process.env.PI_SPEAK_HTTP_VOICE_BODY_LIMIT_BYTES || "26214400", 10);
+const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_WINDOW_MS || "60000", 10);
+const RATE_LIMIT_CONTROL = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_CONTROL || "20", 10);
+const RATE_LIMIT_VOICE = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_VOICE || "6", 10);
 const REMOTE_APP_DIR = resolveRemoteAppDir();
+const ALLOWED_VOICE_CONTENT_TYPES = [
+	"audio/webm",
+	"audio/ogg",
+	"audio/wav",
+	"audio/x-wav",
+	"audio/mpeg",
+	"audio/mp3",
+	"audio/mp4",
+	"audio/x-m4a",
+	"audio/aac",
+	"application/octet-stream",
+];
 
 export class ControlServer {
 	private server?: Server;
+	private cleanupTimer?: NodeJS.Timeout;
 	private readonly onStateChange: (patch: Partial<ControlServerState>) => void;
 	private readonly getStatus: () => ControlServerStatus;
+	private readonly getDiagnostics: () => ControlServerDiagnostics;
 	private readonly onMonoAction: ControlServerOptions["onMonoAction"];
 	private readonly onSpeakAction: ControlServerOptions["onSpeakAction"];
 	private readonly onPhoneAction: ControlServerOptions["onPhoneAction"];
 	private readonly onTextTurn: ControlServerOptions["onTextTurn"];
 	private readonly onVoiceTurn: ControlServerOptions["onVoiceTurn"];
-	private state: ControlServerState;
+	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
+	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
+	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 
 	constructor(options: ControlServerOptions) {
 		this.state = {
 			enabled: options.state.enabled,
-			host: options.state.host || DEFAULT_HOST,
-			port: options.state.port || DEFAULT_PORT,
+			host: options.state.host ?? DEFAULT_HOST,
+			port: options.state.port ?? DEFAULT_PORT,
 			authToken: options.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || randomUUID(),
 		};
 		this.onStateChange = options.onStateChange;
 		this.getStatus = options.getStatus;
+		this.getDiagnostics = options.getDiagnostics;
 		this.onMonoAction = options.onMonoAction;
 		this.onSpeakAction = options.onSpeakAction;
 		this.onPhoneAction = options.onPhoneAction;
@@ -95,21 +133,33 @@ export class ControlServer {
 	getRuntimeState() {
 		return {
 			enabled: !!this.server,
-			host: this.state.host || DEFAULT_HOST,
-			port: this.state.port || DEFAULT_PORT,
+			host: this.state.host ?? DEFAULT_HOST,
+			port: this.state.port ?? DEFAULT_PORT,
 			authToken: this.state.authToken || "",
+			allowedOrigins: [...this.allowedOrigins],
 		};
 	}
 
 	async start() {
 		if (this.server) return this.getRuntimeState();
-		const host = this.state.host || DEFAULT_HOST;
-		const port = this.state.port || DEFAULT_PORT;
+		const host = this.state.host ?? DEFAULT_HOST;
+		const port = this.state.port ?? DEFAULT_PORT;
 		const authToken = this.state.authToken || randomUUID();
-		this.state = { enabled: true, host, port, authToken };
+		this.state.enabled = true;
+		this.state.host = host;
+		this.state.port = port;
+		this.state.authToken = authToken;
 
 		this.server = createServer((req, res) => {
 			void this.handleRequest(req, res).catch((error) => {
+				if (error instanceof BusyError) {
+					this.writeJson(res, 429, { ok: false, busy: true, error: error.message });
+					return;
+				}
+				if (error instanceof RequestLimitError) {
+					this.writeJson(res, error.statusCode, { ok: false, error: error.message });
+					return;
+				}
 				this.writeJson(res, 500, { ok: false, error: getErrorMessage(error) });
 			});
 		});
@@ -122,13 +172,23 @@ export class ControlServer {
 				resolve();
 			});
 		});
+		const address = this.server.address();
+		if (address && typeof address === "object") {
+			this.state.port = address.port;
+		}
 
-		this.onStateChange({ enabled: true, host, port, authToken });
+		this.cleanupTimer = setInterval(() => this.cleanupExpiredAudio(), CLEANUP_INTERVAL_MS);
+		this.cleanupTimer.unref?.();
+		this.onStateChange({ enabled: true, host, port: this.state.port, authToken });
 		return this.getRuntimeState();
 	}
 
 	async stop() {
 		if (!this.server) return;
+		if (this.cleanupTimer) {
+			clearInterval(this.cleanupTimer);
+			this.cleanupTimer = undefined;
+		}
 		const server = this.server;
 		this.server = undefined;
 		await new Promise<void>((resolve) => {
@@ -138,8 +198,8 @@ export class ControlServer {
 	}
 
 	private async handleRequest(req: IncomingMessage, res: ServerResponse) {
-		this.cleanupExpiredAudio();
-		this.applyCors(res);
+		const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+		this.applyCors(req, res, url);
 
 		if (req.method === "OPTIONS") {
 			res.statusCode = 204;
@@ -147,13 +207,29 @@ export class ControlServer {
 			return;
 		}
 
-		const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
 		if (req.method === "GET" && (await this.handlePublicRoute(url, res))) {
 			return;
 		}
 
-		if (!this.isAuthorized(req, url)) {
+		const localRequest = isLocalRequest(req, url);
+		if (req.method === "GET" && url.pathname.startsWith("/v1/audio/")) {
+			if (!this.isAuthorized(req, url, true)) {
+				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
+				return;
+			}
+			const id = decodeURIComponent(url.pathname.slice("/v1/audio/".length));
+			await this.handleAudioRequest(id, res);
+			return;
+		}
+
+		if (!this.isAuthorized(req, url, false)) {
 			this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
+			return;
+		}
+
+		const rateLimitError = this.checkRateLimit(req, url, localRequest);
+		if (rateLimitError) {
+			this.writeJson(res, 429, rateLimitError);
 			return;
 		}
 
@@ -167,9 +243,18 @@ export class ControlServer {
 			return;
 		}
 
-		if (req.method === "GET" && url.pathname.startsWith("/v1/audio/")) {
-			const id = decodeURIComponent(url.pathname.slice("/v1/audio/".length));
-			await this.handleAudioRequest(id, res);
+		if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
+			this.writeJson(res, 200, {
+				ok: true,
+				diagnostics: {
+					...this.getDiagnostics(),
+					auth: {
+						authRequired: !!this.state.authToken,
+						allowQueryTokenForAudio: true,
+						allowedOrigins: [...this.allowedOrigins],
+					},
+				},
+			});
 			return;
 		}
 
@@ -221,25 +306,31 @@ export class ControlServer {
 		if (req.method === "GET" && url.pathname === "/v1/turn/text") {
 			const text = url.searchParams.get("text") || "";
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
-			this.writeJson(res, 200, await this.createTurnPayload(await this.onTextTurn(text, includeAudio), url));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio));
+			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
 
 		if (req.method === "POST" && url.pathname === "/v1/turn/text") {
-			const body = await this.readTextBody(req);
+			const body = await this.readTextBody(req, TEXT_BODY_LIMIT_BYTES);
 			const payload = parseJson<Record<string, unknown>>(body);
 			const text = typeof payload?.text === "string" ? payload.text : "";
 			const includeAudio = !!payload?.audio;
-			this.writeJson(res, 200, await this.createTurnPayload(await this.onTextTurn(text, includeAudio), url));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio));
+			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
 
 		if (req.method === "POST" && url.pathname === "/v1/turn/voice") {
-			const buffer = await this.readBinaryBody(req);
+			const mimeType = getPrimaryHeaderValue(req.headers["content-type"]);
+			if (!isSupportedVoiceContentType(mimeType)) {
+				this.writeJson(res, 415, { ok: false, error: `Unsupported voice content type: ${mimeType || "unknown"}` });
+				return;
+			}
+			const buffer = await this.readBinaryBody(req, VOICE_BODY_LIMIT_BYTES);
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
-			const mimeType = req.headers["content-type"];
-			const result = await this.onVoiceTurn(buffer, Array.isArray(mimeType) ? mimeType[0] : mimeType, includeAudio);
-			this.writeJson(res, 200, await this.createTurnPayload(result, url));
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio));
+			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
 
@@ -254,6 +345,16 @@ export class ControlServer {
 
 		if (url.pathname === "/app/" || url.pathname === "/app/index.html") {
 			await this.serveStaticFile(join(REMOTE_APP_DIR, "index.html"), "text/html; charset=utf-8", res, "no-store");
+			return true;
+		}
+
+		if (url.pathname === "/app/app.js") {
+			await this.serveStaticFile(
+				join(REMOTE_APP_DIR, "app.js"),
+				"application/javascript; charset=utf-8",
+				res,
+				"no-store",
+			);
 			return true;
 		}
 
@@ -286,18 +387,63 @@ export class ControlServer {
 		return false;
 	}
 
-	private isAuthorized(req: IncomingMessage, url: URL) {
+	private isAuthorized(req: IncomingMessage, url: URL, allowQueryToken: boolean) {
 		const token = this.state.authToken || "";
 		if (!token) return true;
 		if (isLocalRequest(req, url)) return true;
-		const headerToken = req.headers["x-pi-speak-token"];
-		if (typeof headerToken === "string" && headerToken === token) return true;
-		const authHeader = req.headers.authorization;
-		if (typeof authHeader === "string" && authHeader === `Bearer ${token}`) return true;
-		return url.searchParams.get("token") === token;
+		const headerToken = getPrimaryHeaderValue(req.headers["x-pi-speak-token"]);
+		if (headerToken === token) return true;
+		const authHeader = getPrimaryHeaderValue(req.headers.authorization);
+		if (authHeader === `Bearer ${token}`) return true;
+		return allowQueryToken && url.searchParams.get("token") === token;
 	}
 
-	private async createTurnPayload(result: RemoteTurnResult, url: URL) {
+	private checkRateLimit(req: IncomingMessage, url: URL, localRequest: boolean) {
+		if (localRequest) return undefined;
+		const key = `${req.socket.remoteAddress || "unknown"}:${this.extractPresentedToken(req) || "anon"}`;
+		const now = Date.now();
+		const bucket = this.rateLimitBuckets.get(key) || {
+			windowStartedAt: now,
+			control: 0,
+			voice: 0,
+		};
+		if (now - bucket.windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
+			bucket.windowStartedAt = now;
+			bucket.control = 0;
+			bucket.voice = 0;
+		}
+		const isVoice = req.method === "POST" && url.pathname === "/v1/turn/voice";
+		if (isVoice) {
+			if (bucket.voice >= RATE_LIMIT_VOICE) {
+				return {
+					ok: false,
+					busy: true,
+					error: "Voice rate limit exceeded. Retry shortly.",
+					retryAfterMs: bucket.windowStartedAt + RATE_LIMIT_WINDOW_MS - now,
+				};
+			}
+			bucket.voice += 1;
+		} else {
+			if (bucket.control >= RATE_LIMIT_CONTROL) {
+				return {
+					ok: false,
+					busy: true,
+					error: "Rate limit exceeded. Retry shortly.",
+					retryAfterMs: bucket.windowStartedAt + RATE_LIMIT_WINDOW_MS - now,
+				};
+			}
+			bucket.control += 1;
+		}
+		this.rateLimitBuckets.set(key, bucket);
+		return undefined;
+	}
+
+	private extractPresentedToken(req: IncomingMessage) {
+		return getPrimaryHeaderValue(req.headers["x-pi-speak-token"])
+			|| getBearerToken(getPrimaryHeaderValue(req.headers.authorization));
+	}
+
+	private async createTurnPayload(result: RemoteTurnResult) {
 		let audioUrl: string | undefined;
 		if (result.audioPath) {
 			const artifact = this.publishAudio(result.audioPath, result.audioMimeType || "audio/mpeg");
@@ -310,6 +456,10 @@ export class ControlServer {
 			transcript: result.transcript,
 			audioUrl,
 			audioMimeType: result.audioMimeType,
+			busy: result.busy,
+			timings: result.timings,
+			providers: result.providers,
+			warnings: result.warnings,
 		};
 	}
 
@@ -348,15 +498,21 @@ export class ControlServer {
 		}
 	}
 
-	private async readTextBody(req: IncomingMessage) {
-		const buffer = await this.readBinaryBody(req);
+	private async readTextBody(req: IncomingMessage, limitBytes: number) {
+		const buffer = await this.readBinaryBody(req, limitBytes);
 		return buffer.toString("utf8");
 	}
 
-	private async readBinaryBody(req: IncomingMessage) {
+	private async readBinaryBody(req: IncomingMessage, limitBytes: number) {
 		const chunks: Buffer[] = [];
+		let totalBytes = 0;
 		for await (const chunk of req) {
-			chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+			const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			totalBytes += buffer.length;
+			if (totalBytes > limitBytes) {
+				throw new RequestLimitError(`Request body exceeded ${limitBytes} bytes`, 413);
+			}
+			chunks.push(buffer);
 		}
 		return Buffer.concat(chunks);
 	}
@@ -390,10 +546,31 @@ export class ControlServer {
 		res.end();
 	}
 
-	private applyCors(res: ServerResponse) {
-		res.setHeader("Access-Control-Allow-Origin", "*");
+	private applyCors(req: IncomingMessage, res: ServerResponse, url: URL) {
+		const origin = getPrimaryHeaderValue(req.headers.origin);
+		if (!origin) return;
+		const allowed =
+			this.allowedOrigins.includes(origin) ||
+			(this.allowedOrigins.length === 0 && sameOrigin(origin, url));
+		if (!allowed) return;
+		res.setHeader("Access-Control-Allow-Origin", origin);
+		res.setHeader("Vary", "Origin");
 		res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Pi-Speak-Token");
 		res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+	}
+
+	private async withTimeout<T>(promise: Promise<T>) {
+		const timeout = new Promise<never>((_, reject) => {
+			setTimeout(() => reject(new RequestLimitError("Request timed out", 504)), REQUEST_TIMEOUT_MS).unref?.();
+		});
+		return await Promise.race([promise, timeout]);
+	}
+}
+
+class RequestLimitError extends Error {
+	constructor(message: string, readonly statusCode: number) {
+		super(message);
+		this.name = "RequestLimitError";
 	}
 }
 
@@ -411,11 +588,7 @@ function isTruthy(value: string | null) {
 }
 
 function isLoopback(remoteAddress: string) {
-	return (
-		remoteAddress === "::1" ||
-		remoteAddress === "127.0.0.1" ||
-		remoteAddress === "::ffff:127.0.0.1"
-	);
+	return remoteAddress === "::1" || remoteAddress === "127.0.0.1" || remoteAddress === "::ffff:127.0.0.1";
 }
 
 function isLocalRequest(req: IncomingMessage, url: URL) {
@@ -436,6 +609,38 @@ function resolveRemoteAppDir() {
 }
 
 function getErrorMessage(error: unknown) {
+	if (error instanceof RequestLimitError) return error.message;
 	if (error instanceof Error) return error.message;
 	return String(error);
+}
+
+function parseAllowedOrigins(value: string) {
+	return value
+		.split(",")
+		.map((origin) => origin.trim())
+		.filter(Boolean);
+}
+
+function sameOrigin(origin: string, url: URL) {
+	try {
+		const parsed = new URL(origin);
+		return parsed.host === url.host && parsed.protocol === url.protocol;
+	} catch {
+		return false;
+	}
+}
+
+function getPrimaryHeaderValue(value: string | string[] | undefined) {
+	if (Array.isArray(value)) return value[0];
+	return value;
+}
+
+function getBearerToken(value?: string) {
+	if (!value?.startsWith("Bearer ")) return "";
+	return value.slice("Bearer ".length);
+}
+
+function isSupportedVoiceContentType(mimeType?: string) {
+	const normalized = (mimeType || "").toLowerCase().split(";")[0].trim();
+	return !!normalized && ALLOWED_VOICE_CONTENT_TYPES.includes(normalized);
 }
