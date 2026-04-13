@@ -30,7 +30,11 @@ VOSK_BLOCK_SIZE = 4000  # ~250ms chunks for Vosk
 WHISPER_MODEL = "tiny"
 WAKE_RE = re.compile(r'\bpi\s+mono(?:\s+(\S+))?', re.IGNORECASE)
 SILENCE_TIMEOUT = 2.0  # seconds of silence before finalizing a whisper segment
-ACTIVITY_TIMEOUT = 10.0  # seconds without "pi mono" before auto-deactivating
+ACTIVITY_TIMEOUT = float(
+    os.environ.get("PI_SPEAK_MONO_ACTIVITY_TIMEOUT")
+    or os.environ.get("MONO_ACTIVITY_TIMEOUT")
+    or "15.0"
+)  # seconds without "pi mono" before auto-deactivating
 ENERGY_THRESHOLD = 300  # RMS threshold for voice activity
 PRE_BUFFER_CHUNKS = 4  # ~1 second of lookback to capture utterance onset
 

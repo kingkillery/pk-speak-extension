@@ -1,6 +1,9 @@
 node_modules/
 __pycache__/
+listener/__pycache__/
 *.pyc
+listener/*.pyc
+*.tgz
 
 # Compiled output (rebuilt on install)
 dist/

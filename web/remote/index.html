@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="theme-color" content="#14324a">
+	<title>Pi Speak Remote</title>
+	<link rel="manifest" href="/app/app.webmanifest">
+	<style>
+		:root {
+			--bg: #efe7d4;
+			--panel: rgba(255, 250, 241, 0.82);
+			--panel-strong: rgba(255, 250, 241, 0.94);
+			--ink: #173044;
+			--muted: #4f6370;
+			--line: rgba(23, 48, 68, 0.12);
+			--accent: #d65a31;
+			--accent-soft: #f0b08b;
+			--success: #1d7a5e;
+			--shadow: 0 22px 70px rgba(23, 48, 68, 0.16);
+			--radius: 28px;
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		html, body {
+			margin: 0;
+			min-height: 100%;
+			background:
+				radial-gradient(circle at top left, rgba(214, 90, 49, 0.22), transparent 32%),
+				radial-gradient(circle at top right, rgba(29, 122, 94, 0.16), transparent 28%),
+				linear-gradient(180deg, #f5efdf 0%, #efe7d4 58%, #eadfc9 100%);
+			color: var(--ink);
+		}
+
+		body {
+			font-family: "Trebuchet MS", "Gill Sans", sans-serif;
+			padding: 18px;
+		}
+
+		body::before {
+			content: "";
+			position: fixed;
+			inset: 0;
+			pointer-events: none;
+			background-image:
+				linear-gradient(rgba(23, 48, 68, 0.028) 1px, transparent 1px),
+				linear-gradient(90deg, rgba(23, 48, 68, 0.028) 1px, transparent 1px);
+			background-size: 22px 22px;
+			mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.72), transparent);
+		}
+
+		.app {
+			position: relative;
+			max-width: 760px;
+			margin: 0 auto;
+			display: grid;
+			gap: 16px;
+			padding-bottom: calc(24px + env(safe-area-inset-bottom));
+		}
+
+		.panel {
+			background: var(--panel);
+			backdrop-filter: blur(20px);
+			border: 1px solid var(--line);
+			border-radius: var(--radius);
+			box-shadow: var(--shadow);
+			overflow: hidden;
+		}
+
+		.hero {
+			padding: 24px 22px 22px;
+			background:
+				linear-gradient(135deg, rgba(255, 255, 255, 0.48), transparent 55%),
+				linear-gradient(180deg, rgba(23, 48, 68, 0.03), rgba(23, 48, 68, 0));
+		}
+
+		.kicker {
+			display: inline-flex;
+			align-items: center;
+			gap: 10px;
+			padding: 8px 12px;
+			border-radius: 999px;
+			background: rgba(23, 48, 68, 0.07);
+			font-size: 12px;
+			letter-spacing: 0.18em;
+			text-transform: uppercase;
+			color: var(--muted);
+		}
+
+		h1 {
+			margin: 14px 0 8px;
+			font-family: "Palatino Linotype", "Book Antiqua", serif;
+			font-size: clamp(2.2rem, 5vw, 3.8rem);
+			line-height: 0.95;
+			letter-spacing: -0.04em;
+			font-weight: 700;
+		}
+
+		.hero p {
+			margin: 0;
+			max-width: 42rem;
+			font-size: 1rem;
+			line-height: 1.45;
+			color: var(--muted);
+		}
+
+		.hero-actions,
+		.status-bar,
+		.quick-grid,
+		.text-actions {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+		}
+
+		.hero-actions {
+			margin-top: 18px;
+		}
+
+		.status-bar {
+			padding: 0 22px 22px;
+		}
+
+		.pill {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 10px 13px;
+			border-radius: 999px;
+			border: 1px solid var(--line);
+			background: rgba(255, 255, 255, 0.58);
+			font-size: 0.92rem;
+			color: var(--muted);
+		}
+
+		.pill strong {
+			color: var(--ink);
+		}
+
+		.button,
+		button,
+		input,
+		textarea {
+			font: inherit;
+		}
+
+		.button,
+		button {
+			appearance: none;
+			border: 1px solid transparent;
+			border-radius: 999px;
+			padding: 12px 16px;
+			background: var(--ink);
+			color: #fff9f0;
+			cursor: pointer;
+			transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease, border-color 140ms ease;
+			box-shadow: 0 10px 24px rgba(23, 48, 68, 0.18);
+		}
+
+		button:hover,
+		button:focus-visible {
+			transform: translateY(-1px);
+		}
+
+		button.secondary {
+			background: rgba(255, 255, 255, 0.72);
+			color: var(--ink);
+			border-color: var(--line);
+			box-shadow: none;
+		}
+
+		button.ghost {
+			background: transparent;
+			border-color: var(--line);
+			color: var(--ink);
+			box-shadow: none;
+		}
+
+		button.install-ready {
+			background: var(--success);
+		}
+
+		.surface {
+			padding: 22px;
+		}
+
+		.surface h2 {
+			margin: 0 0 8px;
+			font-family: "Palatino Linotype", "Book Antiqua", serif;
+			font-size: 1.6rem;
+			letter-spacing: -0.03em;
+		}
+
+		.surface .lead {
+			margin: 0 0 18px;
+			color: var(--muted);
+			line-height: 1.45;
+		}
+
+		.status-note {
+			padding: 14px 16px;
+			border-radius: 18px;
+			background: rgba(255, 255, 255, 0.72);
+			border: 1px solid var(--line);
+			line-height: 1.45;
+		}
+
+		.recorder {
+			display: grid;
+			gap: 16px;
+			justify-items: center;
+		}
+
+		.record-button {
+			width: min(52vw, 220px);
+			aspect-ratio: 1;
+			border-radius: 32px;
+			border: none;
+			padding: 0;
+			background:
+				radial-gradient(circle at 28% 24%, rgba(255, 255, 255, 0.55), transparent 24%),
+				linear-gradient(145deg, #d65a31 0%, #cb4c28 48%, #173044 132%);
+			color: #fff9f0;
+			box-shadow:
+				0 30px 60px rgba(214, 90, 49, 0.28),
+				inset 0 1px 1px rgba(255, 255, 255, 0.28);
+			display: grid;
+			place-items: center;
+			text-align: center;
+		}
+
+		.record-button span {
+			display: block;
+			max-width: 8ch;
+			font-family: "Palatino Linotype", "Book Antiqua", serif;
+			font-size: clamp(1.3rem, 4vw, 2rem);
+			line-height: 0.95;
+		}
+
+		.record-button small {
+			display: block;
+			margin-top: 10px;
+			font-size: 0.86rem;
+			letter-spacing: 0.05em;
+			text-transform: uppercase;
+			opacity: 0.86;
+		}
+
+		.record-button.recording {
+			animation: pulse 1.1s infinite alternate;
+			box-shadow:
+				0 0 0 12px rgba(214, 90, 49, 0.12),
+				0 34px 70px rgba(214, 90, 49, 0.34),
+				inset 0 1px 1px rgba(255, 255, 255, 0.24);
+		}
+
+		@keyframes pulse {
+			from {
+				transform: translateY(0) scale(1);
+			}
+			to {
+				transform: translateY(-2px) scale(1.02);
+			}
+		}
+
+		.timer {
+			font-size: 0.92rem;
+			letter-spacing: 0.12em;
+			text-transform: uppercase;
+			color: var(--muted);
+		}
+
+		textarea,
+		input[type="password"],
+		input[type="text"] {
+			width: 100%;
+			border: 1px solid var(--line);
+			border-radius: 20px;
+			padding: 14px 16px;
+			background: rgba(255, 255, 255, 0.72);
+			color: var(--ink);
+			outline: none;
+		}
+
+		textarea {
+			min-height: 112px;
+			resize: vertical;
+		}
+
+		.field-grid {
+			display: grid;
+			gap: 14px;
+		}
+
+		.quick-grid {
+			margin-top: 18px;
+		}
+
+		.quick-grid button {
+			flex: 1 1 130px;
+		}
+
+		.card-grid {
+			display: grid;
+			gap: 12px;
+		}
+
+		.card {
+			padding: 16px;
+			border-radius: 20px;
+			background: rgba(255, 255, 255, 0.66);
+			border: 1px solid var(--line);
+		}
+
+		.card h3 {
+			margin: 0 0 8px;
+			font-size: 0.88rem;
+			text-transform: uppercase;
+			letter-spacing: 0.14em;
+			color: var(--muted);
+		}
+
+		.card p,
+		.card pre {
+			margin: 0;
+			white-space: pre-wrap;
+			word-break: break-word;
+			line-height: 1.5;
+		}
+
+		.audio-shell {
+			display: grid;
+			gap: 10px;
+		}
+
+		audio {
+			width: 100%;
+			border-radius: 999px;
+		}
+
+		label.toggle {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			color: var(--muted);
+		}
+
+		label.toggle input {
+			width: auto;
+		}
+
+		details.settings summary {
+			cursor: pointer;
+			list-style: none;
+			padding: 18px 22px;
+			font-family: "Palatino Linotype", "Book Antiqua", serif;
+			font-size: 1.2rem;
+		}
+
+		details.settings summary::-webkit-details-marker {
+			display: none;
+		}
+
+		details.settings[open] summary {
+			border-bottom: 1px solid var(--line);
+		}
+
+		.settings-body {
+			padding: 18px 22px 22px;
+			display: grid;
+			gap: 14px;
+		}
+
+		footer {
+			padding: 4px 6px 0;
+			font-size: 0.9rem;
+			color: var(--muted);
+			text-align: center;
+		}
+
+		.hidden {
+			display: none !important;
+		}
+
+		@media (max-width: 560px) {
+			body {
+				padding: 12px;
+			}
+
+			.hero,
+			.surface {
+				padding: 18px;
+			}
+
+			.status-bar {
+				padding: 0 18px 18px;
+			}
+
+			.record-button {
+				width: min(68vw, 220px);
+				border-radius: 26px;
+			}
+		}
+	</style>
+</head>
+<body>
+	<div class="app">
+		<section class="panel">
+			<div class="hero">
+				<div class="kicker">Pi Speak Remote Voice</div>
+				<h1>Walk around.<br>Keep Pi in your ear.</h1>
+				<p>Use your phone as the voice front-end. Record a turn, get the transcript, stream the reply audio, and keep the local Pi workflow intact.</p>
+				<div class="hero-actions">
+					<button id="refresh-button" class="secondary" type="button">Refresh status</button>
+					<button id="install-button" class="ghost hidden" type="button">Install app</button>
+				</div>
+			</div>
+			<div class="status-bar">
+				<div class="pill"><strong>Origin</strong> <span id="origin-pill"></span></div>
+				<div class="pill"><strong>Secure</strong> <span id="secure-pill"></span></div>
+				<div class="pill"><strong>Auth</strong> <span id="auth-pill">Checking</span></div>
+			</div>
+		</section>
+
+		<section class="panel">
+			<div class="surface">
+				<h2>Voice turn</h2>
+				<p class="lead">Tap once to start recording. Tap again to send. The app posts raw audio to <code>/v1/turn/voice</code> and auto-plays the returned reply when available.</p>
+				<div class="recorder">
+					<button id="record-button" class="record-button" type="button" aria-live="polite">
+						<div>
+							<span id="record-label">Tap to talk</span>
+							<small id="record-subtitle">Mic opens on demand</small>
+						</div>
+					</button>
+					<div id="timer" class="timer">Ready</div>
+				</div>
+				<div class="quick-grid">
+					<button type="button" data-action="mono/on">Mono on</button>
+					<button type="button" data-action="mono/off" class="secondary">Mono off</button>
+					<button type="button" data-action="speak/on">Speak on</button>
+					<button type="button" data-action="speak/off" class="secondary">Speak off</button>
+					<button type="button" data-action="phone/code" class="secondary">Telegram code</button>
+					<button type="button" data-action="phone/on" class="secondary">Phone bridge on</button>
+				</div>
+			</div>
+		</section>
+
+		<section class="panel">
+			<div class="surface">
+				<h2>Text fallback</h2>
+				<p class="lead">For quiet rooms, flaky microphones, or long prompts.</p>
+				<div class="field-grid">
+					<textarea id="text-input" placeholder="Ask Pi something..."></textarea>
+					<div class="text-actions">
+						<button id="send-text-button" type="button">Send text</button>
+						<button id="clear-text-button" class="secondary" type="button">Clear</button>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<section class="panel">
+			<div class="surface">
+				<h2>Turn result</h2>
+				<div id="status-note" class="status-note">Waiting for connection.</div>
+				<div class="card-grid" style="margin-top: 14px;">
+					<div class="card">
+						<h3>Transcript</h3>
+						<p id="transcript-output">No transcript yet.</p>
+					</div>
+					<div class="card">
+						<h3>Reply</h3>
+						<p id="reply-output">No reply yet.</p>
+					</div>
+					<div class="card audio-shell">
+						<h3>Reply audio</h3>
+						<audio id="reply-audio" controls preload="none" class="hidden"></audio>
+						<p id="audio-note">Requested audio replies will appear here.</p>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<details class="panel settings" id="settings-panel">
+			<summary>Settings</summary>
+			<div class="settings-body">
+				<label class="field-grid">
+					<span>API token</span>
+					<input id="token-input" type="password" placeholder="Required for remote hosts unless you use localhost">
+				</label>
+				<div class="text-actions">
+					<button id="save-token-button" type="button">Save token</button>
+					<button id="clear-token-button" class="secondary" type="button">Forget token</button>
+				</div>
+				<label class="toggle">
+					<input id="audio-toggle" type="checkbox" checked>
+					<span>Request spoken replies when sending a turn</span>
+				</label>
+				<label class="toggle">
+					<input id="autoplay-toggle" type="checkbox" checked>
+					<span>Autoplay reply audio when the browser allows it</span>
+				</label>
+				<p class="lead" style="margin: 0;">Tip: if you open a link like <code>/app/?token=YOUR_TOKEN</code>, the app will store the token and clean the URL.</p>
+			</div>
+		</details>
+
+		<footer>Best results come from a secure origin: localhost, Tailscale Serve, or an HTTPS tunnel.</footer>
+	</div>
+
+	<script>
+		(() => {
+			const STORAGE_TOKEN = "piSpeakRemoteToken";
+			const STORAGE_AUDIO = "piSpeakRemoteAudio";
+			const STORAGE_AUTOPLAY = "piSpeakRemoteAutoplay";
+			const state = {
+				token: "",
+				wantAudio: true,
+				autoplay: true,
+				mediaRecorder: null,
+				stream: null,
+				chunks: [],
+				recording: false,
+				recordStartedAt: 0,
+				timerId: null,
+				deferredPrompt: null,
+				lastStatus: null
+			};
+
+			const els = {
+				origin: document.getElementById("origin-pill"),
+				secure: document.getElementById("secure-pill"),
+				auth: document.getElementById("auth-pill"),
+				refresh: document.getElementById("refresh-button"),
+				install: document.getElementById("install-button"),
+				record: document.getElementById("record-button"),
+				recordLabel: document.getElementById("record-label"),
+				recordSubtitle: document.getElementById("record-subtitle"),
+				timer: document.getElementById("timer"),
+				statusNote: document.getElementById("status-note"),
+				transcript: document.getElementById("transcript-output"),
+				reply: document.getElementById("reply-output"),
+				audio: document.getElementById("reply-audio"),
+				audioNote: document.getElementById("audio-note"),
+				textInput: document.getElementById("text-input"),
+				sendText: document.getElementById("send-text-button"),
+				clearText: document.getElementById("clear-text-button"),
+				tokenInput: document.getElementById("token-input"),
+				saveToken: document.getElementById("save-token-button"),
+				clearToken: document.getElementById("clear-token-button"),
+				audioToggle: document.getElementById("audio-toggle"),
+				autoplayToggle: document.getElementById("autoplay-toggle"),
+				settings: document.getElementById("settings-panel")
+			};
+
+			function setStatus(text, tone) {
+				els.statusNote.textContent = text;
+				els.statusNote.style.borderColor = tone === "error" ? "rgba(214, 90, 49, 0.4)" : "var(--line)";
+				els.statusNote.style.color = tone === "error" ? "#9b3517" : "var(--ink)";
+			}
+
+			function setReplyText(text) {
+				els.reply.textContent = text && text.trim() ? text.trim() : "No reply yet.";
+			}
+
+			function setTranscript(text) {
+				els.transcript.textContent = text && text.trim() ? text.trim() : "No transcript yet.";
+			}
+
+			function setAudio(url) {
+				if (!url) {
+					els.audio.pause();
+					els.audio.removeAttribute("src");
+					els.audio.classList.add("hidden");
+					els.audioNote.textContent = "Requested audio replies will appear here.";
+					return;
+				}
+
+				const audioUrl = new URL(url, window.location.origin);
+				if (state.token) audioUrl.searchParams.set("token", state.token);
+				els.audio.src = audioUrl.toString();
+				els.audio.classList.remove("hidden");
+				els.audioNote.textContent = "Reply audio ready.";
+				if (state.autoplay) {
+					els.audio.play().catch(() => {
+						els.audioNote.textContent = "Reply audio ready. Tap play if autoplay is blocked.";
+					});
+				}
+			}
+
+			function syncSettingsUi() {
+				els.origin.textContent = window.location.origin;
+				els.secure.textContent = window.isSecureContext ? "Yes" : "No";
+				els.audio.textContent = "";
+				els.audioToggle.checked = state.wantAudio;
+				els.autoplayToggle.checked = state.autoplay;
+				els.tokenInput.value = state.token;
+				els.auth.textContent = state.token ? "Token loaded" : "No token";
+			}
+
+			function loadSettings() {
+				const queryToken = new URL(window.location.href).searchParams.get("token");
+				state.token = queryToken || localStorage.getItem(STORAGE_TOKEN) || "";
+				state.wantAudio = (localStorage.getItem(STORAGE_AUDIO) || "true") !== "false";
+				state.autoplay = (localStorage.getItem(STORAGE_AUTOPLAY) || "true") !== "false";
+				if (queryToken) {
+					localStorage.setItem(STORAGE_TOKEN, queryToken);
+					const cleaned = new URL(window.location.href);
+					cleaned.searchParams.delete("token");
+					window.history.replaceState({}, "", cleaned.pathname + cleaned.search + cleaned.hash);
+				}
+				syncSettingsUi();
+			}
+
+			function saveSettings() {
+				if (state.token) {
+					localStorage.setItem(STORAGE_TOKEN, state.token);
+				} else {
+					localStorage.removeItem(STORAGE_TOKEN);
+				}
+				localStorage.setItem(STORAGE_AUDIO, String(state.wantAudio));
+				localStorage.setItem(STORAGE_AUTOPLAY, String(state.autoplay));
+				syncSettingsUi();
+			}
+
+			async function apiFetch(path, options = {}) {
+				const headers = new Headers(options.headers || {});
+				if (state.token) headers.set("Authorization", "Bearer " + state.token);
+				const response = await fetch(path, { ...options, headers });
+				let payload = null;
+				const contentType = response.headers.get("content-type") || "";
+				if (contentType.includes("application/json")) {
+					payload = await response.json().catch(() => null);
+				}
+				if (response.status === 401) {
+					els.auth.textContent = "Token required";
+					els.settings.open = true;
+					throw new Error("Unauthorized. Save the remote token in Settings.");
+				}
+				if (!response.ok) {
+					throw new Error(payload && (payload.error || payload.message) ? payload.error || payload.message : "Request failed (" + response.status + ")");
+				}
+				els.auth.textContent = state.token ? "Token loaded" : "Local access";
+				return payload;
+			}
+
+			function summarizeStatus(status) {
+				if (!status) return "Connected.";
+				const speak = status.speak || {};
+				const mono = status.mono || {};
+				const phone = status.phone || {};
+				const remote = status.remote || {};
+				const speakLabel = speak.enabled ? (speak.provider || speak.configuredProvider || "on") : "off";
+				const monoLabel = mono.running ? (mono.voiceInputActive ? "active" : "standby") : "off";
+				const phoneLabel = phone.enabled ? (phone.linkedChatId ? "linked" : "waiting for pair code") : "off";
+				return "Remote " + (remote.enabled ? "on" : "off") + " at port " + (remote.port || 8767) + ". Speak " + speakLabel + ", mono " + monoLabel + ", phone " + phoneLabel + ".";
+			}
+
+			async function refreshStatus() {
+				try {
+					const payload = await apiFetch("/v1/status");
+					state.lastStatus = payload ? payload.status : null;
+					setStatus(summarizeStatus(state.lastStatus));
+				} catch (error) {
+					setStatus(String(error.message || error), "error");
+				}
+			}
+
+			async function triggerAction(path) {
+				try {
+					const payload = await apiFetch("/v1/" + path);
+					setStatus(payload && payload.message ? payload.message : "Action complete.");
+					await refreshStatus();
+				} catch (error) {
+					setStatus(String(error.message || error), "error");
+				}
+			}
+
+			async function submitText() {
+				const text = els.textInput.value.trim();
+				if (!text) {
+					setStatus("Enter text before sending.", "error");
+					return;
+				}
+				setStatus("Sending text turn...");
+				try {
+					const payload = await apiFetch("/v1/turn/text", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ text, audio: state.wantAudio })
+					});
+					setTranscript("");
+					setReplyText(payload && payload.replyText ? payload.replyText : "");
+					setAudio(payload ? payload.audioUrl : "");
+					setStatus("Turn complete.");
+					await refreshStatus();
+				} catch (error) {
+					setStatus(String(error.message || error), "error");
+				}
+			}
+
+			function pickMimeType() {
+				if (!window.MediaRecorder) return "";
+				const candidates = [
+					"audio/webm;codecs=opus",
+					"audio/webm",
+					"audio/ogg;codecs=opus",
+					"audio/mp4"
+				];
+				for (const candidate of candidates) {
+					if (window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(candidate)) {
+						return candidate;
+					}
+				}
+				return "";
+			}
+
+			async function ensureRecorder() {
+				if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+					throw new Error("This browser does not support microphone recording.");
+				}
+				if (!window.isSecureContext) {
+					throw new Error("Microphone access requires localhost or HTTPS.");
+				}
+				if (!state.stream) {
+					state.stream = await navigator.mediaDevices.getUserMedia({
+						audio: {
+							echoCancellation: true,
+							noiseSuppression: true,
+							autoGainControl: true
+						}
+					});
+				}
+				if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
+					return state.mediaRecorder;
+				}
+				const mimeType = pickMimeType();
+				state.chunks = [];
+				state.mediaRecorder = mimeType
+					? new MediaRecorder(state.stream, { mimeType })
+					: new MediaRecorder(state.stream);
+				state.mediaRecorder.addEventListener("dataavailable", (event) => {
+					if (event.data && event.data.size > 0) state.chunks.push(event.data);
+				});
+				return state.mediaRecorder;
+			}
+
+			function formatElapsed(ms) {
+				const totalSeconds = Math.floor(ms / 1000);
+				const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+				const seconds = String(totalSeconds % 60).padStart(2, "0");
+				return minutes + ":" + seconds;
+			}
+
+			function updateRecordingUi() {
+				if (!state.recording) {
+					els.record.classList.remove("recording");
+					els.recordLabel.textContent = "Tap to talk";
+					els.recordSubtitle.textContent = "Mic opens on demand";
+					els.timer.textContent = "Ready";
+					return;
+				}
+				els.record.classList.add("recording");
+				els.recordLabel.textContent = "Tap to send";
+				els.recordSubtitle.textContent = "Recording live";
+				els.timer.textContent = formatElapsed(Date.now() - state.recordStartedAt);
+			}
+
+			async function startRecording() {
+				try {
+					const recorder = await ensureRecorder();
+					state.chunks = [];
+					recorder.start();
+					state.recording = true;
+					state.recordStartedAt = Date.now();
+					updateRecordingUi();
+					state.timerId = window.setInterval(updateRecordingUi, 250);
+					setStatus("Recording. Tap again to send the voice turn.");
+				} catch (error) {
+					setStatus(String(error.message || error), "error");
+				}
+			}
+
+			async function stopRecordingAndSend() {
+				if (!state.mediaRecorder || state.mediaRecorder.state === "inactive") return;
+				const recorder = state.mediaRecorder;
+				state.recording = false;
+				window.clearInterval(state.timerId);
+				state.timerId = null;
+				updateRecordingUi();
+				setStatus("Uploading voice turn...");
+
+				const blob = await new Promise((resolve) => {
+					recorder.addEventListener("stop", () => {
+						resolve(new Blob(state.chunks, { type: recorder.mimeType || "application/octet-stream" }));
+					}, { once: true });
+					recorder.stop();
+				});
+
+				try {
+					const payload = await apiFetch("/v1/turn/voice?audio=" + (state.wantAudio ? "1" : "0"), {
+						method: "POST",
+						headers: { "Content-Type": blob.type || "application/octet-stream" },
+						body: blob
+					});
+					setTranscript(payload && payload.transcript ? payload.transcript : "");
+					setReplyText(payload && payload.replyText ? payload.replyText : "");
+					setAudio(payload ? payload.audioUrl : "");
+					setStatus("Voice turn complete.");
+					await refreshStatus();
+				} catch (error) {
+					setStatus(String(error.message || error), "error");
+				}
+			}
+
+			async function toggleRecording() {
+				if (state.recording) {
+					await stopRecordingAndSend();
+					return;
+				}
+				await startRecording();
+			}
+
+			function registerServiceWorker() {
+				if (!("serviceWorker" in navigator)) return;
+				navigator.serviceWorker.register("/app/sw.js").catch(() => {});
+			}
+
+			function bindInstallPrompt() {
+				window.addEventListener("beforeinstallprompt", (event) => {
+					event.preventDefault();
+					state.deferredPrompt = event;
+					els.install.classList.remove("hidden");
+					els.install.classList.add("install-ready");
+				});
+				els.install.addEventListener("click", async () => {
+					if (!state.deferredPrompt) return;
+					state.deferredPrompt.prompt();
+					await state.deferredPrompt.userChoice.catch(() => {});
+					state.deferredPrompt = null;
+					els.install.classList.add("hidden");
+				});
+			}
+
+			document.querySelectorAll("[data-action]").forEach((button) => {
+				button.addEventListener("click", () => {
+					triggerAction(button.getAttribute("data-action"));
+				});
+			});
+
+			els.refresh.addEventListener("click", refreshStatus);
+			els.record.addEventListener("click", toggleRecording);
+			els.sendText.addEventListener("click", submitText);
+			els.clearText.addEventListener("click", () => {
+				els.textInput.value = "";
+			});
+			els.textInput.addEventListener("keydown", (event) => {
+				if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+					event.preventDefault();
+					submitText();
+				}
+			});
+			els.saveToken.addEventListener("click", () => {
+				state.token = els.tokenInput.value.trim();
+				saveSettings();
+				setStatus(state.token ? "Token saved." : "Token cleared.");
+				refreshStatus();
+			});
+			els.clearToken.addEventListener("click", () => {
+				state.token = "";
+				saveSettings();
+				setStatus("Token forgotten.");
+			});
+			els.audioToggle.addEventListener("change", () => {
+				state.wantAudio = els.audioToggle.checked;
+				saveSettings();
+			});
+			els.autoplayToggle.addEventListener("change", () => {
+				state.autoplay = els.autoplayToggle.checked;
+				saveSettings();
+			});
+
+			loadSettings();
+			registerServiceWorker();
+			bindInstallPrompt();
+			refreshStatus();
+		})();
+	</script>
+</body>
+</html>

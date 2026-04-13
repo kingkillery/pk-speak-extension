@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout onLaunch="refresh" color="#0F172A">
+	<tabs>
+		<tab text="Status">
+			<row weight="wrap">
+				<button text="Refresh" ontap="refresh" />
+				<button text="Phone" ontap="phone_status" />
+				<button text="Pair Code" ontap="phone_code" />
+			</row>
+			<row weight="wrap">
+				<label id="status" text="Run /remote on in Pi Speak first." />
+			</row>
+			<row weight="wrap">
+				<label id="reply" text="Text-turn replies will appear here." />
+			</row>
+		</tab>
+		<tab text="Prompt">
+			<row weight="3">
+				<text id="prompt" hint="Send a text turn to Pi..." onchange="set_prompt" multiLine="true" />
+			</row>
+			<row weight="wrap">
+				<button text="Send" ontap="send_prompt" />
+				<button text="Clear" ontap="clear_prompt" />
+				<button text="Refresh" ontap="refresh" />
+			</row>
+		</tab>
+		<tab text="Control">
+			<row>
+				<button text="Mono On" ontap="mono_on" />
+				<button text="Mono Off" ontap="mono_off" />
+				<button text="Speak On" ontap="speak_on" />
+				<button text="Speak Off" ontap="speak_off" />
+			</row>
+			<row>
+				<button text="Stop Talk" ontap="speak_stop" />
+				<button text="Test" ontap="speak_test" />
+				<button text="Phone On" ontap="phone_on" />
+				<button text="Phone Off" ontap="phone_off" />
+			</row>
+			<row>
+				<button text="Auto" ontap="provider_auto" />
+				<button text="Edge" ontap="provider_edge" />
+				<button text="OpenAI" ontap="provider_openai" />
+				<button text="11Labs" ontap="provider_elevenlabs" />
+			</row>
+		</tab>
+	</tabs>
+</layout>

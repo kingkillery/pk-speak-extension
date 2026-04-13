@@ -1,6 +1,9 @@
 __pycache__/
+listener/__pycache__/
 *.pyc
+listener/*.pyc
 *.pyo
 REVIEW.md
 EDGE_CASE_TRACE.md
 .pi/
+*.tgz
