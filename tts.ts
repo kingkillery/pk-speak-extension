@@ -52,7 +52,8 @@ function throwIfAborted(signal?: AbortSignal) {
 }
 
 function getOpenAiAudioKey() {
-	return process.env.VOICE_TOOLS_OPENAI_KEY || process.env.OPENAI_API_KEY || "";
+	// Require a dedicated key for audio TTS — avoid consuming the general LLM key
+	return process.env.PI_SPEAK_OPENAI_KEY || process.env.VOICE_TOOLS_OPENAI_KEY || "";
 }
 
 function getPythonExecutable() {
@@ -228,7 +229,7 @@ async function synthesizeEdge(text: string, outputPath: string, signal?: AbortSi
 
 async function synthesizeOpenAI(text: string, outputPath: string, signal?: AbortSignal) {
 	const apiKey = getOpenAiAudioKey();
-	if (!apiKey) throw new Error("OPENAI_API_KEY or VOICE_TOOLS_OPENAI_KEY is required for OpenAI TTS");
+	if (!apiKey) throw new Error("PI_SPEAK_OPENAI_KEY or VOICE_TOOLS_OPENAI_KEY is required for OpenAI TTS");
 	throwIfAborted(signal);
 	const response = await fetch(`${process.env.PI_SPEAK_OPENAI_BASE_URL || "https://api.openai.com/v1"}/audio/speech`, {
 		method: "POST",

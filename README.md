@@ -473,7 +473,9 @@ PI_SPEAK_OPENROUTER_URL=https://openrouter.ai/api/v1/chat/completions
 ### OpenAI
 
 ```text
-OPENAI_API_KEY=...
+# Dedicated key for audio TTS (avoids consuming the general LLM key)
+PI_SPEAK_OPENAI_KEY=...
+# Legacy fallback
 VOICE_TOOLS_OPENAI_KEY=...
 PI_SPEAK_OPENAI_TTS_MODEL=gpt-4o-mini-tts
 PI_SPEAK_OPENAI_VOICE=alloy
