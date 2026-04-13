@@ -11,6 +11,6 @@
     "declaration": false
   },
   "include": [
-    "index.ts"
+    "*.ts"
   ]
 }

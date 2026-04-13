@@ -1,61 +1,572 @@
 # pi-speak-pk
 
-Real `/speak` command for pi / pi-mono.
+Voice, wake-word, and remote-control extensions for Pi / `pi-mono`.
+
+This package turns Pi into a usable voice workstation, not just a text assistant with TTS bolted on. It gives you:
+
+- spoken assistant replies with multiple TTS backends
+- the always-listening `pi mono` wake phrase flow
+- Telegram text and voice turns from your phone
+- a local HTTP control API
+- a built-in mobile web app at `/app/`
+- a Unified Remote control surface
+
+## What To Use
+
+If you just want the shortest path:
+
+1. Local desktop voice: use `/speak on`
+2. Hands-free on the same machine: use `/mono on`
+3. Remote from your phone with the least friction: use `/phone on`
+4. Remote from your phone with browser mic + audio playback: use `/remote on`, then open `/app/`
+5. Remote button grid on Android: use the bundled Unified Remote remote
 
 ## Install
+
+Install the extension:
 
 ```text
 pi npm i pi-speak-pk
 ```
 
-What it does:
-- toggles spoken assistant replies on and off
-- injects speech-first CodeChat behavior into the system prompt
-- preserves the full on-screen pi response
-- sends the spoken version through this flow:
-  1. user submits text
-  2. pi produces the full assistant response
-  3. `speak11` rewrites that response through OpenRouter model `openai/gpt-oss-20b:nitro`
-  4. the rewritten text is voiced through the ElevenLabs API using the `adam` voice
-- shows per-turn pipeline status in pi's status line:
-  - `llm`
-  - `rewrite`
-  - `elevenlabs`
-  - `playing`
+Reload Pi after install.
 
-## Usage
+## Quick Start
 
-After reloading pi:
+### 1. Make Pi Speak Locally
 
 ```text
-/speak
+/speak on
 /speak test
-/speak stop
-/speak off
 /speak status
-/speak explain the auth flow
 ```
 
-## Dependencies
+If you do nothing else, `auto` provider selection will pick the best available backend in this order:
 
-- `speak11.py` / `speak11.cmd`
-- OpenRouter rewrite model: `openai/gpt-oss-20b:nitro`
-- ElevenLabs API voice output (default voice: `adam`)
+1. `legacy` via `speak11`
+2. `elevenlabs`
+3. `openai`
+4. `edge`
 
-## Interrupting playback
-
-Use:
+### 2. Enable The Always-Listening Wake Phrase
 
 ```text
-/speak stop
+/mono on
 ```
 
-That stops the current spoken reply immediately but keeps speak mode enabled.
-
-Use:
+Say:
 
 ```text
+pi mono
+```
+
+Pi will open a short voice-input window. Say `pi mono` again within the timeout to keep it alive. Default keep-alive is 15 seconds.
+
+### 3. Remote In From Your Phone With Telegram
+
+```text
+/phone on
+/phone code
+```
+
+Then in Telegram:
+
+1. Open your bot
+2. Send `/link <code>`
+3. Send text or voice notes to Pi
+
+This is the easiest remote path. It works well when you want reliability more than low latency.
+
+`PI_SPEAK_TELEGRAM_BOT_TOKEN` can point to an existing bot you already control. It does not need to be a fresh bot, but using a dedicated bot keeps the Pi workflow cleaner and easier to secure.
+
+### 4. Remote In From Your Phone With The Built-In Web App
+
+```text
+/remote on
+/remote token
+```
+
+Then open one of these:
+
+```text
+http://localhost:8767/app/
+https://<tailnet-host>/app/
+https://<tunnel-domain>/app/
+```
+
+The web app:
+
+- records your microphone in the browser
+- sends audio to `/v1/turn/voice`
+- shows the transcript
+- plays the returned reply audio
+- stores the remote token locally if needed
+
+For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel.
+
+## Main Commands
+
+### `/speak`
+
+Turns spoken replies on, off, or changes the backend.
+
+Common examples:
+
+```text
+/speak on
 /speak off
+/speak stop
+/speak status
+/speak test
+/speak providers
+/speak provider edge
+/speak provider openai
+/speak provider elevenlabs
+/speak rewrite on
+/speak rewrite off
 ```
 
-That stops playback and disables speak mode entirely.
+Behavior:
+
+- Pi still keeps the full on-screen response
+- the spoken version can optionally be rewritten for audio clarity
+- `/speak stop` interrupts playback without disabling speech mode
+
+### `/mono`
+
+Controls the wake-word listener.
+
+```text
+/mono on
+/mono off
+/mono status
+```
+
+Behavior:
+
+- waits for `pi mono`
+- activates voice input for a short window
+- keeps the existing `pi mono` flow intact
+- supports `pi mono <session-name>` to route into a named session
+
+### `/phone`
+
+Controls the Telegram bridge.
+
+```text
+/phone on
+/phone off
+/phone status
+/phone code
+/phone unpair
+```
+
+Behavior:
+
+- text messages become Pi turns
+- voice notes are transcribed, then sent to Pi
+- replies can be delivered as text plus generated audio
+
+### `/remote`
+
+Controls the HTTP API and mobile web app.
+
+```text
+/remote on
+/remote off
+/remote status
+/remote token
+```
+
+Behavior:
+
+- starts the HTTP server
+- serves the mobile app from `/app/`
+- exposes remote-control endpoints
+- generates a token if one is not already configured
+
+### `/sess`
+
+Named sessions for voice routing.
+
+```text
+/sess new bugfix
+/sess switch bugfix
+/sess list
+/sess name active-work
+```
+
+This matters because `pi mono bugfix` can route voice input to that named session.
+
+## Architecture
+
+There are six main subsystems:
+
+1. `index.ts`
+   The extension entrypoint. Registers commands, persists state, owns wake-word routing, and coordinates TTS, STT, Telegram, and HTTP control.
+
+2. `tts.ts`
+   Multi-provider speech synthesis. Supports `legacy`, `edge`, `openai`, `elevenlabs`, and `auto`.
+
+3. `stt.ts` and `listener/transcribe_file.py`
+   Remote voice transcription for uploaded audio. `auto` prefers OpenAI when an API key is present, otherwise local `faster-whisper`.
+
+4. `listener/listener.py`
+   The always-on two-tier listener:
+   - Tier 1: Vosk for low-cost wake phrase detection
+   - Tier 2: `faster-whisper` for actual speech transcription
+
+5. `phone-bridge.ts`
+   Telegram transport for remote text and voice notes.
+
+6. `control-server.ts`
+   Local HTTP API, audio artifact serving, and the built-in mobile app host.
+
+## Remote Paths
+
+### Best Overall: Built-In Mobile Web App
+
+Use this when you want:
+
+- browser mic capture
+- browser audio playback
+- one-tap remote use from Android
+- compatibility with Tailscale or an HTTPS tunnel
+
+Start it:
+
+```text
+/remote on
+```
+
+Open:
+
+```text
+https://<your-url>/app/
+```
+
+### Best Zero-Friction Fallback: Telegram
+
+Use this when you want:
+
+- the least setup
+- reliable remote turns
+- simple text plus voice note interaction
+
+Start it:
+
+```text
+/phone on
+```
+
+### Best Button Grid: Unified Remote
+
+Use this when you want:
+
+- fast buttons for `mono`, `speak`, provider changes, and phone pairing
+- a control surface on the phone
+
+Do not use this as your main audio path. It is a controller, not a real voice transport.
+
+## Mobile Web App
+
+The mobile app is built into the extension and served from:
+
+```text
+/app/
+```
+
+Capabilities:
+
+- record a voice turn with the browser microphone
+- send typed fallback text
+- request spoken replies on each turn
+- autoplay returned audio when the browser allows it
+- save the remote token locally
+- install as a PWA on Android
+
+Token onboarding options:
+
+1. Paste the token in the Settings panel
+2. Open the app once with:
+
+```text
+/app/?token=YOUR_TOKEN
+```
+
+The app will save the token and clean the URL.
+
+Secure-origin rules:
+
+- `localhost` works
+- HTTPS works
+- random plain HTTP hostnames usually will not allow browser microphone access
+
+That is why Tailscale Serve or an HTTPS tunnel is the right remote path.
+
+## HTTP API
+
+Start it with:
+
+```text
+/remote on
+```
+
+Default bind:
+
+```text
+host: 0.0.0.0
+port: 8767
+```
+
+### Public Routes
+
+These are available before auth because they serve the built-in app:
+
+```text
+GET /
+GET /app/
+GET /app/index.html
+GET /app/app.webmanifest
+GET /app/sw.js
+GET /app/icon.svg
+```
+
+### Control Routes
+
+```text
+GET  /v1/health
+GET  /v1/status
+
+GET  /v1/mono/on
+GET  /v1/mono/off
+GET  /v1/mono/status
+
+GET  /v1/speak/on
+GET  /v1/speak/off
+GET  /v1/speak/stop
+GET  /v1/speak/status
+GET  /v1/speak/test
+GET  /v1/speak/providers
+GET  /v1/speak/provider/:provider
+GET  /v1/speak/rewrite/:onOrOff
+
+GET  /v1/phone/on
+GET  /v1/phone/off
+GET  /v1/phone/status
+GET  /v1/phone/code
+GET  /v1/phone/unpair
+
+GET  /v1/turn/text?text=hello&audio=1
+POST /v1/turn/text
+POST /v1/turn/voice
+
+GET  /v1/audio/:id
+```
+
+### Auth
+
+Local bypass applies only to true localhost requests:
+
+- `localhost`
+- `127.0.0.1`
+- `::1`
+
+Remote clients must send one of:
+
+- `Authorization: Bearer <token>`
+- `X-Pi-Speak-Token: <token>`
+- `?token=<token>`
+
+Inspect the active token with:
+
+```text
+/remote token
+```
+
+### Example Requests
+
+Text turn:
+
+```bash
+curl -X POST http://127.0.0.1:8767/v1/turn/text ^
+  -H "Content-Type: application/json" ^
+  -d "{\"text\":\"Summarize the repo\",\"audio\":true}"
+```
+
+Voice turn:
+
+```bash
+curl -X POST "https://<your-host>/v1/turn/voice?audio=1" ^
+  -H "Authorization: Bearer <token>" ^
+  -H "Content-Type: audio/webm" ^
+  --data-binary "@voice.webm"
+```
+
+## Unified Remote
+
+Bundled remote source:
+
+```text
+unified-remote/Pi Speak
+```
+
+Install path:
+
+```text
+C:\ProgramData\Unified Remote\Remotes\Custom\Pi Speak
+```
+
+What it is good at:
+
+- toggling `mono`
+- toggling `speak`
+- switching providers
+- requesting the Telegram pair code
+- sending short text turns
+
+What it is not good at:
+
+- full remote voice capture
+- browser-style audio playback
+- low-latency conversational audio
+
+## Environment Variables
+
+### Core
+
+```text
+PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
+PI_SPEAK_REWRITE_ENABLED=true|false
+PI_SPEAK_MONO_ACTIVITY_TIMEOUT=15
+```
+
+### Rewrite
+
+```text
+OPENROUTER_API_KEY=...
+PI_SPEAK_REWRITE_MODEL=openai/gpt-oss-20b:nitro
+PI_SPEAK_OPENROUTER_URL=https://openrouter.ai/api/v1/chat/completions
+```
+
+### OpenAI
+
+```text
+OPENAI_API_KEY=...
+VOICE_TOOLS_OPENAI_KEY=...
+PI_SPEAK_OPENAI_TTS_MODEL=gpt-4o-mini-tts
+PI_SPEAK_OPENAI_VOICE=alloy
+PI_SPEAK_REMOTE_OPENAI_STT_MODEL=whisper-1
+PI_SPEAK_OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
+### ElevenLabs
+
+```text
+ELEVENLABS_API_KEY=...
+PI_SPEAK_ELEVENLABS_VOICE_ID=pNInz6obpgDQGcFmaJgB
+PI_SPEAK_ELEVENLABS_MODEL_ID=eleven_multilingual_v2
+```
+
+### Edge TTS
+
+```text
+PI_SPEAK_EDGE_VOICE=en-US-AriaNeural
+PI_SPEAK_EDGE_LANG=en-US
+PI_SPEAK_EDGE_RATE=1
+PI_SPEAK_EDGE_TIMEOUT_MS=15000
+```
+
+### Legacy / Local Python
+
+```text
+PI_SPEAK_SPEAK11_PATH=...
+PI_SPEAK_PYTHON=...
+WHISPER_MODEL=tiny
+WHISPER_DEVICE=cpu
+WHISPER_COMPUTE=int8
+PI_SPEAK_REMOTE_WHISPER_MODEL=base
+PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai
+```
+
+### Telegram
+
+```text
+PI_SPEAK_TELEGRAM_BOT_TOKEN=...
+TELEGRAM_BOT_TOKEN=...
+PI_SPEAK_PHONE_WAIT_TIMEOUT_MS=180000
+```
+
+### HTTP Remote
+
+```text
+PI_SPEAK_HTTP_HOST=0.0.0.0
+PI_SPEAK_HTTP_PORT=8767
+PI_SPEAK_HTTP_TOKEN=...
+PI_SPEAK_HTTP_AUDIO_TTL_MS=600000
+```
+
+## Troubleshooting
+
+### The phone web app opens, but the mic does not work
+
+You are probably not on a secure origin.
+
+Use one of:
+
+- `http://localhost:8767/app/`
+- Tailscale Serve over HTTPS
+- Cloudflare Tunnel over HTTPS
+
+### `/mono on` starts, but voice transcription fails
+
+You likely do not have the Python audio stack installed. The local listener depends on:
+
+- `numpy`
+- `sounddevice`
+- `vosk`
+- `faster_whisper`
+
+### Remote voice turns fail
+
+Check these in order:
+
+1. `/remote status`
+2. `/remote token`
+3. `PI_SPEAK_REMOTE_STT_PROVIDER`
+4. OpenAI key or local whisper setup
+
+### Speech is using the wrong provider
+
+Check:
+
+```text
+/speak status
+/speak providers
+/speak provider edge
+```
+
+### Telegram pairing is stuck
+
+Use:
+
+```text
+/phone code
+/phone unpair
+```
+
+Then link again with the fresh code.
+
+## Files You Will Care About
+
+- [index.ts](./index.ts)
+- [tts.ts](./tts.ts)
+- [stt.ts](./stt.ts)
+- [phone-bridge.ts](./phone-bridge.ts)
+- [control-server.ts](./control-server.ts)
+- [listener/listener.py](./listener/listener.py)
+- [web/remote/index.html](./web/remote/index.html)
+
+## Release Notes
+
+See [CHANGELOG.md](./CHANGELOG.md).

@@ -1,0 +1,19 @@
+{
+  "name": "Pi Speak Remote",
+  "short_name": "Pi Speak",
+  "description": "Remote voice front-end for Pi Speak.",
+  "start_url": "/app/",
+  "scope": "/app/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#efe7d4",
+  "theme_color": "#14324a",
+  "icons": [
+    {
+      "src": "/app/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

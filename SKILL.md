@@ -1,40 +1,80 @@
 ---
 name: pi-speak
-description: "Real-time voice output for Pi assistant replies via ElevenLabs. Use when the user wants to hear Pi speak, enable voice mode, or toggle speech output. Triggers on /speak, /mono, voice output, text-to-speech, or ElevenLabs."
+description: "Voice, wake-word, and remote-control extension for Pi. Use when the user wants spoken replies, the always-listening `pi mono` flow, Telegram phone access, the built-in mobile web app, or HTTP/Unified Remote control. Triggers on /speak, /mono, /phone, /remote, text-to-speech, voice input, or remote voice access."
 ---
 
 # pi-speak-pk
 
-Real-time voice extension for pi-coding-agent. Speaks assistant replies through ElevenLabs with a speech-optimized rewrite pass.
+Voice extension for `pi-coding-agent` with local wake-word input, multi-provider TTS, remote STT, Telegram transport, and a built-in mobile web app.
 
 ## Commands
 
-| Command | Purpose |
-|---------|---------|
-| `/speak` | Enable speech mode |
-| `/speak test` | Play a test phrase |
-| `/speak stop` | Interrupt current playback |
-| `/speak off` | Disable speech mode |
-| `/speak status` | Show current state |
-| `/mono` | Start always-on voice listener (Vosk + faster-whisper) |
-| `/mono on\|off\|status` | Control the listener |
-| `/sess` | Manage named sessions (new, switch, list, name) |
+- `/speak` - enable or configure spoken replies
+- `/mono` - control the always-listening wake phrase flow
+- `/phone` - run the Telegram bridge
+- `/remote` - run the HTTP API and built-in web app
+- `/sess` - manage named sessions for voice routing
 
 ## How It Works
 
-1. User submits text (typed or voice)
+1. User submits text or speech
 2. Pi generates the full assistant response
-3. `speak11` rewrites the response for audio clarity via OpenRouter (`openai/gpt-oss-20b:nitro`)
-4. Rewritten text is voiced through ElevenLabs API (default voice: `adam`)
-5. Audio plays through speakers via MediaPlayer
+3. Optional rewrite-for-speech makes the reply easier to hear
+4. A TTS backend synthesizes the spoken version
+5. Audio plays locally or is returned to a remote client
+
+## TTS Providers
+
+- `legacy` via `speak11`
+- `edge` via `node-edge-tts`
+- `openai`
+- `elevenlabs`
+- `auto`
+
+Auto mode resolves in this order:
+
+1. `legacy`
+2. `elevenlabs`
+3. `openai`
+4. `edge`
 
 ## Voice Listener
 
-`/mono` starts a background Python process that listens for the wake phrase "pi mono". Once activated, spoken input is transcribed (faster-whisper) and routed to Pi as user messages. The listener stays alive across session switches.
+`/mono` runs a background Python listener:
 
-## Dependencies
+- Vosk handles the low-cost wake phrase detection
+- `faster-whisper` handles actual utterance transcription
+- the wake phrase is still `pi mono`
+- the keep-alive timeout defaults to 15 seconds
+- `pi mono <session-name>` can target a named session
 
-- `speak11.py` / `speak11.cmd` — rewrite + TTS pipeline
-- OpenRouter API key — for audio rewrite pass
-- ElevenLabs API key — for voice synthesis
-- Python 3.14+ with `numpy`, `sounddevice`, `vosk`, `faster_whisper` — for `/mono` listener
+## Remote Paths
+
+### Telegram
+
+`/phone` gives you remote text and voice-note turns through a Telegram bot.
+
+### Mobile web app
+
+`/remote` serves the built-in phone web app from `/app/`. Use this when you want browser mic capture plus browser audio playback.
+
+### Unified Remote
+
+The bundled Unified Remote remote is a control surface, not the main audio path.
+
+## Important Files
+
+- `index.ts`
+- `tts.ts`
+- `stt.ts`
+- `phone-bridge.ts`
+- `control-server.ts`
+- `listener/listener.py`
+- `web/remote/index.html`
+
+## Setup Notes
+
+- OpenRouter is only needed for rewrite-for-speech
+- OpenAI is optional for TTS and optional for remote STT
+- ElevenLabs is optional
+- local `/mono` requires Python plus the listener dependencies
