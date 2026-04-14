@@ -18,3 +18,9 @@ Thumbs.db
 
 # Install helper scripts
 _install.ps1
+
+# Local Android / device-testing artifacts
+android-app-*.png
+app-qr*.png
+window_dump*.xml
+nul
