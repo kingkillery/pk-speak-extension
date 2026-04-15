@@ -2,6 +2,7 @@ package com.pkkidking.pispeak.domain.usecase
 
 import com.pkkidking.pispeak.domain.model.AppSettings
 import com.pkkidking.pispeak.domain.model.RecordedAudio
+import com.pkkidking.pispeak.domain.model.RemoteStatusSummary
 import com.pkkidking.pispeak.domain.repo.PiSpeakRepository
 import javax.inject.Inject
 
@@ -21,6 +22,13 @@ class GetStatusUseCase @Inject constructor(
     private val repository: PiSpeakRepository,
 ) {
     suspend operator fun invoke(settings: AppSettings) = repository.getStatus(settings)
+}
+
+class UpdateRouteTargetUseCase @Inject constructor(
+    private val repository: PiSpeakRepository,
+) {
+    suspend operator fun invoke(settings: AppSettings, target: String?): Result<RemoteStatusSummary> =
+        repository.updateRouteTarget(settings, target)
 }
 
 class SendTextTurnUseCase @Inject constructor(

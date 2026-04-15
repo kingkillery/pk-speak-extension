@@ -1,15 +1,25 @@
 package com.pkkidking.pispeak.core
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.net.Uri
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class AppAudioPlayer @Inject constructor() {
+class AppAudioPlayer @Inject constructor(
+    @ApplicationContext private val context: Context,
+) {
     private var player: MediaPlayer? = null
 
-    fun play(url: String, onComplete: () -> Unit = {}, onError: (String) -> Unit = {}) {
+    fun play(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        onComplete: () -> Unit = {},
+        onError: (String) -> Unit = {},
+    ) {
         stop()
         player = MediaPlayer().apply {
             setAudioAttributes(
@@ -28,7 +38,7 @@ class AppAudioPlayer @Inject constructor() {
                 stop()
                 true
             }
-            setDataSource(url)
+            setDataSource(context, Uri.parse(url), headers)
             prepareAsync()
         }
     }

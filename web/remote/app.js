@@ -102,21 +102,44 @@ function setAudio(url) {
 	if (!url) {
 		els.audio.pause();
 		els.audio.removeAttribute("src");
+		if (els.audio.dataset.objectUrl) {
+			URL.revokeObjectURL(els.audio.dataset.objectUrl);
+			delete els.audio.dataset.objectUrl;
+		}
 		els.audio.classList.add("hidden");
 		els.audioNote.textContent = "Requested audio replies will appear here.";
 		return;
 	}
 
 	const audioUrl = new URL(url, window.location.origin);
-	if (state.token) audioUrl.searchParams.set("token", state.token);
-	els.audio.src = audioUrl.toString();
-	els.audio.classList.remove("hidden");
-	els.audioNote.textContent = "Reply audio ready.";
-	if (state.autoplay) {
-		els.audio.play().catch(() => {
-			els.audioNote.textContent = "Reply audio ready. Tap play if autoplay is blocked.";
+	const headers = new Headers();
+	if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+	els.audioNote.textContent = "Loading reply audio...";
+	fetch(audioUrl, { headers })
+		.then(async (response) => {
+			if (!response.ok) {
+				throw new Error(`Audio request failed (${response.status})`);
+			}
+			const blob = await response.blob();
+			if (els.audio.dataset.objectUrl) {
+				URL.revokeObjectURL(els.audio.dataset.objectUrl);
+			}
+			const objectUrl = URL.createObjectURL(blob);
+			els.audio.dataset.objectUrl = objectUrl;
+			els.audio.src = objectUrl;
+			els.audio.classList.remove("hidden");
+			els.audioNote.textContent = "Reply audio ready.";
+			if (state.autoplay) {
+				els.audio.play().catch(() => {
+					els.audioNote.textContent = "Reply audio ready. Tap play if autoplay is blocked.";
+				});
+			}
+		})
+		.catch((error) => {
+			els.audio.classList.add("hidden");
+			els.audio.removeAttribute("src");
+			els.audioNote.textContent = String(error.message || error);
 		});
-	}
 }
 
 function syncSettingsUi() {

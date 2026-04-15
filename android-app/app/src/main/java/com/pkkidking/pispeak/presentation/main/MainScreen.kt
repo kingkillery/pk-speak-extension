@@ -52,6 +52,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,6 +82,8 @@ private val VoiceShape = RoundedCornerShape(40.dp)
 
 @Composable
 fun MainRoute(
+    bootstrapBaseUrl: String? = null,
+    bootstrapToken: String? = null,
     viewModel: MainViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -91,13 +94,19 @@ fun MainRoute(
         if (granted) viewModel.startRecording()
     }
 
+    LaunchedEffect(bootstrapBaseUrl, bootstrapToken) {
+        viewModel.applyBootstrap(bootstrapBaseUrl, bootstrapToken)
+    }
+
     MainScreen(
         uiState = uiState,
         onBaseUrlChanged = viewModel::onBaseUrlChanged,
         onTokenChanged = viewModel::onTokenChanged,
+        onTargetChanged = viewModel::onTargetChanged,
         onRequestAudioChanged = viewModel::onRequestAudioRepliesChanged,
         onAutoplayChanged = viewModel::onAutoplayReplyAudioChanged,
         onSaveSettings = viewModel::saveCurrentSettings,
+        onApplyTarget = viewModel::applyRouteTarget,
         onRefresh = viewModel::refreshStatus,
         onTextChanged = viewModel::onTextPromptChanged,
         onSendText = viewModel::submitTextTurn,
@@ -122,9 +131,11 @@ fun MainScreen(
     uiState: MainUiState,
     onBaseUrlChanged: (String) -> Unit,
     onTokenChanged: (String) -> Unit,
+    onTargetChanged: (String) -> Unit,
     onRequestAudioChanged: (Boolean) -> Unit,
     onAutoplayChanged: (Boolean) -> Unit,
     onSaveSettings: () -> Unit,
+    onApplyTarget: () -> Unit,
     onRefresh: () -> Unit,
     onTextChanged: (String) -> Unit,
     onSendText: () -> Unit,
@@ -151,6 +162,15 @@ fun MainScreen(
                 requestAudioReplies = uiState.requestAudioReplies,
                 onRefresh = onRefresh,
                 onToggleSettings = { showSettings = !showSettings },
+            )
+
+            TargetPanel(
+                targetName = uiState.targetName,
+                currentSession = uiState.currentSession,
+                availableTargets = uiState.availableTargets,
+                isBusy = uiState.isBusy,
+                onTargetChanged = onTargetChanged,
+                onApplyTarget = onApplyTarget,
             )
 
             if (uiState.error != null) {
@@ -192,6 +212,74 @@ fun MainScreen(
                     onAutoplayChanged = onAutoplayChanged,
                     onSaveSettings = onSaveSettings,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TargetPanel(
+    targetName: String,
+    currentSession: String?,
+    availableTargets: List<String>,
+    isBusy: Boolean,
+    onTargetChanged: (String) -> Unit,
+    onApplyTarget: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = PanelShape,
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Talk to", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = buildString {
+                    append("Current session: ")
+                    append(currentSession ?: "unknown")
+                    append(". Route target: ")
+                    append(targetName.ifBlank { "current session" })
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            )
+            OutlinedTextField(
+                value = targetName,
+                onValueChange = onTargetChanged,
+                label = { Text("Target agent or session") },
+                placeholder = { Text("pi, hermes, claude, codex") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            if (availableTargets.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    availableTargets.take(4).forEach { target ->
+                        OutlinedButton(
+                            onClick = { onTargetChanged(target) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(target, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onApplyTarget, enabled = !isBusy) {
+                    Text("Apply target")
+                }
+                OutlinedButton(onClick = { onTargetChanged("") }, enabled = !isBusy) {
+                    Text("Use current")
+                }
             }
         }
     }

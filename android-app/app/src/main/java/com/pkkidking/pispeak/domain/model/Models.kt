@@ -1,5 +1,7 @@
 package com.pkkidking.pispeak.domain.model
 
+import java.net.URI
+
 data class AppSettings(
     val baseUrl: String,
     val token: String,
@@ -14,6 +16,9 @@ data class RemoteStatusSummary(
     val speakProvider: String?,
     val monoRunning: Boolean,
     val phoneEnabled: Boolean,
+    val defaultTarget: String?,
+    val currentSession: String?,
+    val availableTargets: List<String>,
 ) {
     fun summaryText(): String = buildString {
         append("Remote ")
@@ -25,6 +30,8 @@ data class RemoteStatusSummary(
         append(if (monoRunning) "on" else "off")
         append(", phone ")
         append(if (phoneEnabled) "on" else "off")
+        append(", route ")
+        append(defaultTarget ?: currentSession ?: "current")
         append('.')
     }
 }
@@ -39,3 +46,18 @@ data class RecordedAudio(
     val filePath: String,
     val mimeType: String,
 )
+
+fun AppSettings.validate(allowInsecureLoopback: Boolean): String? {
+    val normalized = baseUrl.trim()
+    if (normalized.isEmpty()) return "Base URL is required."
+
+    val parsed = runCatching { URI.create(normalized) }.getOrNull()
+        ?: return "Base URL is invalid."
+    val scheme = parsed.scheme?.lowercase().orEmpty()
+    val host = parsed.host?.lowercase().orEmpty()
+    val loopbackHosts = setOf("localhost", "127.0.0.1", "::1", "10.0.2.2")
+
+    if (scheme == "https") return null
+    if (allowInsecureLoopback && scheme == "http" && host in loopbackHosts) return null
+    return "Use an HTTPS base URL. HTTP is only allowed for local debug endpoints."
+}

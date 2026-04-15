@@ -27,6 +27,9 @@ export type ControlServerStatus = {
 		host: string;
 		port: number;
 		authRequired: boolean;
+		defaultTarget?: string;
+		currentSession?: string;
+		availableTargets?: string[];
 	};
 };
 
@@ -48,6 +51,12 @@ export type ControlServerOptions = {
 	onStateChange: (patch: Partial<ControlServerState>) => void;
 	getStatus: () => ControlServerStatus;
 	getDiagnostics: () => ControlServerDiagnostics;
+	getRoutingStatus: () => {
+		defaultTarget?: string;
+		currentSession?: string;
+		availableTargets: string[];
+	};
+	setRoutingTarget: (target?: string) => Promise<ControlActionResult> | ControlActionResult;
 	onMonoAction: (action: "on" | "off" | "status") => Promise<ControlActionResult> | ControlActionResult;
 	onSpeakAction: (
 		action: "on" | "off" | "stop" | "status" | "test" | "providers" | "provider" | "rewrite",
@@ -56,8 +65,8 @@ export type ControlServerOptions = {
 	onPhoneAction: (
 		action: "on" | "off" | "status" | "code" | "unpair",
 	) => Promise<ControlActionResult> | ControlActionResult;
-	onTextTurn: (text: string, includeAudio: boolean) => Promise<RemoteTurnResult>;
-	onVoiceTurn: (buffer: Buffer, mimeType: string | undefined, includeAudio: boolean) => Promise<RemoteTurnResult>;
+	onTextTurn: (text: string, includeAudio: boolean, target?: string) => Promise<RemoteTurnResult>;
+	onVoiceTurn: (buffer: Buffer, mimeType: string | undefined, includeAudio: boolean, target?: string) => Promise<RemoteTurnResult>;
 };
 
 type AudioArtifact = {
@@ -83,6 +92,7 @@ const VOICE_BODY_LIMIT_BYTES = Number.parseInt(process.env.PI_SPEAK_HTTP_VOICE_B
 const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_WINDOW_MS || "60000", 10);
 const RATE_LIMIT_CONTROL = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_CONTROL || "20", 10);
 const RATE_LIMIT_VOICE = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_VOICE || "6", 10);
+const ALLOW_QUERY_TOKEN_FOR_AUDIO = isTruthy(process.env.PI_SPEAK_HTTP_ALLOW_QUERY_TOKEN_FOR_AUDIO || "false");
 const REMOTE_APP_DIR = resolveRemoteAppDir();
 const ALLOWED_VOICE_CONTENT_TYPES = [
 	"audio/webm",
@@ -103,6 +113,8 @@ export class ControlServer {
 	private readonly onStateChange: (patch: Partial<ControlServerState>) => void;
 	private readonly getStatus: () => ControlServerStatus;
 	private readonly getDiagnostics: () => ControlServerDiagnostics;
+	private readonly getRoutingStatus: ControlServerOptions["getRoutingStatus"];
+	private readonly setRoutingTarget: ControlServerOptions["setRoutingTarget"];
 	private readonly onMonoAction: ControlServerOptions["onMonoAction"];
 	private readonly onSpeakAction: ControlServerOptions["onSpeakAction"];
 	private readonly onPhoneAction: ControlServerOptions["onPhoneAction"];
@@ -123,6 +135,8 @@ export class ControlServer {
 		this.onStateChange = options.onStateChange;
 		this.getStatus = options.getStatus;
 		this.getDiagnostics = options.getDiagnostics;
+		this.getRoutingStatus = options.getRoutingStatus;
+		this.setRoutingTarget = options.setRoutingTarget;
 		this.onMonoAction = options.onMonoAction;
 		this.onSpeakAction = options.onSpeakAction;
 		this.onPhoneAction = options.onPhoneAction;
@@ -213,7 +227,7 @@ export class ControlServer {
 
 		const localRequest = isLocalRequest(req, url);
 		if (req.method === "GET" && url.pathname.startsWith("/v1/audio/")) {
-			if (!this.isAuthorized(req, url, true)) {
+			if (!this.isAuthorized(req, url, ALLOW_QUERY_TOKEN_FOR_AUDIO)) {
 				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 				return;
 			}
@@ -244,16 +258,39 @@ export class ControlServer {
 		}
 
 		if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
+			const routing = this.getRoutingStatus();
 			this.writeJson(res, 200, {
 				ok: true,
 				diagnostics: {
 					...this.getDiagnostics(),
+					routing,
 					auth: {
 						authRequired: !!this.state.authToken,
-						allowQueryTokenForAudio: true,
+						allowQueryTokenForAudio: ALLOW_QUERY_TOKEN_FOR_AUDIO,
 						allowedOrigins: [...this.allowedOrigins],
 					},
 				},
+			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/route") {
+			this.writeJson(res, 200, {
+				ok: true,
+				route: this.getRoutingStatus(),
+			});
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/route") {
+			const body = await this.readTextBody(req, TEXT_BODY_LIMIT_BYTES);
+			const payload = parseJson<Record<string, unknown>>(body);
+			const target = typeof payload?.target === "string" ? payload.target : "";
+			const result = await this.setRoutingTarget(target.trim() || undefined);
+			this.writeJson(res, result.ok ? 200 : 400, {
+				ok: result.ok,
+				message: result.message,
+				route: this.getRoutingStatus(),
 			});
 			return;
 		}
@@ -306,7 +343,8 @@ export class ControlServer {
 		if (req.method === "GET" && url.pathname === "/v1/turn/text") {
 			const text = url.searchParams.get("text") || "";
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio));
+			const target = url.searchParams.get("target")?.trim() || undefined;
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -316,7 +354,8 @@ export class ControlServer {
 			const payload = parseJson<Record<string, unknown>>(body);
 			const text = typeof payload?.text === "string" ? payload.text : "";
 			const includeAudio = !!payload?.audio;
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio));
+			const target = typeof payload?.target === "string" ? payload.target.trim() || undefined : undefined;
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -329,7 +368,8 @@ export class ControlServer {
 			}
 			const buffer = await this.readBinaryBody(req, VOICE_BODY_LIMIT_BYTES);
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
-			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio));
+			const target = url.searchParams.get("target")?.trim() || undefined;
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}

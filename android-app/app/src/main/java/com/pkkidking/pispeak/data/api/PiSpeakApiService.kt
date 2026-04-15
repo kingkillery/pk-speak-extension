@@ -1,6 +1,8 @@
 package com.pkkidking.pispeak.data.api
 
 import com.pkkidking.pispeak.data.model.StatusResponseDto
+import com.pkkidking.pispeak.data.model.TargetRouteRequestDto
+import com.pkkidking.pispeak.data.model.TargetRouteResponseDto
 import com.pkkidking.pispeak.data.model.TextTurnRequestDto
 import com.pkkidking.pispeak.data.model.TurnResponseDto
 import okhttp3.RequestBody
@@ -23,6 +25,13 @@ interface PiSpeakApiService {
         @Header("Authorization") authorization: String? = null,
         @Body body: TextTurnRequestDto,
     ): TurnResponseDto
+
+    @POST
+    suspend fun updateRoute(
+        @Url url: String,
+        @Header("Authorization") authorization: String? = null,
+        @Body body: TargetRouteRequestDto,
+    ): TargetRouteResponseDto
 
     @POST
     suspend fun sendVoiceTurn(

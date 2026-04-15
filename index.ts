@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
-import { ControlServer, type ControlServerState } from "./control-server.js";
+import { ControlServer, type ControlActionResult, type ControlServerState } from "./control-server.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
@@ -31,7 +31,9 @@ type SessionRegistryState = {
 	sessions: Record<string, string>; // name -> sessionPath
 };
 
-type RemoteState = ControlServerState;
+type RemoteState = ControlServerState & {
+	defaultTarget?: string;
+};
 
 type PendingRemoteTurn = {
 	resolve: (result: RemoteTurnResult) => void;
@@ -44,6 +46,7 @@ type PendingRemoteTurn = {
 		tts?: string;
 	};
 	warnings?: string[];
+	timeoutId?: NodeJS.Timeout;
 };
 
 type ListenerEvent =
@@ -238,6 +241,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		port: DEFAULT_REMOTE_PORT,
 		authToken: process.env.PI_SPEAK_HTTP_TOKEN || undefined,
 	};
+	let remoteDefaultTarget = remoteState.defaultTarget;
 	let pendingRemoteTurn: PendingRemoteTurn | undefined;
 	const remoteTurnManager = new RemoteTurnManager({
 		onStateChange: () => updateRemoteStatus(),
@@ -344,8 +348,29 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const syncRemoteState = (patch: Partial<RemoteState>, persist = false) => {
 		remoteState = { ...remoteState, ...patch };
+		remoteDefaultTarget = remoteState.defaultTarget;
 		if (persist) persistRemoteState();
 		updateRemoteStatus();
+	};
+
+	const getRoutingStatus = () => ({
+		defaultTarget: remoteDefaultTarget,
+		currentSession: pi.getSessionName() || undefined,
+		availableTargets: Object.keys(sessionRegistry).sort((a, b) => a.localeCompare(b)),
+	});
+
+	const setRoutingTarget = (target?: string): ControlActionResult => {
+		const trimmed = target?.trim();
+		if (!trimmed) {
+			syncRemoteState({ defaultTarget: undefined }, true);
+			return { ok: true, message: "Remote target cleared. New turns stay on the current session." };
+		}
+		if (!findSessionByName(trimmed)) {
+			const available = Object.keys(sessionRegistry).sort((a, b) => a.localeCompare(b)).join(", ") || "none";
+			return { ok: false, message: `Unknown target "${trimmed}". Known: ${available}` };
+		}
+		syncRemoteState({ defaultTarget: trimmed }, true);
+		return { ok: true, message: `Remote target set to ${trimmed}.` };
 	};
 
 	const cleanupAudioFiles = () => {
@@ -501,10 +526,18 @@ export default function speakExtension(pi: ExtensionAPI) {
 		throw new Error("Timed out waiting for Pi to become ready for a phone turn");
 	};
 
+	const clearPendingRemoteTurnTimeout = (pending?: PendingRemoteTurn) => {
+		if (!pending?.timeoutId) return;
+		clearTimeout(pending.timeoutId);
+		pending.timeoutId = undefined;
+	};
+
 	const rejectPendingPhoneTurn = (reason: string) => {
 		if (!pendingRemoteTurn) return;
 		const pending = pendingRemoteTurn;
 		pendingRemoteTurn = undefined;
+		clearPendingRemoteTurnTimeout(pending);
+		diagnostics.lastErrors.remote = reason;
 		pending.reject(new Error(reason));
 	};
 
@@ -512,6 +545,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (!pendingRemoteTurn) return;
 		const pending = pendingRemoteTurn;
 		pendingRemoteTurn = undefined;
+		clearPendingRemoteTurnTimeout(pending);
+		diagnostics.lastErrors.remote = undefined;
 		const replyText = lastAssistantText.trim() || "I finished the turn, but no assistant text was captured.";
 		const audioResult = pending.wantAudio ? await renderRemoteAudio(replyText, ctx) : undefined;
 		const mergedTimings = {
@@ -540,16 +575,54 @@ export default function speakExtension(pi: ExtensionAPI) {
 		timings?: TurnTimingSummary,
 		providers?: { stt?: string; tts?: string },
 		warnings?: string[],
+		targetName?: string,
 	): Promise<RemoteTurnResult> => {
 		const trimmed = text.trim();
 		if (!trimmed) {
 			return { replyText: "I did not receive any text to send to Pi.", transcript };
 		}
 
-		const readiness = await waitForReadyTurnContext();
+		const desiredTarget = targetName?.trim() || remoteDefaultTarget;
+		const currentCtx = lastCtx;
+		if (!currentCtx) {
+			const reason = "No active Pi session is available for remote turns.";
+			diagnostics.lastErrors.remote = reason;
+			throw new Error(reason);
+		}
+		const currentSessionBusy = !(currentCtx.isIdle?.() ?? true) || (currentCtx.hasPendingMessages?.() ?? false);
+		if (currentSessionBusy || pendingRemoteTurn) {
+			const reason = desiredTarget
+				? `Pi is busy. Finish the current turn before routing a remote turn to \"${desiredTarget}\".`
+				: "Pi is busy in the current session. Finish the current turn, then try again.";
+			diagnostics.lastErrors.remote = reason;
+			throw new BusyError(reason);
+		}
+
+		let readiness = await waitForReadyTurnContext();
+		if (desiredTarget && typeof readiness.ctx?.switchSession === "function") {
+			const sessionPath = findSessionByName(desiredTarget);
+			if (!sessionPath) {
+				const available = Object.keys(sessionRegistry).sort((a, b) => a.localeCompare(b)).join(", ") || "none";
+				return { replyText: `Unknown target "${desiredTarget}". Known: ${available}`, transcript };
+			}
+			const switched = await readiness.ctx.switchSession(sessionPath);
+			if (switched?.cancelled) {
+				return { replyText: `Switch to target "${desiredTarget}" was cancelled.`, transcript };
+			}
+			readiness = await waitForReadyTurnContext();
+		}
 		const startedAt = Date.now();
+		diagnostics.lastErrors.remote = undefined;
 
 		return await new Promise<RemoteTurnResult>((resolve, reject) => {
+			const timeoutId = setTimeout(() => {
+				if (pendingRemoteTurn?.resolve !== resolve) return;
+				pendingRemoteTurn = undefined;
+				const reason = "Remote turn timed out waiting for Pi to finish.";
+				diagnostics.lastErrors.remote = reason;
+				reject(new Error(reason));
+			}, PHONE_TURN_WAIT_TIMEOUT_MS);
+			timeoutId.unref?.();
 			pendingRemoteTurn = {
 				resolve,
 				reject,
@@ -561,6 +634,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				},
 				providers,
 				warnings,
+				timeoutId,
 			};
 			forceSpeechPromptNextTurn = true;
 			pi.sendUserMessage(trimmed);
@@ -582,10 +656,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 		timings?: TurnTimingSummary,
 		providers?: { stt?: string; tts?: string },
 		warnings?: string[],
+		targetName?: string,
 	) => {
 		diagnostics.recentTimings.lastRemoteSource = source;
 		return await remoteTurnManager.enqueue(source, async () =>
-			await executePhoneTurn(text, transcript, wantAudio, timings, providers, warnings),
+			await executePhoneTurn(text, transcript, wantAudio, timings, providers, warnings, targetName),
 		);
 	};
 
@@ -748,6 +823,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 			authRequired: !!(runtime?.authToken || remoteState.authToken),
 			busy: queue.processing,
 			queued: queue.queued,
+			defaultTarget: remoteDefaultTarget,
+			currentSession: pi.getSessionName() || undefined,
+			availableTargets: Object.keys(sessionRegistry).sort((a, b) => a.localeCompare(b)),
 		};
 	};
 
@@ -758,8 +836,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 			`Remote API ${status.enabled ? "running" : "stopped"}.`,
 			`Bind: ${status.host}:${status.port}.`,
 			token ? `Token: ${token}.` : "Token: not required.",
+			status.defaultTarget ? `Route target: ${status.defaultTarget}.` : "Route target: current session.",
 			"App: /app/.",
-			"Endpoints: /v1/status, /v1/turn/text, /v1/turn/voice.",
+			"Endpoints: /v1/status, /v1/route, /v1/turn/text, /v1/turn/voice.",
 			status.busy ? `Queue: busy with ${status.queued} queued.` : "Queue: idle.",
 		].join(" ");
 	};
@@ -934,12 +1013,15 @@ export default function speakExtension(pi: ExtensionAPI) {
 					recentTimings: diagnostics.recentTimings,
 					queue: remoteTurnManager.getSnapshot(),
 					providers: getTtsDiagnostics(getSpeakRuntimeState()),
+					routing: getRoutingStatus(),
 				}),
+				getRoutingStatus,
+				setRoutingTarget,
 				onMonoAction: (action) => handleMonoAction(action, lastCtx),
 				onSpeakAction: (action, value) => handleSpeakAction(action, value, lastCtx),
 				onPhoneAction: (action) => handlePhoneAction(action, lastCtx),
-				onTextTurn: (text, includeAudio) => enqueuePhoneTurn("http-text", text, undefined, includeAudio),
-				onVoiceTurn: async (buffer, mimeType, includeAudio) => {
+				onTextTurn: (text, includeAudio, target) => enqueuePhoneTurn("http-text", text, undefined, includeAudio, undefined, undefined, undefined, target),
+				onVoiceTurn: async (buffer, mimeType, includeAudio, target) => {
 					try {
 						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
@@ -953,6 +1035,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 							includeAudio,
 							{ sttMs: transcription.durationMs, totalMs: Date.now() - sttStartedAt },
 							{ stt: transcription.provider },
+							undefined,
+							target,
 						);
 					} catch (error) {
 						diagnostics.lastErrors.stt = getErrorMessage(error);
@@ -1582,6 +1666,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 			if (entry.type === "custom" && entry.customType === REMOTE_STATE_TYPE && entry.data && typeof entry.data === "object") {
 				remoteState = { ...remoteState, ...(entry.data as RemoteState) };
+				remoteDefaultTarget = remoteState.defaultTarget;
 			}
 			if (entry.type === "custom" && entry.customType === SESSION_REGISTRY_TYPE && entry.data && typeof entry.data === "object") {
 				const reg = entry.data as SessionRegistryState;
