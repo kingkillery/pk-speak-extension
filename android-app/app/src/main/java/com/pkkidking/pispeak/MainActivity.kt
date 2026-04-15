@@ -13,9 +13,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        val bootstrapBaseUrl = intent.getStringExtra("base_url")
+        val bootstrapToken = intent.getStringExtra("token")
         setContent {
             PiSpeakTheme {
-                MainRoute()
+                MainRoute(
+                    bootstrapBaseUrl = bootstrapBaseUrl,
+                    bootstrapToken = bootstrapToken,
+                )
             }
         }
     }

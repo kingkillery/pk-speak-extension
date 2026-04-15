@@ -34,12 +34,15 @@ class AppAudioRecorder @Inject constructor(
     fun stop(): RecordedAudio {
         val recorder = requireNotNull(mediaRecorder) { "Recorder is not active" }
         val file = requireNotNull(outputFile) { "Output file missing" }
-        recorder.stop()
-        recorder.reset()
-        recorder.release()
-        mediaRecorder = null
-        outputFile = null
-        return RecordedAudio(filePath = file.absolutePath, mimeType = "audio/mp4")
+        try {
+            recorder.stop()
+            return RecordedAudio(filePath = file.absolutePath, mimeType = "audio/mp4")
+        } finally {
+            runCatching { recorder.reset() }
+            runCatching { recorder.release() }
+            mediaRecorder = null
+            outputFile = null
+        }
     }
 
     fun cancel() {

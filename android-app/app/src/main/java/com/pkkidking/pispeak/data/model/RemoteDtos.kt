@@ -32,11 +32,31 @@ data class PhoneStatusDto(
 data class RemoteStatusDto(
     val enabled: Boolean? = null,
     val port: Int? = null,
+    val defaultTarget: String? = null,
+    val currentSession: String? = null,
+    val availableTargets: List<String>? = null,
 )
 
 data class TextTurnRequestDto(
     val text: String,
     val audio: Boolean,
+    val target: String? = null,
+)
+
+data class TargetRouteRequestDto(
+    val target: String? = null,
+)
+
+data class TargetRouteResponseDto(
+    val ok: Boolean = false,
+    val message: String? = null,
+    val route: RouteStatusDto? = null,
+)
+
+data class RouteStatusDto(
+    val defaultTarget: String? = null,
+    val currentSession: String? = null,
+    val availableTargets: List<String>? = null,
 )
 
 data class TurnResponseDto(
@@ -57,6 +77,9 @@ fun StatusResponseDto.toDomain(): RemoteStatusSummary {
         speakProvider = safeStatus?.speak?.provider ?: safeStatus?.speak?.configuredProvider,
         monoRunning = safeStatus?.mono?.running == true,
         phoneEnabled = safeStatus?.phone?.enabled == true,
+        defaultTarget = safeStatus?.remote?.defaultTarget,
+        currentSession = safeStatus?.remote?.currentSession,
+        availableTargets = safeStatus?.remote?.availableTargets.orEmpty(),
     )
 }
 

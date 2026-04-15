@@ -23,4 +23,16 @@ _install.ps1
 android-app-*.png
 app-qr*.png
 window_dump*.xml
+android-native-*.png
+android-app/*.png
+android-app/*.xml
+perm_dump.xml
+pi_*dump*.xml
+pi_send_dump.xml
+pi_text_dump.xml
 nul
+
+# Android local build state
+android-app/.gradle/
+android-app/app/build/
+android-app/local.properties

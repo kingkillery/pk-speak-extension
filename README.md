@@ -340,6 +340,8 @@ GET /app/icon.svg
 GET  /v1/health
 GET  /v1/status
 GET  /v1/diagnostics
+GET  /v1/route
+POST /v1/route
 
 GET  /v1/mono/on
 GET  /v1/mono/off
@@ -398,6 +400,7 @@ The production-oriented defaults are:
 - background cleanup of expired reply-audio artifacts
 - authenticated diagnostics at `/v1/diagnostics`
 - queue/backpressure for remote turns so Pi returns a deterministic busy response instead of piling up unlimited work
+- synchronous remote turns fail fast when the current Pi session is already mid-turn, instead of hanging the HTTP request against the same active session
 
 Inspect the active token with:
 

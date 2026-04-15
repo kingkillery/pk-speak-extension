@@ -1,5 +1,6 @@
 package com.pkkidking.pispeak.core
 
+import com.pkkidking.pispeak.BuildConfig
 import com.pkkidking.pispeak.data.api.PiSpeakApiService
 import com.pkkidking.pispeak.data.repo.PiSpeakRepositoryImpl
 import com.pkkidking.pispeak.domain.repo.PiSpeakRepository
@@ -37,15 +38,18 @@ object AppModule {
     @Provides
     @Singleton
     fun provideOkHttpClient(): OkHttpClient {
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
-        }
-        return OkHttpClient.Builder()
+        val builder = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(180, TimeUnit.SECONDS)
             .writeTimeout(180, TimeUnit.SECONDS)
-            .addInterceptor(logging)
-            .build()
+        if (BuildConfig.DEBUG) {
+            val logging = HttpLoggingInterceptor().apply {
+                level = HttpLoggingInterceptor.Level.BODY
+                redactHeader("Authorization")
+            }
+            builder.addInterceptor(logging)
+        }
+        return builder.build()
     }
 
     @Provides

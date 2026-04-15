@@ -2,15 +2,18 @@ package com.pkkidking.pispeak.presentation.main
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pkkidking.pispeak.BuildConfig
 import com.pkkidking.pispeak.core.AppAudioPlayer
 import com.pkkidking.pispeak.core.AppAudioRecorder
 import com.pkkidking.pispeak.data.repo.PiSpeakRepositoryImpl
 import com.pkkidking.pispeak.domain.model.AppSettings
+import com.pkkidking.pispeak.domain.model.validate
 import com.pkkidking.pispeak.domain.usecase.GetStatusUseCase
 import com.pkkidking.pispeak.domain.usecase.LoadSettingsUseCase
 import com.pkkidking.pispeak.domain.usecase.SaveSettingsUseCase
 import com.pkkidking.pispeak.domain.usecase.SendTextTurnUseCase
 import com.pkkidking.pispeak.domain.usecase.SendVoiceTurnUseCase
+import com.pkkidking.pispeak.domain.usecase.UpdateRouteTargetUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +27,7 @@ class MainViewModel @Inject constructor(
     private val loadSettings: LoadSettingsUseCase,
     private val saveSettings: SaveSettingsUseCase,
     private val getStatus: GetStatusUseCase,
+    private val updateRouteTarget: UpdateRouteTargetUseCase,
     private val sendTextTurn: SendTextTurnUseCase,
     private val sendVoiceTurn: SendVoiceTurnUseCase,
     private val recorder: AppAudioRecorder,
@@ -46,28 +50,62 @@ class MainViewModel @Inject constructor(
         refreshStatus()
     }
 
+    fun applyBootstrap(baseUrl: String?, token: String?) {
+        if (baseUrl.isNullOrBlank() && token.isNullOrBlank()) return
+        val nextState = uiState.value.copy(
+            baseUrl = baseUrl?.trim().takeUnless { it.isNullOrBlank() } ?: uiState.value.baseUrl,
+            token = token?.trim().takeUnless { it.isNullOrBlank() } ?: uiState.value.token,
+        )
+        _uiState.value = nextState
+        saveSettings(currentSettings())
+        refreshStatus()
+    }
+
     fun onBaseUrlChanged(value: String) = _uiState.update { it.copy(baseUrl = value) }
     fun onTokenChanged(value: String) = _uiState.update { it.copy(token = value) }
+    fun onTargetChanged(value: String) = _uiState.update { it.copy(targetName = value) }
     fun onTextPromptChanged(value: String) = _uiState.update { it.copy(textPrompt = value) }
     fun onRequestAudioRepliesChanged(value: Boolean) = _uiState.update { it.copy(requestAudioReplies = value) }
     fun onAutoplayReplyAudioChanged(value: Boolean) = _uiState.update { it.copy(autoplayReplyAudio = value) }
     fun clearError() = _uiState.update { it.copy(error = null) }
 
     fun saveCurrentSettings() {
-        saveSettings(currentSettings())
+        val settings = validatedSettings() ?: return
+        saveSettings(settings)
         _uiState.update { it.copy(statusSummary = "Settings saved.", error = null) }
         refreshStatus()
     }
 
     fun refreshStatus() {
+        val settings = validatedSettings() ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, error = null) }
-            getStatus(currentSettings())
+            getStatus(settings)
                 .onSuccess { status ->
-                    _uiState.update { it.copy(isBusy = false, statusSummary = status.summaryText()) }
+                    _uiState.update {
+                        it.copy(
+                            isBusy = false,
+                            statusSummary = status.summaryText(),
+                            targetName = status.defaultTarget.orEmpty(),
+                            currentSession = status.currentSession,
+                            availableTargets = status.availableTargets,
+                        )
+                    }
                 }
                 .onFailure { error ->
                     _uiState.update { it.copy(isBusy = false, error = error.message ?: "Status request failed") }
+                }
+        }
+    }
+
+    fun applyRouteTarget() {
+        val settings = validatedSettings() ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isBusy = true, error = null) }
+            updateRouteTarget(settings, uiState.value.targetName)
+                .onSuccess { refreshStatus() }
+                .onFailure { error ->
+                    _uiState.update { it.copy(isBusy = false, error = error.message ?: "Failed to update route target") }
                 }
         }
     }
@@ -78,9 +116,10 @@ class MainViewModel @Inject constructor(
             _uiState.update { it.copy(error = "Enter text before sending.") }
             return
         }
+        val settings = validatedSettings() ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, error = null, transcript = "") }
-            sendTextTurn(currentSettings(), text)
+            sendTextTurn(settings, text)
                 .onSuccess { turn ->
                     _uiState.update {
                         it.copy(
@@ -111,11 +150,12 @@ class MainViewModel @Inject constructor(
     }
 
     fun stopRecordingAndSend() {
+        val settings = validatedSettings() ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, isRecording = false, error = null, statusSummary = "Uploading voice turn…") }
             runCatching { recorder.stop() }
                 .onSuccess { audio ->
-                    sendVoiceTurn(currentSettings(), audio)
+                    sendVoiceTurn(settings, audio)
                         .onSuccess { turn ->
                             _uiState.update {
                                 it.copy(
@@ -146,9 +186,11 @@ class MainViewModel @Inject constructor(
         if (audioUrl.isNullOrBlank()) return
         val state = uiState.value
         if (!force && !state.autoplayReplyAudio) return
-        val resolved = PiSpeakRepositoryImpl.resolveAudioUrl(state.baseUrl, state.token, audioUrl)
+        val resolved = PiSpeakRepositoryImpl.resolveAudioUrl(state.baseUrl, audioUrl)
+        val headers = state.token.takeIf { it.isNotBlank() }?.let { mapOf("Authorization" to "Bearer $it") }.orEmpty()
         player.play(
             url = resolved,
+            headers = headers,
             onError = { message -> _uiState.update { it.copy(error = message) } },
         )
     }
@@ -159,6 +201,16 @@ class MainViewModel @Inject constructor(
         requestAudioReplies = uiState.value.requestAudioReplies,
         autoplayReplyAudio = uiState.value.autoplayReplyAudio,
     )
+
+    private fun validatedSettings(): AppSettings? {
+        val settings = currentSettings()
+        val error = settings.validate(allowInsecureLoopback = BuildConfig.DEBUG)
+        if (error != null) {
+            _uiState.update { it.copy(error = error, isBusy = false) }
+            return null
+        }
+        return settings
+    }
 
     override fun onCleared() {
         recorder.cancel()
