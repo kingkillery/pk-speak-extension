@@ -1,0 +1,176 @@
+{
+  "project": "pi-speak-pk session manager pane",
+  "branchName": "ralph/session-manager-pane",
+  "description": "Ink-based management pane for the /sess session manager. Renders the live dashboard from docs/SESSION_MANAGER_SPEC.qmd, reflects voice-command mutations as toasts, and supports interactive rename/alias/remove. Launched out-of-process via /sess ui. Full requirements in docs/SESSION_MANAGER_PANE_PRD.md.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Extract buildSessionDashboard selector",
+      "description": "As a maintainer, I want the /sess dashboard shape produced by a pure selector so the text formatter and the Ink pane share one source of truth.",
+      "acceptanceCriteria": [
+        "New exported function buildSessionDashboard(routing, snapshots, currentSessionPath) in session-routing.ts returns { current, ready, storePath, sessions: [{ name, path, current, ready, activity, aliases }] }",
+        "activity is one of 'busy', 'idle', 'saved' per docs/SESSION_MANAGER_SPEC.qmd §Activity model",
+        "formatSessionManagerSummary refactored to consume buildSessionDashboard; existing text output unchanged",
+        "tests/session-routing.test.mjs adds at least 2 new cases covering busy, idle, and saved activity resolution",
+        "Existing tests in tests/session-routing.test.mjs continue to pass",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Add session-events append log module",
+      "description": "As the extension, I want an append-only event log so the pane can tail voice-triggered mutations without IPC.",
+      "acceptanceCriteria": [
+        "New file session-events.ts exports appendSessionEvent(kind, payload) and tailSessionEvents(sinceOffset) returning { events, nextOffset }",
+        "Events stored at .pi-speak/session-events.jsonl beside the routing store path from getSessionRoutingStorePath",
+        "Log rotates to keep last 200 lines",
+        "Each event line is valid JSON with fields { ts, kind, source, payload }",
+        "New tests/session-events.test.mjs covers append, tail-from-offset, and rotation at boundary",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Emit session events from voice-originated mutations",
+      "description": "As an operator, I want voice-triggered session changes to leave a trace in the event log so the pane can surface toasts.",
+      "acceptanceCriteria": [
+        "index.ts calls appendSessionEvent at every /sess mutation path: new, switch, rename, remove confirmation, alias add, alias remove, wake set, wake clear, name",
+        "Events carry source='voice' when invoked via parseVoiceSlashCommand / parseVoiceBridgePrompt, else source='command'",
+        "Payload includes session name or path and alias where relevant",
+        "tests/session-command-integration.test.mjs adds at least 2 new cases asserting an event is emitted for a voice rename and a voice wake-alias set",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Add Ink build toolchain and admin CLI stub",
+      "description": "As a developer, I want a separate UI build and a runnable bin entry so the Ink pane compiles without disturbing the main build.",
+      "acceptanceCriteria": [
+        "package.json adds dependencies: ink, react, and devDependency @types/react pinned within Ink's peer-deps range",
+        "New tsconfig.ui.json with jsx='react' compiling ui/**/*.tsx to dist/ui/",
+        "package.json adds script build:ui running the UI tsconfig and an npm bin pi-speak-admin pointing to dist/ui/admin.js",
+        "ui/admin.tsx is a stub that prints usage when --help is passed and exits 0",
+        "npm run build still passes (main project typecheck unchanged)",
+        "npm run build:ui passes",
+        "Running node dist/ui/admin.js --help prints a short usage string",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Render Ink dashboard view",
+      "description": "As an operator, I want the pane to render the dashboard matching the spec so I can read current/ready/activity at a glance.",
+      "acceptanceCriteria": [
+        "ui/components/Dashboard.tsx renders header (current session, store path), ready list, and per-session rows with [current]/[ready]/[activity] markers and aliases",
+        "ui/selectors.ts wraps buildSessionDashboard and reads from the persisted routing store and attention snapshots",
+        "tests/ui-dashboard.test.mjs asserts rendered output for 3 fixtures: current+busy only, saved-only, and ready+busy; uses ink-testing-library if importable, otherwise falls back to snapshotting the selector output",
+        "Rendered layout matches the example in docs/SESSION_MANAGER_PANE_PRD.md §UX §Dashboard",
+        "npm run build:ui passes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Live polling hook and toast component",
+      "description": "As an operator, I want the pane to refresh within 1s of external store changes and show toast feedback when voice events arrive.",
+      "acceptanceCriteria": [
+        "ui/hooks/useSessionStore.ts polls routing-store mtime every 500ms and reloads when it changes",
+        "Hook tails session-events.jsonl and exposes a list of active toasts with 3s TTL",
+        "ui/components/Toast.tsx renders a single-line band at the bottom with 'voice: ...' or 'admin: ...' prefix",
+        "tests/ui-polling.test.mjs covers: store mutation detected within one poll interval, event tail returns only new events since last offset, toast TTL expires",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Pane write actions: rename, alias, remove",
+      "description": "As an operator, I want keybindings r/a/x in the pane to mutate sessions so I do not have to type slash commands.",
+      "acceptanceCriteria": [
+        "ui/components/ActionBar.tsx shows keybindings [r] rename  [a] alias  [x] remove  [q] quit",
+        "ui/actions.ts implements each action via setNamedSession, setWakeAlias, removeSessionRoutingForPath and persistSessionRouting from the existing modules",
+        "Rename rejects duplicate names per docs/SESSION_MANAGER_SPEC.qmd §Safe Behavior Rules",
+        "Remove is two-step with explicit confirm prompt per spec §Deletion safety",
+        "Each write path calls appendSessionEvent with source='admin'",
+        "tests/ui-actions.test.mjs covers: rename success, duplicate rename rejected, alias add normalized, remove two-step confirm",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Extension-side reload on external store change",
+      "description": "As an operator, I want pane-triggered mutations to reflect in /sess text output without restarting the extension.",
+      "acceptanceCriteria": [
+        "index.ts watches the routing-store path; on external mtime bump it calls loadPersistedSessionRouting and updates SESSION_REGISTRY_TYPE and SESSION_WAKE_ALIAS_TYPE state maps",
+        "Watcher skips reloads triggered by its own writes (track last write mtime)",
+        "tests/session-command-integration.test.mjs adds a case that mutates the store externally and asserts runtime state reflects the change on the next /sess call",
+        "No regression in existing session-command-integration tests",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "/sess ui launcher",
+      "description": "As an operator, I want /sess ui to open the pane in a second terminal so it does not fight pi-coding-agent for the TTY.",
+      "acceptanceCriteria": [
+        "/sess ui in index.ts spawns dist/ui/admin.js detached in a new terminal using 'start' on Windows",
+        "If no terminal emulator is detected, the handler notifies the exact command the operator can run manually",
+        "The spawned process does not inherit stdin/stdout/stderr from the pi-coding-agent process",
+        "A new test mocks child_process.spawn and asserts the command, args, and detached flag",
+        "Typecheck passes",
+        "Tests pass",
+        "Manual terminal verification: running /sess ui opens a new Windows terminal running the admin CLI"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Update operator documentation",
+      "description": "As an operator, I want all /sess doc surfaces to mention the management pane so I can discover it.",
+      "acceptanceCriteria": [
+        "docs/SESSION_OPERATIONS.md adds a Management Pane section describing /sess ui, keybindings, and toast behavior",
+        "README.md documents /sess ui under the /sess command family",
+        "SKILL.md, AGENTS.md, and CLAUDE.md reference the pane where they enumerate /sess surfaces",
+        "CHANGELOG.md records the feature under the next version",
+        "No stale /sess usage text that omits the ui subcommand",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

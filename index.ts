@@ -8,6 +8,17 @@ import { ControlServer, type ControlActionResult, type ControlServerState } from
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
+import { findSessionRouteConflict, listKnownTargets, resolveSessionRoute, resolveSessionTarget } from "./voice-routing.js";
+import {
+	clearWakeAlias,
+	describeSessionRoutingStore,
+	findSessionNameByPath,
+	formatSessionManagerSummary,
+	removeSessionRoutingForPath,
+	setNamedSession,
+	setWakeAlias,
+} from "./session-routing.js";
+import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import {
 	describeTtsProvider,
 	getAudioMimeType,
@@ -29,6 +40,10 @@ type MonoState = {
 
 type SessionRegistryState = {
 	sessions: Record<string, string>; // name -> sessionPath
+};
+
+type SessionWakeAliasState = {
+	aliases: Record<string, string>; // alias -> sessionPath
 };
 
 type RemoteState = ControlServerState & {
@@ -85,6 +100,8 @@ const MONO_STATE_TYPE = "mono-listener-state";
 const PHONE_STATE_TYPE = "phone-bridge-state";
 const REMOTE_STATE_TYPE = "remote-control-state";
 const SESSION_REGISTRY_TYPE = "session-registry";
+const SESSION_WAKE_ALIAS_TYPE = "session-wake-aliases";
+const SESSION_REMOVE_CONFIRM_TTL_MS = Number.parseInt(process.env.PI_SPEAK_SESSION_REMOVE_CONFIRM_TTL_MS || "120000", 10);
 const AVAILABLE_TTS_PROVIDERS: TtsProvider[] = ["auto", "legacy", "edge", "openai", "elevenlabs"];
 const MONO_KEEP_ALIVE_SECONDS = Number.parseFloat(
 	process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || process.env.MONO_ACTIVITY_TIMEOUT || "15",
@@ -280,6 +297,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let voiceInputActive = false;
 	let voiceTarget: string | undefined;
 	let sessionRegistry: Record<string, string> = {};
+	let sessionWakeAliases: Record<string, string> = {};
+	let pendingSessionRemoval:
+		| { sessionPath: string; sessionName: string; requestedAt: number }
+		| undefined;
 	let phoneBridge: TelegramPhoneBridge | undefined;
 	let phoneState: PhoneBridgeState = { enabled: false };
 	let remoteServer: ControlServer | undefined;
@@ -384,8 +405,105 @@ export default function speakExtension(pi: ExtensionAPI) {
 		pi.appendEntry<RemoteState>(REMOTE_STATE_TYPE, { ...remoteState });
 	};
 
+	const persistSessionRoutingState = () => {
+		persistSessionRouting({ sessions: sessionRegistry, aliases: sessionWakeAliases });
+	};
+
 	const persistSessionRegistry = () => {
+		persistSessionRoutingState();
 		pi.appendEntry<SessionRegistryState>(SESSION_REGISTRY_TYPE, { sessions: sessionRegistry });
+	};
+
+	const persistSessionWakeAliases = () => {
+		persistSessionRoutingState();
+		pi.appendEntry<SessionWakeAliasState>(SESSION_WAKE_ALIAS_TYPE, { aliases: sessionWakeAliases });
+	};
+
+	const getKnownTargets = () => listKnownTargets(sessionRegistry, sessionWakeAliases);
+	const getKnownTargetsText = () => getKnownTargets().join(", ") || "none";
+	const findSessionNameByPathLocal = (sessionPath: string) => findSessionNameByPath(sessionPath, sessionRegistry);
+	const findSessionByTarget = (target: string) => resolveSessionTarget(target, sessionRegistry, sessionWakeAliases);
+	const getSessionManagerSummaryText = (ctx?: any) => formatSessionManagerSummary({
+		sessions: sessionRegistry,
+		aliases: sessionWakeAliases,
+		currentSessionPath: ctx?.sessionManager?.getSessionFile?.(),
+		currentSessionName: pi.getSessionName() || undefined,
+		currentBusy: false,
+		currentReady: false,
+		storePath: getSessionRoutingStorePath(),
+	});
+	const getAliasesForSession = (sessionPath: string) => Object.entries(sessionWakeAliases)
+		.filter(([, path]) => path === sessionPath)
+		.map(([alias]) => alias)
+		.sort((a, b) => a.localeCompare(b));
+	const getSessionEditGuideText = (sessionPath: string, label: string, ctx?: any) => {
+		const displayName = findSessionNameByPathLocal(sessionPath) || (ctx?.sessionManager?.getSessionFile?.() === sessionPath ? pi.getSessionName() : undefined) || label;
+		const aliases = getAliasesForSession(sessionPath);
+		return [
+			`Session: ${displayName}`,
+			`Aliases: ${aliases.length > 0 ? aliases.join(", ") : "none"}`,
+			"Shortcuts",
+			`- /sess switch ${displayName}`,
+			`- /sess rename ${displayName} <new-name>`,
+			`- /sess alias add ${displayName} <alias>`,
+			...(aliases.map((alias) => `- /sess alias remove ${alias}`)),
+			`- /sess remove ${displayName}`,
+		].join("\n");
+	};
+	const getSessCompletions = (prefix: string) => {
+		const trimmed = prefix.trimStart();
+		const complete = (value: string, label = value) => ({ value, label });
+		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "list", "name", "wake", "export"];
+		if (!trimmed) return top.map((value) => complete(value));
+		const firstSpace = trimmed.indexOf(" ");
+		if (firstSpace === -1) return top.filter((value) => value.startsWith(trimmed.toLowerCase())).map((value) => complete(value));
+		const sub = trimmed.slice(0, firstSpace).toLowerCase();
+		const rest = trimmed.slice(firstSpace + 1);
+		const targets = getKnownTargets();
+		const aliases = Object.keys(sessionWakeAliases).sort((a, b) => a.localeCompare(b));
+		if (["switch", "remove"].includes(sub)) {
+			const targetPrefix = rest.trim().toLowerCase();
+			return targets
+				.filter((value) => value.toLowerCase().startsWith(targetPrefix))
+				.map((value) => complete(`${sub} ${value}`, `${sub} ${value}`));
+		}
+		if (sub === "rename") {
+			if (!rest.includes(" ")) return targets.filter((value) => value.toLowerCase().startsWith(rest.toLowerCase())).map((value) => complete(`rename ${value}`, `rename ${value}`));
+			return null;
+		}
+		if (sub === "confirm") {
+			if ("remove".startsWith(rest.toLowerCase())) return [complete("confirm remove")];
+			if (rest.toLowerCase().startsWith("remove ")) {
+				const targetPrefix = rest.slice("remove ".length);
+				return targets.filter((value) => value.toLowerCase().startsWith(targetPrefix.toLowerCase())).map((value) => complete(`confirm remove ${value}`, `confirm remove ${value}`));
+			}
+		}
+		if (sub === "alias") {
+			const aliasSub = rest.trimStart();
+			if (!aliasSub) return [complete("alias add"), complete("alias remove"), complete("alias list")];
+			if (aliasSub.startsWith("remove")) {
+				const aliasPrefix = aliasSub.replace(/^remove\s*/, "");
+				return aliases.filter((value) => value.toLowerCase().startsWith(aliasPrefix.toLowerCase())).map((value) => complete(`alias remove ${value}`, `alias remove ${value}`));
+			}
+		}
+		if (sub === "edit") {
+			const parts = rest.split(/\s+/).filter(Boolean);
+			if (parts.length === 0) {
+				return targets.map((value) => complete(`edit ${value}`, `edit ${value}`));
+			}
+			if (parts.length === 1) {
+				const target = parts[0];
+				return [
+					complete(`edit ${target}`, `edit ${target}`),
+					complete(`edit ${target} rename`, `edit ${target} rename`),
+					complete(`edit ${target} alias remove`, `edit ${target} alias remove`),
+				];
+			}
+			if (parts.length >= 2 && parts[1] === "alias" && parts[2] === "remove") {
+				return aliases.map((value) => complete(`edit ${parts[0]} alias remove ${value}`, `edit ${parts[0]} alias remove ${value}`));
+			}
+		}
+		return null;
 	};
 
 	const syncPhoneState = (patch: Partial<PhoneBridgeState>, persist = false) => {
@@ -404,7 +522,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getRoutingStatus = () => ({
 		defaultTarget: remoteDefaultTarget,
 		currentSession: pi.getSessionName() || undefined,
-		availableTargets: Object.keys(sessionRegistry).sort((a, b) => a.localeCompare(b)),
+		availableTargets: getKnownTargets(),
 	});
 
 	const setRoutingTarget = (target?: string): ControlActionResult => {
@@ -413,12 +531,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 			syncRemoteState({ defaultTarget: undefined }, true);
 			return { ok: true, message: "Remote target cleared. New turns stay on the current session." };
 		}
-		if (!findSessionByName(trimmed)) {
+		const match = resolveSessionByName(trimmed);
+		if (!match) {
 			const available = Object.keys(sessionRegistry).sort((a, b) => a.localeCompare(b)).join(", ") || "none";
 			return { ok: false, message: `Unknown target "${trimmed}". Known: ${available}` };
 		}
-		syncRemoteState({ defaultTarget: trimmed }, true);
-		return { ok: true, message: `Remote target set to ${trimmed}.` };
+		syncRemoteState({ defaultTarget: match.sessionName }, true);
+		return { ok: true, message: `Remote target set to ${match.sessionName}.` };
 	};
 
 	const cleanupAudioFiles = () => {
@@ -546,12 +665,41 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const findSessionByName = (name: string): string | undefined => {
-		const lower = name.toLowerCase();
-		for (const [regName, regPath] of Object.entries(sessionRegistry)) {
-			if (regName.toLowerCase() === lower) return regPath;
+	const resolveSessionByName = (name: string) => {
+		const targetMatch = findSessionByTarget(name);
+		if (targetMatch) {
+			return { sessionName: findSessionNameByPathLocal(targetMatch.sessionPath) || targetMatch.matchedLabel, sessionPath: targetMatch.sessionPath, matchedBy: "exact" as const };
 		}
-		return undefined;
+		return resolveSessionRoute(name, sessionRegistry);
+	};
+
+	const findSessionByName = (name: string): string | undefined => resolveSessionByName(name)?.sessionPath;
+
+	const getSessionRouteConflictText = (name: string, ctx?: any) => {
+		const sessionFile = ctx?.sessionManager?.getSessionFile?.();
+		const conflict = findSessionRouteConflict(name, sessionRegistry, sessionFile);
+		if (!conflict) return undefined;
+		if (conflict.reason === "numeric-family") {
+			const familyLabel = conflict.family === "1" ? '"one" / "1"' : '"two" / "2"';
+			return `Session name "${name}" conflicts with existing route "${conflict.sessionName}". Keep the ${familyLabel} voice family mapped to only one session so PK ${conflict.family}, PK ${conflict.family === "1" ? "one" : "two"}, and fused forms stay distinct.`;
+		}
+		return `Session name "${name}" already points to another session. Choose a different name.`;
+	};
+
+	const getWakeAliasConflictText = (alias: string, sessionPath: string) => {
+		const conflict = findSessionRouteConflict(alias, sessionWakeAliases, sessionPath);
+		if (!conflict) return undefined;
+		if (conflict.reason === "numeric-family") {
+			const familyLabel = conflict.family === "1" ? '"one" / "1"' : '"two" / "2"';
+			return `Wake alias "${alias}" conflicts with existing alias "${conflict.sessionName}". Keep the ${familyLabel} voice family mapped to only one session so PK ${conflict.family}, PK ${conflict.family === "1" ? "one" : "two"}, and fused forms stay distinct.`;
+		}
+		return `Wake alias "${alias}" already points to another session. Choose a different alias.`;
+	};
+
+	const persistAllSessionRoutingState = () => {
+		persistSessionRoutingState();
+		pi.appendEntry<SessionRegistryState>(SESSION_REGISTRY_TYPE, { sessions: sessionRegistry });
+		pi.appendEntry<SessionWakeAliasState>(SESSION_WAKE_ALIAS_TYPE, { aliases: sessionWakeAliases });
 	};
 
 	const waitForReadyTurnContext = async () => {
@@ -1325,11 +1473,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 		// Everything else -> user message to Pi (queued as followUp if busy)
 		if (voiceTarget) {
-			const sessionPath = findSessionByName(voiceTarget);
-			if (sessionPath && typeof target?.switchSession === "function") {
+			const sessionMatch = resolveSessionByName(voiceTarget);
+			if (sessionMatch && typeof target?.switchSession === "function") {
 				// Switch to target session and send the message
-				target?.ui?.notify?.(`Routing to session: ${voiceTarget}`, "info");
-				const result = await target.switchSession(sessionPath);
+				target?.ui?.notify?.(`Routing to session: ${sessionMatch.sessionName}`, "info");
+				const result = await target.switchSession(sessionMatch.sessionPath);
 				if (!result?.cancelled) {
 					pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
 				}
@@ -1388,29 +1536,41 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("sess", {
 		description: "Manage named sessions (new, switch, list, name)",
-		getArgumentCompletions: (prefix) => {
-			const options = ["new", "switch", "list", "name"];
-			const matches = options.filter((opt) => opt.startsWith(prefix));
-			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
-		},
+		getArgumentCompletions: (prefix) => getSessCompletions(prefix),
 		handler: async (args, ctx) => {
 			lastCtx = ctx;
-			const parts = args.trim().split(/\s+/);
+			const raw = args.trim();
+			const parts = raw ? raw.split(/\s+/) : [];
 			const sub = (parts[0] || "").toLowerCase();
 			const rest = parts.slice(1).join(" ").trim();
 
+			if (!sub || sub === "list" || sub === "status") {
+				ctx.ui.notify(getSessionManagerSummaryText(ctx), "info");
+				return;
+			}
+
 			if (sub === "new") {
 				const name = rest || `session-${Date.now()}`;
-				if (sessionRegistry[name]) {
-					ctx.ui.notify(`Warning: session "${name}" already exists and will be overwritten in registry`, "warning");
+				const conflictText = getSessionRouteConflictText(name, ctx);
+				if (conflictText) {
+					ctx.ui.notify(conflictText, "error");
+					return;
+				}
+				const existing = setNamedSession(sessionRegistry, name, `pending:${name}`);
+				if (!existing.ok) {
+					ctx.ui.notify(existing.error, "error");
+					return;
 				}
 				const result = await ctx.newSession();
 				if (!result.cancelled) {
 					pi.setSessionName(name);
 					const sessionFile = ctx.sessionManager.getSessionFile();
 					if (sessionFile) {
-						sessionRegistry[name] = sessionFile;
-						persistSessionRegistry();
+						const named = setNamedSession(sessionRegistry, name, sessionFile);
+						if (named.ok) {
+							sessionRegistry = named.sessions;
+							persistSessionRegistry();
+						}
 					}
 					ctx.ui.notify(`New session: ${name}`, "info");
 				}
@@ -1419,27 +1579,196 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 			if (sub === "switch") {
 				if (!rest) {
-					ctx.ui.notify("Usage: /sess switch <name>", "error");
+					ctx.ui.notify("Usage: /sess switch <name-or-alias>", "error");
 					return;
 				}
-				const sessionPath = findSessionByName(rest);
-				if (!sessionPath) {
-					const available = Object.keys(sessionRegistry).join(", ") || "none";
-					ctx.ui.notify(`Session "${rest}" not found. Known: ${available}`, "error");
+				const sessionMatch = resolveSessionByName(rest);
+				if (!sessionMatch) {
+					ctx.ui.notify(`Session "${rest}" not found. Known: ${getKnownTargetsText()}`, "error");
 					return;
 				}
-				const result = await ctx.switchSession(sessionPath);
+				const result = await ctx.switchSession(sessionMatch.sessionPath);
 				if (!result.cancelled) {
-					ctx.ui.notify(`Switched to session: ${rest}`, "info");
+					ctx.ui.notify(`Switched to session: ${sessionMatch.sessionName}`, "info");
 				}
 				return;
 			}
 
-			if (sub === "list") {
-				const names = Object.entries(sessionRegistry)
-					.map(([name, _path]) => name)
-					.join(", ");
-				ctx.ui.notify(names ? `Sessions: ${names}` : "No named sessions", "info");
+			if (sub === "rename") {
+				const [targetName, ...restParts] = rest.split(/\s+/).filter(Boolean);
+				const nextName = restParts.join(" ").trim();
+				if (!targetName || !nextName) {
+					ctx.ui.notify("Usage: /sess rename <name-or-alias> <new-name>", "error");
+					return;
+				}
+				const sessionMatch = resolveSessionByName(targetName);
+				if (!sessionMatch) {
+					ctx.ui.notify(`Session "${targetName}" not found. Known: ${getKnownTargetsText()}`, "error");
+					return;
+				}
+				const conflictText = getSessionRouteConflictText(nextName, ctx);
+				if (conflictText && sessionMatch.sessionPath !== ctx.sessionManager.getSessionFile()) {
+					ctx.ui.notify(conflictText, "error");
+					return;
+				}
+				const named = setNamedSession(sessionRegistry, nextName, sessionMatch.sessionPath);
+				if (!named.ok) {
+					ctx.ui.notify(named.error, "error");
+					return;
+				}
+				sessionRegistry = named.sessions;
+				if (ctx.sessionManager.getSessionFile() === sessionMatch.sessionPath) {
+					pi.setSessionName(nextName);
+				}
+				persistSessionRegistry();
+				ctx.ui.notify(`Session renamed: ${sessionMatch.sessionName} → ${nextName}`, "info");
+				return;
+			}
+
+			if (sub === "alias") {
+				const aliasSub = (parts[1] || "").toLowerCase();
+				const aliasRest = parts.slice(2).join(" ").trim();
+				if (!aliasSub || aliasSub === "list") {
+					ctx.ui.notify(getSessionManagerSummaryText(ctx), "info");
+					return;
+				}
+				if (aliasSub === "remove" || aliasSub === "clear") {
+					if (!aliasRest) {
+						ctx.ui.notify("Usage: /sess alias remove <alias>", "error");
+						return;
+					}
+					const cleared = clearWakeAlias(sessionWakeAliases, aliasRest);
+					if (!cleared.ok) {
+						ctx.ui.notify(`Wake alias "${aliasRest}" not found`, "error");
+						return;
+					}
+					sessionWakeAliases = cleared.aliases;
+					persistSessionWakeAliases();
+					ctx.ui.notify(`Wake alias cleared: ${cleared.alias}`, "info");
+					return;
+				}
+				if (aliasSub === "add") {
+					const [targetName, ...aliasParts] = aliasRest.split(/\s+/).filter(Boolean);
+					const aliasName = aliasParts.join(" ").trim();
+					if (!targetName || !aliasName) {
+						ctx.ui.notify("Usage: /sess alias add <session> <alias>", "error");
+						return;
+					}
+					const sessionMatch = resolveSessionByName(targetName);
+					if (!sessionMatch) {
+						ctx.ui.notify(`Session "${targetName}" not found. Known: ${getKnownTargetsText()}`, "error");
+						return;
+					}
+					const nextAlias = setWakeAlias(sessionWakeAliases, aliasName, sessionMatch.sessionPath);
+					sessionWakeAliases = nextAlias.aliases;
+					persistSessionWakeAliases();
+					ctx.ui.notify(`Wake alias "${aliasName}" now routes to ${sessionMatch.sessionName}. Say "${MONO_WAKE_PHRASE} ${aliasName}".`, "info");
+					return;
+				}
+				ctx.ui.notify("Usage: /sess alias [add <session> <alias>|remove <alias>|list]", "error");
+				return;
+			}
+
+			if (sub === "edit") {
+				if (!rest) {
+					ctx.ui.notify(`${getSessionManagerSummaryText(ctx)}\n\nTip: use /sess edit <session> to show shortcuts.`, "info");
+					return;
+				}
+				const actionParts = rest.split(/\s+/).filter(Boolean);
+				const targetName = actionParts[0];
+				const sessionMatch = resolveSessionByName(targetName);
+				if (!sessionMatch) {
+					ctx.ui.notify(`Session "${targetName}" not found. Known: ${getKnownTargetsText()}`, "error");
+					return;
+				}
+				const remainder = actionParts.slice(1).join(" ").trim();
+				if (!remainder) {
+					ctx.ui.notify(getSessionEditGuideText(sessionMatch.sessionPath, sessionMatch.sessionName, ctx), "info");
+					return;
+				}
+				if (remainder === "switch") {
+					const result = await ctx.switchSession(sessionMatch.sessionPath);
+					if (!result.cancelled) ctx.ui.notify(`Switched to session: ${sessionMatch.sessionName}`, "info");
+					return;
+				}
+				if (remainder.startsWith("rename ")) {
+					const nextName = remainder.slice("rename ".length).trim();
+					const named = setNamedSession(sessionRegistry, nextName, sessionMatch.sessionPath);
+					if (!named.ok) {
+						ctx.ui.notify(named.error, "error");
+						return;
+					}
+					sessionRegistry = named.sessions;
+					if (ctx.sessionManager.getSessionFile() === sessionMatch.sessionPath) pi.setSessionName(nextName);
+					persistSessionRegistry();
+					ctx.ui.notify(`Session renamed: ${sessionMatch.sessionName} → ${nextName}`, "info");
+					return;
+				}
+				if (remainder.startsWith("alias add ")) {
+					const aliasName = remainder.slice("alias add ".length).trim();
+					const nextAlias = setWakeAlias(sessionWakeAliases, aliasName, sessionMatch.sessionPath);
+					sessionWakeAliases = nextAlias.aliases;
+					persistSessionWakeAliases();
+					ctx.ui.notify(`Wake alias "${aliasName}" now routes to ${sessionMatch.sessionName}. Say "${MONO_WAKE_PHRASE} ${aliasName}".`, "info");
+					return;
+				}
+				if (remainder.startsWith("alias remove ")) {
+					const aliasName = remainder.slice("alias remove ".length).trim();
+					const cleared = clearWakeAlias(sessionWakeAliases, aliasName);
+					if (!cleared.ok) {
+						ctx.ui.notify(`Wake alias "${aliasName}" not found`, "error");
+						return;
+					}
+					sessionWakeAliases = cleared.aliases;
+					persistSessionWakeAliases();
+					ctx.ui.notify(`Wake alias cleared: ${cleared.alias}`, "info");
+					return;
+				}
+				if (remainder === "remove") {
+					pendingSessionRemoval = { sessionPath: sessionMatch.sessionPath, sessionName: sessionMatch.sessionName, requestedAt: Date.now() };
+					ctx.ui.notify(`Confirm with /sess confirm remove ${sessionMatch.sessionName}. This removes the saved session name and aliases from the local routing store. It does not delete the underlying Pi session file.`, "warning");
+					return;
+				}
+				ctx.ui.notify(`Unknown edit action "${remainder}". Use /sess edit ${targetName} to see shortcuts.`, "error");
+				return;
+			}
+
+			if (sub === "remove" || sub === "delete") {
+				if (!rest) {
+					ctx.ui.notify("Usage: /sess remove <name-or-alias>", "error");
+					return;
+				}
+				const sessionMatch = resolveSessionByName(rest);
+				if (!sessionMatch) {
+					ctx.ui.notify(`Session "${rest}" not found. Known: ${getKnownTargetsText()}`, "error");
+					return;
+				}
+				pendingSessionRemoval = { sessionPath: sessionMatch.sessionPath, sessionName: sessionMatch.sessionName, requestedAt: Date.now() };
+				ctx.ui.notify(`Confirm with /sess confirm remove ${sessionMatch.sessionName}. This removes the saved session name and aliases from the local routing store. It does not delete the underlying Pi session file.`, "warning");
+				return;
+			}
+
+			if (sub === "confirm" && (parts[1] || "").toLowerCase() === "remove") {
+				if (!pendingSessionRemoval || (Date.now() - pendingSessionRemoval.requestedAt) > SESSION_REMOVE_CONFIRM_TTL_MS) {
+					pendingSessionRemoval = undefined;
+					ctx.ui.notify("No pending session removal confirmation is active.", "error");
+					return;
+				}
+				const removal = removeSessionRoutingForPath(sessionRegistry, sessionWakeAliases, pendingSessionRemoval.sessionPath);
+				sessionRegistry = removal.sessions;
+				sessionWakeAliases = removal.aliases;
+				if (ctx.sessionManager.getSessionFile() === pendingSessionRemoval.sessionPath) pi.setSessionName("");
+				persistSessionRegistry();
+				persistSessionWakeAliases();
+				const removedLabel = pendingSessionRemoval.sessionName;
+				pendingSessionRemoval = undefined;
+				ctx.ui.notify(`Removed saved session metadata for ${removedLabel}.`, "info");
+				return;
+			}
+
+			if (sub === "export") {
+				persistSessionRoutingState();
+				ctx.ui.notify(describeSessionRoutingStore(getSessionRoutingStorePath(), { sessions: sessionRegistry, aliases: sessionWakeAliases }), "info");
 				return;
 			}
 
@@ -1449,17 +1778,54 @@ export default function speakExtension(pi: ExtensionAPI) {
 					ctx.ui.notify(current ? `Current: ${current}` : "No session name set", "info");
 					return;
 				}
-				pi.setSessionName(rest);
 				const sessionFile = ctx.sessionManager.getSessionFile();
-				if (sessionFile) {
-					sessionRegistry[rest] = sessionFile;
-					persistSessionRegistry();
+				if (!sessionFile) {
+					ctx.ui.notify("No active session file is available for naming", "error");
+					return;
 				}
+				const named = setNamedSession(sessionRegistry, rest, sessionFile);
+				if (!named.ok) {
+					ctx.ui.notify(named.error, "error");
+					return;
+				}
+				pi.setSessionName(rest);
+				sessionRegistry = named.sessions;
+				persistSessionRegistry();
 				ctx.ui.notify(`Session named: ${rest}`, "info");
 				return;
 			}
 
-			ctx.ui.notify("Usage: /sess [new|switch|list|name] <args>", "error");
+			if (sub === "wake") {
+				const wakeSub = (parts[1] || "").toLowerCase();
+				const aliasRest = parts.slice(2).join(" ").trim();
+				if (!rest || wakeSub === "list") {
+					ctx.ui.notify(getSessionManagerSummaryText(ctx), "info");
+					return;
+				}
+				if (wakeSub === "clear") {
+					const cleared = clearWakeAlias(sessionWakeAliases, aliasRest);
+					if (!cleared.ok) {
+						ctx.ui.notify(`Wake alias "${aliasRest}" not found`, "error");
+						return;
+					}
+					sessionWakeAliases = cleared.aliases;
+					persistSessionWakeAliases();
+					ctx.ui.notify(`Wake alias cleared: ${cleared.alias}`, "info");
+					return;
+				}
+				const sessionFile = ctx.sessionManager.getSessionFile();
+				if (!sessionFile) {
+					ctx.ui.notify("No active session file is available for wake alias registration", "error");
+					return;
+				}
+				const nextAlias = setWakeAlias(sessionWakeAliases, rest, sessionFile);
+				sessionWakeAliases = nextAlias.aliases;
+				persistSessionWakeAliases();
+				ctx.ui.notify(`Wake alias "${rest}" now routes to ${pi.getSessionName() || "this session"}. Say "${MONO_WAKE_PHRASE} ${rest}".`, "info");
+				return;
+			}
+
+			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|list|name|wake|export] <args>", "error");
 		},
 	});
 
@@ -1689,6 +2055,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 		};
 		lastAssistantText = "";
 		phase = "ready";
+		const persistedRouting = loadPersistedSessionRouting();
+		sessionRegistry = { ...persistedRouting.sessions };
+		sessionWakeAliases = { ...persistedRouting.aliases };
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type === "custom" && entry.customType === STATE_TYPE && entry.data && typeof entry.data === "object") {
 				const savedSpeakState = entry.data as SpeakState;
@@ -1717,12 +2086,22 @@ export default function speakExtension(pi: ExtensionAPI) {
 					sessionRegistry = { ...sessionRegistry, ...reg.sessions };
 				}
 			}
+			if (entry.type === "custom" && entry.customType === SESSION_WAKE_ALIAS_TYPE && entry.data && typeof entry.data === "object") {
+				const aliasState = entry.data as SessionWakeAliasState;
+				if (aliasState.aliases) {
+					sessionWakeAliases = { ...sessionWakeAliases, ...aliasState.aliases };
+				}
+			}
 		}
 		// Register current session in registry if it has a name
 		const currentName = pi.getSessionName();
 		const currentFile = ctx.sessionManager.getSessionFile();
 		if (currentName && currentFile) {
-			sessionRegistry[currentName] = currentFile;
+			const named = setNamedSession(sessionRegistry, currentName, currentFile);
+			if (named.ok) {
+				sessionRegistry = named.sessions;
+				persistSessionRoutingState();
+			}
 		}
 
 		if (phoneBridge) {
@@ -1766,6 +2145,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 		lastCtx = ctx;
 		if (Object.keys(sessionRegistry).length > 0) {
 			persistSessionRegistry();
+		}
+		if (Object.keys(sessionWakeAliases).length > 0) {
+			persistSessionWakeAliases();
 		}
 		rejectPendingPhoneTurn("Session changed before the phone reply was delivered");
 		remoteTurnManager.cancelAll("Session changed before queued remote work completed");
