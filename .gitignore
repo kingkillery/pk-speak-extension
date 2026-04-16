@@ -36,3 +36,9 @@ nul
 android-app/.gradle/
 android-app/app/build/
 android-app/local.properties
+
+# OMC local runtime state
+.omc/state/*.json
+.omc/state/sessions/*
+!.omc/state/.gitkeep
+!.omc/state/sessions/.gitkeep
