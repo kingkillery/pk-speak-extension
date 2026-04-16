@@ -18,6 +18,7 @@ import os
 import re
 import time
 import collections
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -26,7 +27,7 @@ import sounddevice as sd
 # Globals
 # ---------------------------------------------------------------------------
 SAMPLE_RATE = 16000
-VOSK_BLOCK_SIZE = 4000  # ~250ms chunks for Vosk
+VOSK_BLOCK_SIZE = int(os.environ.get("PI_SPEAK_VOSK_BLOCK_SIZE", "0"))
 WHISPER_MODEL = "tiny"
 WAKE_RE = re.compile(r'\bpi\s+mono(?:\s+(\S+))?', re.IGNORECASE)
 SILENCE_TIMEOUT = 2.0  # seconds of silence before finalizing a whisper segment
@@ -37,12 +38,61 @@ ACTIVITY_TIMEOUT = float(
 )  # seconds without "pi mono" before auto-deactivating
 ENERGY_THRESHOLD = 300  # RMS threshold for voice activity
 PRE_BUFFER_CHUNKS = 4  # ~1 second of lookback to capture utterance onset
+MAX_AUDIO_QUEUE_CHUNKS = int(os.environ.get("PI_SPEAK_AUDIO_QUEUE_CHUNKS", "24"))
+OVERFLOW_WARN_INTERVAL = float(os.environ.get("PI_SPEAK_OVERFLOW_WARN_INTERVAL", "5.0"))
 
-audio_queue: queue.Queue = queue.Queue()
+audio_queue: queue.Queue = queue.Queue(maxsize=MAX_AUDIO_QUEUE_CHUNKS)
 transcription_queue: queue.Queue = queue.Queue(maxsize=3)  # bounded: drop oldest if full
 active = False  # whether voice mode is on
 last_wake_time = 0.0  # wall-clock of last "pi mono" utterance
 running = True
+last_overflow_warning_at = 0.0
+audio_chunks_dropped = 0
+
+
+def resolve_vosk_cache_root() -> Path:
+    configured = (os.environ.get("VOSK_MODEL_PATH") or "").strip()
+    if configured:
+        return Path(configured)
+
+    local_appdata = (os.environ.get("LOCALAPPDATA") or "").strip()
+    if local_appdata:
+        return Path(local_appdata) / "vosk"
+
+    home = (os.environ.get("HOME") or os.environ.get("USERPROFILE") or "").strip()
+    if home:
+        return Path(home) / ".cache" / "vosk"
+
+    return Path.cwd() / ".cache" / "vosk"
+
+
+def resolve_vosk_model_path(lang: str = "en-us") -> str | None:
+    configured = (os.environ.get("VOSK_MODEL_PATH") or "").strip()
+    if configured and Path(configured).is_dir():
+        configured_path = Path(configured)
+        if (configured_path / "am" / "final.mdl").is_file():
+            return str(configured_path)
+        matches = sorted(
+            child for child in configured_path.iterdir()
+            if child.is_dir() and re.match(rf"vosk-model(-small)?-{re.escape(lang)}", child.name)
+        )
+        if matches:
+            return str(matches[0])
+
+    for root in [
+        resolve_vosk_cache_root(),
+        Path(os.environ.get("USERPROFILE") or "") / ".cache" / "vosk" if os.environ.get("USERPROFILE") else None,
+    ]:
+        if root is None or not root.is_dir():
+            continue
+        matches = sorted(
+            child for child in root.iterdir()
+            if child.is_dir() and re.match(rf"vosk-model(-small)?-{re.escape(lang)}", child.name)
+        )
+        if matches:
+            return str(matches[0])
+
+    return None
 
 
 def emit(event_type: str, **kwargs):
@@ -57,13 +107,43 @@ def rms(data: np.ndarray) -> float:
     return float(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
 
 
+def warn_input_overflow(message: str):
+    global last_overflow_warning_at
+    now = time.time()
+    if (now - last_overflow_warning_at) < OVERFLOW_WARN_INTERVAL:
+        return
+    last_overflow_warning_at = now
+    emit("status", message=message)
+
+
 # ---------------------------------------------------------------------------
 # Audio capture callback
 # ---------------------------------------------------------------------------
 def audio_callback(indata, frames, time_info, status):
+    global audio_chunks_dropped
     if status:
-        emit("error", message=str(status))
-    audio_queue.put(bytes(indata))
+        status_text = str(status)
+        if getattr(status, "input_overflow", False):
+            warn_input_overflow("Audio input overflow detected; dropping stale audio and continuing.")
+        else:
+            emit("error", message=status_text)
+
+    chunk = bytes(indata)
+    try:
+        audio_queue.put_nowait(chunk)
+    except queue.Full:
+        audio_chunks_dropped += 1
+        try:
+            audio_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            audio_queue.put_nowait(chunk)
+        except queue.Full:
+            pass
+        warn_input_overflow(
+            f"Audio capture queue overflowed; dropped {audio_chunks_dropped} chunk(s) to stay real-time."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -95,11 +175,20 @@ def run_vosk_detector(on_wake, on_timeout):
 
     from vosk import Model as VoskModel, KaldiRecognizer
 
-    model_path = os.environ.get("VOSK_MODEL_PATH", "")
-    if model_path and os.path.isdir(model_path):
-        model = VoskModel(model_path)
+    model_path = resolve_vosk_model_path("en-us")
+    if model_path:
+        model = VoskModel(model_path=model_path)
     else:
-        model = VoskModel(lang="en-us")
+        cache_root = resolve_vosk_cache_root()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        os.environ["VOSK_MODEL_PATH"] = str(cache_root)
+        try:
+            model = VoskModel(lang="en-us")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load Vosk model. Cache root: {cache_root}. "
+                f"Set VOSK_MODEL_PATH to a valid model directory if needed."
+            ) from exc
 
     recognizer = KaldiRecognizer(model, SAMPLE_RATE)
     recognizer.SetWords(True)
@@ -269,6 +358,7 @@ def main():
             blocksize=VOSK_BLOCK_SIZE,
             dtype="int16",
             channels=1,
+            latency="high",
             callback=audio_callback,
         )
         stream.start()
