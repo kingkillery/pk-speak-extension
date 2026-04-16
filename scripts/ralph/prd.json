@@ -169,8 +169,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "docs/SESSION_OPERATIONS.md gains a Management Pane section (launcher, layout, keybindings, toasts, cross-surface reload). README.md /sess block adds /sess ui with keybindings + toast behavior summary. SKILL.md /sess bullet enumerates the pane + adds 'open the session manager pane' to natural-phrase examples. AGENTS.md Key Files table adds session-events.ts, ui-launcher.ts, and all ui/* entries; Important Patterns gains /sess ui + pane write-path notes. CLAUDE.md Core Command Families references /sess ui; Important Source Map enumerates session-events, ui-launcher, and ui/* paths. CHANGELOG.md Unreleased gains /sess ui + event-log + extension-watcher bullets. docs/VOICE_SESSION_BRIDGE.md command-bridge table adds the pane row. docs/SESSION_MANAGER_SPEC.qmd Primary command list adds /sess ui for parity. handleSessCommand usage text (index.ts:1903) already included 'ui' from US-009 — verified no stale listings remain. npm test → 81 passing, 0 failing."
     }
   ]
 }
