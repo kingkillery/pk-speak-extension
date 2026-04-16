@@ -25,6 +25,7 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
 - Toast policy: only `voice` and `admin` events produce toasts (`command`-sourced events are suppressed because the operator typed them and already has feedback inline). Toast `expiresAt` is *exclusive* — `filterActiveToasts` drops entries where `expiresAt <= now`, so a toast created at t0 with ttl=3000 is gone at exactly t0+3000.
 - Pane-side admin writes (`ui/actions.ts`) follow a fixed shape: `loadPersistedSessionRouting()` → apply a pure helper from `session-routing.ts` (`setNamedSession` / `setWakeAlias` / `clearWakeAlias` / `removeSessionRoutingForPath`) → `persistSessionRouting` → `appendSessionEvent(kind, "admin", payload)`. Any new pane write must preserve this order. Guard errors via the pure helper's `ok:false` path so no event fires on a rejected mutation.
 - `beginRemoveSession` does not mutate the store or emit an event; only `confirmRemoveSession` writes. TTL (`REMOVE_CONFIRM_TTL_MS`, default 15s) is enforced on the `pending.requestedAt` → `confirm.nowMs` delta so tests can pass synthetic clocks.
+- External-write reconciliation in `index.ts`: `lastRoutingStoreMtime` is captured inside `persistSessionRoutingState` after every self-write, and `reloadSessionRoutingIfExternallyChanged()` (called at the top of `handleSessCommand` and by the `fs.watchFile` watcher) short-circuits when the current mtime matches — so self-writes don't feedback-loop. Any new /sess mutation path MUST call `persistSessionRoutingState` (not `persistSessionRouting` directly) so the mtime tracker stays consistent.
 
 ---
 
@@ -218,4 +219,28 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - Tests import the action helpers from `dist/ui/actions.js` (CJS), not source — same pattern as ui-polling. Do NOT import Ink components from `.mjs` tests: Ink is ESM-only and our `dist/ui/components/ActionBar.js` is CJS, which would fail at runtime.
   - The `PendingRemoval.requestedAt` is the caller's `nowMs`, not `Date.now()`, so tests can use synthetic clocks. The React hook that drives this in the pane should pass `Date.now()` explicitly when constructing pending state.
   - Event payload shape for `sess.remove` is `{ name, path, removedAliases }` — future pane UI that wants to show "removed X aliases" can read `payload.removedAliases.length` without calling back into the store.
+---
+
+## 2026-04-16 - US-008: Extension-side reload on external store change
+- Added `lastRoutingStoreMtime` (number) + `routingStoreWatcherPath` (string) closure state in `speakExtension`.
+- Added `readRoutingStoreMtime()` (statSync wrapper, returns 0 on missing), `broadcastSessionRoutingState()` (re-appends `SESSION_REGISTRY_TYPE` + `SESSION_WAKE_ALIAS_TYPE`), `reloadSessionRoutingIfExternallyChanged()` (checks mtime delta vs self-write tracker; on change reloads + broadcasts), `startRoutingStoreWatcher()` / `stopRoutingStoreWatcher()` (fs.watchFile with 500ms interval).
+- `persistSessionRoutingState` now captures `lastRoutingStoreMtime = readRoutingStoreMtime()` after each persist so subsequent external-mtime checks skip our own writes.
+- `handleSessCommand` calls `reloadSessionRoutingIfExternallyChanged()` at its top, so any /sess invocation reconciles runtime state against the store.
+- `session_start` seeds `lastRoutingStoreMtime` right after loading persisted routing, then calls `startRoutingStoreWatcher()`.
+- `session_shutdown` calls `stopRoutingStoreWatcher()` before other teardown.
+- Added 2 new cases in `tests/session-command-integration.test.mjs`:
+  - External `persistSessionRouting` write (simulating pane-side admin write) is reflected on the next `/sess` invocation; new session + alias both show up in the dashboard text.
+  - Self-writes via /sess do NOT trigger a reload loop (`pi.appended.length` doesn't grow on a subsequent no-op /sess call).
+- Files changed:
+  - `index.ts`
+  - `tests/session-command-integration.test.mjs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 77 passing (was 75), 0 failing. `npm run build` + `npm run build:ui` both clean.
+- **Learnings for future iterations:**
+  - `fs.watchFile(path, { interval: 500 }, cb)` is the right primitive here because it uses portable stat-based polling and fires stably even when the file is replaced via rename (our `persistSessionRouting` uses `renameSync` + delete-then-rename). `fs.watch` (inotify/FSEvents/ReadDirectoryChangesW) would miss rename-over-existing-file events on some platforms.
+  - The mtime dedupe trick relies on the fact that `persistSessionRouting` writes synchronously before returning, so `readRoutingStoreMtime()` captured immediately after persist is already the final mtime. If a future persist path becomes async or buffered, `lastRoutingStoreMtime` must be updated in the callback instead.
+  - On Windows, NTFS `mtimeMs` has sub-millisecond resolution in Node, but back-to-back writes within ~1ms can still collide. The integration test adds `sleep(20)` before the external write to guarantee a distinguishable mtime — use the same pattern in any future external-mutation test rather than relying on natural delays.
+  - The watcher re-broadcasts `SESSION_REGISTRY_TYPE` + `SESSION_WAKE_ALIAS_TYPE` entries via `pi.appendEntry` so any component subscribed to those session-branch entry types sees the change. Don't swap this for a narrower broadcast without also updating anything that consumes those entry types.
+  - US-009's `/sess ui` launcher doesn't need to poke the extension when the pane writes — the watcher handles it. The pane's `ui/actions.ts` already calls `persistSessionRouting` directly; no additional IPC needed.
 ---
