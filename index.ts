@@ -198,7 +198,7 @@ function getPython(): string {
 function getListenerPythonEnv(): NodeJS.ProcessEnv {
 	// Preserve the Windows user-profile variables Python uses to locate
 	// user-site packages such as %APPDATA%\\Python\\Python314\\site-packages.
-	return {
+	const env: NodeJS.ProcessEnv = {
 		PATH: process.env.PATH || "",
 		PYTHONPATH: process.env.PYTHONPATH || "",
 		APPDATA: process.env.APPDATA || "",
@@ -209,15 +209,25 @@ function getListenerPythonEnv(): NodeJS.ProcessEnv {
 		SYSTEMDRIVE: process.env.SYSTEMDRIVE || "",
 		TEMP: process.env.TEMP || "",
 		TMP: process.env.TMP || "",
-		VOSK_MODEL_PATH: process.env.VOSK_MODEL_PATH || "",
-		WHISPER_DEVICE: process.env.WHISPER_DEVICE || "",
-		WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "",
-		WHISPER_MODEL: process.env.WHISPER_MODEL || "",
-		PI_SPEAK_MONO_ACTIVITY_TIMEOUT:
-			process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || process.env.MONO_ACTIVITY_TIMEOUT || "",
 		PI_SPEAK_WAKE_PHRASE:
-			process.env.PI_SPEAK_WAKE_PHRASE || process.env.PI_SPEAK_MONO_WAKE_PHRASE || MONO_WAKE_PHRASE,
+			(process.env.PI_SPEAK_WAKE_PHRASE || process.env.PI_SPEAK_MONO_WAKE_PHRASE || MONO_WAKE_PHRASE).trim(),
 	};
+
+	const optionalEnv = {
+		VOSK_MODEL_PATH: process.env.VOSK_MODEL_PATH,
+		WHISPER_DEVICE: process.env.WHISPER_DEVICE,
+		WHISPER_COMPUTE: process.env.WHISPER_COMPUTE,
+		WHISPER_MODEL: process.env.WHISPER_MODEL,
+		PI_SPEAK_MONO_ACTIVITY_TIMEOUT:
+			process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || process.env.MONO_ACTIVITY_TIMEOUT,
+	};
+
+	for (const [key, value] of Object.entries(optionalEnv)) {
+		const trimmed = value?.trim();
+		if (trimmed) env[key] = trimmed;
+	}
+
+	return env;
 }
 
 function sleep(ms: number) {

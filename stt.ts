@@ -36,6 +36,24 @@ function getExtensionDir() {
 	return __dirname;
 }
 
+function getLocalSttWorkerEnv(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {
+		PATH: process.env.PATH || "",
+		PYTHONPATH: process.env.PYTHONPATH || "",
+	};
+	const optionalEnv = {
+		PI_SPEAK_REMOTE_WHISPER_MODEL: process.env.PI_SPEAK_REMOTE_WHISPER_MODEL,
+		WHISPER_MODEL: process.env.WHISPER_MODEL,
+		WHISPER_DEVICE: process.env.WHISPER_DEVICE,
+		WHISPER_COMPUTE: process.env.WHISPER_COMPUTE,
+	};
+	for (const [key, value] of Object.entries(optionalEnv)) {
+		const trimmed = value?.trim();
+		if (trimmed) env[key] = trimmed;
+	}
+	return env;
+}
+
 export function resolveSttProvider(): Exclude<SttProvider, "auto"> {
 	const configured = (process.env.PI_SPEAK_REMOTE_STT_PROVIDER || "auto").trim().toLowerCase() as SttProvider;
 	if (configured !== "auto") return configured;
@@ -141,14 +159,7 @@ class LocalSttWorker {
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
 			shell: false,
-			env: {
-				PATH: process.env.PATH || "",
-				PYTHONPATH: process.env.PYTHONPATH || "",
-				PI_SPEAK_REMOTE_WHISPER_MODEL: process.env.PI_SPEAK_REMOTE_WHISPER_MODEL || "",
-				WHISPER_MODEL: process.env.WHISPER_MODEL || "",
-				WHISPER_DEVICE: process.env.WHISPER_DEVICE || "",
-				WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "",
-			},
+			env: getLocalSttWorkerEnv(),
 		});
 		child.stdout.setEncoding("utf8");
 		let stdoutBuffer = "";
