@@ -124,7 +124,28 @@ function getSnapshotActivity(snapshot: SessionRuntimeSnapshot | undefined) {
 	return snapshot.phase && snapshot.phase !== "ready" ? "busy" : "idle";
 }
 
-export function buildSessionManagerEntries(options: {
+export type SessionActivity = "busy" | "idle" | "saved";
+
+export type SessionDashboardEntry = {
+	name: string;
+	path?: string;
+	sessionPath?: string;
+	current: boolean;
+	isCurrent: boolean;
+	ready: boolean;
+	isReady: boolean;
+	activity: SessionActivity;
+	aliases: string[];
+};
+
+export type SessionDashboard = {
+	current: string;
+	ready: string[];
+	storePath?: string;
+	sessions: SessionDashboardEntry[];
+};
+
+export type BuildSessionDashboardOptions = {
 	sessions: Record<string, string>;
 	aliases: Record<string, string>;
 	runtimeSnapshots?: SessionRuntimeSnapshot[];
@@ -132,21 +153,17 @@ export function buildSessionManagerEntries(options: {
 	currentSessionName?: string;
 	currentBusy?: boolean;
 	currentReady?: boolean;
-}) {
+	storePath?: string;
+};
+
+export function buildSessionDashboard(options: BuildSessionDashboardOptions): SessionDashboard {
 	const snapshotByPath = new Map<string, SessionRuntimeSnapshot>();
 	for (const snapshot of options.runtimeSnapshots || []) {
 		if (!snapshot.sessionPath || snapshotByPath.has(snapshot.sessionPath)) continue;
 		snapshotByPath.set(snapshot.sessionPath, snapshot);
 	}
 
-	const entries: Array<{
-		name: string;
-		sessionPath?: string;
-		aliases: string[];
-		isCurrent: boolean;
-		isReady: boolean;
-		activity: "busy" | "idle" | "saved";
-	}> = [];
+	const entries: SessionDashboardEntry[] = [];
 	const seenPaths = new Set<string>();
 
 	const addEntry = (name: string, sessionPath?: string) => {
@@ -156,7 +173,7 @@ export function buildSessionManagerEntries(options: {
 			...(snapshot?.aliases || []),
 		]);
 		const isCurrent = !!sessionPath && sessionPath === options.currentSessionPath;
-		const activity = isCurrent && typeof options.currentBusy === "boolean"
+		const activity: SessionActivity = isCurrent && typeof options.currentBusy === "boolean"
 			? (options.currentBusy ? "busy" : "idle")
 			: getSnapshotActivity(snapshot);
 		const isReady = isCurrent && typeof options.currentReady === "boolean"
@@ -164,11 +181,14 @@ export function buildSessionManagerEntries(options: {
 			: !!snapshot?.waitingForAttention;
 		entries.push({
 			name,
+			path: sessionPath,
 			sessionPath,
-			aliases,
+			current: isCurrent,
 			isCurrent,
+			ready: isReady,
 			isReady,
 			activity,
+			aliases,
 		});
 		if (sessionPath) seenPaths.add(sessionPath);
 	};
@@ -183,38 +203,41 @@ export function buildSessionManagerEntries(options: {
 		addEntry(currentSessionName || "(unnamed current session)", currentSessionPath);
 	}
 
-	return entries.sort((a, b) => {
+	const sortedEntries = entries.sort((a, b) => {
 		if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
 		if (a.isReady !== b.isReady) return a.isReady ? -1 : 1;
 		return a.name.localeCompare(b.name);
 	});
+
+	const currentLabel = currentSessionName
+		|| (currentSessionPath ? "(unnamed current session)" : "none");
+	const readyNames = sortedEntries.filter((entry) => entry.isReady).map((entry) => entry.name);
+
+	return {
+		current: currentLabel,
+		ready: readyNames,
+		storePath: options.storePath,
+		sessions: sortedEntries,
+	};
 }
 
-export function formatSessionManagerSummary(options: {
-	sessions: Record<string, string>;
-	aliases: Record<string, string>;
-	runtimeSnapshots?: SessionRuntimeSnapshot[];
-	currentSessionPath?: string;
-	currentSessionName?: string;
-	currentBusy?: boolean;
-	currentReady?: boolean;
-	storePath?: string;
-}) {
-	const entries = buildSessionManagerEntries(options);
-	const currentLabel = options.currentSessionName?.trim()
-		|| (options.currentSessionPath ? "(unnamed current session)" : "none");
-	const readyNames = entries.filter((entry) => entry.isReady).map((entry) => entry.name);
+export function buildSessionManagerEntries(options: BuildSessionDashboardOptions) {
+	return buildSessionDashboard(options).sessions;
+}
+
+export function formatSessionManagerSummary(options: BuildSessionDashboardOptions) {
+	const dashboard = buildSessionDashboard(options);
 	const lines = [
-		`Current: ${currentLabel}`,
-		`Ready: ${readyNames.length > 0 ? readyNames.join(", ") : "none"}`,
+		`Current: ${dashboard.current}`,
+		`Ready: ${dashboard.ready.length > 0 ? dashboard.ready.join(", ") : "none"}`,
 	];
-	if (options.storePath) lines.push(`Store: ${options.storePath}`);
+	if (dashboard.storePath) lines.push(`Store: ${dashboard.storePath}`);
 	lines.push("Sessions");
-	if (entries.length === 0) {
+	if (dashboard.sessions.length === 0) {
 		lines.push("- none");
 		return lines.join("\n");
 	}
-	for (const entry of entries) {
+	for (const entry of dashboard.sessions) {
 		const tags = [
 			...(entry.isCurrent ? ["current"] : []),
 			...(entry.isReady ? ["ready"] : []),
