@@ -21,6 +21,8 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
 - `ui/selectors.ts` is the read-side bridge: `loadSessionDashboard({ runtimeSnapshots?, currentSessionPath?, ... })` loads the persisted routing store + reads attention snapshots via `readAttentionSnapshots()` unless `runtimeSnapshots` is provided (tests inject). Also exports `projectDashboardRow` (marker+tags) and `projectDashboardLines` (full multi-line text projection) so pane and tests share one formatter.
 - Dashboard layout rule: when rendering session rows, the width is `Math.max(16, longest-name)`. Keep this in both `Dashboard.tsx` and `projectDashboardLines` in sync if either changes.
 - `ink-testing-library` at npm tip is v4 which pins Ink v5 peer-deps — incompatible with our Ink v7. Until a v7-compatible release exists, tests must use the pure-function snapshot fallback (import from `dist/ui/selectors.js`, do not import Ink components in `.mjs` tests; Ink is ESM-only while our CJS `dist/` would fail at runtime).
+- UI hook pattern: put IO + React wiring in `ui/hooks/*.ts`, but expose pure helpers (`pollTick`, `eventToToast`, `filterActiveToasts`, `formatEventMessage`) alongside the hook so `.mjs` tests can exercise the tick semantics without importing React. React 19 ships CJS so the hook file itself is importable from CJS `dist/`, but importing the hook *function* from `.mjs` will attempt to load React — tests should prefer the pure helpers.
+- Toast policy: only `voice` and `admin` events produce toasts (`command`-sourced events are suppressed because the operator typed them and already has feedback inline). Toast `expiresAt` is *exclusive* — `filterActiveToasts` drops entries where `expiresAt <= now`, so a toast created at t0 with ttl=3000 is gone at exactly t0+3000.
 
 ---
 
@@ -146,4 +148,37 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - Do NOT import Ink components from `.mjs` tests. `ink` is ESM-only (`"type":"module"`) but our `dist/ui/components/Dashboard.js` is CommonJS (package has no `"type":"module"`). Tests must stick to `dist/ui/selectors.js` or static text projections until the pane gets real runtime wiring.
   - `composite: true` in the main tsconfig is load-bearing for the UI build — removing it reinstates the TS6059 "not under rootDir" errors for `ui/selectors.ts`. Future stories touching the main tsconfig should leave composite + declaration alone.
   - US-007's ActionBar and write actions should live in new `ui/components/ActionBar.tsx` + `ui/actions.ts`. Extend `loadSessionDashboard`/selectors only if the write paths actually need new projected shape; keep Dashboard.tsx presentational.
+---
+
+## 2026-04-16 - US-006: Live polling hook and toast component
+- Added `ui/hooks/useSessionStore.ts` with the `useSessionStore` React hook plus pure helpers:
+  - `DEFAULT_POLL_INTERVAL_MS = 500`, `DEFAULT_TOAST_TTL_MS = 3000` (pinned to spec)
+  - `getRoutingStoreMtime(storePath?)` / `getEventLogMtime()` — stat-based mtime reads that return 0 on missing
+  - `formatEventMessage(event)` — pretty-print voice/admin events into toast strings (`rename A -> B`, `switch to Docs`, `alias one -> Docs`, etc.)
+  - `eventToToast(event, now, ttlMs)` — converts a SessionEvent into `{ id, kind, source, message, ts, expiresAt }`
+  - `filterActiveToasts(toasts, now)` — exclusive TTL filter (drops entries where `expiresAt <= now`)
+  - `toastsFromEvents(events, now, ttlMs)` — suppresses `command`-source events (per Toast policy); only voice/admin surface
+  - `pollTick(input)` — single testable tick function: reloads dashboard only when store mtime changes, tails events since offset, merges surviving toasts with new ones
+- The React hook composes `pollTick` inside a `setInterval(pollIntervalMs)` effect; it exposes `{ dashboard, toasts }` and takes a `runtimeSnapshotProvider` for live-attention injection.
+- Added `ui/components/Toast.tsx` with `ToastBand` (bottom-of-pane `Box` with per-source color: voice=magenta, admin=cyan) and the pure `renderToastLine` helper (`"{source}: {message}"`).
+- Added `tests/ui-polling.test.mjs` (6 tests, all via pure helpers; no React/Ink imports):
+  - defaults match spec (500ms / 3s)
+  - store mutation detected within one poll interval (sleeps 550ms, calls pollTick twice, asserts mtime change + dashboard reload)
+  - event tail returns only new events since last offset (idle tail empty, then delta after append)
+  - toast TTL expires exactly at `expiresAt` (exclusive boundary)
+  - pollTick merges surviving toasts + new toasts while dropping expired
+  - formatEventMessage renders the spec kinds
+- Files changed:
+  - `ui/hooks/useSessionStore.ts` (new)
+  - `ui/components/Toast.tsx` (new)
+  - `tests/ui-polling.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 66 passing (was 60), 0 failing. `npm run build` + `npm run build:ui` both clean.
+- **Learnings for future iterations:**
+  - US-007's write actions should call `appendSessionEvent(kind, "admin", payload)` — the hook's `toastsFromEvents` already picks these up and the ToastBand will show them cyan. No extra wiring needed on the pane side.
+  - Toast IDs are timestamp+kind+random; React re-renders without churn because `filterActiveToasts` preserves object identity for survivors. If a future story needs stable IDs across process restarts, hash `ts+kind+source+JSON.stringify(payload)` instead.
+  - Import boundary reminder: `tests/ui-polling.test.mjs` imports pure helpers from `dist/ui/hooks/useSessionStore.js` but never the `useSessionStore` hook itself — this dodges the React resolution path from a `.mjs` test while still giving us full pollTick coverage. Match this pattern for US-007 (export pure action helpers alongside the React wiring).
+  - `pollTick` intentionally does *not* refresh the dashboard when only events change (store mtime gates the reload). If the pane ever needs to reflect event-driven state not visible in the routing store (e.g. a transient read-receipt), add a second gate in `pollTick` rather than always reloading — `loadSessionDashboard` touches the filesystem.
+  - The ui-polling mutation test sleeps 550ms between persists. On slow file systems the mtime can coalesce, so if this test ever flakes, bump to 750ms rather than trying to diff contents.
 ---
