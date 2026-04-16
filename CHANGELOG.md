@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-Production-readiness hardening pass.
+Ongoing listener and remote-UX work.
+
+## 0.2.1
+
+Listener reliability and activation-cue release.
 
 Added:
 
@@ -11,14 +15,19 @@ Added:
 - warm local STT worker process for remote voice uploads
 - Telegram polling diagnostics and error tracking
 - automated tests for HTTP auth/limits, queue behavior, Telegram link flow, and PWA token persistence
+- Android native companion app scaffold with secure settings storage, route control, text turns, voice turns, and reply audio playback
+- local mono activation cues with stronger `mono:listening` status output
 
 Improved:
 
 - remote auth now prefers header-based tokens for control and turn routes
+- reply-audio fetch path now uses auth headers instead of query-token fallback by default
 - PWA token handling now defaults to session-only storage with an explicit remember-device option
 - remote request limits, rate limits, content-type validation, and timeout handling
 - background cleanup for reply-audio artifacts
 - listener child-process env scoping and listener event validation
+- listener Vosk model resolution and cache fallback on Windows
+- listener overflow handling now degrades gracefully with bounded queues and higher-latency capture defaults
 - operator documentation for production remote use
 
 ## 0.2.0

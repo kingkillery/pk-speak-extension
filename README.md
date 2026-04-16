@@ -60,7 +60,7 @@ Say:
 pi mono
 ```
 
-Pi will open a short voice-input window. Say `pi mono` again within the timeout to keep it alive. Default keep-alive is 15 seconds.
+Pi will open a short voice-input window, play a short listening cue, and update the mono status so you can tell it is actively listening. Say `pi mono` again within the timeout to keep it alive. Default keep-alive is 15 seconds.
 
 ### 3. Remote In From Your Phone With Telegram
 

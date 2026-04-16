@@ -165,6 +165,18 @@ $player.Close()
 	return { command: "powershell.exe", args: ["-NoProfile", "-Command", ps] };
 }
 
+function playMonoCue(kind: "listening" | "idle" = "listening") {
+	const ps = kind === "listening"
+		? "[console]::Beep(1046,120); Start-Sleep -Milliseconds 40; [console]::Beep(1318,160)"
+		: "[console]::Beep(784,100)";
+	return spawn("powershell.exe", ["-NoProfile", "-Command", ps], {
+		stdio: "ignore",
+		detached: false,
+		windowsHide: true,
+		shell: false,
+	});
+}
+
 function getExtensionDir(): string {
 	// When loaded from dist/, listener/ is a sibling of dist/ â†’ go up one level.
 	// When loaded directly (e.g. ~/.pi/agent/extensions/speak.ts), listener/ is a
@@ -180,6 +192,29 @@ function getPython(): string {
 	const localPy = join(home, "AppData", "Local", "Microsoft", "WindowsApps", "python3.exe");
 	if (existsSync(localPy)) return localPy;
 	return "python";
+}
+
+function getListenerPythonEnv(): NodeJS.ProcessEnv {
+	// Preserve the Windows user-profile variables Python uses to locate
+	// user-site packages such as %APPDATA%\\Python\\Python314\\site-packages.
+	return {
+		PATH: process.env.PATH || "",
+		PYTHONPATH: process.env.PYTHONPATH || "",
+		APPDATA: process.env.APPDATA || "",
+		LOCALAPPDATA: process.env.LOCALAPPDATA || "",
+		USERPROFILE: process.env.USERPROFILE || "",
+		HOME: process.env.HOME || process.env.USERPROFILE || "",
+		SYSTEMROOT: process.env.SYSTEMROOT || "",
+		SYSTEMDRIVE: process.env.SYSTEMDRIVE || "",
+		TEMP: process.env.TEMP || "",
+		TMP: process.env.TMP || "",
+		VOSK_MODEL_PATH: process.env.VOSK_MODEL_PATH || "",
+		WHISPER_DEVICE: process.env.WHISPER_DEVICE || "",
+		WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "",
+		WHISPER_MODEL: process.env.WHISPER_MODEL || "",
+		PI_SPEAK_MONO_ACTIVITY_TIMEOUT:
+			process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || process.env.MONO_ACTIVITY_TIMEOUT || "",
+	};
 }
 
 function sleep(ms: number) {
@@ -286,8 +321,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 		const label = voiceInputActive
 			? voiceTarget
-				? `mono:${voiceTarget}`
-				: "mono:on"
+				? `mono:listening -> ${voiceTarget}`
+				: "mono:listening"
 			: "mono:standby";
 		target.ui.setStatus("mono", label);
 	};
@@ -1121,16 +1156,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			detached: false,
 			windowsHide: true,
 			shell: false,
-			env: {
-				PATH: process.env.PATH || "",
-				PYTHONPATH: process.env.PYTHONPATH || "",
-				VOSK_MODEL_PATH: process.env.VOSK_MODEL_PATH || "",
-				PI_SPEAK_MONO_ACTIVITY_TIMEOUT: process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || "",
-				MONO_ACTIVITY_TIMEOUT: process.env.MONO_ACTIVITY_TIMEOUT || "",
-				WHISPER_DEVICE: process.env.WHISPER_DEVICE || "",
-				WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "",
-				WHISPER_MODEL: process.env.WHISPER_MODEL || "",
-			},
+			env: getListenerPythonEnv(),
 		});
 
 		monoActive = true;
@@ -1198,13 +1224,15 @@ export default function speakExtension(pi: ExtensionAPI) {
 					voiceInputActive = true;
 					voiceTarget = event.target || undefined;
 					updateMonoStatus(target);
+					const cue = playMonoCue("listening");
+					cue.on("error", () => {});
 					if (!speakState.enabled) {
 						speakState.enabled = true;
 						persistState();
 						setPhase("ready", target);
 					}
 					const targetLabel = voiceTarget ? ` (target: ${voiceTarget})` : "";
-					target?.ui?.notify?.(`Voice input active${targetLabel} - say "pi mono" or "pi mono <name>" to keep alive`, "info");
+					target?.ui?.notify?.(`Listening now${targetLabel} - speak your request, then say "pi mono" again to keep alive`, "info");
 				} else if (event.state === "ping") {
 					// Keep-alive â€” update target if provided
 					if (event.target) voiceTarget = event.target;
@@ -1213,6 +1241,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 					voiceInputActive = false;
 					voiceTarget = undefined;
 					updateMonoStatus(target);
+					const cue = playMonoCue("idle");
+					cue.on("error", () => {});
 					const reason = event.reason === "timeout" ? " (timed out)" : "";
 					target?.ui?.notify?.(`Voice input off${reason} - say "pi mono" to reactivate`, "info");
 				}
