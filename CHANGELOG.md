@@ -4,6 +4,16 @@
 
 Ongoing listener and remote-UX work.
 
+Added:
+
+- configurable local wake phrase with `PK` as the new default via `PI_SPEAK_WAKE_PHRASE`
+
+Improved:
+
+- replaced Vosk wake detection with a free offline `faster-whisper` tiny wake-detection path
+- mono listener copy and docs now reference the new `PK` wake phrase flow
+- listener Python requirements no longer depend on `vosk`
+
 ## 0.2.1
 
 Listener reliability and activation-cue release.

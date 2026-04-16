@@ -1,24 +1,26 @@
 """
 Two-tier voice listener for pi-speak-extension.
 
-Tier 1: Vosk (always-on, low CPU) listens for wake phrase "pi mono".
-        Saying "pi mono" activates voice input. It stays active as long as
-        "pi mono" is heard again within ACTIVITY_TIMEOUT seconds (keep-alive).
-        Auto-deactivates after the timeout expires.
-Tier 2: faster-whisper (activated on demand) transcribes full speech for Pi messages.
+Tier 1: faster-whisper tiny performs lightweight wake-phrase detection for the
+        default wake phrase "PK" (configurable via PI_SPEAK_WAKE_PHRASE).
+        Saying the wake phrase activates voice input. It stays active as long as
+        the wake phrase is heard again within ACTIVITY_TIMEOUT seconds.
+Tier 2: faster-whisper transcribes full speech for Pi messages.
 
 Outputs JSON lines to stdout for the Node.js extension to consume.
 """
 
-import sys
-import json
-import queue
-import threading
-import os
-import re
-import time
+from __future__ import annotations
+
 import collections
-from pathlib import Path
+import json
+import os
+import queue
+import re
+import sys
+import threading
+import time
+from typing import Literal
 
 import numpy as np
 import sounddevice as sd
@@ -27,84 +29,102 @@ import sounddevice as sd
 # Globals
 # ---------------------------------------------------------------------------
 SAMPLE_RATE = 16000
-VOSK_BLOCK_SIZE = int(os.environ.get("PI_SPEAK_VOSK_BLOCK_SIZE", "0"))
 WHISPER_MODEL = "tiny"
-WAKE_RE = re.compile(r'\bpi\s+mono(?:\s+(\S+))?', re.IGNORECASE)
-SILENCE_TIMEOUT = 2.0  # seconds of silence before finalizing a whisper segment
+WAKE_PHRASE_DISPLAY = (os.environ.get("PI_SPEAK_WAKE_PHRASE") or "PK").strip() or "PK"
 ACTIVITY_TIMEOUT = float(
     os.environ.get("PI_SPEAK_MONO_ACTIVITY_TIMEOUT")
     or os.environ.get("MONO_ACTIVITY_TIMEOUT")
     or "15.0"
-)  # seconds without "pi mono" before auto-deactivating
-ENERGY_THRESHOLD = 300  # RMS threshold for voice activity
-PRE_BUFFER_CHUNKS = 4  # ~1 second of lookback to capture utterance onset
-MAX_AUDIO_QUEUE_CHUNKS = int(os.environ.get("PI_SPEAK_AUDIO_QUEUE_CHUNKS", "24"))
+)
+WAKE_SILENCE_TIMEOUT = float(os.environ.get("PI_SPEAK_WAKE_SILENCE_TIMEOUT", "0.8"))
+SPEECH_SILENCE_TIMEOUT = float(os.environ.get("PI_SPEAK_SPEECH_SILENCE_TIMEOUT", "1.4"))
+ENERGY_THRESHOLD = float(os.environ.get("PI_SPEAK_ENERGY_THRESHOLD", "150"))
+PRE_BUFFER_CHUNKS = int(os.environ.get("PI_SPEAK_PRE_BUFFER_CHUNKS", "6"))
+MAX_AUDIO_QUEUE_CHUNKS = int(os.environ.get("PI_SPEAK_AUDIO_QUEUE_CHUNKS", "48"))
+MAX_SEGMENT_QUEUE_ITEMS = int(os.environ.get("PI_SPEAK_SEGMENT_QUEUE_ITEMS", "4"))
+MAX_SEGMENT_SECONDS = float(os.environ.get("PI_SPEAK_MAX_SEGMENT_SECONDS", "8.0"))
 OVERFLOW_WARN_INTERVAL = float(os.environ.get("PI_SPEAK_OVERFLOW_WARN_INTERVAL", "5.0"))
 
-audio_queue: queue.Queue = queue.Queue(maxsize=MAX_AUDIO_QUEUE_CHUNKS)
-transcription_queue: queue.Queue = queue.Queue(maxsize=3)  # bounded: drop oldest if full
-active = False  # whether voice mode is on
-last_wake_time = 0.0  # wall-clock of last "pi mono" utterance
+SegmentKind = Literal["wake", "speech"]
+
+
+audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=MAX_AUDIO_QUEUE_CHUNKS)
+segment_queue: queue.Queue[tuple[SegmentKind, bytes] | None] = queue.Queue(maxsize=MAX_SEGMENT_QUEUE_ITEMS)
+active = False
+last_wake_time = 0.0
 running = True
 last_overflow_warning_at = 0.0
 audio_chunks_dropped = 0
 
 
-def resolve_vosk_cache_root() -> Path:
-    configured = (os.environ.get("VOSK_MODEL_PATH") or "").strip()
-    if configured:
-        return Path(configured)
-
-    local_appdata = (os.environ.get("LOCALAPPDATA") or "").strip()
-    if local_appdata:
-        return Path(local_appdata) / "vosk"
-
-    home = (os.environ.get("HOME") or os.environ.get("USERPROFILE") or "").strip()
-    if home:
-        return Path(home) / ".cache" / "vosk"
-
-    return Path.cwd() / ".cache" / "vosk"
-
-
-def resolve_vosk_model_path(lang: str = "en-us") -> str | None:
-    configured = (os.environ.get("VOSK_MODEL_PATH") or "").strip()
-    if configured and Path(configured).is_dir():
-        configured_path = Path(configured)
-        if (configured_path / "am" / "final.mdl").is_file():
-            return str(configured_path)
-        matches = sorted(
-            child for child in configured_path.iterdir()
-            if child.is_dir() and re.match(rf"vosk-model(-small)?-{re.escape(lang)}", child.name)
-        )
-        if matches:
-            return str(matches[0])
-
-    for root in [
-        resolve_vosk_cache_root(),
-        Path(os.environ.get("USERPROFILE") or "") / ".cache" / "vosk" if os.environ.get("USERPROFILE") else None,
-    ]:
-        if root is None or not root.is_dir():
-            continue
-        matches = sorted(
-            child for child in root.iterdir()
-            if child.is_dir() and re.match(rf"vosk-model(-small)?-{re.escape(lang)}", child.name)
-        )
-        if matches:
-            return str(matches[0])
-
-    return None
-
-
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def emit(event_type: str, **kwargs):
-    """Send a JSON event to stdout."""
     payload = {"type": event_type, **kwargs}
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
 
 
+_wakeup_variants: tuple[str, ...] | None = None
+
+
+def normalize_text(text: str) -> str:
+    lowered = text.lower().replace(".", " ")
+    lowered = re.sub(r"[^a-z0-9_\-\s]", " ", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
+
+
+def get_wake_variants() -> tuple[str, ...]:
+    global _wakeup_variants
+    if _wakeup_variants is not None:
+        return _wakeup_variants
+
+    normalized = normalize_text(WAKE_PHRASE_DISPLAY)
+    variants: list[str] = [normalized]
+    if normalized == "pk":
+        variants.extend([
+            "p k",
+            "pee kay",
+            "pea kay",
+            "pee k",
+            "okay pk",
+            "ok pk",
+            "okay p k",
+            "ok p k",
+        ])
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for variant in variants:
+        if variant and variant not in seen:
+            deduped.append(variant)
+            seen.add(variant)
+    _wakeup_variants = tuple(deduped)
+    return _wakeup_variants
+
+
+def detect_wake_phrase(text: str) -> str | None:
+    normalized = normalize_text(text)
+    if not normalized:
+        return None
+
+    for variant in get_wake_variants():
+        if normalized == variant:
+            return ""
+        prefix = variant + " "
+        if normalized.startswith(prefix):
+            remainder = normalized[len(prefix):].strip()
+            if not remainder:
+                return ""
+            parts = remainder.split()
+            if len(parts) == 1:
+                return parts[0]
+            return ""
+    return None
+
+
 def rms(data: np.ndarray) -> float:
-    """Root mean square energy of audio chunk."""
-    return float(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
+    return float(np.sqrt(np.mean(data.astype(np.float32) ** 2))) if data.size else 0.0
 
 
 def warn_input_overflow(message: str):
@@ -114,6 +134,18 @@ def warn_input_overflow(message: str):
         return
     last_overflow_warning_at = now
     emit("status", message=message)
+
+
+def enqueue_segment(kind: SegmentKind, audio_bytes: bytes):
+    if len(audio_bytes) < SAMPLE_RATE * 2:
+        return
+    item = (kind, audio_bytes)
+    if segment_queue.full():
+        try:
+            segment_queue.get_nowait()
+        except queue.Empty:
+            pass
+    segment_queue.put(item)
 
 
 # ---------------------------------------------------------------------------
@@ -147,136 +179,7 @@ def audio_callback(indata, frames, time_info, status):
 
 
 # ---------------------------------------------------------------------------
-# Vosk wake-word detector (Tier 1)
-# ---------------------------------------------------------------------------
-def whisper_worker():
-    """Background thread that pulls audio from transcription_queue and transcribes."""
-    while running:
-        try:
-            audio_bytes = transcription_queue.get(timeout=1.0)
-        except queue.Empty:
-            continue
-        if audio_bytes is None:  # poison pill
-            break
-        emit("transcribing")
-        try:
-            text = transcribe_audio(audio_bytes)
-            if text:
-                emit("speech", text=text)
-        except Exception as e:
-            emit("error", message=f"Transcription failed: {e}")
-
-
-def run_vosk_detector(on_wake, on_timeout):
-    """Continuously process audio with Vosk. Detect "pi mono" wake phrase and
-    enqueue audio for whisper transcription while active. Auto-deactivates
-    after ACTIVITY_TIMEOUT seconds without hearing "pi mono" again."""
-    global last_wake_time
-
-    from vosk import Model as VoskModel, KaldiRecognizer
-
-    model_path = resolve_vosk_model_path("en-us")
-    if model_path:
-        model = VoskModel(model_path=model_path)
-    else:
-        cache_root = resolve_vosk_cache_root()
-        cache_root.mkdir(parents=True, exist_ok=True)
-        os.environ["VOSK_MODEL_PATH"] = str(cache_root)
-        try:
-            model = VoskModel(lang="en-us")
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to load Vosk model. Cache root: {cache_root}. "
-                f"Set VOSK_MODEL_PATH to a valid model directory if needed."
-            ) from exc
-
-    recognizer = KaldiRecognizer(model, SAMPLE_RATE)
-    recognizer.SetWords(True)
-
-    collecting_for_whisper = False
-    whisper_buffer = bytearray()
-    last_voice_time = time.time()
-    pre_buffer: collections.deque = collections.deque(maxlen=PRE_BUFFER_CHUNKS)
-
-    def flush_to_whisper():
-        nonlocal collecting_for_whisper
-        if len(whisper_buffer) > SAMPLE_RATE * 2:
-            audio_bytes = bytes(whisper_buffer)
-            if transcription_queue.full():
-                try:
-                    transcription_queue.get_nowait()
-                except queue.Empty:
-                    pass
-            transcription_queue.put(audio_bytes)
-        whisper_buffer.clear()
-        collecting_for_whisper = False
-
-    def check_activity_timeout():
-        """Auto-deactivate if "pi mono" hasn't been heard within ACTIVITY_TIMEOUT."""
-        if active and last_wake_time > 0 and (time.time() - last_wake_time) > ACTIVITY_TIMEOUT:
-            on_timeout()
-            # Flush any pending audio before deactivating
-            nonlocal collecting_for_whisper
-            if collecting_for_whisper:
-                flush_to_whisper()
-
-    while running:
-        try:
-            data = audio_queue.get(timeout=0.5)
-        except queue.Empty:
-            check_activity_timeout()
-            if collecting_for_whisper and (time.time() - last_voice_time) > SILENCE_TIMEOUT:
-                flush_to_whisper()
-            continue
-
-        # Check activity timeout on every chunk
-        check_activity_timeout()
-
-        pre_buffer.append(data)
-
-        if recognizer.AcceptWaveform(data):
-            result = json.loads(recognizer.Result())
-            text = result.get("text", "").lower().strip()
-
-            if not text:
-                continue
-
-            # "pi mono [target]" acts as activate + keep-alive + target selection
-            match = WAKE_RE.search(text)
-            if match:
-                last_wake_time = time.time()
-                target_name = match.group(1) or None
-                on_wake(target_name)
-                # Don't capture the wake phrase itself as speech
-                collecting_for_whisper = False
-                whisper_buffer.clear()
-                continue
-
-            if active:
-                if not collecting_for_whisper:
-                    for chunk in pre_buffer:
-                        whisper_buffer.extend(chunk)
-                collecting_for_whisper = True
-                whisper_buffer.extend(data)
-                last_voice_time = time.time()
-        else:
-            if active:
-                energy = rms(np.frombuffer(data, dtype=np.int16))
-                if energy > ENERGY_THRESHOLD:
-                    if not collecting_for_whisper:
-                        for chunk in pre_buffer:
-                            whisper_buffer.extend(chunk)
-                    collecting_for_whisper = True
-                    last_voice_time = time.time()
-                if collecting_for_whisper:
-                    whisper_buffer.extend(data)
-
-                if collecting_for_whisper and (time.time() - last_voice_time) > SILENCE_TIMEOUT:
-                    flush_to_whisper()
-
-
-# ---------------------------------------------------------------------------
-# faster-whisper transcriber (Tier 2)
+# faster-whisper model
 # ---------------------------------------------------------------------------
 _whisper_model = None
 _whisper_lock = threading.Lock()
@@ -288,6 +191,7 @@ def get_whisper_model():
         with _whisper_lock:
             if _whisper_model is None:
                 from faster_whisper import WhisperModel
+
                 device = os.environ.get("WHISPER_DEVICE", "cpu")
                 compute = os.environ.get("WHISPER_COMPUTE", "int8")
                 model_size = os.environ.get("WHISPER_MODEL", WHISPER_MODEL)
@@ -297,14 +201,119 @@ def get_whisper_model():
     return _whisper_model
 
 
-def transcribe_audio(audio_bytes: bytes) -> str:
-    """Transcribe raw 16-bit 16kHz mono PCM audio using faster-whisper."""
+def transcribe_audio(audio_bytes: bytes, purpose: SegmentKind | Literal["speech-active"] = "speech") -> str:
     model = get_whisper_model()
     audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-    segments, _info = model.transcribe(audio_np, beam_size=3, language="en",
-                                        vad_filter=True, vad_parameters=dict(min_silence_duration_ms=500))
+    beam_size = 1 if purpose == "wake" else 3
+    segments, _info = model.transcribe(
+        audio_np,
+        beam_size=beam_size,
+        best_of=beam_size,
+        language="en",
+        condition_on_previous_text=False,
+        vad_filter=False,
+        temperature=0.0,
+    )
     parts = [seg.text.strip() for seg in segments if seg.text.strip()]
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Worker threads
+# ---------------------------------------------------------------------------
+def transcription_worker(on_wake, on_timeout):
+    global last_wake_time
+    while running:
+        try:
+            item = segment_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        if item is None:
+            break
+
+        kind, audio_bytes = item
+        try:
+            text = transcribe_audio(audio_bytes, purpose=kind)
+        except Exception as exc:
+            emit("error", message=f"Transcription failed: {exc}")
+            continue
+
+        if not text:
+            continue
+
+        target = detect_wake_phrase(text)
+        if target is not None:
+            last_wake_time = time.time()
+            on_wake(target or None)
+            continue
+
+        if kind == "speech":
+            emit("transcribing")
+            emit("speech", text=text)
+
+
+# ---------------------------------------------------------------------------
+# Audio segmentation loop
+# ---------------------------------------------------------------------------
+def run_audio_loop(on_wake, on_timeout):
+    collecting = False
+    segment_buffer = bytearray()
+    pre_buffer: collections.deque[bytes] = collections.deque(maxlen=PRE_BUFFER_CHUNKS)
+    last_voice_time = 0.0
+
+    def flush_segment(force_kind: SegmentKind | None = None):
+        nonlocal collecting, last_voice_time
+        if not segment_buffer:
+            collecting = False
+            return
+        kind: SegmentKind = force_kind or ("speech" if active else "wake")
+        enqueue_segment(kind, bytes(segment_buffer))
+        segment_buffer.clear()
+        collecting = False
+        last_voice_time = 0.0
+
+    def current_silence_timeout() -> float:
+        return SPEECH_SILENCE_TIMEOUT if active else WAKE_SILENCE_TIMEOUT
+
+    def check_activity_timeout():
+        if active and last_wake_time > 0 and (time.time() - last_wake_time) > ACTIVITY_TIMEOUT:
+            if collecting:
+                flush_segment("speech")
+            on_timeout()
+
+    max_segment_bytes = int(MAX_SEGMENT_SECONDS * SAMPLE_RATE * 2)
+
+    while running:
+        try:
+            data = audio_queue.get(timeout=0.25)
+        except queue.Empty:
+            check_activity_timeout()
+            if collecting and last_voice_time > 0 and (time.time() - last_voice_time) > current_silence_timeout():
+                flush_segment()
+            continue
+
+        check_activity_timeout()
+        pre_buffer.append(data)
+        samples = np.frombuffer(data, dtype=np.int16)
+        energy = rms(samples)
+        has_voice = energy >= ENERGY_THRESHOLD
+
+        if collecting:
+            segment_buffer.extend(data)
+            if has_voice:
+                last_voice_time = time.time()
+            if len(segment_buffer) >= max_segment_bytes:
+                flush_segment()
+                continue
+            if last_voice_time > 0 and (time.time() - last_voice_time) > current_silence_timeout():
+                flush_segment()
+            continue
+
+        if has_voice:
+            collecting = True
+            for chunk in pre_buffer:
+                segment_buffer.extend(chunk)
+            last_voice_time = time.time()
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +323,7 @@ def main():
     global active, running
 
     emit("status", message="Voice listener starting...")
+    emit("status", message=f"Wake phrase ready: {WAKE_PHRASE_DISPLAY}")
 
     def on_wake(target_name=None):
         global active
@@ -321,9 +331,7 @@ def main():
         active = True
         if not was_active:
             emit("wake", state="on", target=target_name or "")
-            threading.Thread(target=get_whisper_model, daemon=True).start()
         else:
-            # Keep-alive ping -- pass target if changed
             emit("wake", state="ping", target=target_name or "")
 
     def on_timeout():
@@ -332,17 +340,18 @@ def main():
             active = False
             emit("wake", state="off", reason="timeout")
 
-    # Start whisper transcription worker thread
-    worker = threading.Thread(target=whisper_worker, daemon=True)
+    worker = threading.Thread(target=transcription_worker, args=(on_wake, on_timeout), daemon=True)
     worker.start()
 
-    # Watch stdin for close (graceful shutdown signal from Node.js)
+    model_loader = threading.Thread(target=get_whisper_model, daemon=True)
+    model_loader.start()
+
     def watch_stdin():
         global running
         try:
             while True:
                 line = sys.stdin.readline()
-                if not line:  # stdin closed
+                if not line:
                     break
         except Exception:
             pass
@@ -351,11 +360,10 @@ def main():
     stdin_watcher = threading.Thread(target=watch_stdin, daemon=True)
     stdin_watcher.start()
 
-    # Start audio stream
     try:
         stream = sd.RawInputStream(
             samplerate=SAMPLE_RATE,
-            blocksize=VOSK_BLOCK_SIZE,
+            blocksize=0,
             dtype="int16",
             channels=1,
             latency="high",
@@ -363,17 +371,22 @@ def main():
         )
         stream.start()
         emit("status", message="Listening (waiting for wake phrase)")
-    except Exception as e:
-        emit("error", message=f"Failed to open audio stream: {e}")
+    except Exception as exc:
+        emit("error", message=f"Failed to open audio stream: {exc}")
         sys.exit(1)
 
     try:
-        run_vosk_detector(on_wake, on_timeout)
+        run_audio_loop(on_wake, on_timeout)
     except KeyboardInterrupt:
         pass
     finally:
         running = False
-        transcription_queue.put(None)  # poison pill for worker
+        if segment_queue.full():
+            try:
+                segment_queue.get_nowait()
+            except queue.Empty:
+                pass
+        segment_queue.put(None)
         stream.stop()
         stream.close()
         worker.join(timeout=5.0)

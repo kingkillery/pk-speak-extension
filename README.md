@@ -5,7 +5,7 @@ Voice, wake-word, and remote-control extensions for Pi / `pi-mono`.
 This package turns Pi into a usable voice workstation, not just a text assistant with TTS bolted on. It gives you:
 
 - spoken assistant replies with multiple TTS backends
-- the always-listening `pi mono` wake phrase flow
+- the always-listening `PK` wake phrase flow
 - Telegram text and voice turns from your phone
 - a local HTTP control API
 - a built-in mobile web app at `/app/`
@@ -57,10 +57,10 @@ If you do nothing else, `auto` provider selection will pick the best available b
 Say:
 
 ```text
-pi mono
+PK
 ```
 
-Pi will open a short voice-input window, play a short listening cue, and update the mono status so you can tell it is actively listening. Say `pi mono` again within the timeout to keep it alive. Default keep-alive is 15 seconds.
+Pi will open a short voice-input window, play a short listening cue, and update the mono status so you can tell it is actively listening. Say `PK` again within the timeout to keep it alive. Default keep-alive is 15 seconds.
 
 ### 3. Remote In From Your Phone With Telegram
 
@@ -145,10 +145,10 @@ Controls the wake-word listener.
 
 Behavior:
 
-- waits for `pi mono`
+- waits for the wake phrase `PK` by default
 - activates voice input for a short window
-- keeps the existing `pi mono` flow intact
-- supports `pi mono <session-name>` to route into a named session
+- keeps the existing `/mono` flow intact with a faster-whisper wake detector
+- supports `PK <session-name>` to route into a named session when the target name is spoken clearly
 
 ### `/phone`
 
@@ -197,7 +197,7 @@ Named sessions for voice routing.
 /sess name active-work
 ```
 
-This matters because `pi mono bugfix` can route voice input to that named session.
+This matters because `PK bugfix` can route voice input to that named session.
 
 ## Architecture
 
@@ -214,7 +214,7 @@ There are six main subsystems:
 
 4. `listener/listener.py`
    The always-on two-tier listener:
-   - Tier 1: Vosk for low-cost wake phrase detection
+   - Tier 1: `faster-whisper` tiny for wake-phrase detection
    - Tier 2: `faster-whisper` for actual speech transcription
 
 5. `phone-bridge.ts`
@@ -462,6 +462,7 @@ What it is not good at:
 ```text
 PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
 PI_SPEAK_REWRITE_ENABLED=true|false
+PI_SPEAK_WAKE_PHRASE=PK
 PI_SPEAK_MONO_ACTIVITY_TIMEOUT=15
 ```
 
@@ -558,7 +559,6 @@ You likely do not have the Python audio stack installed. The local listener depe
 
 - `numpy`
 - `sounddevice`
-- `vosk`
 - `faster_whisper`
 
 ### Remote voice turns fail
@@ -617,7 +617,7 @@ Current automated coverage includes:
 Before treating a machine as production-ready, verify:
 
 1. `/mono on`
-2. local wake phrase: say `pi mono`
+2. local wake phrase: say `PK`
 3. `/phone on` then `/phone code`, then complete a Telegram text turn and voice-note turn
 4. `/remote on`, open `/app/`, complete a text turn and voice turn, and confirm reply audio playback
 5. over Tailscale or your HTTPS tunnel, confirm non-local requests fail without the token and succeed with it

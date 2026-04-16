@@ -89,6 +89,7 @@ const AVAILABLE_TTS_PROVIDERS: TtsProvider[] = ["auto", "legacy", "edge", "opena
 const MONO_KEEP_ALIVE_SECONDS = Number.parseFloat(
 	process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || process.env.MONO_ACTIVITY_TIMEOUT || "15",
 );
+const MONO_WAKE_PHRASE = process.env.PI_SPEAK_WAKE_PHRASE || process.env.PI_SPEAK_MONO_WAKE_PHRASE || "PK";
 const PHONE_TURN_WAIT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_PHONE_WAIT_TIMEOUT_MS || "180000", 10);
 const DEFAULT_REMOTE_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
@@ -214,6 +215,8 @@ function getListenerPythonEnv(): NodeJS.ProcessEnv {
 		WHISPER_MODEL: process.env.WHISPER_MODEL || "",
 		PI_SPEAK_MONO_ACTIVITY_TIMEOUT:
 			process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || process.env.MONO_ACTIVITY_TIMEOUT || "",
+		PI_SPEAK_WAKE_PHRASE:
+			process.env.PI_SPEAK_WAKE_PHRASE || process.env.PI_SPEAK_MONO_WAKE_PHRASE || MONO_WAKE_PHRASE,
 	};
 }
 
@@ -709,7 +712,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				? voiceTarget
 					? `active -> ${voiceTarget}`
 					: "active"
-				: `listening for "pi mono"`;
+				: `listening for "${MONO_WAKE_PHRASE}"`;
 		const rewriteStatus = isRewriteEnabled(getSpeakRuntimeState()) ? "rewrite on" : "rewrite off";
 		return [
 			`Phone bridge ${phoneState.enabled ? "running" : "stopped"}.`,
@@ -884,7 +887,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			persistMonoState();
 			return {
 				ok: true,
-				message: `Voice listener started. Say "pi mono" to activate (${MONO_KEEP_ALIVE_SECONDS}s keep-alive).`,
+				message: `Voice listener started. Say "${MONO_WAKE_PHRASE}" to activate (${MONO_KEEP_ALIVE_SECONDS}s keep-alive).`,
 				mono: getMonoStatus(),
 			};
 		}
@@ -1232,7 +1235,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 						setPhase("ready", target);
 					}
 					const targetLabel = voiceTarget ? ` (target: ${voiceTarget})` : "";
-					target?.ui?.notify?.(`Listening now${targetLabel} - speak your request, then say "pi mono" again to keep alive`, "info");
+					target?.ui?.notify?.(`Listening now${targetLabel} - speak your request, then say "${MONO_WAKE_PHRASE}" again to keep alive`, "info");
 				} else if (event.state === "ping") {
 					// Keep-alive â€” update target if provided
 					if (event.target) voiceTarget = event.target;
@@ -1244,7 +1247,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					const cue = playMonoCue("idle");
 					cue.on("error", () => {});
 					const reason = event.reason === "timeout" ? " (timed out)" : "";
-					target?.ui?.notify?.(`Voice input off${reason} - say "pi mono" to reactivate`, "info");
+					target?.ui?.notify?.(`Voice input off${reason} - say "${MONO_WAKE_PHRASE}" to reactivate`, "info");
 				}
 				break;
 
@@ -1322,7 +1325,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				}
 				return;
 			} else {
-				target?.ui?.notify?.(`Unknown session "${voiceTarget}" - say "pi mono" to reset to current`, "warning");
+				target?.ui?.notify?.(`Unknown session "${voiceTarget}" - say "${MONO_WAKE_PHRASE}" to reset to current`, "warning");
 			}
 		}
 		pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
@@ -1332,7 +1335,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	// Commands
 	// -----------------------------------------------------------------------
 	pi.registerCommand("mono", {
-		description: "Control the always-on voice listener (Vosk + faster-whisper)",
+		description: "Control the always-on voice listener (faster-whisper wake detection + transcription)",
 		getArgumentCompletions: (prefix) => {
 			const options = ["on", "off", "status"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
@@ -1345,7 +1348,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			if (!lower || lower === "on" || lower === "start") {
 				startListener(ctx);
 				persistMonoState();
-				ctx.ui.notify(`Voice listener started - say "pi mono" to activate (${MONO_KEEP_ALIVE_SECONDS}s keep-alive)`, "info");
+				ctx.ui.notify(`Voice listener started - say "${MONO_WAKE_PHRASE}" to activate (${MONO_KEEP_ALIVE_SECONDS}s keep-alive)`, "info");
 				return;
 			}
 
