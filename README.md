@@ -62,6 +62,8 @@ PK
 
 Pi will open a short voice-input window, play a short listening cue, and update the mono status so you can tell it is actively listening. Say `PK` again within the timeout to keep it alive. Default keep-alive is 15 seconds.
 
+Wake matching now has a sensitivity preset. Use `PI_SPEAK_WAKE_SENSITIVITY=low|medium|high` to make activation stricter or more forgiving. `medium` is the default.
+
 ### 3. Remote In From Your Phone With Telegram
 
 ```text
@@ -464,6 +466,10 @@ PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
 PI_SPEAK_REWRITE_ENABLED=true|false
 PI_SPEAK_WAKE_PHRASE=PK
 PI_SPEAK_MONO_ACTIVITY_TIMEOUT=15
+PI_SPEAK_WAKE_SENSITIVITY=low|medium|high
+PI_SPEAK_WAKE_FUZZY_ENABLED=true|false              # optional override
+PI_SPEAK_WAKE_FUZZY_MAX_DISTANCE=0|1|2              # optional override
+PI_SPEAK_WAKE_COMPACT_PREFIX_ENABLED=true|false     # optional override
 ```
 
 ### Rewrite

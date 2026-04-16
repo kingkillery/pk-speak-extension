@@ -34,6 +34,7 @@ Auto-resolution order:
 - **API keys for audio**: Use dedicated keys (`PI_SPEAK_OPENAI_KEY`, `ELEVENLABS_API_KEY`) not the general LLM keys
 - **Edge TTS**: Bundled via `node-edge-tts`, no external deps needed
 - **Local voice (`/mono`)**: Requires Python stack with `faster-whisper`, `sounddevice`, `numpy`
+- **Wake sensitivity**: Use `PI_SPEAK_WAKE_SENSITIVITY=low|medium|high` as the main operator control for how forgiving `PK` activation should be; use the lower-level fuzzy and compact env vars only as overrides
 - **Remote audio**: Browser mic requires HTTPS origin (use Tailscale Serve or tunnel)
 
 ## Testing

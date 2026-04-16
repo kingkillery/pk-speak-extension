@@ -1,0 +1,156 @@
+---
+title: Session Manager Spec
+project: pi-speak-pk
+date: 2026-04-16
+status: implemented
+owners:
+  - pi-speak-pk
+areas:
+  - sessions
+  - voice-routing
+  - attention-broker
+---
+
+## Goal
+
+Make `/sess` the primary user-facing session manager so operators think in terms of:
+
+- current session
+- known sessions
+- aliases
+- ready state
+- busy vs idle
+
+Instead of forcing them to learn the lower-level attention-broker model.
+
+## User model
+
+`/sess` with no args is the main dashboard.
+
+It should show:
+
+- current session
+- ready sessions
+- store path
+- all known sessions inline with:
+  - current marker
+  - ready marker
+  - activity state: `busy`, `idle`, or `saved`
+  - aliases
+
+Example:
+
+```text
+/sess
+
+Current: voice
+Ready: voice-bugfix
+Store: C:\Users\...\session-routing.json
+Sessions
+- voice [current] [idle]
+  aliases: one
+- voice-bugfix [ready] [busy]
+  aliases: two
+- voice-docs [saved]
+  aliases: three
+```
+
+## Command surface
+
+### Primary
+
+```text
+/sess
+/sess new <name>
+/sess switch <name-or-alias>
+/sess rename <name-or-alias> <new-name>
+/sess edit <name-or-alias>
+/sess remove <name-or-alias>
+/sess confirm remove <name-or-alias>
+/sess alias add <session> <alias>
+/sess alias remove <alias>
+/sess export
+```
+
+### Compatibility
+
+Keep these working:
+
+```text
+/sess list
+/sess name <name>
+/sess wake <alias>
+/sess wake clear <alias>
+/sess wake list
+```
+
+### Low-level advanced path
+
+Keep `/attn` as an advanced or debugging surface:
+
+```text
+/attn status
+/attn list
+/attn clear <session>
+/attn on
+/attn off
+```
+
+## Behavioral rules
+
+### Summary model
+
+Readiness is a session property in the dashboard, not a separate primary concept.
+
+### Edit wrapper
+
+`/sess edit <session>` is the convenience wrapper over the explicit action surface.
+
+It should:
+
+- show the current aliases and status for the chosen session
+- print exact next-step commands as shortcuts
+- optionally proxy direct follow-up actions like rename, alias add/remove, switch, and remove
+
+### Activity model
+
+- `busy` = live runtime snapshot exists and the session is actively working
+- `idle` = live runtime snapshot exists and the session is not actively working
+- `saved` = known in the local session store, but no live snapshot is present
+
+### Deletion safety
+
+`/sess remove <name>` must not immediately remove routing metadata.
+
+Require explicit confirmation:
+
+```text
+/sess remove bugfix
+/sess confirm remove bugfix
+```
+
+Removal means:
+
+- clear saved session-name mapping for that session path
+- clear aliases that point to that session path
+- do not silently delete the underlying Pi session file
+
+### Abstraction boundary
+
+The attention broker remains the implementation mechanism for cross-window ready state, but it is not the primary user-facing abstraction.
+
+## Implementation notes
+
+- `session-routing.ts` owns pure helpers for session-dashboard formatting and removal of saved routing metadata
+- `index.ts` owns `/sess` orchestration and current-session runtime state
+- `attention-broker.ts` continues to own local snapshot + leader lease mechanics
+- `voice-session-command.ts` should route generic session/status voice requests to `/sess`
+
+## Validation
+
+Key tests:
+
+- `tests/session-routing.test.mjs`
+- `tests/session-command-integration.test.mjs`
+- `tests/voice-session-command.test.mjs`
+- `tests/attention-broker.test.mjs`

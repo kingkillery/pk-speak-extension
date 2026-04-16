@@ -44,6 +44,7 @@ MAX_AUDIO_QUEUE_CHUNKS = int(os.environ.get("PI_SPEAK_AUDIO_QUEUE_CHUNKS", "48")
 MAX_SEGMENT_QUEUE_ITEMS = int(os.environ.get("PI_SPEAK_SEGMENT_QUEUE_ITEMS", "4"))
 MAX_SEGMENT_SECONDS = float(os.environ.get("PI_SPEAK_MAX_SEGMENT_SECONDS", "8.0"))
 OVERFLOW_WARN_INTERVAL = float(os.environ.get("PI_SPEAK_OVERFLOW_WARN_INTERVAL", "5.0"))
+WAKE_SENSITIVITY = (os.environ.get("PI_SPEAK_WAKE_SENSITIVITY") or "medium").strip().lower() or "medium"
 
 SegmentKind = Literal["wake", "speech"]
 
@@ -75,12 +76,48 @@ def get_env(name: str, default: str = "") -> str:
 
 
 _wakeup_variants: tuple[str, ...] | None = None
+_wakeup_compact_variants: tuple[str, ...] | None = None
 
 
 def normalize_text(text: str) -> str:
     lowered = text.lower().replace(".", " ")
     lowered = re.sub(r"[^a-z0-9_\-\s]", " ", lowered)
     return re.sub(r"\s+", " ", lowered).strip()
+
+
+def parse_bool_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def compact_text(text: str) -> str:
+    return text.replace(" ", "")
+
+
+def get_wake_fuzzy_enabled() -> bool:
+    default = WAKE_SENSITIVITY in {"medium", "high"}
+    return parse_bool_env("PI_SPEAK_WAKE_FUZZY_ENABLED", default)
+
+
+def get_wake_compact_prefix_enabled() -> bool:
+    default = WAKE_SENSITIVITY in {"medium", "high"}
+    return parse_bool_env("PI_SPEAK_WAKE_COMPACT_PREFIX_ENABLED", default)
+
+
+def get_wake_fuzzy_max_distance() -> int:
+    configured = os.environ.get("PI_SPEAK_WAKE_FUZZY_MAX_DISTANCE")
+    if configured is not None and configured.strip():
+        try:
+            return max(0, int(configured.strip()))
+        except ValueError:
+            return 1
+    if WAKE_SENSITIVITY == "high":
+        return 2
+    if WAKE_SENSITIVITY == "low":
+        return 0
+    return 1
 
 
 def get_wake_variants() -> tuple[str, ...]:
@@ -95,11 +132,21 @@ def get_wake_variants() -> tuple[str, ...]:
             "p k",
             "pee kay",
             "pea kay",
+            "pee key",
+            "pea key",
+            "peekay",
+            "peekey",
+            "pkay",
             "pee k",
+            "pea k",
             "okay pk",
             "ok pk",
             "okay p k",
             "ok p k",
+            "okay pee kay",
+            "ok pee kay",
+            "okay peekay",
+            "ok peekay",
         ])
     deduped: list[str] = []
     seen: set[str] = set()
@@ -109,6 +156,64 @@ def get_wake_variants() -> tuple[str, ...]:
             seen.add(variant)
     _wakeup_variants = tuple(deduped)
     return _wakeup_variants
+
+
+def get_wake_compact_variants() -> tuple[str, ...]:
+    global _wakeup_compact_variants
+    if _wakeup_compact_variants is not None:
+        return _wakeup_compact_variants
+
+    compact_variants: list[str] = []
+    seen: set[str] = set()
+    for variant in get_wake_variants():
+        compact = compact_text(variant)
+        if compact and compact not in seen:
+            compact_variants.append(compact)
+            seen.add(compact)
+    _wakeup_compact_variants = tuple(compact_variants)
+    return _wakeup_compact_variants
+
+
+def levenshtein_distance(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+    if len(left) < len(right):
+        left, right = right, left
+
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, start=1):
+        current = [i]
+        for j, right_char in enumerate(right, start=1):
+            insert_cost = current[j - 1] + 1
+            delete_cost = previous[j] + 1
+            replace_cost = previous[j - 1] + (0 if left_char == right_char else 1)
+            current.append(min(insert_cost, delete_cost, replace_cost))
+        previous = current
+    return previous[-1]
+
+
+def fuzzy_matches_wake(candidate: str) -> bool:
+    if not get_wake_fuzzy_enabled():
+        return False
+    normalized = compact_text(normalize_text(candidate))
+    if not normalized:
+        return False
+
+    max_distance = get_wake_fuzzy_max_distance()
+    for variant in get_wake_compact_variants():
+        if normalized == variant:
+            return True
+        if abs(len(normalized) - len(variant)) > max_distance:
+            continue
+        if normalized[0] != variant[0]:
+            continue
+        if levenshtein_distance(normalized, variant) <= max_distance:
+            return True
+    return False
 
 
 def detect_wake_phrase(text: str) -> str | None:
@@ -121,13 +226,32 @@ def detect_wake_phrase(text: str) -> str | None:
             return ""
         prefix = variant + " "
         if normalized.startswith(prefix):
-            remainder = normalized[len(prefix):].strip()
-            if not remainder:
+            return normalized[len(prefix):].strip()
+
+    compact = compact_text(normalized)
+    if get_wake_compact_prefix_enabled():
+        for variant in get_wake_compact_variants():
+            if compact == variant:
                 return ""
-            parts = remainder.split()
-            if len(parts) == 1:
-                return parts[0]
-            return ""
+            if compact.startswith(variant) and len(compact) > len(variant):
+                return compact[len(variant):].strip()
+
+    words = normalized.split()
+    if not words:
+        return None
+
+    if fuzzy_matches_wake(words[0]):
+        return " ".join(words[1:]).strip()
+    if len(words) >= 2 and fuzzy_matches_wake(" ".join(words[:2])):
+        return " ".join(words[2:]).strip()
+    if len(words) <= 2 and fuzzy_matches_wake(normalized):
+        return ""
+
+    if get_wake_compact_prefix_enabled():
+        compact_first = compact_text(words[0])
+        for variant in get_wake_compact_variants():
+            if compact_first.startswith(variant) and len(compact_first) > len(variant):
+                return compact_first[len(variant):].strip()
     return None
 
 
@@ -332,6 +456,15 @@ def main():
 
     emit("status", message="Voice listener starting...")
     emit("status", message=f"Wake phrase ready: {WAKE_PHRASE_DISPLAY}")
+    emit(
+        "status",
+        message=(
+            f"Wake sensitivity: {WAKE_SENSITIVITY} "
+            f"(fuzzy={'on' if get_wake_fuzzy_enabled() else 'off'}, "
+            f"compact={'on' if get_wake_compact_prefix_enabled() else 'off'}, "
+            f"distance={get_wake_fuzzy_max_distance()})"
+        ),
+    )
 
     def on_wake(target_name=None):
         global active

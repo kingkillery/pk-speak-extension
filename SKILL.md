@@ -1,80 +1,78 @@
 ---
 name: pi-speak
-description: "Voice, wake-word, and remote-control extension for Pi. Use when the user wants spoken replies, the always-listening `PK` wake phrase flow, Telegram phone access, the built-in mobile web app, or HTTP/Unified Remote control. Triggers on /speak, /mono, /phone, /remote, text-to-speech, voice input, or remote voice access."
+description: "Pointer skill for pi-speak-pk. Use when the user wants spoken replies, wake-word listening, session-manager control, voice session routing, ready-session checks, Telegram control, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
 ---
 
 # pi-speak-pk
 
-Voice extension for `pi-coding-agent` with local wake-word input, multi-provider TTS, remote STT, Telegram transport, and a built-in mobile web app.
+This is a pointer skill.
 
-## Commands
+Start here when the user wants to talk naturally about:
+- spoken replies
+- the `PK` wake phrase
+- the `/sess` session manager
+- voice-driven session creation, switching, naming, aliasing, or removal
+- ready-session checks across local Pi windows
+- Telegram remote control
+- the browser remote app
 
-- `/speak` - enable or configure spoken replies
-- `/mono` - control the always-listening wake phrase flow
-- `/phone` - run the Telegram bridge
-- `/remote` - run the HTTP API and built-in web app
-- `/sess` - manage named sessions for voice routing
+## First reads
 
-## How It Works
+Read these in order:
+1. `docs/VOICE_SESSION_BRIDGE.md`
+2. `docs/SESSION_OPERATIONS.md` when the task is mostly about `/sess`, `/attn`, wake aliases, or multi-session control
+3. `README.md`
+4. the relevant source file for the command family you need
 
-1. User submits text or speech
-2. Pi generates the full assistant response
-3. Optional rewrite-for-speech makes the reply easier to hear
-4. A TTS backend synthesizes the spoken version
-5. Audio plays locally or is returned to a remote client
+For the current manager-shape design note, also read:
+- `docs/SESSION_MANAGER_SPEC.qmd`
 
-## TTS Providers
+## Use this skill as a bridge
 
-- `legacy` via `speak11`
-- `edge` via `node-edge-tts`
-- `openai`
-- `elevenlabs`
-- `auto`
+The goal is to let the user speak naturally while grounding actions in real commands.
 
-Auto mode resolves in this order:
+Examples of natural requests this skill should map cleanly:
+- "make Pi speak"
+- "start listening for PK"
+- "show sessions"
+- "create a bugfix session"
+- "switch to research"
+- "name this session active work"
+- "set wake alias one"
+- "remove session bugfix"
+- "which sessions are ready"
+- "turn on the browser remote"
 
-1. `legacy`
-2. `elevenlabs`
-3. `openai`
-4. `edge`
+## Main command families
 
-## Voice Listener
+- `/speak` → spoken replies and TTS settings
+- `/mono` → local wake-word listener
+- `/sess` → session manager dashboard, session naming, switching, edit wrapper, aliases, removal, export
+- `/attn` → advanced multi-session ready-state broker controls
+- `/phone` → Telegram bridge
+- `/remote` → HTTP API and built-in mobile web app
 
-`/mono` runs a background Python listener:
+## Deep references
 
-- `faster-whisper` tiny handles wake phrase detection
-- `faster-whisper` handles actual utterance transcription
-- the default wake phrase is `PK`
-- the keep-alive timeout defaults to 15 seconds
-- `PK <session-name>` can target a named session when the target name is spoken clearly
-
-## Remote Paths
-
-### Telegram
-
-`/phone` gives you remote text and voice-note turns through a Telegram bot.
-
-### Mobile web app
-
-`/remote` serves the built-in phone web app from `/app/`. Use this when you want browser mic capture plus browser audio playback.
-
-### Unified Remote
-
-The bundled Unified Remote remote is a control surface, not the main audio path.
-
-## Important Files
-
+Use the bridge doc to find the right source quickly:
+- `docs/VOICE_SESSION_BRIDGE.md`
+- `docs/SESSION_OPERATIONS.md`
+- `docs/SESSION_MANAGER_SPEC.qmd`
+- `README.md`
 - `index.ts`
-- `tts.ts`
-- `stt.ts`
-- `phone-bridge.ts`
-- `control-server.ts`
+- `voice-session-command.ts`
+- `voice-routing.ts`
+- `session-routing.ts`
+- `session-routing-store.ts`
+- `attention-broker.ts`
 - `listener/listener.py`
-- `web/remote/index.html`
 
-## Setup Notes
+## Maintenance rule
 
-- OpenRouter is only needed for rewrite-for-speech
-- OpenAI is optional for TTS and optional for remote STT
-- ElevenLabs is optional
-- local `/mono` requires Python plus the listener dependencies
+If you add or change voice/session control behavior, update:
+- `SKILL.md`
+- `docs/VOICE_SESSION_BRIDGE.md`
+- `docs/SESSION_OPERATIONS.md`
+- `AGENTS.md`
+- `CLAUDE.md`
+- `README.md` when operator behavior changes
