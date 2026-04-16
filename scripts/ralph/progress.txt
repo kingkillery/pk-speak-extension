@@ -23,6 +23,8 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
 - `ink-testing-library` at npm tip is v4 which pins Ink v5 peer-deps — incompatible with our Ink v7. Until a v7-compatible release exists, tests must use the pure-function snapshot fallback (import from `dist/ui/selectors.js`, do not import Ink components in `.mjs` tests; Ink is ESM-only while our CJS `dist/` would fail at runtime).
 - UI hook pattern: put IO + React wiring in `ui/hooks/*.ts`, but expose pure helpers (`pollTick`, `eventToToast`, `filterActiveToasts`, `formatEventMessage`) alongside the hook so `.mjs` tests can exercise the tick semantics without importing React. React 19 ships CJS so the hook file itself is importable from CJS `dist/`, but importing the hook *function* from `.mjs` will attempt to load React — tests should prefer the pure helpers.
 - Toast policy: only `voice` and `admin` events produce toasts (`command`-sourced events are suppressed because the operator typed them and already has feedback inline). Toast `expiresAt` is *exclusive* — `filterActiveToasts` drops entries where `expiresAt <= now`, so a toast created at t0 with ttl=3000 is gone at exactly t0+3000.
+- Pane-side admin writes (`ui/actions.ts`) follow a fixed shape: `loadPersistedSessionRouting()` → apply a pure helper from `session-routing.ts` (`setNamedSession` / `setWakeAlias` / `clearWakeAlias` / `removeSessionRoutingForPath`) → `persistSessionRouting` → `appendSessionEvent(kind, "admin", payload)`. Any new pane write must preserve this order. Guard errors via the pure helper's `ok:false` path so no event fires on a rejected mutation.
+- `beginRemoveSession` does not mutate the store or emit an event; only `confirmRemoveSession` writes. TTL (`REMOVE_CONFIRM_TTL_MS`, default 15s) is enforced on the `pending.requestedAt` → `confirm.nowMs` delta so tests can pass synthetic clocks.
 
 ---
 
@@ -181,4 +183,39 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - Import boundary reminder: `tests/ui-polling.test.mjs` imports pure helpers from `dist/ui/hooks/useSessionStore.js` but never the `useSessionStore` hook itself — this dodges the React resolution path from a `.mjs` test while still giving us full pollTick coverage. Match this pattern for US-007 (export pure action helpers alongside the React wiring).
   - `pollTick` intentionally does *not* refresh the dashboard when only events change (store mtime gates the reload). If the pane ever needs to reflect event-driven state not visible in the routing store (e.g. a transient read-receipt), add a second gate in `pollTick` rather than always reloading — `loadSessionDashboard` touches the filesystem.
   - The ui-polling mutation test sleeps 550ms between persists. On slow file systems the mtime can coalesce, so if this test ever flakes, bump to 750ms rather than trying to diff contents.
+---
+
+## 2026-04-16 - US-007: Pane write actions: rename, alias, remove
+- Added `ui/actions.ts` exporting the pane-side write helpers:
+  - `renameSession({ sessionPath, newName })` → loads persisted routing, calls `setNamedSession`, persists, emits `sess.rename` with `source: "admin"`. Rejects via `setNamedSession`'s `ok:false` path when the name already points to another session.
+  - `addWakeAlias({ sessionPath, alias })` → normalizes the alias via `normalizeAliasInput` (trim + collapse whitespace), calls `setWakeAlias`, persists, emits `alias.add`.
+  - `removeWakeAlias({ alias })` → calls `clearWakeAlias`, persists, emits `alias.remove`.
+  - `beginRemoveSession({ sessionPath, nowMs })` → returns `PendingRemoval` shape; validates the session is known (either a saved name or aliases pointing at the path). Does not touch the store and does not emit an event.
+  - `confirmRemoveSession({ pending, sessionPath, nowMs, ttlMs })` → enforces TTL (default 15s) + matching pending path; on success runs `removeSessionRoutingForPath`, persists, emits `sess.remove` with `removedAliases`.
+  - Exposed `REMOVE_CONFIRM_TTL_MS = 15_000`.
+- Added `ui/components/ActionBar.tsx` — Ink component rendering the `[r] rename  [a] alias  [x] remove  [q] quit` bindings plus a yellow inline prompt driven by `ActionMode` (`rename` draft, `alias` draft, `remove-confirm` two-step prompt). Takes optional `message`/`messageTone` to surface action results.
+- Added `tests/ui-actions.test.mjs` with 9 tests:
+  - rename success persists + emits admin event with `{from,to,path}`
+  - duplicate rename rejected, store untouched, no event emitted
+  - alias whitespace normalized (collapses to single space, trims) + admin event fires
+  - empty alias rejected
+  - remove wake alias emits admin `alias.remove`
+  - two-step remove: begin returns pending without writing/emitting, confirm writes + emits `sess.remove` with `removedAliases`
+  - confirm without pending rejected
+  - confirm with a different session path rejected
+  - confirm after TTL rejected
+- Files changed:
+  - `ui/actions.ts` (new)
+  - `ui/components/ActionBar.tsx` (new)
+  - `tests/ui-actions.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` → 75 passing (was 66), 0 failing. `npm run build` + `npm run build:ui` both clean.
+- **Learnings for future iterations:**
+  - `beginRemoveSession` intentionally rejects when there's no saved name and no aliases at the path — otherwise the pane would let operators "remove" a path that isn't in the store (no-op that looks scary). If US-008 surfaces remove for a current-only-not-yet-saved session, add a separate code path rather than relaxing this guard.
+  - Action helpers are stateless: each call `loadPersistedSessionRouting()` → mutates → `persistSessionRouting`. That means US-008's extension-side mtime watcher needs to reload in-process state every time one of these runs from the pane. The admin events fire *after* the write, so the watcher + toast layer should reconcile against the new mtime.
+  - `normalizeAliasInput` only trims and collapses whitespace — it does NOT lowercase, because wake-alias matching in `voice-routing.ts` already normalizes via `normalizeVoiceRouteKey`. If the spec later requires case-normalization at write time, consolidate that inside `normalizeAliasInput` instead of splattering it across call sites.
+  - Tests import the action helpers from `dist/ui/actions.js` (CJS), not source — same pattern as ui-polling. Do NOT import Ink components from `.mjs` tests: Ink is ESM-only and our `dist/ui/components/ActionBar.js` is CJS, which would fail at runtime.
+  - The `PendingRemoval.requestedAt` is the caller's `nowMs`, not `Date.now()`, so tests can use synthetic clocks. The React hook that drives this in the pane should pass `Date.now()` explicitly when constructing pending state.
+  - Event payload shape for `sess.remove` is `{ name, path, removedAliases }` — future pane UI that wants to show "removed X aliases" can read `payload.removedAliases.length` without calling back into the store.
 ---

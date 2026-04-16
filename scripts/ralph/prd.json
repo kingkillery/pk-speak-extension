@@ -119,8 +119,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ui/actions.ts exports renameSession, addWakeAlias, removeWakeAlias, beginRemoveSession, confirmRemoveSession (two-step, 15s TTL) + REMOVE_CONFIRM_TTL_MS. All writes go through loadPersistedSessionRouting -> setNamedSession/setWakeAlias/clearWakeAlias/removeSessionRoutingForPath -> persistSessionRouting, then appendSessionEvent(kind, 'admin', payload). Rename rejects duplicates via setNamedSession's existing error path. Aliases normalized via normalizeAliasInput (trim + collapse whitespace). ui/components/ActionBar.tsx shows [r] rename [a] alias [x] remove [q] quit plus a yellow inline prompt for the active ActionMode (rename/alias draft, remove-confirm). tests/ui-actions.test.mjs adds 9 tests covering rename success, duplicate rename rejected (no event emitted), alias normalized whitespace, empty alias rejected, removeWakeAlias emits alias.remove admin event, two-step remove confirm, no-pending reject, cross-session pending reject, TTL expiry reject."
     },
     {
       "id": "US-008",
