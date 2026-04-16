@@ -152,8 +152,8 @@
         "Manual terminal verification: running /sess ui opens a new Windows terminal running the admin CLI"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New ui-launcher.ts module exports launchSessionManagerPane(options) + resolveAdminScriptPath(). On win32 it spawns cmd.exe with args ['/c','start','', nodeBinary, adminScriptPath] using detached:true, stdio:'ignore', shell:false, windowsHide:false and calls child.unref(). Non-win32 platforms return spawned:false with a manualCommand + reason string so /sess ui can notify the operator to run it by hand. index.ts adds a /sess ui handler that calls launchSessionManagerPane() and notifies; completions + usage text now include 'ui'. tests/ui-launcher.test.mjs adds 4 tests: win32 spawn shape/args/detached flag via a stubbed spawnImpl, non-win32 manual fallback, default admin path resolution, and end-to-end /sess ui notification via the registered command handler."
     },
     {
       "id": "US-010",
