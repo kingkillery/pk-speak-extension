@@ -3,6 +3,14 @@ import os
 import sys
 
 
+def get_env(name, default=""):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value or default
+
+
 def main():
     if len(sys.argv) < 2:
         print(json.dumps({"success": False, "error": "Missing input file"}))
@@ -13,9 +21,9 @@ def main():
         print(json.dumps({"success": False, "error": f"Input file not found: {input_path}"}))
         sys.exit(1)
 
-    model_size = os.environ.get("PI_SPEAK_REMOTE_WHISPER_MODEL") or os.environ.get("WHISPER_MODEL") or "base"
-    device = os.environ.get("WHISPER_DEVICE", "cpu")
-    compute = os.environ.get("WHISPER_COMPUTE", "int8")
+    model_size = get_env("PI_SPEAK_REMOTE_WHISPER_MODEL") or get_env("WHISPER_MODEL") or "base"
+    device = get_env("WHISPER_DEVICE", "cpu")
+    compute = get_env("WHISPER_COMPUTE", "int8")
 
     try:
         from faster_whisper import WhisperModel

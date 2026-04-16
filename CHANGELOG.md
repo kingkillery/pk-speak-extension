@@ -13,6 +13,7 @@ Improved:
 - replaced Vosk wake detection with a free offline `faster-whisper` tiny wake-detection path
 - mono listener copy and docs now reference the new `PK` wake phrase flow
 - listener Python requirements no longer depend on `vosk`
+- listener and local STT worker env handling now ignore blank whisper config values, so an empty `WHISPER_MODEL` no longer crashes transcription
 
 ## 0.2.1
 

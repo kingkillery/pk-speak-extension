@@ -66,6 +66,14 @@ def emit(event_type: str, **kwargs):
     sys.stdout.flush()
 
 
+def get_env(name: str, default: str = "") -> str:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value or default
+
+
 _wakeup_variants: tuple[str, ...] | None = None
 
 
@@ -192,9 +200,9 @@ def get_whisper_model():
             if _whisper_model is None:
                 from faster_whisper import WhisperModel
 
-                device = os.environ.get("WHISPER_DEVICE", "cpu")
-                compute = os.environ.get("WHISPER_COMPUTE", "int8")
-                model_size = os.environ.get("WHISPER_MODEL", WHISPER_MODEL)
+                device = get_env("WHISPER_DEVICE", "cpu")
+                compute = get_env("WHISPER_COMPUTE", "int8")
+                model_size = get_env("WHISPER_MODEL", WHISPER_MODEL)
                 emit("status", message=f"Loading whisper model ({model_size}, {device}, {compute})...")
                 _whisper_model = WhisperModel(model_size, device=device, compute_type=compute)
                 emit("status", message="Whisper model loaded")

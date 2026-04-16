@@ -13,6 +13,14 @@ def emit(payload):
     sys.stdout.flush()
 
 
+def get_env(name, default=""):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value or default
+
+
 def get_model():
     global _model
     if _model is None:
@@ -20,13 +28,9 @@ def get_model():
             if _model is None:
                 from faster_whisper import WhisperModel
 
-                model_size = (
-                    os.environ.get("PI_SPEAK_REMOTE_WHISPER_MODEL")
-                    or os.environ.get("WHISPER_MODEL")
-                    or "base"
-                )
-                device = os.environ.get("WHISPER_DEVICE", "cpu")
-                compute = os.environ.get("WHISPER_COMPUTE", "int8")
+                model_size = get_env("PI_SPEAK_REMOTE_WHISPER_MODEL") or get_env("WHISPER_MODEL") or "base"
+                device = get_env("WHISPER_DEVICE", "cpu")
+                compute = get_env("WHISPER_COMPUTE", "int8")
                 _model = WhisperModel(model_size, device=device, compute_type=compute)
     return _model
 
