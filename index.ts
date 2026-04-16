@@ -19,6 +19,8 @@ import {
 	setWakeAlias,
 } from "./session-routing.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
+import { appendSessionEvent, type SessionEventSource } from "./session-events.js";
+import { parseVoiceSlashCommand } from "./voice-session-command.js";
 import {
 	describeTtsProvider,
 	getAudioMimeType,
@@ -301,6 +303,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let pendingSessionRemoval:
 		| { sessionPath: string; sessionName: string; requestedAt: number }
 		| undefined;
+	let pendingSessSource: SessionEventSource | undefined;
 	let phoneBridge: TelegramPhoneBridge | undefined;
 	let phoneState: PhoneBridgeState = { enabled: false };
 	let remoteServer: ControlServer | undefined;
@@ -1450,24 +1453,16 @@ export default function speakExtension(pi: ExtensionAPI) {
 			target?.ui?.setStatus?.("mono", "mono:queued");
 		}
 
-		// Session commands via voice
-		if (lower.startsWith("new session ")) {
-			const name = text.slice("new session ".length).trim();
-			if (name) {
-				pi.sendUserMessage(`/sess new ${name}`, deliverAs ? { deliverAs } : undefined);
+		// Session commands via voice — route through the parser so mutations are tagged source="voice"
+		const voiceMatch = parseVoiceSlashCommand(text);
+		if (voiceMatch && voiceMatch.command.startsWith("/sess")) {
+			const sessArgs = voiceMatch.command.slice("/sess".length).trim();
+			if (target) {
+				await handleSessCommand(sessArgs, target, "voice");
 				return;
 			}
-		}
-		if (lower.startsWith("switch to session ") || lower.startsWith("switch session ")) {
-			const prefix = lower.startsWith("switch to session ") ? "switch to session " : "switch session ";
-			const name = text.slice(prefix.length).trim();
-			if (name) {
-				pi.sendUserMessage(`/sess switch ${name}`, deliverAs ? { deliverAs } : undefined);
-				return;
-			}
-		}
-		if (lower === "list sessions" || lower === "show sessions") {
-			pi.sendUserMessage("/sess list", deliverAs ? { deliverAs } : undefined);
+			pendingSessSource = "voice";
+			pi.sendUserMessage(voiceMatch.command, deliverAs ? { deliverAs } : undefined);
 			return;
 		}
 
@@ -1534,10 +1529,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("sess", {
-		description: "Manage named sessions (new, switch, list, name)",
-		getArgumentCompletions: (prefix) => getSessCompletions(prefix),
-		handler: async (args, ctx) => {
+	const handleSessCommand = async (args: string, ctx: any, source: SessionEventSource = "command") => {
 			lastCtx = ctx;
 			const raw = args.trim();
 			const parts = raw ? raw.split(/\s+/) : [];
@@ -1572,6 +1564,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							persistSessionRegistry();
 						}
 					}
+					appendSessionEvent("sess.new", source, { name, path: ctx.sessionManager.getSessionFile() || `pending:${name}` });
 					ctx.ui.notify(`New session: ${name}`, "info");
 				}
 				return;
@@ -1589,6 +1582,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				}
 				const result = await ctx.switchSession(sessionMatch.sessionPath);
 				if (!result.cancelled) {
+					appendSessionEvent("sess.switch", source, { name: sessionMatch.sessionName, path: sessionMatch.sessionPath });
 					ctx.ui.notify(`Switched to session: ${sessionMatch.sessionName}`, "info");
 				}
 				return;
@@ -1621,6 +1615,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					pi.setSessionName(nextName);
 				}
 				persistSessionRegistry();
+				appendSessionEvent("sess.rename", source, { from: sessionMatch.sessionName, to: nextName, path: sessionMatch.sessionPath });
 				ctx.ui.notify(`Session renamed: ${sessionMatch.sessionName} → ${nextName}`, "info");
 				return;
 			}
@@ -1644,6 +1639,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					}
 					sessionWakeAliases = cleared.aliases;
 					persistSessionWakeAliases();
+					appendSessionEvent("alias.remove", source, { alias: cleared.alias });
 					ctx.ui.notify(`Wake alias cleared: ${cleared.alias}`, "info");
 					return;
 				}
@@ -1662,6 +1658,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					const nextAlias = setWakeAlias(sessionWakeAliases, aliasName, sessionMatch.sessionPath);
 					sessionWakeAliases = nextAlias.aliases;
 					persistSessionWakeAliases();
+					appendSessionEvent("alias.add", source, { alias: aliasName, name: sessionMatch.sessionName, path: sessionMatch.sessionPath });
 					ctx.ui.notify(`Wake alias "${aliasName}" now routes to ${sessionMatch.sessionName}. Say "${MONO_WAKE_PHRASE} ${aliasName}".`, "info");
 					return;
 				}
@@ -1688,7 +1685,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 				}
 				if (remainder === "switch") {
 					const result = await ctx.switchSession(sessionMatch.sessionPath);
-					if (!result.cancelled) ctx.ui.notify(`Switched to session: ${sessionMatch.sessionName}`, "info");
+					if (!result.cancelled) {
+						appendSessionEvent("sess.switch", source, { name: sessionMatch.sessionName, path: sessionMatch.sessionPath });
+						ctx.ui.notify(`Switched to session: ${sessionMatch.sessionName}`, "info");
+					}
 					return;
 				}
 				if (remainder.startsWith("rename ")) {
@@ -1701,6 +1701,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					sessionRegistry = named.sessions;
 					if (ctx.sessionManager.getSessionFile() === sessionMatch.sessionPath) pi.setSessionName(nextName);
 					persistSessionRegistry();
+					appendSessionEvent("sess.rename", source, { from: sessionMatch.sessionName, to: nextName, path: sessionMatch.sessionPath });
 					ctx.ui.notify(`Session renamed: ${sessionMatch.sessionName} → ${nextName}`, "info");
 					return;
 				}
@@ -1709,6 +1710,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					const nextAlias = setWakeAlias(sessionWakeAliases, aliasName, sessionMatch.sessionPath);
 					sessionWakeAliases = nextAlias.aliases;
 					persistSessionWakeAliases();
+					appendSessionEvent("alias.add", source, { alias: aliasName, name: sessionMatch.sessionName, path: sessionMatch.sessionPath });
 					ctx.ui.notify(`Wake alias "${aliasName}" now routes to ${sessionMatch.sessionName}. Say "${MONO_WAKE_PHRASE} ${aliasName}".`, "info");
 					return;
 				}
@@ -1721,6 +1723,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					}
 					sessionWakeAliases = cleared.aliases;
 					persistSessionWakeAliases();
+					appendSessionEvent("alias.remove", source, { alias: cleared.alias });
 					ctx.ui.notify(`Wake alias cleared: ${cleared.alias}`, "info");
 					return;
 				}
@@ -1754,14 +1757,16 @@ export default function speakExtension(pi: ExtensionAPI) {
 					ctx.ui.notify("No pending session removal confirmation is active.", "error");
 					return;
 				}
-				const removal = removeSessionRoutingForPath(sessionRegistry, sessionWakeAliases, pendingSessionRemoval.sessionPath);
+				const removedPath = pendingSessionRemoval.sessionPath;
+				const removal = removeSessionRoutingForPath(sessionRegistry, sessionWakeAliases, removedPath);
 				sessionRegistry = removal.sessions;
 				sessionWakeAliases = removal.aliases;
-				if (ctx.sessionManager.getSessionFile() === pendingSessionRemoval.sessionPath) pi.setSessionName("");
+				if (ctx.sessionManager.getSessionFile() === removedPath) pi.setSessionName("");
 				persistSessionRegistry();
 				persistSessionWakeAliases();
 				const removedLabel = pendingSessionRemoval.sessionName;
 				pendingSessionRemoval = undefined;
+				appendSessionEvent("sess.remove", source, { name: removedLabel, path: removedPath });
 				ctx.ui.notify(`Removed saved session metadata for ${removedLabel}.`, "info");
 				return;
 			}
@@ -1791,6 +1796,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				pi.setSessionName(rest);
 				sessionRegistry = named.sessions;
 				persistSessionRegistry();
+				appendSessionEvent("sess.name", source, { name: rest, path: sessionFile });
 				ctx.ui.notify(`Session named: ${rest}`, "info");
 				return;
 			}
@@ -1810,6 +1816,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					}
 					sessionWakeAliases = cleared.aliases;
 					persistSessionWakeAliases();
+					appendSessionEvent("alias.remove", source, { alias: cleared.alias });
 					ctx.ui.notify(`Wake alias cleared: ${cleared.alias}`, "info");
 					return;
 				}
@@ -1821,11 +1828,28 @@ export default function speakExtension(pi: ExtensionAPI) {
 				const nextAlias = setWakeAlias(sessionWakeAliases, rest, sessionFile);
 				sessionWakeAliases = nextAlias.aliases;
 				persistSessionWakeAliases();
+				appendSessionEvent("alias.add", source, { alias: rest, name: pi.getSessionName() || "", path: sessionFile });
 				ctx.ui.notify(`Wake alias "${rest}" now routes to ${pi.getSessionName() || "this session"}. Say "${MONO_WAKE_PHRASE} ${rest}".`, "info");
 				return;
 			}
 
 			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|list|name|wake|export] <args>", "error");
+	};
+
+	pi.registerCommand("sess", {
+		description: "Manage named sessions (new, switch, list, name)",
+		getArgumentCompletions: (prefix) => getSessCompletions(prefix),
+		handler: async (args, ctx) => {
+			const source = pendingSessSource ?? "command";
+			pendingSessSource = undefined;
+			await handleSessCommand(args, ctx, source);
+		},
+	});
+
+	pi.registerCommand("_sessVoice", {
+		description: "(internal) voice-originated /sess dispatch",
+		handler: async (args, ctx) => {
+			await handleSessCommand(args, ctx, "voice");
 		},
 	});
 

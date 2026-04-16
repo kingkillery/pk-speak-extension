@@ -11,6 +11,9 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
 - `session-events.ts` signature is `appendSessionEvent(kind, source, payload)` (3-arg, not the 2-arg form mentioned in the PRD prose) so callers pass `source` cleanly per-site. On-disk shape is `{ ts, kind, source, payload }` per spec.
 - `session-events.ts` stores at `dirname(getSessionRoutingStorePath())/session-events.jsonl` — same directory as the routing-store JSON, so env-scoped tests pick it up automatically.
 - `tailSessionEvents` uses line-count offsets. After rotation, `sinceOffset > lines.length` resets to 0, so pane consumers never silently miss events even when the log rotates.
+- The /sess handler body lives in `handleSessCommand(args, ctx, source)`. The public `/sess` command calls it with source='command'; the internal `_sessVoice` command calls it with source='voice'; the Ink pane (US-007) will call it directly with source='admin'. Do not duplicate /sess logic — always thread `source` through a single dispatch.
+- Event kinds in index.ts: `sess.new`, `sess.switch`, `sess.rename`, `sess.remove`, `sess.name`, `alias.add`, `alias.remove`. Fired from both top-level `/sess <sub>` and `/sess edit <name> <action>` proxies. Keep the naming convention (dot-namespaced) when adding new mutations.
+- `pendingSessSource` is the closure-scoped fallback when voice dispatch can't synchronously invoke `handleSessCommand` (e.g. when `target` ctx is missing and we fall through to `pi.sendUserMessage`). Set it just before the sendUserMessage call; the /sess handler consumes and resets it.
 
 ---
 
@@ -52,4 +55,28 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - The pane's polling hook (US-006) should keep a `nextOffset` and pass it back into `tailSessionEvents` each tick; the built-in stale-offset reset handles rotation transparently, so the hook doesn't need its own rotation detection.
   - Do not rename the on-disk fields (`ts`, `kind`, `source`, `payload`) — the PRD spec and US-002 acceptance criteria pin them. If extending, add new fields without breaking the shape `parseEventLine` expects.
   - The PRD described the signature as `appendSessionEvent(kind, payload)`; the actual implementation uses 3 args `(kind, source, payload)` because US-003/US-007 require per-call-site source selection. If a future story insists on the 2-arg form, prefer a wrapper over changing the core signature.
+---
+
+## 2026-04-16 - US-003: Emit session events from voice-originated mutations
+- Refactored /sess handler into `handleSessCommand(args, ctx, source)` declared inside `speakExtension`; public /sess command delegates with source='command'; new internal `_sessVoice` command delegates with source='voice'.
+- `routeVoiceInput` now parses voice text with `parseVoiceSlashCommand`. When the parse result is a `/sess ...` command it calls `handleSessCommand(argsStr, ctx, "voice")` directly; only falls through to `pi.sendUserMessage` if no ctx is available (using `pendingSessSource` as a synchronous hand-off signal).
+- Added `appendSessionEvent(kind, source, payload)` at every /sess mutation path:
+  - top-level: new / switch / rename / confirm remove / name / alias add / alias remove / wake set / wake clear
+  - edit-proxied: edit <name> switch / rename / alias add / alias remove
+- Event payloads carry the session name and path (or alias) per PRD: `sess.new`, `sess.switch`, `sess.rename`, `sess.remove`, `sess.name`, `alias.add`, `alias.remove`.
+- `tests/session-command-integration.test.mjs` adds 3 new cases:
+  - voice rename via `_sessVoice` emits `sess.rename` with source='voice'
+  - voice wake-alias set via `_sessVoice` emits `alias.add` with source='voice'
+  - typed `/sess rename` emits `sess.rename` with source='command' (regression guard)
+- Files changed:
+  - `index.ts`
+  - `tests/session-command-integration.test.mjs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 54 passing (was 51), 0 failing. `npm run build` clean.
+- **Learnings for future iterations:**
+  - The Ink pane's write actions (US-007) should call `handleSessCommand(args, ctx, "admin")` through the same single-dispatch function. To reach the handler from outside `speakExtension`'s closure, the pane will need a third registered entry (e.g. `_sessAdmin`) or a returned dispatcher; keep the pattern consistent with `_sessVoice`.
+  - `routeVoiceInput` previously hand-rolled `new session` / `switch to session` / `list sessions` prefix matching. That inline logic is now replaced by `parseVoiceSlashCommand`, which covers many more phrases (rename, remove, wake add/clear, export, ready checks, attn status). Any new voice phrases should be added to `voice-session-command.ts` — don't re-introduce inline parsing in `index.ts`.
+  - `_sessVoice` is registered as a regular command with an underscore-prefixed name. Operators won't type it, but completion systems may still surface it. If that becomes a UX concern, consider adding a "hidden" flag or filtering underscore-prefixed names at the command layer.
+  - The event on `/sess new` fires *after* `ctx.newSession()` resolves and `setNamedSession` is re-applied with the real path. The payload uses `ctx.sessionManager.getSessionFile() || `pending:${name}`` so the pane still sees an event even when the sessionManager hasn't finalized a path.
 ---

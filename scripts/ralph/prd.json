@@ -50,8 +50,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "/sess handler refactored into handleSessCommand(args, ctx, source); internal _sessVoice command registered for voice dispatch; routeVoiceInput now delegates voice-parsed /sess commands through handleSessCommand with source='voice'; appendSessionEvent fires for new, switch, rename, remove, name, alias.add, alias.remove across both top-level and edit-proxied paths; 3 new integration tests cover voice rename, voice wake-alias set, and typed rename (command source)."
     },
     {
       "id": "US-004",
