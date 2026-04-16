@@ -101,8 +101,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ui/hooks/useSessionStore.ts exports React hook + pure helpers (getRoutingStoreMtime, eventToToast, filterActiveToasts, toastsFromEvents, formatEventMessage, pollTick). pollTick is the single testable tick function the hook composes; store mtime comparison detects external writes, tailSessionEvents(offset) pulls only new events, and toast TTL is enforced by filterActiveToasts with exclusive expiresAt. command-sourced events intentionally do not produce toasts (only voice/admin). ui/components/Toast.tsx renders a bottom Box with colored per-source prefix ('voice: ...' / 'admin: ...') using renderToastLine. tests/ui-polling.test.mjs adds 6 tests: defaults sanity, store-mutation detection across a 500ms+50ms sleep, event-tail-since-offset, TTL boundary (exclusive at exactly ttl), merge+expire behavior in pollTick, and formatEventMessage spec-kind coverage."
     },
     {
       "id": "US-007",
