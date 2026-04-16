@@ -7,6 +7,10 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
 - The repo has a pre-existing WIP commit (be6e70a "pre-ralph checkpoint") with uncommitted index.ts changes that break `tsc`. Those were stashed before starting US-001 so `npm run build` is clean from main. Future iterations touching `index.ts` must not re-introduce those WIP errors.
 - Dashboard activity terms are `busy` / `idle` / `saved` per `docs/SESSION_MANAGER_SPEC.qmd` §Activity model. `busy`=snapshot + phase!=ready, `idle`=snapshot + phase==ready, `saved`=no snapshot.
 - Dashboard entries expose both `current`/`ready` (PRD-native names) and `isCurrent`/`isReady` (legacy aliases) so existing consumers of `buildSessionManagerEntries` keep working.
+- Tests that touch the routing store or event log override `LOCALAPPDATA` and `APPDATA` to a `mkdtempSync` dir; `getStoreRootDir` in `session-routing-store.ts` falls back to `%LOCALAPPDATA% || %APPDATA% || %TEMP% || cwd`. Always restore prior env values in `finally` and `rmSync(root, { recursive, force })`.
+- `session-events.ts` signature is `appendSessionEvent(kind, source, payload)` (3-arg, not the 2-arg form mentioned in the PRD prose) so callers pass `source` cleanly per-site. On-disk shape is `{ ts, kind, source, payload }` per spec.
+- `session-events.ts` stores at `dirname(getSessionRoutingStorePath())/session-events.jsonl` — same directory as the routing-store JSON, so env-scoped tests pick it up automatically.
+- `tailSessionEvents` uses line-count offsets. After rotation, `sinceOffset > lines.length` resets to 0, so pane consumers never silently miss events even when the log rotates.
 
 ---
 
@@ -30,4 +34,22 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - `currentBusy` / `currentReady` overrides only apply to the current session; other sessions resolve activity/ready from their snapshot. This distinction matters when wiring live snapshots into the pane.
   - Uncommitted WIP index.ts changes are stashed (`pre-us001-stash`). Do not drop them — they contain the in-progress /sess handler reshape needed for later stories.
 
+---
+
+## 2026-04-16 - US-002: Add session-events append log module
+- Added `session-events.ts` exporting `appendSessionEvent(kind, source, payload)`, `tailSessionEvents(sinceOffset)`, `getSessionEventsPath`, and the `SessionEvent` / `SessionEventSource` / `TailSessionEventsResult` types.
+- Log file lives at `dirname(getSessionRoutingStorePath())/session-events.jsonl`; each line is a JSON object `{ ts, kind, source, payload }`.
+- Bounded rotation: after every append, the in-memory line array is trimmed to the last 200 entries and rewritten atomically via `writeFileSync` (simpler than append + periodic compaction at this volume).
+- `tailSessionEvents` uses line-count offsets; when `sinceOffset > lines.length` (e.g. caller cached a pre-rotation offset) it resets to 0 rather than returning nothing.
+- Added `tests/session-events.test.mjs` with 4 tests: append shape, tail-from-offset (including empty-state and idle re-poll), rotation at the 200-line boundary, and stale-offset reset.
+- Files changed:
+  - `session-events.ts` (new)
+  - `tests/session-events.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+- Tests: `npm test` → 51 passing (was 47), 0 failing. `npm run build` clean.
+- **Learnings for future iterations:**
+  - US-003 will call `appendSessionEvent` from `index.ts` at every `/sess` mutation. Use `source: "voice"` when the command came in via `parseVoiceSlashCommand` / `parseVoiceBridgePrompt`, otherwise `source: "command"`. Admin-originated writes from the Ink pane use `source: "admin"` (US-007).
+  - The pane's polling hook (US-006) should keep a `nextOffset` and pass it back into `tailSessionEvents` each tick; the built-in stale-offset reset handles rotation transparently, so the hook doesn't need its own rotation detection.
+  - Do not rename the on-disk fields (`ts`, `kind`, `source`, `payload`) — the PRD spec and US-002 acceptance criteria pin them. If extending, add new fields without breaking the shape `parseEventLine` expects.
+  - The PRD described the signature as `appendSessionEvent(kind, payload)`; the actual implementation uses 3 args `(kind, source, payload)` because US-003/US-007 require per-call-site source selection. If a future story insists on the 2-arg form, prefer a wrapper over changing the core signature.
 ---
