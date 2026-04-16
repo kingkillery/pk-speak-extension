@@ -68,8 +68,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Installed ink@^7.0.0 + react@^19.2.5 as deps and @types/react@^19.2.14 as devDep (Ink v7 peer-deps require React >=19.2). Added tsconfig.ui.json with jsx='react', outDir=dist/ui, rootDir=ui, include=ui/**/*.{ts,tsx}. package.json gains script build:ui and bin pi-speak-admin->dist/ui/admin.js. ui/admin.tsx is a stub with shebang that prints usage on --help (exit 0) and a 'stub' message otherwise. Main tsconfig still uses include:['*.ts'] so UI files are not picked up by the main build."
     },
     {
       "id": "US-005",

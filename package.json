@@ -14,6 +14,9 @@
     "pwa"
   ],
   "main": "dist/index.js",
+  "bin": {
+    "pi-speak-admin": "dist/ui/admin.js"
+  },
   "files": [
     "dist",
     "web",
@@ -25,11 +28,14 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:ui": "tsc -p tsconfig.ui.json",
     "test": "npm run build && node --test tests/*.test.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "node-edge-tts": "^1.2.10"
+    "ink": "^7.0.0",
+    "node-edge-tts": "^1.2.10",
+    "react": "^19.2.5"
   },
   "publishConfig": {
     "access": "public"
@@ -37,6 +43,7 @@
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "^0.66.1",
     "@types/node": "^22.15.3",
+    "@types/react": "^19.2.14",
     "typescript": "^5.8.3"
   }
 }

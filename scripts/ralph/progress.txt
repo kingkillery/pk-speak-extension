@@ -3,6 +3,8 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
 
 ## Codebase Patterns
 - Tests import from `dist/`, not source — `npm test` runs `tsc -p tsconfig.json` first. Anything new must compile under the main tsconfig to be test-visible.
+- The project has **two tsconfigs**: `tsconfig.json` (main, include=`["*.ts"]`, outDir=`dist/`) and `tsconfig.ui.json` (Ink pane, include=`["ui/**/*.{ts,tsx}"]`, outDir=`dist/ui/`, jsx=`react`). Main build does *not* pick up UI files because its include pattern is top-level only. Run `npm run build:ui` to compile the pane.
+- Ink/React deps are pinned against Ink v7 peer-deps (React >=19.2): `ink@^7.0.0`, `react@^19.2.5`, `@types/react@^19.2.14`. If Ink bumps major, check peer-deps first (`npm view ink peerDependencies`).
 - Pure helpers live in `session-routing.ts`; `index.ts` composes them but must not fork write paths. Per `docs/SESSION_MANAGER_PANE_PRD.md` Invariant 2, all mutations must flow through `setNamedSession` / `setWakeAlias` / `removeSessionRoutingForPath` + `persistSessionRouting`.
 - The repo has a pre-existing WIP commit (be6e70a "pre-ralph checkpoint") with uncommitted index.ts changes that break `tsc`. Those were stashed before starting US-001 so `npm run build` is clean from main. Future iterations touching `index.ts` must not re-introduce those WIP errors.
 - Dashboard activity terms are `busy` / `idle` / `saved` per `docs/SESSION_MANAGER_SPEC.qmd` §Activity model. `busy`=snapshot + phase!=ready, `idle`=snapshot + phase==ready, `saved`=no snapshot.
@@ -79,4 +81,34 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - `routeVoiceInput` previously hand-rolled `new session` / `switch to session` / `list sessions` prefix matching. That inline logic is now replaced by `parseVoiceSlashCommand`, which covers many more phrases (rename, remove, wake add/clear, export, ready checks, attn status). Any new voice phrases should be added to `voice-session-command.ts` — don't re-introduce inline parsing in `index.ts`.
   - `_sessVoice` is registered as a regular command with an underscore-prefixed name. Operators won't type it, but completion systems may still surface it. If that becomes a UX concern, consider adding a "hidden" flag or filtering underscore-prefixed names at the command layer.
   - The event on `/sess new` fires *after* `ctx.newSession()` resolves and `setNamedSession` is re-applied with the real path. The payload uses `ctx.sessionManager.getSessionFile() || `pending:${name}`` so the pane still sees an event even when the sessionManager hasn't finalized a path.
+---
+
+## 2026-04-16 - US-004: Add Ink build toolchain and admin CLI stub
+- Installed Ink pane dependencies: `ink@^7.0.0`, `react@^19.2.5` (runtime), `@types/react@^19.2.14` (dev). Versions chosen to satisfy Ink v7 peer-deps (`react >=19.2.0`, `@types/react >=19.2.0`).
+- New `tsconfig.ui.json` compiles `ui/**/*.{ts,tsx}` -> `dist/ui/` with `jsx: "react"`, `module/moduleResolution: NodeNext`, `strict: true`. Mirrors the main tsconfig's baseline so output shape is consistent.
+- `package.json` additions:
+  - `bin.pi-speak-admin` -> `dist/ui/admin.js`
+  - `scripts.build:ui` -> `tsc -p tsconfig.ui.json`
+  - `dependencies.ink`, `dependencies.react`, `devDependencies.@types/react`
+- `ui/admin.tsx` is a stub with a `#!/usr/bin/env node` shebang. No React/Ink imports yet (the stub just prints usage) so the `--help` path works before the render code lands. `main(argv)` returns an exit code; we pass it to `process.exit`.
+- Verified:
+  - `npm run build` -> clean (main project typecheck unchanged)
+  - `npm run build:ui` -> clean, produces `dist/ui/admin.js`
+  - `node dist/ui/admin.js --help` -> prints short usage, exits 0
+  - `node dist/ui/admin.js` (no args) -> prints stub message, exits 0
+  - `npm test` -> 54 passing, 0 failing (no regression)
+- Files changed:
+  - `package.json` (deps/scripts/bin)
+  - `package-lock.json` (new deps)
+  - `tsconfig.ui.json` (new)
+  - `ui/admin.tsx` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The main tsconfig uses `include: ["*.ts"]` — a top-level-only glob. UI files placed under `ui/` are automatically excluded from the main build. Preserve this boundary; do not add `ui/**/*` to the main include or the two builds will start stepping on each other in `dist/`.
+  - `tsconfig.ui.json` uses `jsx: "react"` (classic runtime) per AC, so components must `import React from "react"` when they use JSX. For US-005 / US-006 components, remember to add the import even if no React APIs are called directly.
+  - The stub deliberately avoids importing Ink/React so the `--help` path has no module-resolution cost and works in Node even if node_modules is stale. Later iterations that add real rendering should gate the render on not-`--help` so CLI introspection stays fast.
+  - `module: "NodeNext"` + repo package.json (no `"type": "module"`) means `dist/ui/admin.js` is emitted as CommonJS. Ink is ESM-only — when the pane actually renders, either (a) dynamic-import Ink inside an async main, or (b) add a `dist/ui/package.json` with `"type": "module"` via a postbuild step. Do NOT flip the root package.json to `type: module` — that would break every existing `dist/*.js` consumer.
+  - Shebangs on `.tsx` source files survive tsc compilation, so `ui/admin.tsx`'s `#!/usr/bin/env node` ends up on line 1 of `dist/ui/admin.js` and the `bin` entry works without a wrapper.
+  - Ink v7 requires React 19.2+. If a future story needs `ink-testing-library`, check its peer-deps compatibility with Ink v7 before pinning. An older ink-testing-library may pin Ink v4/v5 and force a downgrade.
 ---

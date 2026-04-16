@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist/ui",
+    "rootDir": "ui",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": false,
+    "jsx": "react"
+  },
+  "include": [
+    "ui/**/*.ts",
+    "ui/**/*.tsx"
+  ]
+}
