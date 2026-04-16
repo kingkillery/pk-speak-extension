@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 const speakExtensionModule = await import("../dist/index.js");
 const speakExtension = speakExtensionModule.default?.default || speakExtensionModule.default || speakExtensionModule;
 
+const { tailSessionEvents } = await import("../dist/session-events.js");
+
 function makePi() {
 	const commands = new Map();
 	const events = new Map();
@@ -253,5 +255,75 @@ test("/sess export reports the persisted store path and current routing snapshot
 		assert.match(message, /Sessions: bugfix/i);
 		assert.match(message, /Wake aliases: one → bugfix/i);
 		assert.match(message, /Store:/i);
+	});
+});
+
+test("voice-originated /sess rename emits a session event with source='voice'", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const sess = pi.commands.get("sess");
+		const voiceSess = pi.commands.get("_sessVoice");
+		assert.ok(sess);
+		assert.ok(voiceSess, "extension should register _sessVoice internal entry");
+
+		const ctx = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("name bugfix", ctx);
+
+		const baseline = tailSessionEvents();
+		await voiceSess.handler("rename bugfix voice-bugfix", ctx);
+
+		const { events } = tailSessionEvents(baseline.nextOffset);
+		const rename = events.find((event) => event.kind === "sess.rename");
+		assert.ok(rename, `expected a sess.rename event, saw: ${events.map((e) => e.kind).join(", ") || "none"}`);
+		assert.equal(rename.source, "voice");
+		assert.equal(rename.payload.from, "bugfix");
+		assert.equal(rename.payload.to, "voice-bugfix");
+		assert.equal(pi.getSessionName(), "voice-bugfix");
+	});
+});
+
+test("voice-originated /sess wake alias set emits alias.add with source='voice'", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const sess = pi.commands.get("sess");
+		const voiceSess = pi.commands.get("_sessVoice");
+		assert.ok(sess);
+		assert.ok(voiceSess);
+
+		const ctx = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("name bugfix", ctx);
+
+		const baseline = tailSessionEvents();
+		await voiceSess.handler("wake one", ctx);
+
+		const { events } = tailSessionEvents(baseline.nextOffset);
+		const aliasAdd = events.find((event) => event.kind === "alias.add");
+		assert.ok(aliasAdd, `expected an alias.add event, saw: ${events.map((e) => e.kind).join(", ") || "none"}`);
+		assert.equal(aliasAdd.source, "voice");
+		assert.equal(aliasAdd.payload.alias, "one");
+		assert.equal(aliasAdd.payload.path, "/sessions/bugfix.jsonl");
+	});
+});
+
+test("typed /sess rename emits a session event with source='command'", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const sess = pi.commands.get("sess");
+		assert.ok(sess);
+
+		const ctx = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("name bugfix", ctx);
+
+		const baseline = tailSessionEvents();
+		await sess.handler("rename bugfix command-bugfix", ctx);
+
+		const { events } = tailSessionEvents(baseline.nextOffset);
+		const rename = events.find((event) => event.kind === "sess.rename");
+		assert.ok(rename, "expected a sess.rename event from typed /sess");
+		assert.equal(rename.source, "command");
+		assert.equal(rename.payload.to, "command-bugfix");
 	});
 });
