@@ -17,8 +17,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "buildSessionDashboard selector added in session-routing.ts; formatSessionManagerSummary refactored to wrap it; 3 new tests cover busy/idle/saved and unnamed-current projection."
     },
     {
       "id": "US-002",

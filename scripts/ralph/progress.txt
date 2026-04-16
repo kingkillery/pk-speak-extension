@@ -1,3 +1,33 @@
 # Ralph Progress Log
 Started: 2026-04-16 11:25:18 Mountain Daylight Time
+
+## Codebase Patterns
+- Tests import from `dist/`, not source — `npm test` runs `tsc -p tsconfig.json` first. Anything new must compile under the main tsconfig to be test-visible.
+- Pure helpers live in `session-routing.ts`; `index.ts` composes them but must not fork write paths. Per `docs/SESSION_MANAGER_PANE_PRD.md` Invariant 2, all mutations must flow through `setNamedSession` / `setWakeAlias` / `removeSessionRoutingForPath` + `persistSessionRouting`.
+- The repo has a pre-existing WIP commit (be6e70a "pre-ralph checkpoint") with uncommitted index.ts changes that break `tsc`. Those were stashed before starting US-001 so `npm run build` is clean from main. Future iterations touching `index.ts` must not re-introduce those WIP errors.
+- Dashboard activity terms are `busy` / `idle` / `saved` per `docs/SESSION_MANAGER_SPEC.qmd` §Activity model. `busy`=snapshot + phase!=ready, `idle`=snapshot + phase==ready, `saved`=no snapshot.
+- Dashboard entries expose both `current`/`ready` (PRD-native names) and `isCurrent`/`isReady` (legacy aliases) so existing consumers of `buildSessionManagerEntries` keep working.
+
+---
+
+## 2026-04-16 - US-001: Extract buildSessionDashboard selector
+- Added `buildSessionDashboard(options): SessionDashboard` in `session-routing.ts`. Returns `{ current, ready, storePath, sessions: [{ name, path, current, ready, activity, aliases, ... }] }`.
+- Refactored `formatSessionManagerSummary` to consume `buildSessionDashboard` (single source of truth, text output unchanged).
+- `buildSessionManagerEntries` now thin-wraps `buildSessionDashboard(...).sessions` for back-compat.
+- Exposed `SessionActivity`, `SessionDashboard`, `SessionDashboardEntry`, `BuildSessionDashboardOptions` types.
+- Added 3 new tests in `tests/session-routing.test.mjs`:
+  - busy/idle/saved activity resolution with ready-state projection
+  - empty state + unnamed current session handling
+  - text-projection parity between `formatSessionManagerSummary` and `buildSessionDashboard`
+- Files changed:
+  - `session-routing.ts`
+  - `tests/session-routing.test.mjs`
+  - `scripts/ralph/prd.json`
+- Tests: `npm test` → 47 passing (was 44), 0 failing.
+- **Learnings for future iterations:**
+  - The Ink pane (US-005) should import `buildSessionDashboard` from `dist/session-routing.js` or compile through `tsconfig.ui.json` alongside the source. Do not duplicate the activity resolution.
+  - Entry fields intentionally carry *both* `current`/`ready` and `isCurrent`/`isReady`; UI code should prefer the short names from the PRD spec, but the legacy aliases protect any existing consumer.
+  - `currentBusy` / `currentReady` overrides only apply to the current session; other sessions resolve activity/ready from their snapshot. This distinction matters when wiring live snapshots into the pane.
+  - Uncommitted WIP index.ts changes are stashed (`pre-us001-stash`). Do not drop them — they contain the in-progress /sess handler reshape needed for later stories.
+
 ---
