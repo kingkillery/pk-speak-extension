@@ -34,8 +34,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "session-events.ts exports appendSessionEvent(kind, source, payload) + tailSessionEvents(sinceOffset); stored at dirname(getSessionRoutingStorePath())/session-events.jsonl; 200-line bounded rotation; 4 new tests cover append shape, tail-from-offset, rotation at boundary, and stale-offset reset."
     },
     {
       "id": "US-003",
