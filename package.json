@@ -29,7 +29,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:ui": "tsc -p tsconfig.ui.json",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run build && npm run build:ui && node --test tests/*.test.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

@@ -16,6 +16,11 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
 - The /sess handler body lives in `handleSessCommand(args, ctx, source)`. The public `/sess` command calls it with source='command'; the internal `_sessVoice` command calls it with source='voice'; the Ink pane (US-007) will call it directly with source='admin'. Do not duplicate /sess logic — always thread `source` through a single dispatch.
 - Event kinds in index.ts: `sess.new`, `sess.switch`, `sess.rename`, `sess.remove`, `sess.name`, `alias.add`, `alias.remove`. Fired from both top-level `/sess <sub>` and `/sess edit <name> <action>` proxies. Keep the naming convention (dot-namespaced) when adding new mutations.
 - `pendingSessSource` is the closure-scoped fallback when voice dispatch can't synchronously invoke `handleSessCommand` (e.g. when `target` ctx is missing and we fall through to `pi.sendUserMessage`). Set it just before the sendUserMessage call; the /sess handler consumes and resets it.
+- Main `tsconfig.json` now has `composite: true` + `declaration: true`. This lets `tsconfig.ui.json` reference it and import from top-level source (`../session-routing.js` etc.) without TS6059 rootDir errors. Side effects: `dist/*.d.ts` and `dist/tsconfig.tsbuildinfo` are now emitted. Do not turn composite/declaration back off without also repointing ui imports.
+- `npm test` runs `npm run build && npm run build:ui && node --test tests/*.test.mjs` — UI dist must compile for any test that imports `dist/ui/**`. If a future story forbids the UI build from gating tests, split into separate scripts.
+- `ui/selectors.ts` is the read-side bridge: `loadSessionDashboard({ runtimeSnapshots?, currentSessionPath?, ... })` loads the persisted routing store + reads attention snapshots via `readAttentionSnapshots()` unless `runtimeSnapshots` is provided (tests inject). Also exports `projectDashboardRow` (marker+tags) and `projectDashboardLines` (full multi-line text projection) so pane and tests share one formatter.
+- Dashboard layout rule: when rendering session rows, the width is `Math.max(16, longest-name)`. Keep this in both `Dashboard.tsx` and `projectDashboardLines` in sync if either changes.
+- `ink-testing-library` at npm tip is v4 which pins Ink v5 peer-deps — incompatible with our Ink v7. Until a v7-compatible release exists, tests must use the pure-function snapshot fallback (import from `dist/ui/selectors.js`, do not import Ink components in `.mjs` tests; Ink is ESM-only while our CJS `dist/` would fail at runtime).
 
 ---
 
@@ -111,4 +116,34 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - `module: "NodeNext"` + repo package.json (no `"type": "module"`) means `dist/ui/admin.js` is emitted as CommonJS. Ink is ESM-only — when the pane actually renders, either (a) dynamic-import Ink inside an async main, or (b) add a `dist/ui/package.json` with `"type": "module"` via a postbuild step. Do NOT flip the root package.json to `type: module` — that would break every existing `dist/*.js` consumer.
   - Shebangs on `.tsx` source files survive tsc compilation, so `ui/admin.tsx`'s `#!/usr/bin/env node` ends up on line 1 of `dist/ui/admin.js` and the `bin` entry works without a wrapper.
   - Ink v7 requires React 19.2+. If a future story needs `ink-testing-library`, check its peer-deps compatibility with Ink v7 before pinning. An older ink-testing-library may pin Ink v4/v5 and force a downgrade.
+---
+
+## 2026-04-16 - US-005: Render Ink dashboard view
+- Added `ui/selectors.ts` with `loadSessionDashboard(options)` (reads persisted routing store, falls back to `readAttentionSnapshots()` for snapshots unless `runtimeSnapshots` is supplied), plus `projectDashboardRow` and `projectDashboardLines` pure-text helpers used by both the pane and tests.
+- Added `ui/components/Dashboard.tsx` — Ink component rendering header (`pi-speak session manager`) + store path, blank separator, `Current:` / `Ready:` lines, and per-session rows with focus marker `>`, `[current]`/`[ready]`/`[activity]` tags, and `aliases:` suffix. Uses `Box`/`Text` from ink with color on ready/busy tags. No ActionBar (US-007 territory).
+- Enabled TypeScript project references so the UI build can import from top-level source without tripping rootDir:
+  - `tsconfig.json` gains `composite: true` + `declaration: true`.
+  - `tsconfig.ui.json` gains `references: [{ "path": "./tsconfig.json" }]`.
+  - `npm test` now runs `npm run build && npm run build:ui && node --test tests/*.test.mjs` so `dist/ui/selectors.js` is available to tests.
+- Added `tests/ui-dashboard.test.mjs` with three fixtures per AC:
+  - current+busy only (single current session actively working, one alias)
+  - saved-only (two sessions in routing store, zero runtime snapshots, all rows tagged `[saved]`)
+  - ready+busy (3 sessions: current=Voice busy, voice-bugfix ready+idle, voice-docs saved)
+  plus a diagnostic assertion that records ink-testing-library availability (currently absent; v4 pins Ink v5 so fallback-to-selector-snapshot is in effect).
+- Files changed:
+  - `ui/selectors.ts` (new)
+  - `ui/components/Dashboard.tsx` (new)
+  - `tsconfig.json`
+  - `tsconfig.ui.json`
+  - `package.json` (test script)
+  - `tests/ui-dashboard.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 60 passing (was 54), 0 failing. `npm run build` + `npm run build:ui` both clean. `node dist/ui/admin.js --help` still prints the stub usage (no regression).
+- **Learnings for future iterations:**
+  - US-006's polling hook should call `loadSessionDashboard()` without arguments to pick up the latest persisted sessions + live attention snapshots; pass `{ runtimeSnapshots: [] }` only for tests that want to isolate the store.
+  - The dashboard layout uses `Math.max(16, longest-name)` for the name column. Keep that invariant across `Dashboard.tsx` and `projectDashboardLines` — breaking it will desync the pane from any text-based snapshot tests.
+  - Do NOT import Ink components from `.mjs` tests. `ink` is ESM-only (`"type":"module"`) but our `dist/ui/components/Dashboard.js` is CommonJS (package has no `"type":"module"`). Tests must stick to `dist/ui/selectors.js` or static text projections until the pane gets real runtime wiring.
+  - `composite: true` in the main tsconfig is load-bearing for the UI build — removing it reinstates the TS6059 "not under rootDir" errors for `ui/selectors.ts`. Future stories touching the main tsconfig should leave composite + declaration alone.
+  - US-007's ActionBar and write actions should live in new `ui/components/ActionBar.tsx` + `ui/actions.ts`. Extend `loadSessionDashboard`/selectors only if the write paths actually need new projected shape; keep Dashboard.tsx presentational.
 ---

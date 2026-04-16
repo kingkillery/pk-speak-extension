@@ -85,8 +85,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ui/selectors.ts exports loadSessionDashboard (wraps buildSessionDashboard over loadPersistedSessionRouting + readAttentionSnapshots) and projectDashboardLines/Row pure-text helpers. ui/components/Dashboard.tsx is an Ink component rendering header+store, current/ready lines, and per-session rows with [current]/[ready]/[activity] tags and aliases. tests/ui-dashboard.test.mjs covers 3 fixtures (current+busy only, saved-only, ready+busy) by snapshotting the selector output and the projected text lines (ink-testing-library fallback, since v4 of that lib pins Ink v5 and is incompatible with our Ink v7). Main tsconfig gained composite:true+declaration:true so tsconfig.ui.json can reference it; npm test now runs both builds before node --test."
     },
     {
       "id": "US-006",
