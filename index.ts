@@ -21,6 +21,7 @@ import {
 } from "./session-routing.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, type SessionEventSource } from "./session-events.js";
+import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
 import {
 	describeTtsProvider,
@@ -505,7 +506,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getSessCompletions = (prefix: string) => {
 		const trimmed = prefix.trimStart();
 		const complete = (value: string, label = value) => ({ value, label });
-		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "list", "name", "wake", "slots", "export"];
+		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "list", "name", "wake", "slots", "ui", "export"];
 		if (!trimmed) return top.map((value) => complete(value));
 		const firstSpace = trimmed.indexOf(" ");
 		if (firstSpace === -1) return top.filter((value) => value.startsWith(trimmed.toLowerCase())).map((value) => complete(value));
@@ -1596,6 +1597,17 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (sub === "ui") {
+				const result = launchSessionManagerPane();
+				if (result.spawned) {
+					ctx.ui.notify(`Opened session manager pane in a new terminal. Run manually with: ${result.manualCommand}`, "info");
+				} else {
+					const reason = result.reason ? `${result.reason} ` : "";
+					ctx.ui.notify(`${reason}Run manually: ${result.manualCommand}`, "warning");
+				}
+				return;
+			}
+
 			if (sub === "new") {
 				const name = rest || `session-${Date.now()}`;
 				const conflictText = getSessionRouteConflictText(name, ctx);
@@ -1888,7 +1900,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|list|name|wake|slots|export] <args>", "error");
+			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|list|name|wake|slots|ui|export] <args>", "error");
 	};
 
 	pi.registerCommand("sess", {

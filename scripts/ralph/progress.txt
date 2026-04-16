@@ -244,3 +244,30 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - The watcher re-broadcasts `SESSION_REGISTRY_TYPE` + `SESSION_WAKE_ALIAS_TYPE` entries via `pi.appendEntry` so any component subscribed to those session-branch entry types sees the change. Don't swap this for a narrower broadcast without also updating anything that consumes those entry types.
   - US-009's `/sess ui` launcher doesn't need to poke the extension when the pane writes — the watcher handles it. The pane's `ui/actions.ts` already calls `persistSessionRouting` directly; no additional IPC needed.
 ---
+
+## 2026-04-16 - US-009: /sess ui launcher
+- Added `ui-launcher.ts` exporting `launchSessionManagerPane(options)` + `resolveAdminScriptPath(override?)`. Options: `{ spawnImpl?, platform?, adminScriptPath?, nodeBinary? }` so tests can inject a stub spawn. Result shape: `{ spawned, command?, args?, detached?, manualCommand, reason? }`.
+- win32 path: spawns `cmd.exe /c start "" <nodeBinary> <adminScriptPath>` with `detached:true, stdio:'ignore', windowsHide:false, shell:false` and calls `child.unref()`. The empty-string title argument is required so `start` doesn't misinterpret a quoted node path as a window title.
+- Non-win32: short-circuits to `{ spawned:false, manualCommand, reason }` with the node+script command the operator can run manually.
+- If the caller relies on the default admin path and it doesn't exist (e.g. `npm run build:ui` hasn't run yet), the launcher returns `spawned:false` with a reason pointing at the build step. When an explicit `adminScriptPath` is passed, the check is skipped — tests don't need to stage a real file.
+- `index.ts` adds the `ui` subcommand branch in `handleSessCommand`, calling `launchSessionManagerPane()` and notifying the operator with either an "Opened session manager pane..." info message or a warning that includes the manual command. The `top` array in `getSessCompletions` and the usage-error text both include `ui`.
+- `tests/ui-launcher.test.mjs` adds 4 tests:
+  - win32 spawn: asserts `command='cmd.exe'`, `args=['/c','start','', nodeBinary, adminScriptPath]`, `detached:true`, `stdio:'ignore'`, `shell:false`, and that `child.unref()` is called.
+  - linux platform fallback: asserts `spawned:false`, no spawn calls, manualCommand contains both node binary and admin path, reason mentions the platform.
+  - default admin path resolution: asserts `resolveAdminScriptPath()` returns a non-empty string ending in `admin.js`.
+  - end-to-end `/sess ui`: registers the extension, invokes the `sess` command with `"ui"`, asserts a notification is produced referencing the pane.
+- Files changed:
+  - `ui-launcher.ts` (new)
+  - `index.ts` (import, /sess ui branch, completions, usage text)
+  - `tests/ui-launcher.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 81 passing (was 77), 0 failing. `npm run build` + `npm run build:ui` both clean. `node dist/ui/admin.js --help` still prints the stub usage (no regression).
+- **Learnings for future iterations:**
+  - `process.execPath` is the reliable way to reference the same Node binary the extension is running under — much safer than a bare `"node"` which depends on PATH in the new terminal. Both get passed through cmd's `start` cleanly.
+  - On Windows, `start`'s first positional argument is interpreted as a window *title* when quoted; always pass an empty `""` title before the actual command or quoted paths with spaces will break. Our args use `["/c", "start", ""]` as the fixed prefix.
+  - `SpawnOptions` from `node:child_process` needs `windowsHide:false` for `start` to actually show the new terminal window; `windowsHide:true` (used elsewhere in `index.ts` for the audio player) would suppress the new window on Win32.
+  - Tests mock `child_process.spawn` via dependency injection (`options.spawnImpl`) rather than module-level mocking. That pattern matches the rest of this repo: pure helpers take injected collaborators, and `index.ts` composes them with defaults. Keep the default path honest (`spawn as unknown as SpawnLike`) so production stays on the real `child_process.spawn`.
+  - US-010 (docs) still needs to surface `/sess ui` in `docs/SESSION_OPERATIONS.md`, `README.md`, `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, and `CHANGELOG.md`. The usage-error text inside `handleSessCommand` is now the single-source inline listing — any new subcommand added here should be added there too.
+  - Manual terminal verification (per AC): running `/sess ui` inside pi-coding-agent opens a new Windows terminal that runs `node dist/ui/admin.js`. The stub prints its usage message and exits 0, which closes the window — when US-005/US-006 rendering is wired into `admin.tsx`, the window will stay alive for the Ink loop.
+---
