@@ -271,3 +271,32 @@ Started: 2026-04-16 11:25:18 Mountain Daylight Time
   - US-010 (docs) still needs to surface `/sess ui` in `docs/SESSION_OPERATIONS.md`, `README.md`, `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, and `CHANGELOG.md`. The usage-error text inside `handleSessCommand` is now the single-source inline listing — any new subcommand added here should be added there too.
   - Manual terminal verification (per AC): running `/sess ui` inside pi-coding-agent opens a new Windows terminal that runs `node dist/ui/admin.js`. The stub prints its usage message and exits 0, which closes the window — when US-005/US-006 rendering is wired into `admin.tsx`, the window will stay alive for the Ink loop.
 ---
+
+## 2026-04-16 - US-010: Update operator documentation
+- `docs/SESSION_OPERATIONS.md`: added `/sess ui` to the main-commands block and a new "Management Pane" section covering the launcher behavior (new terminal on Windows, manual fallback elsewhere, detached from pi-coding-agent), pane layout, `[r]/[a]/[x]/[q]` keybindings, voice/admin toast band, and extension-side reload on external store writes.
+- `README.md`: `/sess` command family now lists `/sess ui`, with a paragraph describing the interactive pane, keybindings, and 1s refresh on external mutations.
+- `SKILL.md`: `/sess` bullet enumerates the pane; added "open the session manager pane" to the natural-phrase examples so the skill maps spoken language to `/sess ui`.
+- `AGENTS.md`: Key Files table gains `session-events.ts`, `ui-launcher.ts`, and the `ui/admin.tsx` / `ui/components/*.tsx` / `ui/actions.ts` / `ui/hooks/useSessionStore.ts` / `ui/selectors.ts` entries. Important Patterns adds `/sess ui` under Operator UX plus a new "Pane write path" invariant (load → pure helper → persist → appendSessionEvent + extension watcher reload).
+- `CLAUDE.md`: Core Command Families line references `/sess ui`; Important Source Map enumerates `session-events.ts`, `ui-launcher.ts`, and the `ui/` tree so repo-local agents can find pane files.
+- `CHANGELOG.md` Unreleased: added two Added bullets — `/sess ui` pane feature (with keybinding + toast detail) and the voice/admin event log + routing-store watcher that powers cross-surface reload.
+- `docs/VOICE_SESSION_BRIDGE.md`: command-bridge table adds "open the session manager pane" → `/sess ui`.
+- `docs/SESSION_MANAGER_SPEC.qmd`: Primary command list adds `/sess ui` for parity with the live spec.
+- Verified `handleSessCommand` usage text in `index.ts:1903` already includes `ui` (landed in US-009); no stale listings remain.
+- Files changed:
+  - `docs/SESSION_OPERATIONS.md`
+  - `docs/VOICE_SESSION_BRIDGE.md`
+  - `docs/SESSION_MANAGER_SPEC.qmd`
+  - `README.md`
+  - `SKILL.md`
+  - `AGENTS.md`
+  - `CLAUDE.md`
+  - `CHANGELOG.md`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 81 passing, 0 failing. `npm run build` + `npm run build:ui` both clean (no code changes this iteration).
+- **Learnings for future iterations:**
+  - Whenever you add a new `/sess` subcommand, update all of: `index.ts` usage-error text, `getSessCompletions`, `docs/SESSION_OPERATIONS.md` main-commands block, `README.md` /sess block, `docs/SESSION_MANAGER_SPEC.qmd` Primary list, and `docs/VOICE_SESSION_BRIDGE.md` command-bridge table if a natural phrase maps to it. The `CLAUDE.md` Rules For Changes list codifies this but it's easy to miss `SESSION_MANAGER_SPEC.qmd` since it's a spec doc, not an operator doc.
+  - `CHANGELOG.md` entries that describe the pane should note that external writes reconcile via the routing-store watcher — operators won't find this in the `/sess` output, so surfacing it in Added/Improved prevents the "I made a change in the pane, why isn't it in /sess?" support question.
+  - `SKILL.md`'s natural-phrase examples drive voice-language → slash-command mapping. When a new slash command is documentable in voice (e.g. "open the session manager pane"), add both the SKILL phrase and a row in `docs/VOICE_SESSION_BRIDGE.md`'s command-bridge table. The actual parser (`voice-session-command.ts`) may or may not already cover the phrase; check before claiming it's wired.
+  - All stories in the PRD are now passing. Next iteration should stop.
+---
