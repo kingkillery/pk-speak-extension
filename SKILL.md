@@ -1,6 +1,6 @@
 ---
 name: pi-speak
-description: "Voice, wake-word, and remote-control extension for Pi. Use when the user wants spoken replies, the always-listening `pi mono` flow, Telegram phone access, the built-in mobile web app, or HTTP/Unified Remote control. Triggers on /speak, /mono, /phone, /remote, text-to-speech, voice input, or remote voice access."
+description: "Voice, wake-word, and remote-control extension for Pi. Use when the user wants spoken replies, the always-listening `PK` wake phrase flow, Telegram phone access, the built-in mobile web app, or HTTP/Unified Remote control. Triggers on /speak, /mono, /phone, /remote, text-to-speech, voice input, or remote voice access."
 ---
 
 # pi-speak-pk
@@ -42,11 +42,11 @@ Auto mode resolves in this order:
 
 `/mono` runs a background Python listener:
 
-- Vosk handles the low-cost wake phrase detection
+- `faster-whisper` tiny handles wake phrase detection
 - `faster-whisper` handles actual utterance transcription
-- the wake phrase is still `pi mono`
+- the default wake phrase is `PK`
 - the keep-alive timeout defaults to 15 seconds
-- `pi mono <session-name>` can target a named session
+- `PK <session-name>` can target a named session when the target name is spoken clearly
 
 ## Remote Paths
 

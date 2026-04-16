@@ -18,7 +18,7 @@ npm test         # Run tests
 | `stt.ts` | Remote voice transcription |
 | `phone-bridge.ts` | Telegram transport |
 | `control-server.ts` | HTTP API + mobile web app server |
-| `listener/listener.py` | Always-on wake-word listener (Vosk + faster-whisper) |
+| `listener/listener.py` | Always-on wake-word listener (faster-whisper wake detection + transcription) |
 | `web/remote/index.html` | Mobile web app |
 
 ## TTS Provider Logic
@@ -33,7 +33,7 @@ Auto-resolution order:
 
 - **API keys for audio**: Use dedicated keys (`PI_SPEAK_OPENAI_KEY`, `ELEVENLABS_API_KEY`) not the general LLM keys
 - **Edge TTS**: Bundled via `node-edge-tts`, no external deps needed
-- **Local voice (`/mono`)**: Requires Python stack with `vosk`, `faster-whisper`, `sounddevice`, `numpy`
+- **Local voice (`/mono`)**: Requires Python stack with `faster-whisper`, `sounddevice`, `numpy`
 - **Remote audio**: Browser mic requires HTTPS origin (use Tailscale Serve or tunnel)
 
 ## Testing
