@@ -14,5 +14,8 @@
   "include": [
     "ui/**/*.ts",
     "ui/**/*.tsx"
+  ],
+  "references": [
+    { "path": "./tsconfig.json" }
   ]
 }
