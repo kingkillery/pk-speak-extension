@@ -8,6 +8,11 @@ const speakExtensionModule = await import("../dist/index.js");
 const speakExtension = speakExtensionModule.default?.default || speakExtensionModule.default || speakExtensionModule;
 
 const { tailSessionEvents } = await import("../dist/session-events.js");
+const { persistSessionRouting, loadPersistedSessionRouting } = await import("../dist/session-routing-store.js");
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function makePi() {
 	const commands = new Map();
@@ -258,6 +263,29 @@ test("/sess export reports the persisted store path and current routing snapshot
 	});
 });
 
+test("/sess slots reports PK1 and PK2 lane assignments", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const sess = pi.commands.get("sess");
+		assert.ok(sess);
+
+		const bugfix = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("name bugfix", bugfix);
+		await sess.handler("wake one", bugfix);
+
+		const research = makeCtx("/sessions/research.jsonl");
+		await sess.handler("name research", research);
+		await sess.handler("wake two", research);
+		await sess.handler("slots", research);
+
+		const message = research.notifications.at(-1)?.message || "";
+		assert.match(message, /Compact routes/i);
+		assert.match(message, /- 1: bugfix via one/i);
+		assert.match(message, /- 2: research via two/i);
+	});
+});
+
 test("voice-originated /sess rename emits a session event with source='voice'", async () => {
 	await withSessionStore(async () => {
 		const pi = makePi();
@@ -304,6 +332,57 @@ test("voice-originated /sess wake alias set emits alias.add with source='voice'"
 		assert.equal(aliasAdd.source, "voice");
 		assert.equal(aliasAdd.payload.alias, "one");
 		assert.equal(aliasAdd.payload.path, "/sessions/bugfix.jsonl");
+	});
+});
+
+test("/sess reflects external routing-store mutations on the next call", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const sess = pi.commands.get("sess");
+		assert.ok(sess);
+
+		// Prime an in-process session so the extension has a baseline mtime.
+		const owner = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("name bugfix", owner);
+
+		// Externally mutate the routing store (e.g. the Ink pane wrote to it).
+		await sleep(20);
+		const persisted = loadPersistedSessionRouting();
+		persistSessionRouting({
+			sessions: { ...persisted.sessions, "voice-research": "/sessions/research.jsonl" },
+			aliases: { ...persisted.aliases, two: "/sessions/research.jsonl" },
+		});
+
+		// The next /sess call should reconcile against the external mutation.
+		const viewer = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("", viewer);
+
+		const message = viewer.notifications.at(-1)?.message || "";
+		assert.match(message, /voice-research/i, `missing externally-added session in: ${message}`);
+		assert.match(message, /aliases: two/i, `missing externally-added alias in: ${message}`);
+	});
+});
+
+test("external routing-store writes do not trigger a feedback reload loop", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const sess = pi.commands.get("sess");
+		assert.ok(sess);
+
+		const ctx = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("name bugfix", ctx);
+
+		// Self-writes should not be interpreted as external mutations by the next call.
+		const beforeAppended = pi.appended.length;
+		await sess.handler("", ctx);
+		const afterAppended = pi.appended.length;
+		assert.equal(
+			afterAppended,
+			beforeAppended,
+			"self-triggered /sess writes must not re-broadcast registry/alias state entries",
+		);
 	});
 });
 

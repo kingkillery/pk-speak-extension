@@ -135,8 +135,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "index.ts now watches the routing store via fs.watchFile (interval: 500ms) and calls reloadSessionRoutingIfExternallyChanged() at the top of handleSessCommand. Own-write dedupe uses lastRoutingStoreMtime, captured inside persistSessionRoutingState after each persist. External mtime bumps reload sessionRegistry + sessionWakeAliases from loadPersistedSessionRouting and re-broadcast SESSION_REGISTRY_TYPE and SESSION_WAKE_ALIAS_TYPE. Watcher started in session_start and torn down in session_shutdown. Two new tests in session-command-integration.test.mjs: external mutation reflected on next /sess call, and self-writes do not trigger a feedback re-broadcast."
     },
     {
       "id": "US-009",

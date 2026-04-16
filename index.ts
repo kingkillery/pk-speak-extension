@@ -1,6 +1,6 @@
 ﻿import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
@@ -13,6 +13,7 @@ import {
 	clearWakeAlias,
 	describeSessionRoutingStore,
 	findSessionNameByPath,
+	formatCompactRouteSlots,
 	formatSessionManagerSummary,
 	removeSessionRoutingForPath,
 	setNamedSession,
@@ -304,6 +305,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		| { sessionPath: string; sessionName: string; requestedAt: number }
 		| undefined;
 	let pendingSessSource: SessionEventSource | undefined;
+	let lastRoutingStoreMtime = 0;
+	let routingStoreWatcherPath: string | undefined;
 	let phoneBridge: TelegramPhoneBridge | undefined;
 	let phoneState: PhoneBridgeState = { enabled: false };
 	let remoteServer: ControlServer | undefined;
@@ -408,8 +411,54 @@ export default function speakExtension(pi: ExtensionAPI) {
 		pi.appendEntry<RemoteState>(REMOTE_STATE_TYPE, { ...remoteState });
 	};
 
+	const readRoutingStoreMtime = () => {
+		try {
+			return statSync(getSessionRoutingStorePath()).mtimeMs;
+		} catch {
+			return 0;
+		}
+	};
+
 	const persistSessionRoutingState = () => {
 		persistSessionRouting({ sessions: sessionRegistry, aliases: sessionWakeAliases });
+		lastRoutingStoreMtime = readRoutingStoreMtime();
+	};
+
+	const broadcastSessionRoutingState = () => {
+		pi.appendEntry<SessionRegistryState>(SESSION_REGISTRY_TYPE, { sessions: sessionRegistry });
+		pi.appendEntry<SessionWakeAliasState>(SESSION_WAKE_ALIAS_TYPE, { aliases: sessionWakeAliases });
+	};
+
+	const reloadSessionRoutingIfExternallyChanged = () => {
+		const mtime = readRoutingStoreMtime();
+		if (!mtime || mtime === lastRoutingStoreMtime) return false;
+		const persisted = loadPersistedSessionRouting();
+		sessionRegistry = { ...persisted.sessions };
+		sessionWakeAliases = { ...persisted.aliases };
+		lastRoutingStoreMtime = mtime;
+		broadcastSessionRoutingState();
+		return true;
+	};
+
+	const startRoutingStoreWatcher = () => {
+		if (routingStoreWatcherPath) return;
+		const storePath = getSessionRoutingStorePath();
+		try {
+			watchFile(storePath, { interval: 500 }, () => {
+				reloadSessionRoutingIfExternallyChanged();
+			});
+			routingStoreWatcherPath = storePath;
+		} catch {
+			routingStoreWatcherPath = undefined;
+		}
+	};
+
+	const stopRoutingStoreWatcher = () => {
+		if (!routingStoreWatcherPath) return;
+		try {
+			unwatchFile(routingStoreWatcherPath);
+		} catch {}
+		routingStoreWatcherPath = undefined;
 	};
 
 	const persistSessionRegistry = () => {
@@ -456,7 +505,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getSessCompletions = (prefix: string) => {
 		const trimmed = prefix.trimStart();
 		const complete = (value: string, label = value) => ({ value, label });
-		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "list", "name", "wake", "export"];
+		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "list", "name", "wake", "slots", "export"];
 		if (!trimmed) return top.map((value) => complete(value));
 		const firstSpace = trimmed.indexOf(" ");
 		if (firstSpace === -1) return top.filter((value) => value.startsWith(trimmed.toLowerCase())).map((value) => complete(value));
@@ -1531,6 +1580,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const handleSessCommand = async (args: string, ctx: any, source: SessionEventSource = "command") => {
 			lastCtx = ctx;
+			reloadSessionRoutingIfExternallyChanged();
 			const raw = args.trim();
 			const parts = raw ? raw.split(/\s+/) : [];
 			const sub = (parts[0] || "").toLowerCase();
@@ -1538,6 +1588,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 			if (!sub || sub === "list" || sub === "status") {
 				ctx.ui.notify(getSessionManagerSummaryText(ctx), "info");
+				return;
+			}
+
+			if (sub === "slots") {
+				ctx.ui.notify(formatCompactRouteSlots({ sessions: sessionRegistry, aliases: sessionWakeAliases }), "info");
 				return;
 			}
 
@@ -1833,11 +1888,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|list|name|wake|export] <args>", "error");
+			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|list|name|wake|slots|export] <args>", "error");
 	};
 
 	pi.registerCommand("sess", {
-		description: "Manage named sessions (new, switch, list, name)",
+		description: "Manage named sessions, wake aliases, slot lanes, and routing summaries",
 		getArgumentCompletions: (prefix) => getSessCompletions(prefix),
 		handler: async (args, ctx) => {
 			const source = pendingSessSource ?? "command";
@@ -2082,6 +2137,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const persistedRouting = loadPersistedSessionRouting();
 		sessionRegistry = { ...persistedRouting.sessions };
 		sessionWakeAliases = { ...persistedRouting.aliases };
+		lastRoutingStoreMtime = readRoutingStoreMtime();
+		startRoutingStoreWatcher();
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type === "custom" && entry.customType === STATE_TYPE && entry.data && typeof entry.data === "object") {
 				const savedSpeakState = entry.data as SpeakState;
@@ -2173,6 +2230,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (Object.keys(sessionWakeAliases).length > 0) {
 			persistSessionWakeAliases();
 		}
+		stopRoutingStoreWatcher();
 		rejectPendingPhoneTurn("Session changed before the phone reply was delivered");
 		remoteTurnManager.cancelAll("Session changed before queued remote work completed");
 		stopSpeaking(ctx);
