@@ -119,24 +119,43 @@ Ready:   <ready-session-list>
 
   > <name>   [current] [ready] [activity]   aliases: <a>, <b>
     <name>   [activity]
+
+Compact routes
+1: <session> via one
+2: <session> via two
+
+Focused session
+<name> (ready · busy)
+path: <session-path>
+aliases: <a>, <b>
+compact: PK1 via one
 ```
 
-`activity` is one of `busy`, `idle`, or `saved`, matching the inline state surfaced by `/sess`.
+`activity` is one of `busy`, `idle`, or `saved`, matching the inline state surfaced by `/sess`. The footer always tracks the currently focused row so you can see the exact session path, aliases, and compact-lane ownership before renaming or removing anything.
 
 ### Keybindings
 
 ```text
+[↑]/[↓]      move focus between sessions
+[tab]        cycle focus forward
+[j]/[k]      vim-style focus movement
 [r] rename   prompt for a new name and persist it
 [a] alias    prompt for a new wake alias on the focused session
 [x] remove   two-step confirm; cancels after 15s
 [q] quit     close the pane
+[enter]      submit rename/alias input
+[esc]        cancel the active rename/alias/remove prompt
 ```
 
-Rename rejects duplicate names. Aliases are normalized for whitespace before they hit the routing store. Remove is the same two-step gesture as `/sess remove` plus `/sess confirm remove`.
+Rename rejects duplicate names. Aliases are normalized for whitespace before they hit the routing store. Remove is the same two-step gesture as `/sess remove` plus `/sess confirm remove`. The pane seeds its current-session context from the Pi window that launched `/sess ui`. On startup it focuses that current row when one is available; otherwise it focuses the first saved session.
 
 ### Toasts
 
-The pane tails the voice/admin event log and surfaces a one-line toast at the bottom for three seconds:
+The pane tails the voice/admin event log and surfaces a one-line toast at the bottom for three seconds.
+
+For automation or testing, `pi-speak-admin --snapshot` renders one deterministic Ink frame to stdout and exits without starting the live input loop.
+
+The toast band uses:
 
 - `voice: ...` (magenta) — change came from a spoken `/sess` phrase, e.g. "rename bugfix to voice-bugfix"
 - `admin: ...` (cyan) — change came from a pane keybinding

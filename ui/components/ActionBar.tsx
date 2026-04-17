@@ -13,7 +13,7 @@ export type ActionBarProps = {
 	messageTone?: "info" | "error";
 };
 
-const KEYBINDINGS = "[r] rename  [a] alias  [x] remove  [q] quit";
+const KEYBINDINGS = "[↑↓/tab/jk] move  [r] rename  [a] alias  [x] remove  [enter] submit  [esc] cancel  [q] quit";
 
 function promptFor(mode: ActionMode): string | undefined {
 	if (mode.kind === "rename") return `rename ${mode.sessionName} -> ${mode.draft}_`;

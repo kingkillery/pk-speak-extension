@@ -47,15 +47,37 @@ test("launchSessionManagerPane spawns cmd.exe with start on win32", () => {
 			platform: "win32",
 			adminScriptPath: adminPath,
 			nodeBinary: "C:/node/node.exe",
+			currentSessionPath: "/sessions/bugfix.jsonl",
+			currentSessionName: "voice bugfix",
 		});
 
 		assert.equal(result.spawned, true);
 		assert.equal(result.command, "cmd.exe");
 		assert.equal(result.detached, true);
-		assert.deepEqual(result.args, ["/c", "start", "", "C:/node/node.exe", adminPath]);
+		assert.deepEqual(result.args, [
+			"/c",
+			"start",
+			"",
+			"C:/node/node.exe",
+			adminPath,
+			"--current-path",
+			"/sessions/bugfix.jsonl",
+			"--current-name",
+			"voice bugfix",
+		]);
 		assert.equal(stub.calls.length, 1);
 		assert.equal(stub.calls[0].command, "cmd.exe");
-		assert.deepEqual(stub.calls[0].args, ["/c", "start", "", "C:/node/node.exe", adminPath]);
+		assert.deepEqual(stub.calls[0].args, [
+			"/c",
+			"start",
+			"",
+			"C:/node/node.exe",
+			adminPath,
+			"--current-path",
+			"/sessions/bugfix.jsonl",
+			"--current-name",
+			"voice bugfix",
+		]);
 		assert.equal(stub.calls[0].options.detached, true);
 		assert.equal(stub.calls[0].options.stdio, "ignore");
 		assert.equal(stub.calls[0].options.shell, false);
@@ -71,12 +93,16 @@ test("launchSessionManagerPane returns manual command on unsupported platforms",
 			platform: "linux",
 			adminScriptPath: adminPath,
 			nodeBinary: "/usr/bin/node",
+			currentSessionPath: "/sessions/bugfix.jsonl",
+			currentSessionName: "voice bugfix",
 		});
 
 		assert.equal(result.spawned, false);
 		assert.equal(stub.calls.length, 0);
 		assert.match(result.manualCommand, /\/usr\/bin\/node/);
 		assert.match(result.manualCommand, new RegExp(adminPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(result.manualCommand, /--current-path/);
+		assert.match(result.manualCommand, /--current-name/);
 		assert.ok(result.reason && /linux/i.test(result.reason));
 	});
 });

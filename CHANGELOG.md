@@ -24,6 +24,8 @@ Added:
 
 Improved:
 
+- the `pi-speak-admin` CLI now runs the real Ink session-manager app instead of a placeholder stub, seeds current-session context from the launching Pi window, supports keyboard focus movement plus inline rename/alias/remove prompts, shows compact PK1/PK2 route lanes and a focused-session footer, and exposes `--snapshot` for deterministic Ink-frame rendering in tests and automation
+- package publishing now builds both the core extension and the UI bundle before release so the shipped `pi-speak-admin` binary stays in sync
 - operator guidance now uses a bridge-first documentation flow with `/sess` positioned as the main session-manager interface and `/attn` positioned as the advanced/debug broker surface
 - voice session-control phrases like `show sessions`, `current session`, `remove session bugfix`, and `what's ready` now prefer the `/sess` manager surface
 - `/sess` argument completions are now context-aware and can suggest session-specific edit and alias-removal shortcuts

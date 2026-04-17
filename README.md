@@ -223,7 +223,7 @@ This matters because `PK bugfix` can route voice input to that named session, wh
 
 Use `/sess slots` when you want the explicit compact-route view for `PK one` / `PK1` and `PK two` / `PK2`.
 
-Use `/sess ui` to open the interactive session manager pane in a separate terminal. It mirrors the `/sess` dashboard, refreshes within one second of external mutations, and adds keybindings `[r] rename`, `[a] alias`, `[x] remove`, and `[q] quit`. Voice and pane-driven changes surface as toasts at the bottom of the pane.
+Use `/sess ui` to open the interactive session manager pane in a separate terminal. It mirrors the `/sess` dashboard, refreshes within one second of external mutations, supports focus movement with `↑` / `↓`, `tab`, or `j` / `k`, shows the compact PK1/PK2 route lanes plus a focused-session footer, and adds keybindings `[r] rename`, `[a] alias`, `[x] remove`, and `[q] quit`. Voice and pane-driven changes surface as toasts at the bottom of the pane.
 
 For operator details, see:
 - `docs/VOICE_SESSION_BRIDGE.md`
