@@ -1,4 +1,4 @@
-import { findNormalizedKey } from "./voice-routing.js";
+import { findNormalizedKey, getNumericRouteFamily } from "./voice-routing.js";
 
 export type SessionRoutingState = {
 	sessions: Record<string, string>;
@@ -225,6 +225,85 @@ export function buildSessionManagerEntries(options: BuildSessionDashboardOptions
 	return buildSessionDashboard(options).sessions;
 }
 
+export type CompactRouteSlot = {
+	family: "1" | "2";
+	sessionName?: string;
+	sessionPath?: string;
+	labels: string[];
+	status: "mapped" | "unassigned" | "ambiguous";
+};
+
+export function buildCompactRouteSlots(state: SessionRoutingState): CompactRouteSlot[] {
+	const families: Array<"1" | "2"> = ["1", "2"];
+	return families.map((family) => {
+		const aliasEntries = Object.entries(state.aliases).filter(([alias]) => getNumericRouteFamily(alias) === family);
+		const aliasPaths = [...new Set(aliasEntries.map(([, path]) => path))];
+		if (aliasPaths.length > 1) {
+			return {
+				family,
+				labels: aliasEntries.map(([alias]) => alias).sort((a, b) => a.localeCompare(b)),
+				status: "ambiguous" as const,
+			};
+		}
+		if (aliasPaths.length === 1) {
+			return {
+				family,
+				sessionPath: aliasPaths[0],
+				sessionName: findSessionNameByPath(aliasPaths[0], state.sessions) || "unknown",
+				labels: aliasEntries.map(([alias]) => alias).sort((a, b) => a.localeCompare(b)),
+				status: "mapped" as const,
+			};
+		}
+
+		const sessionEntries = Object.entries(state.sessions).filter(([name]) => getNumericRouteFamily(name) === family);
+		const sessionPaths = [...new Set(sessionEntries.map(([, path]) => path))];
+		if (sessionPaths.length > 1) {
+			return {
+				family,
+				labels: sessionEntries.map(([name]) => name).sort((a, b) => a.localeCompare(b)),
+				status: "ambiguous" as const,
+			};
+		}
+		if (sessionPaths.length === 1) {
+			return {
+				family,
+				sessionPath: sessionPaths[0],
+				sessionName: findSessionNameByPath(sessionPaths[0], state.sessions) || "unknown",
+				labels: sessionEntries.map(([name]) => name).sort((a, b) => a.localeCompare(b)),
+				status: "mapped" as const,
+			};
+		}
+		return {
+			family,
+			labels: [],
+			status: "unassigned" as const,
+		};
+	});
+}
+
+export function formatCompactRouteSlotSummary(state: SessionRoutingState) {
+	return buildCompactRouteSlots(state)
+		.map((slot) => `${slot.family} → ${slot.status === "mapped" ? slot.sessionName : slot.status === "ambiguous" ? "ambiguous" : "none"}`)
+		.join(", ");
+}
+
+export function formatCompactRouteSlots(state: SessionRoutingState) {
+	const lines = ["Compact routes"];
+	for (const slot of buildCompactRouteSlots(state)) {
+		if (slot.status === "mapped") {
+			const labels = slot.labels.length > 0 ? ` via ${slot.labels.join(", ")}` : "";
+			lines.push(`- ${slot.family}: ${slot.sessionName}${labels} (say \"PK ${slot.family === "1" ? "one\" or \"PK1" : "two\" or \"PK2"}\")`);
+			continue;
+		}
+		if (slot.status === "ambiguous") {
+			lines.push(`- ${slot.family}: ambiguous (${slot.labels.join(", ") || "multiple mappings"})`);
+			continue;
+		}
+		lines.push(`- ${slot.family}: unassigned (use /sess wake ${slot.family === "1" ? "one" : "two"})`);
+	}
+	return lines.join("\n");
+}
+
 export function formatSessionManagerSummary(options: BuildSessionDashboardOptions) {
 	const dashboard = buildSessionDashboard(options);
 	const lines = [
@@ -232,6 +311,7 @@ export function formatSessionManagerSummary(options: BuildSessionDashboardOption
 		`Ready: ${dashboard.ready.length > 0 ? dashboard.ready.join(", ") : "none"}`,
 	];
 	if (dashboard.storePath) lines.push(`Store: ${dashboard.storePath}`);
+	lines.push(`Slots: ${formatCompactRouteSlotSummary({ sessions: options.sessions, aliases: options.aliases })}`);
 	lines.push("Sessions");
 	if (dashboard.sessions.length === 0) {
 		lines.push("- none");
@@ -248,6 +328,7 @@ export function formatSessionManagerSummary(options: BuildSessionDashboardOption
 			lines.push(`  aliases: ${entry.aliases.join(", ")}`);
 		}
 	}
+	lines.push('Tip: use /sess slots for PK one/PK1 and PK two/PK2 lane details.');
 	return lines.join("\n");
 }
 
