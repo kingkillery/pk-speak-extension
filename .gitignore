@@ -19,6 +19,9 @@ Thumbs.db
 # Install helper scripts
 _install.ps1
 
+# Alternate package-manager lockfile noise (npm is canonical here)
+pnpm-lock.yaml
+
 # Local Android / device-testing artifacts
 android-app-*.png
 app-qr*.png
@@ -42,3 +45,6 @@ android-app/local.properties
 .omc/state/sessions/*
 !.omc/state/.gitkeep
 !.omc/state/sessions/.gitkeep
+
+# Ralph local session scratch
+scripts/ralph/.last-branch
