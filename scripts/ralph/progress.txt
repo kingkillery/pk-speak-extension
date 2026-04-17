@@ -1,3 +1,302 @@
 # Ralph Progress Log
 Started: 2026-04-16 11:25:18 Mountain Daylight Time
+
+## Codebase Patterns
+- Tests import from `dist/`, not source — `npm test` runs `tsc -p tsconfig.json` first. Anything new must compile under the main tsconfig to be test-visible.
+- The project has **two tsconfigs**: `tsconfig.json` (main, include=`["*.ts"]`, outDir=`dist/`) and `tsconfig.ui.json` (Ink pane, include=`["ui/**/*.{ts,tsx}"]`, outDir=`dist/ui/`, jsx=`react`). Main build does *not* pick up UI files because its include pattern is top-level only. Run `npm run build:ui` to compile the pane.
+- Ink/React deps are pinned against Ink v7 peer-deps (React >=19.2): `ink@^7.0.0`, `react@^19.2.5`, `@types/react@^19.2.14`. If Ink bumps major, check peer-deps first (`npm view ink peerDependencies`).
+- Pure helpers live in `session-routing.ts`; `index.ts` composes them but must not fork write paths. Per `docs/SESSION_MANAGER_PANE_PRD.md` Invariant 2, all mutations must flow through `setNamedSession` / `setWakeAlias` / `removeSessionRoutingForPath` + `persistSessionRouting`.
+- The repo has a pre-existing WIP commit (be6e70a "pre-ralph checkpoint") with uncommitted index.ts changes that break `tsc`. Those were stashed before starting US-001 so `npm run build` is clean from main. Future iterations touching `index.ts` must not re-introduce those WIP errors.
+- Dashboard activity terms are `busy` / `idle` / `saved` per `docs/SESSION_MANAGER_SPEC.qmd` §Activity model. `busy`=snapshot + phase!=ready, `idle`=snapshot + phase==ready, `saved`=no snapshot.
+- Dashboard entries expose both `current`/`ready` (PRD-native names) and `isCurrent`/`isReady` (legacy aliases) so existing consumers of `buildSessionManagerEntries` keep working.
+- Tests that touch the routing store or event log override `LOCALAPPDATA` and `APPDATA` to a `mkdtempSync` dir; `getStoreRootDir` in `session-routing-store.ts` falls back to `%LOCALAPPDATA% || %APPDATA% || %TEMP% || cwd`. Always restore prior env values in `finally` and `rmSync(root, { recursive, force })`.
+- `session-events.ts` signature is `appendSessionEvent(kind, source, payload)` (3-arg, not the 2-arg form mentioned in the PRD prose) so callers pass `source` cleanly per-site. On-disk shape is `{ ts, kind, source, payload }` per spec.
+- `session-events.ts` stores at `dirname(getSessionRoutingStorePath())/session-events.jsonl` — same directory as the routing-store JSON, so env-scoped tests pick it up automatically.
+- `tailSessionEvents` uses line-count offsets. After rotation, `sinceOffset > lines.length` resets to 0, so pane consumers never silently miss events even when the log rotates.
+- The /sess handler body lives in `handleSessCommand(args, ctx, source)`. The public `/sess` command calls it with source='command'; the internal `_sessVoice` command calls it with source='voice'; the Ink pane (US-007) will call it directly with source='admin'. Do not duplicate /sess logic — always thread `source` through a single dispatch.
+- Event kinds in index.ts: `sess.new`, `sess.switch`, `sess.rename`, `sess.remove`, `sess.name`, `alias.add`, `alias.remove`. Fired from both top-level `/sess <sub>` and `/sess edit <name> <action>` proxies. Keep the naming convention (dot-namespaced) when adding new mutations.
+- `pendingSessSource` is the closure-scoped fallback when voice dispatch can't synchronously invoke `handleSessCommand` (e.g. when `target` ctx is missing and we fall through to `pi.sendUserMessage`). Set it just before the sendUserMessage call; the /sess handler consumes and resets it.
+- Main `tsconfig.json` now has `composite: true` + `declaration: true`. This lets `tsconfig.ui.json` reference it and import from top-level source (`../session-routing.js` etc.) without TS6059 rootDir errors. Side effects: `dist/*.d.ts` and `dist/tsconfig.tsbuildinfo` are now emitted. Do not turn composite/declaration back off without also repointing ui imports.
+- `npm test` runs `npm run build && npm run build:ui && node --test tests/*.test.mjs` — UI dist must compile for any test that imports `dist/ui/**`. If a future story forbids the UI build from gating tests, split into separate scripts.
+- `ui/selectors.ts` is the read-side bridge: `loadSessionDashboard({ runtimeSnapshots?, currentSessionPath?, ... })` loads the persisted routing store + reads attention snapshots via `readAttentionSnapshots()` unless `runtimeSnapshots` is provided (tests inject). Also exports `projectDashboardRow` (marker+tags) and `projectDashboardLines` (full multi-line text projection) so pane and tests share one formatter.
+- Dashboard layout rule: when rendering session rows, the width is `Math.max(16, longest-name)`. Keep this in both `Dashboard.tsx` and `projectDashboardLines` in sync if either changes.
+- `ink-testing-library` at npm tip is v4 which pins Ink v5 peer-deps — incompatible with our Ink v7. Until a v7-compatible release exists, tests must use the pure-function snapshot fallback (import from `dist/ui/selectors.js`, do not import Ink components in `.mjs` tests; Ink is ESM-only while our CJS `dist/` would fail at runtime).
+- UI hook pattern: put IO + React wiring in `ui/hooks/*.ts`, but expose pure helpers (`pollTick`, `eventToToast`, `filterActiveToasts`, `formatEventMessage`) alongside the hook so `.mjs` tests can exercise the tick semantics without importing React. React 19 ships CJS so the hook file itself is importable from CJS `dist/`, but importing the hook *function* from `.mjs` will attempt to load React — tests should prefer the pure helpers.
+- Toast policy: only `voice` and `admin` events produce toasts (`command`-sourced events are suppressed because the operator typed them and already has feedback inline). Toast `expiresAt` is *exclusive* — `filterActiveToasts` drops entries where `expiresAt <= now`, so a toast created at t0 with ttl=3000 is gone at exactly t0+3000.
+- Pane-side admin writes (`ui/actions.ts`) follow a fixed shape: `loadPersistedSessionRouting()` → apply a pure helper from `session-routing.ts` (`setNamedSession` / `setWakeAlias` / `clearWakeAlias` / `removeSessionRoutingForPath`) → `persistSessionRouting` → `appendSessionEvent(kind, "admin", payload)`. Any new pane write must preserve this order. Guard errors via the pure helper's `ok:false` path so no event fires on a rejected mutation.
+- `beginRemoveSession` does not mutate the store or emit an event; only `confirmRemoveSession` writes. TTL (`REMOVE_CONFIRM_TTL_MS`, default 15s) is enforced on the `pending.requestedAt` → `confirm.nowMs` delta so tests can pass synthetic clocks.
+- External-write reconciliation in `index.ts`: `lastRoutingStoreMtime` is captured inside `persistSessionRoutingState` after every self-write, and `reloadSessionRoutingIfExternallyChanged()` (called at the top of `handleSessCommand` and by the `fs.watchFile` watcher) short-circuits when the current mtime matches — so self-writes don't feedback-loop. Any new /sess mutation path MUST call `persistSessionRoutingState` (not `persistSessionRouting` directly) so the mtime tracker stays consistent.
+
+---
+
+## 2026-04-16 - US-001: Extract buildSessionDashboard selector
+- Added `buildSessionDashboard(options): SessionDashboard` in `session-routing.ts`. Returns `{ current, ready, storePath, sessions: [{ name, path, current, ready, activity, aliases, ... }] }`.
+- Refactored `formatSessionManagerSummary` to consume `buildSessionDashboard` (single source of truth, text output unchanged).
+- `buildSessionManagerEntries` now thin-wraps `buildSessionDashboard(...).sessions` for back-compat.
+- Exposed `SessionActivity`, `SessionDashboard`, `SessionDashboardEntry`, `BuildSessionDashboardOptions` types.
+- Added 3 new tests in `tests/session-routing.test.mjs`:
+  - busy/idle/saved activity resolution with ready-state projection
+  - empty state + unnamed current session handling
+  - text-projection parity between `formatSessionManagerSummary` and `buildSessionDashboard`
+- Files changed:
+  - `session-routing.ts`
+  - `tests/session-routing.test.mjs`
+  - `scripts/ralph/prd.json`
+- Tests: `npm test` → 47 passing (was 44), 0 failing.
+- **Learnings for future iterations:**
+  - The Ink pane (US-005) should import `buildSessionDashboard` from `dist/session-routing.js` or compile through `tsconfig.ui.json` alongside the source. Do not duplicate the activity resolution.
+  - Entry fields intentionally carry *both* `current`/`ready` and `isCurrent`/`isReady`; UI code should prefer the short names from the PRD spec, but the legacy aliases protect any existing consumer.
+  - `currentBusy` / `currentReady` overrides only apply to the current session; other sessions resolve activity/ready from their snapshot. This distinction matters when wiring live snapshots into the pane.
+  - Uncommitted WIP index.ts changes are stashed (`pre-us001-stash`). Do not drop them — they contain the in-progress /sess handler reshape needed for later stories.
+
+---
+
+## 2026-04-16 - US-002: Add session-events append log module
+- Added `session-events.ts` exporting `appendSessionEvent(kind, source, payload)`, `tailSessionEvents(sinceOffset)`, `getSessionEventsPath`, and the `SessionEvent` / `SessionEventSource` / `TailSessionEventsResult` types.
+- Log file lives at `dirname(getSessionRoutingStorePath())/session-events.jsonl`; each line is a JSON object `{ ts, kind, source, payload }`.
+- Bounded rotation: after every append, the in-memory line array is trimmed to the last 200 entries and rewritten atomically via `writeFileSync` (simpler than append + periodic compaction at this volume).
+- `tailSessionEvents` uses line-count offsets; when `sinceOffset > lines.length` (e.g. caller cached a pre-rotation offset) it resets to 0 rather than returning nothing.
+- Added `tests/session-events.test.mjs` with 4 tests: append shape, tail-from-offset (including empty-state and idle re-poll), rotation at the 200-line boundary, and stale-offset reset.
+- Files changed:
+  - `session-events.ts` (new)
+  - `tests/session-events.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+- Tests: `npm test` → 51 passing (was 47), 0 failing. `npm run build` clean.
+- **Learnings for future iterations:**
+  - US-003 will call `appendSessionEvent` from `index.ts` at every `/sess` mutation. Use `source: "voice"` when the command came in via `parseVoiceSlashCommand` / `parseVoiceBridgePrompt`, otherwise `source: "command"`. Admin-originated writes from the Ink pane use `source: "admin"` (US-007).
+  - The pane's polling hook (US-006) should keep a `nextOffset` and pass it back into `tailSessionEvents` each tick; the built-in stale-offset reset handles rotation transparently, so the hook doesn't need its own rotation detection.
+  - Do not rename the on-disk fields (`ts`, `kind`, `source`, `payload`) — the PRD spec and US-002 acceptance criteria pin them. If extending, add new fields without breaking the shape `parseEventLine` expects.
+  - The PRD described the signature as `appendSessionEvent(kind, payload)`; the actual implementation uses 3 args `(kind, source, payload)` because US-003/US-007 require per-call-site source selection. If a future story insists on the 2-arg form, prefer a wrapper over changing the core signature.
+---
+
+## 2026-04-16 - US-003: Emit session events from voice-originated mutations
+- Refactored /sess handler into `handleSessCommand(args, ctx, source)` declared inside `speakExtension`; public /sess command delegates with source='command'; new internal `_sessVoice` command delegates with source='voice'.
+- `routeVoiceInput` now parses voice text with `parseVoiceSlashCommand`. When the parse result is a `/sess ...` command it calls `handleSessCommand(argsStr, ctx, "voice")` directly; only falls through to `pi.sendUserMessage` if no ctx is available (using `pendingSessSource` as a synchronous hand-off signal).
+- Added `appendSessionEvent(kind, source, payload)` at every /sess mutation path:
+  - top-level: new / switch / rename / confirm remove / name / alias add / alias remove / wake set / wake clear
+  - edit-proxied: edit <name> switch / rename / alias add / alias remove
+- Event payloads carry the session name and path (or alias) per PRD: `sess.new`, `sess.switch`, `sess.rename`, `sess.remove`, `sess.name`, `alias.add`, `alias.remove`.
+- `tests/session-command-integration.test.mjs` adds 3 new cases:
+  - voice rename via `_sessVoice` emits `sess.rename` with source='voice'
+  - voice wake-alias set via `_sessVoice` emits `alias.add` with source='voice'
+  - typed `/sess rename` emits `sess.rename` with source='command' (regression guard)
+- Files changed:
+  - `index.ts`
+  - `tests/session-command-integration.test.mjs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 54 passing (was 51), 0 failing. `npm run build` clean.
+- **Learnings for future iterations:**
+  - The Ink pane's write actions (US-007) should call `handleSessCommand(args, ctx, "admin")` through the same single-dispatch function. To reach the handler from outside `speakExtension`'s closure, the pane will need a third registered entry (e.g. `_sessAdmin`) or a returned dispatcher; keep the pattern consistent with `_sessVoice`.
+  - `routeVoiceInput` previously hand-rolled `new session` / `switch to session` / `list sessions` prefix matching. That inline logic is now replaced by `parseVoiceSlashCommand`, which covers many more phrases (rename, remove, wake add/clear, export, ready checks, attn status). Any new voice phrases should be added to `voice-session-command.ts` — don't re-introduce inline parsing in `index.ts`.
+  - `_sessVoice` is registered as a regular command with an underscore-prefixed name. Operators won't type it, but completion systems may still surface it. If that becomes a UX concern, consider adding a "hidden" flag or filtering underscore-prefixed names at the command layer.
+  - The event on `/sess new` fires *after* `ctx.newSession()` resolves and `setNamedSession` is re-applied with the real path. The payload uses `ctx.sessionManager.getSessionFile() || `pending:${name}`` so the pane still sees an event even when the sessionManager hasn't finalized a path.
+---
+
+## 2026-04-16 - US-004: Add Ink build toolchain and admin CLI stub
+- Installed Ink pane dependencies: `ink@^7.0.0`, `react@^19.2.5` (runtime), `@types/react@^19.2.14` (dev). Versions chosen to satisfy Ink v7 peer-deps (`react >=19.2.0`, `@types/react >=19.2.0`).
+- New `tsconfig.ui.json` compiles `ui/**/*.{ts,tsx}` -> `dist/ui/` with `jsx: "react"`, `module/moduleResolution: NodeNext`, `strict: true`. Mirrors the main tsconfig's baseline so output shape is consistent.
+- `package.json` additions:
+  - `bin.pi-speak-admin` -> `dist/ui/admin.js`
+  - `scripts.build:ui` -> `tsc -p tsconfig.ui.json`
+  - `dependencies.ink`, `dependencies.react`, `devDependencies.@types/react`
+- `ui/admin.tsx` is a stub with a `#!/usr/bin/env node` shebang. No React/Ink imports yet (the stub just prints usage) so the `--help` path works before the render code lands. `main(argv)` returns an exit code; we pass it to `process.exit`.
+- Verified:
+  - `npm run build` -> clean (main project typecheck unchanged)
+  - `npm run build:ui` -> clean, produces `dist/ui/admin.js`
+  - `node dist/ui/admin.js --help` -> prints short usage, exits 0
+  - `node dist/ui/admin.js` (no args) -> prints stub message, exits 0
+  - `npm test` -> 54 passing, 0 failing (no regression)
+- Files changed:
+  - `package.json` (deps/scripts/bin)
+  - `package-lock.json` (new deps)
+  - `tsconfig.ui.json` (new)
+  - `ui/admin.tsx` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- **Learnings for future iterations:**
+  - The main tsconfig uses `include: ["*.ts"]` — a top-level-only glob. UI files placed under `ui/` are automatically excluded from the main build. Preserve this boundary; do not add `ui/**/*` to the main include or the two builds will start stepping on each other in `dist/`.
+  - `tsconfig.ui.json` uses `jsx: "react"` (classic runtime) per AC, so components must `import React from "react"` when they use JSX. For US-005 / US-006 components, remember to add the import even if no React APIs are called directly.
+  - The stub deliberately avoids importing Ink/React so the `--help` path has no module-resolution cost and works in Node even if node_modules is stale. Later iterations that add real rendering should gate the render on not-`--help` so CLI introspection stays fast.
+  - `module: "NodeNext"` + repo package.json (no `"type": "module"`) means `dist/ui/admin.js` is emitted as CommonJS. Ink is ESM-only — when the pane actually renders, either (a) dynamic-import Ink inside an async main, or (b) add a `dist/ui/package.json` with `"type": "module"` via a postbuild step. Do NOT flip the root package.json to `type: module` — that would break every existing `dist/*.js` consumer.
+  - Shebangs on `.tsx` source files survive tsc compilation, so `ui/admin.tsx`'s `#!/usr/bin/env node` ends up on line 1 of `dist/ui/admin.js` and the `bin` entry works without a wrapper.
+  - Ink v7 requires React 19.2+. If a future story needs `ink-testing-library`, check its peer-deps compatibility with Ink v7 before pinning. An older ink-testing-library may pin Ink v4/v5 and force a downgrade.
+---
+
+## 2026-04-16 - US-005: Render Ink dashboard view
+- Added `ui/selectors.ts` with `loadSessionDashboard(options)` (reads persisted routing store, falls back to `readAttentionSnapshots()` for snapshots unless `runtimeSnapshots` is supplied), plus `projectDashboardRow` and `projectDashboardLines` pure-text helpers used by both the pane and tests.
+- Added `ui/components/Dashboard.tsx` — Ink component rendering header (`pi-speak session manager`) + store path, blank separator, `Current:` / `Ready:` lines, and per-session rows with focus marker `>`, `[current]`/`[ready]`/`[activity]` tags, and `aliases:` suffix. Uses `Box`/`Text` from ink with color on ready/busy tags. No ActionBar (US-007 territory).
+- Enabled TypeScript project references so the UI build can import from top-level source without tripping rootDir:
+  - `tsconfig.json` gains `composite: true` + `declaration: true`.
+  - `tsconfig.ui.json` gains `references: [{ "path": "./tsconfig.json" }]`.
+  - `npm test` now runs `npm run build && npm run build:ui && node --test tests/*.test.mjs` so `dist/ui/selectors.js` is available to tests.
+- Added `tests/ui-dashboard.test.mjs` with three fixtures per AC:
+  - current+busy only (single current session actively working, one alias)
+  - saved-only (two sessions in routing store, zero runtime snapshots, all rows tagged `[saved]`)
+  - ready+busy (3 sessions: current=Voice busy, voice-bugfix ready+idle, voice-docs saved)
+  plus a diagnostic assertion that records ink-testing-library availability (currently absent; v4 pins Ink v5 so fallback-to-selector-snapshot is in effect).
+- Files changed:
+  - `ui/selectors.ts` (new)
+  - `ui/components/Dashboard.tsx` (new)
+  - `tsconfig.json`
+  - `tsconfig.ui.json`
+  - `package.json` (test script)
+  - `tests/ui-dashboard.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 60 passing (was 54), 0 failing. `npm run build` + `npm run build:ui` both clean. `node dist/ui/admin.js --help` still prints the stub usage (no regression).
+- **Learnings for future iterations:**
+  - US-006's polling hook should call `loadSessionDashboard()` without arguments to pick up the latest persisted sessions + live attention snapshots; pass `{ runtimeSnapshots: [] }` only for tests that want to isolate the store.
+  - The dashboard layout uses `Math.max(16, longest-name)` for the name column. Keep that invariant across `Dashboard.tsx` and `projectDashboardLines` — breaking it will desync the pane from any text-based snapshot tests.
+  - Do NOT import Ink components from `.mjs` tests. `ink` is ESM-only (`"type":"module"`) but our `dist/ui/components/Dashboard.js` is CommonJS (package has no `"type":"module"`). Tests must stick to `dist/ui/selectors.js` or static text projections until the pane gets real runtime wiring.
+  - `composite: true` in the main tsconfig is load-bearing for the UI build — removing it reinstates the TS6059 "not under rootDir" errors for `ui/selectors.ts`. Future stories touching the main tsconfig should leave composite + declaration alone.
+  - US-007's ActionBar and write actions should live in new `ui/components/ActionBar.tsx` + `ui/actions.ts`. Extend `loadSessionDashboard`/selectors only if the write paths actually need new projected shape; keep Dashboard.tsx presentational.
+---
+
+## 2026-04-16 - US-006: Live polling hook and toast component
+- Added `ui/hooks/useSessionStore.ts` with the `useSessionStore` React hook plus pure helpers:
+  - `DEFAULT_POLL_INTERVAL_MS = 500`, `DEFAULT_TOAST_TTL_MS = 3000` (pinned to spec)
+  - `getRoutingStoreMtime(storePath?)` / `getEventLogMtime()` — stat-based mtime reads that return 0 on missing
+  - `formatEventMessage(event)` — pretty-print voice/admin events into toast strings (`rename A -> B`, `switch to Docs`, `alias one -> Docs`, etc.)
+  - `eventToToast(event, now, ttlMs)` — converts a SessionEvent into `{ id, kind, source, message, ts, expiresAt }`
+  - `filterActiveToasts(toasts, now)` — exclusive TTL filter (drops entries where `expiresAt <= now`)
+  - `toastsFromEvents(events, now, ttlMs)` — suppresses `command`-source events (per Toast policy); only voice/admin surface
+  - `pollTick(input)` — single testable tick function: reloads dashboard only when store mtime changes, tails events since offset, merges surviving toasts with new ones
+- The React hook composes `pollTick` inside a `setInterval(pollIntervalMs)` effect; it exposes `{ dashboard, toasts }` and takes a `runtimeSnapshotProvider` for live-attention injection.
+- Added `ui/components/Toast.tsx` with `ToastBand` (bottom-of-pane `Box` with per-source color: voice=magenta, admin=cyan) and the pure `renderToastLine` helper (`"{source}: {message}"`).
+- Added `tests/ui-polling.test.mjs` (6 tests, all via pure helpers; no React/Ink imports):
+  - defaults match spec (500ms / 3s)
+  - store mutation detected within one poll interval (sleeps 550ms, calls pollTick twice, asserts mtime change + dashboard reload)
+  - event tail returns only new events since last offset (idle tail empty, then delta after append)
+  - toast TTL expires exactly at `expiresAt` (exclusive boundary)
+  - pollTick merges surviving toasts + new toasts while dropping expired
+  - formatEventMessage renders the spec kinds
+- Files changed:
+  - `ui/hooks/useSessionStore.ts` (new)
+  - `ui/components/Toast.tsx` (new)
+  - `tests/ui-polling.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 66 passing (was 60), 0 failing. `npm run build` + `npm run build:ui` both clean.
+- **Learnings for future iterations:**
+  - US-007's write actions should call `appendSessionEvent(kind, "admin", payload)` — the hook's `toastsFromEvents` already picks these up and the ToastBand will show them cyan. No extra wiring needed on the pane side.
+  - Toast IDs are timestamp+kind+random; React re-renders without churn because `filterActiveToasts` preserves object identity for survivors. If a future story needs stable IDs across process restarts, hash `ts+kind+source+JSON.stringify(payload)` instead.
+  - Import boundary reminder: `tests/ui-polling.test.mjs` imports pure helpers from `dist/ui/hooks/useSessionStore.js` but never the `useSessionStore` hook itself — this dodges the React resolution path from a `.mjs` test while still giving us full pollTick coverage. Match this pattern for US-007 (export pure action helpers alongside the React wiring).
+  - `pollTick` intentionally does *not* refresh the dashboard when only events change (store mtime gates the reload). If the pane ever needs to reflect event-driven state not visible in the routing store (e.g. a transient read-receipt), add a second gate in `pollTick` rather than always reloading — `loadSessionDashboard` touches the filesystem.
+  - The ui-polling mutation test sleeps 550ms between persists. On slow file systems the mtime can coalesce, so if this test ever flakes, bump to 750ms rather than trying to diff contents.
+---
+
+## 2026-04-16 - US-007: Pane write actions: rename, alias, remove
+- Added `ui/actions.ts` exporting the pane-side write helpers:
+  - `renameSession({ sessionPath, newName })` → loads persisted routing, calls `setNamedSession`, persists, emits `sess.rename` with `source: "admin"`. Rejects via `setNamedSession`'s `ok:false` path when the name already points to another session.
+  - `addWakeAlias({ sessionPath, alias })` → normalizes the alias via `normalizeAliasInput` (trim + collapse whitespace), calls `setWakeAlias`, persists, emits `alias.add`.
+  - `removeWakeAlias({ alias })` → calls `clearWakeAlias`, persists, emits `alias.remove`.
+  - `beginRemoveSession({ sessionPath, nowMs })` → returns `PendingRemoval` shape; validates the session is known (either a saved name or aliases pointing at the path). Does not touch the store and does not emit an event.
+  - `confirmRemoveSession({ pending, sessionPath, nowMs, ttlMs })` → enforces TTL (default 15s) + matching pending path; on success runs `removeSessionRoutingForPath`, persists, emits `sess.remove` with `removedAliases`.
+  - Exposed `REMOVE_CONFIRM_TTL_MS = 15_000`.
+- Added `ui/components/ActionBar.tsx` — Ink component rendering the `[r] rename  [a] alias  [x] remove  [q] quit` bindings plus a yellow inline prompt driven by `ActionMode` (`rename` draft, `alias` draft, `remove-confirm` two-step prompt). Takes optional `message`/`messageTone` to surface action results.
+- Added `tests/ui-actions.test.mjs` with 9 tests:
+  - rename success persists + emits admin event with `{from,to,path}`
+  - duplicate rename rejected, store untouched, no event emitted
+  - alias whitespace normalized (collapses to single space, trims) + admin event fires
+  - empty alias rejected
+  - remove wake alias emits admin `alias.remove`
+  - two-step remove: begin returns pending without writing/emitting, confirm writes + emits `sess.remove` with `removedAliases`
+  - confirm without pending rejected
+  - confirm with a different session path rejected
+  - confirm after TTL rejected
+- Files changed:
+  - `ui/actions.ts` (new)
+  - `ui/components/ActionBar.tsx` (new)
+  - `tests/ui-actions.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` → 75 passing (was 66), 0 failing. `npm run build` + `npm run build:ui` both clean.
+- **Learnings for future iterations:**
+  - `beginRemoveSession` intentionally rejects when there's no saved name and no aliases at the path — otherwise the pane would let operators "remove" a path that isn't in the store (no-op that looks scary). If US-008 surfaces remove for a current-only-not-yet-saved session, add a separate code path rather than relaxing this guard.
+  - Action helpers are stateless: each call `loadPersistedSessionRouting()` → mutates → `persistSessionRouting`. That means US-008's extension-side mtime watcher needs to reload in-process state every time one of these runs from the pane. The admin events fire *after* the write, so the watcher + toast layer should reconcile against the new mtime.
+  - `normalizeAliasInput` only trims and collapses whitespace — it does NOT lowercase, because wake-alias matching in `voice-routing.ts` already normalizes via `normalizeVoiceRouteKey`. If the spec later requires case-normalization at write time, consolidate that inside `normalizeAliasInput` instead of splattering it across call sites.
+  - Tests import the action helpers from `dist/ui/actions.js` (CJS), not source — same pattern as ui-polling. Do NOT import Ink components from `.mjs` tests: Ink is ESM-only and our `dist/ui/components/ActionBar.js` is CJS, which would fail at runtime.
+  - The `PendingRemoval.requestedAt` is the caller's `nowMs`, not `Date.now()`, so tests can use synthetic clocks. The React hook that drives this in the pane should pass `Date.now()` explicitly when constructing pending state.
+  - Event payload shape for `sess.remove` is `{ name, path, removedAliases }` — future pane UI that wants to show "removed X aliases" can read `payload.removedAliases.length` without calling back into the store.
+---
+
+## 2026-04-16 - US-008: Extension-side reload on external store change
+- Added `lastRoutingStoreMtime` (number) + `routingStoreWatcherPath` (string) closure state in `speakExtension`.
+- Added `readRoutingStoreMtime()` (statSync wrapper, returns 0 on missing), `broadcastSessionRoutingState()` (re-appends `SESSION_REGISTRY_TYPE` + `SESSION_WAKE_ALIAS_TYPE`), `reloadSessionRoutingIfExternallyChanged()` (checks mtime delta vs self-write tracker; on change reloads + broadcasts), `startRoutingStoreWatcher()` / `stopRoutingStoreWatcher()` (fs.watchFile with 500ms interval).
+- `persistSessionRoutingState` now captures `lastRoutingStoreMtime = readRoutingStoreMtime()` after each persist so subsequent external-mtime checks skip our own writes.
+- `handleSessCommand` calls `reloadSessionRoutingIfExternallyChanged()` at its top, so any /sess invocation reconciles runtime state against the store.
+- `session_start` seeds `lastRoutingStoreMtime` right after loading persisted routing, then calls `startRoutingStoreWatcher()`.
+- `session_shutdown` calls `stopRoutingStoreWatcher()` before other teardown.
+- Added 2 new cases in `tests/session-command-integration.test.mjs`:
+  - External `persistSessionRouting` write (simulating pane-side admin write) is reflected on the next `/sess` invocation; new session + alias both show up in the dashboard text.
+  - Self-writes via /sess do NOT trigger a reload loop (`pi.appended.length` doesn't grow on a subsequent no-op /sess call).
+- Files changed:
+  - `index.ts`
+  - `tests/session-command-integration.test.mjs`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 77 passing (was 75), 0 failing. `npm run build` + `npm run build:ui` both clean.
+- **Learnings for future iterations:**
+  - `fs.watchFile(path, { interval: 500 }, cb)` is the right primitive here because it uses portable stat-based polling and fires stably even when the file is replaced via rename (our `persistSessionRouting` uses `renameSync` + delete-then-rename). `fs.watch` (inotify/FSEvents/ReadDirectoryChangesW) would miss rename-over-existing-file events on some platforms.
+  - The mtime dedupe trick relies on the fact that `persistSessionRouting` writes synchronously before returning, so `readRoutingStoreMtime()` captured immediately after persist is already the final mtime. If a future persist path becomes async or buffered, `lastRoutingStoreMtime` must be updated in the callback instead.
+  - On Windows, NTFS `mtimeMs` has sub-millisecond resolution in Node, but back-to-back writes within ~1ms can still collide. The integration test adds `sleep(20)` before the external write to guarantee a distinguishable mtime — use the same pattern in any future external-mutation test rather than relying on natural delays.
+  - The watcher re-broadcasts `SESSION_REGISTRY_TYPE` + `SESSION_WAKE_ALIAS_TYPE` entries via `pi.appendEntry` so any component subscribed to those session-branch entry types sees the change. Don't swap this for a narrower broadcast without also updating anything that consumes those entry types.
+  - US-009's `/sess ui` launcher doesn't need to poke the extension when the pane writes — the watcher handles it. The pane's `ui/actions.ts` already calls `persistSessionRouting` directly; no additional IPC needed.
+---
+
+## 2026-04-16 - US-009: /sess ui launcher
+- Added `ui-launcher.ts` exporting `launchSessionManagerPane(options)` + `resolveAdminScriptPath(override?)`. Options: `{ spawnImpl?, platform?, adminScriptPath?, nodeBinary? }` so tests can inject a stub spawn. Result shape: `{ spawned, command?, args?, detached?, manualCommand, reason? }`.
+- win32 path: spawns `cmd.exe /c start "" <nodeBinary> <adminScriptPath>` with `detached:true, stdio:'ignore', windowsHide:false, shell:false` and calls `child.unref()`. The empty-string title argument is required so `start` doesn't misinterpret a quoted node path as a window title.
+- Non-win32: short-circuits to `{ spawned:false, manualCommand, reason }` with the node+script command the operator can run manually.
+- If the caller relies on the default admin path and it doesn't exist (e.g. `npm run build:ui` hasn't run yet), the launcher returns `spawned:false` with a reason pointing at the build step. When an explicit `adminScriptPath` is passed, the check is skipped — tests don't need to stage a real file.
+- `index.ts` adds the `ui` subcommand branch in `handleSessCommand`, calling `launchSessionManagerPane()` and notifying the operator with either an "Opened session manager pane..." info message or a warning that includes the manual command. The `top` array in `getSessCompletions` and the usage-error text both include `ui`.
+- `tests/ui-launcher.test.mjs` adds 4 tests:
+  - win32 spawn: asserts `command='cmd.exe'`, `args=['/c','start','', nodeBinary, adminScriptPath]`, `detached:true`, `stdio:'ignore'`, `shell:false`, and that `child.unref()` is called.
+  - linux platform fallback: asserts `spawned:false`, no spawn calls, manualCommand contains both node binary and admin path, reason mentions the platform.
+  - default admin path resolution: asserts `resolveAdminScriptPath()` returns a non-empty string ending in `admin.js`.
+  - end-to-end `/sess ui`: registers the extension, invokes the `sess` command with `"ui"`, asserts a notification is produced referencing the pane.
+- Files changed:
+  - `ui-launcher.ts` (new)
+  - `index.ts` (import, /sess ui branch, completions, usage text)
+  - `tests/ui-launcher.test.mjs` (new)
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 81 passing (was 77), 0 failing. `npm run build` + `npm run build:ui` both clean. `node dist/ui/admin.js --help` still prints the stub usage (no regression).
+- **Learnings for future iterations:**
+  - `process.execPath` is the reliable way to reference the same Node binary the extension is running under — much safer than a bare `"node"` which depends on PATH in the new terminal. Both get passed through cmd's `start` cleanly.
+  - On Windows, `start`'s first positional argument is interpreted as a window *title* when quoted; always pass an empty `""` title before the actual command or quoted paths with spaces will break. Our args use `["/c", "start", ""]` as the fixed prefix.
+  - `SpawnOptions` from `node:child_process` needs `windowsHide:false` for `start` to actually show the new terminal window; `windowsHide:true` (used elsewhere in `index.ts` for the audio player) would suppress the new window on Win32.
+  - Tests mock `child_process.spawn` via dependency injection (`options.spawnImpl`) rather than module-level mocking. That pattern matches the rest of this repo: pure helpers take injected collaborators, and `index.ts` composes them with defaults. Keep the default path honest (`spawn as unknown as SpawnLike`) so production stays on the real `child_process.spawn`.
+  - US-010 (docs) still needs to surface `/sess ui` in `docs/SESSION_OPERATIONS.md`, `README.md`, `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, and `CHANGELOG.md`. The usage-error text inside `handleSessCommand` is now the single-source inline listing — any new subcommand added here should be added there too.
+  - Manual terminal verification (per AC): running `/sess ui` inside pi-coding-agent opens a new Windows terminal that runs `node dist/ui/admin.js`. The stub prints its usage message and exits 0, which closes the window — when US-005/US-006 rendering is wired into `admin.tsx`, the window will stay alive for the Ink loop.
+---
+
+## 2026-04-16 - US-010: Update operator documentation
+- `docs/SESSION_OPERATIONS.md`: added `/sess ui` to the main-commands block and a new "Management Pane" section covering the launcher behavior (new terminal on Windows, manual fallback elsewhere, detached from pi-coding-agent), pane layout, `[r]/[a]/[x]/[q]` keybindings, voice/admin toast band, and extension-side reload on external store writes.
+- `README.md`: `/sess` command family now lists `/sess ui`, with a paragraph describing the interactive pane, keybindings, and 1s refresh on external mutations.
+- `SKILL.md`: `/sess` bullet enumerates the pane; added "open the session manager pane" to the natural-phrase examples so the skill maps spoken language to `/sess ui`.
+- `AGENTS.md`: Key Files table gains `session-events.ts`, `ui-launcher.ts`, and the `ui/admin.tsx` / `ui/components/*.tsx` / `ui/actions.ts` / `ui/hooks/useSessionStore.ts` / `ui/selectors.ts` entries. Important Patterns adds `/sess ui` under Operator UX plus a new "Pane write path" invariant (load → pure helper → persist → appendSessionEvent + extension watcher reload).
+- `CLAUDE.md`: Core Command Families line references `/sess ui`; Important Source Map enumerates `session-events.ts`, `ui-launcher.ts`, and the `ui/` tree so repo-local agents can find pane files.
+- `CHANGELOG.md` Unreleased: added two Added bullets — `/sess ui` pane feature (with keybinding + toast detail) and the voice/admin event log + routing-store watcher that powers cross-surface reload.
+- `docs/VOICE_SESSION_BRIDGE.md`: command-bridge table adds "open the session manager pane" → `/sess ui`.
+- `docs/SESSION_MANAGER_SPEC.qmd`: Primary command list adds `/sess ui` for parity with the live spec.
+- Verified `handleSessCommand` usage text in `index.ts:1903` already includes `ui` (landed in US-009); no stale listings remain.
+- Files changed:
+  - `docs/SESSION_OPERATIONS.md`
+  - `docs/VOICE_SESSION_BRIDGE.md`
+  - `docs/SESSION_MANAGER_SPEC.qmd`
+  - `README.md`
+  - `SKILL.md`
+  - `AGENTS.md`
+  - `CLAUDE.md`
+  - `CHANGELOG.md`
+  - `scripts/ralph/prd.json`
+  - `scripts/ralph/progress.txt`
+- Tests: `npm test` -> 81 passing, 0 failing. `npm run build` + `npm run build:ui` both clean (no code changes this iteration).
+- **Learnings for future iterations:**
+  - Whenever you add a new `/sess` subcommand, update all of: `index.ts` usage-error text, `getSessCompletions`, `docs/SESSION_OPERATIONS.md` main-commands block, `README.md` /sess block, `docs/SESSION_MANAGER_SPEC.qmd` Primary list, and `docs/VOICE_SESSION_BRIDGE.md` command-bridge table if a natural phrase maps to it. The `CLAUDE.md` Rules For Changes list codifies this but it's easy to miss `SESSION_MANAGER_SPEC.qmd` since it's a spec doc, not an operator doc.
+  - `CHANGELOG.md` entries that describe the pane should note that external writes reconcile via the routing-store watcher — operators won't find this in the `/sess` output, so surfacing it in Added/Improved prevents the "I made a change in the pane, why isn't it in /sess?" support question.
+  - `SKILL.md`'s natural-phrase examples drive voice-language → slash-command mapping. When a new slash command is documentable in voice (e.g. "open the session manager pane"), add both the SKILL phrase and a row in `docs/VOICE_SESSION_BRIDGE.md`'s command-bridge table. The actual parser (`voice-session-command.ts`) may or may not already cover the phrase; check before claiming it's wired.
+  - All stories in the PRD are now passing. Next iteration should stop.
 ---

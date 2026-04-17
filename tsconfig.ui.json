@@ -3,15 +3,19 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "outDir": "dist",
-    "rootDir": ".",
+    "outDir": "dist/ui",
+    "rootDir": "ui",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "declaration": true,
-    "composite": true
+    "declaration": false,
+    "jsx": "react"
   },
   "include": [
-    "*.ts"
+    "ui/**/*.ts",
+    "ui/**/*.tsx"
+  ],
+  "references": [
+    { "path": "./tsconfig.json" }
   ]
 }

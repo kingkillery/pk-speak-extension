@@ -41,12 +41,14 @@ Reload Pi after install.
 /speak status
 ```
 
-If you do nothing else, `auto` provider selection will pick the best available backend in this order:
+If you do nothing else, `auto` provider selection will try available backends in this order:
 
 1. `legacy` via `speak11`
 2. `elevenlabs`
 3. `openai`
 4. `edge`
+
+If an earlier auto-selected backend fails at synthesis time, Pi now falls through to the next available provider instead of stopping on the first failure.
 
 ### 2. Enable The Always-Listening Wake Phrase
 
@@ -151,6 +153,11 @@ Behavior:
 - activates voice input for a short window
 - keeps the existing `/mono` flow intact with a faster-whisper wake detector
 - supports `PK <session-name>` to route into a named session when the target name is spoken clearly
+- keeps short numeric routes deterministic:
+  - `PK one`, `PK 1`, and `PK1` belong to the same `1` family
+  - `PK two`, `PK 2`, and `PK2` belong to the same `2` family
+  - `1` stays distinct from `2`
+  - multi-word names like `PK to Google` stay literal and are not coerced into `2`
 
 ### `/phone`
 
@@ -190,16 +197,37 @@ Behavior:
 
 ### `/sess`
 
-Named sessions for voice routing.
+Named sessions, wake aliases, and routing summaries for voice control.
 
 ```text
+/sess
 /sess new bugfix
 /sess switch bugfix
-/sess list
 /sess name active-work
+/sess rename bugfix voice-bugfix
+/sess wake one
+/sess wake clear one
+/sess alias add bugfix one
+/sess alias remove one
+/sess edit bugfix
+/sess remove bugfix
+/sess confirm remove bugfix
+/sess slots
+/sess export
+/sess ui
 ```
 
-This matters because `PK bugfix` can route voice input to that named session.
+This matters because `PK bugfix` can route voice input to that named session, while compact routes like `PK one` / `PK1` and `PK two` / `PK2` can stay stable and distinct.
+
+`/sess` with no args shows the current session, ready sessions, aliases, store path, a compact `1` vs `2` lane summary, and inline state for known sessions.
+
+Use `/sess slots` when you want the explicit compact-route view for `PK one` / `PK1` and `PK two` / `PK2`.
+
+Use `/sess ui` to open the interactive session manager pane in a separate terminal. It mirrors the `/sess` dashboard, refreshes within one second of external mutations, and adds keybindings `[r] rename`, `[a] alias`, `[x] remove`, and `[q] quit`. Voice and pane-driven changes surface as toasts at the bottom of the pane.
+
+For operator details, see:
+- `docs/VOICE_SESSION_BRIDGE.md`
+- `docs/SESSION_OPERATIONS.md`
 
 ## Architecture
 
