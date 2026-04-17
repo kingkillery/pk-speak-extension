@@ -58,7 +58,7 @@ async function withServer(overrides = {}, fn) {
 			phone: { enabled: false },
 			remote: { enabled: true, host: "127.0.0.1", port: 0, authRequired: true },
 		}),
-		getDiagnostics: () => ({
+		getDiagnostics: overrides.getDiagnostics || (() => ({
 			status: {
 				speak: { enabled: false },
 				mono: { running: false },
@@ -69,7 +69,7 @@ async function withServer(overrides = {}, fn) {
 			recentTimings: {},
 			queue: {},
 			providers: {},
-		}),
+		})), 
 		getRoutingStatus: () => ({
 			defaultTarget: undefined,
 			currentSession: "pi",
@@ -125,6 +125,39 @@ test("diagnostics route is authenticated for non-local requests", async () => {
 		});
 		assert.equal(authorized.statusCode, 200);
 		assert.equal(authorized.json().ok, true);
+	});
+});
+
+test("diagnostics route includes a high-signal summary block", async () => {
+	await withServer({
+		getDiagnostics: () => ({
+			status: {
+				speak: { enabled: true },
+				mono: { running: true, status: "active" },
+				phone: { enabled: true, linkedChatId: 12345 },
+				remote: { enabled: true, host: "127.0.0.1", port: 0, authRequired: true, currentSession: "pi" },
+			},
+			lastErrors: { listener: "mic busy", remote: undefined, stt: "timeout" },
+			recentTimings: {},
+			queue: { processing: true, queued: 2 },
+			providers: {},
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/diagnostics",
+			headers: { Host: "tailnet.example", Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		const payload = response.json();
+		assert.equal(payload.diagnostics.summary.remoteEnabled, true);
+		assert.equal(payload.diagnostics.summary.queueState, "busy");
+		assert.equal(payload.diagnostics.summary.queueDepth, 2);
+		assert.equal(payload.diagnostics.summary.phoneLinked, true);
+		assert.equal(payload.diagnostics.summary.monoState, "active");
+		assert.deepEqual(payload.diagnostics.summary.activeErrorSources, ["listener", "stt"]);
+		assert.equal(payload.diagnostics.summary.currentSession, "pi");
+		assert.equal(payload.diagnostics.summary.availableTargetCount, 4);
 	});
 });
 

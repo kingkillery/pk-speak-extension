@@ -38,6 +38,17 @@ export type ControlServerDiagnostics = {
 	lastErrors?: Record<string, string | undefined>;
 	recentTimings?: unknown;
 	queue?: unknown;
+	summary?: {
+		remoteEnabled: boolean;
+		queueState: "idle" | "queued" | "busy";
+		queueDepth: number;
+		phoneLinked: boolean;
+		monoState: string;
+		activeErrorSources: string[];
+		currentSession?: string;
+		defaultTarget?: string;
+		availableTargetCount: number;
+	};
 	auth?: {
 		authRequired: boolean;
 		allowQueryTokenForAudio: boolean;
@@ -106,6 +117,36 @@ const ALLOWED_VOICE_CONTENT_TYPES = [
 	"audio/aac",
 	"application/octet-stream",
 ];
+
+function buildDiagnosticsSummary(
+	diagnostics: ControlServerDiagnostics,
+	routing: { defaultTarget?: string; currentSession?: string; availableTargets: string[] },
+): NonNullable<ControlServerDiagnostics["summary"]> {
+	const status = diagnostics.status as Record<string, any>;
+	const queue = (diagnostics.queue as Record<string, unknown> | undefined) ?? {};
+	const queueDepth = typeof queue.queued === "number" ? queue.queued : 0;
+	const queueState = queue.processing ? "busy" : queueDepth > 0 ? "queued" : "idle";
+	const lastErrors = diagnostics.lastErrors ?? {};
+	const activeErrorSources = Object.entries(lastErrors)
+		.filter(([, value]) => typeof value === "string" && value.trim().length > 0)
+		.map(([source]) => source)
+		.sort((left, right) => left.localeCompare(right));
+	return {
+		remoteEnabled: !!status.remote?.enabled,
+		queueState,
+		queueDepth,
+		phoneLinked: !!status.phone?.linkedChatId,
+		monoState: typeof status.mono?.status === "string"
+			? status.mono.status
+			: status.mono?.running
+				? "running"
+				: "off",
+		activeErrorSources,
+		currentSession: routing.currentSession ?? status.remote?.currentSession,
+		defaultTarget: routing.defaultTarget ?? status.remote?.defaultTarget,
+		availableTargetCount: Array.isArray(routing.availableTargets) ? routing.availableTargets.length : 0,
+	};
+}
 
 export class ControlServer {
 	private server?: Server;
@@ -259,10 +300,12 @@ export class ControlServer {
 
 		if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
 			const routing = this.getRoutingStatus();
+			const diagnostics = this.getDiagnostics();
 			this.writeJson(res, 200, {
 				ok: true,
 				diagnostics: {
-					...this.getDiagnostics(),
+					...diagnostics,
+					summary: buildDiagnosticsSummary(diagnostics, routing),
 					routing,
 					auth: {
 						authRequired: !!this.state.authToken,

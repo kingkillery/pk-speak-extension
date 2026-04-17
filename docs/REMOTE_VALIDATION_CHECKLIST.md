@@ -430,6 +430,7 @@ Expected diagnostics visibility for:
 - recent turn timings
 - last STT / TTS / phone / listener errors
 - Telegram polling health
+- a top-level `summary` block with queue state, queue depth, phone-linked state, mono state, current session/target, and active error sources
 
 Record:
 

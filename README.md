@@ -428,7 +428,7 @@ The production-oriented defaults are:
 - request body limit for voice turns: `25 MB`
 - lightweight in-memory rate limits for non-local traffic
 - background cleanup of expired reply-audio artifacts
-- authenticated diagnostics at `/v1/diagnostics`
+- authenticated diagnostics at `/v1/diagnostics`, including a compact summary block for queue state, phone linkage, mono state, current session/target, and active error sources
 - queue/backpressure for remote turns so Pi returns a deterministic busy response instead of piling up unlimited work
 - synchronous remote turns fail fast when the current Pi session is already mid-turn, instead of hanging the HTTP request against the same active session
 
