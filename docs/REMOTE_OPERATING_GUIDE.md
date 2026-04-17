@@ -98,6 +98,7 @@ What diagnostics now surface:
 - recent turn timings
 - last listener, phone, STT, and TTS errors
 - Telegram polling health
+- a compact `summary` block with queue state, queue depth, phone-linked state, mono state, current session/target, and active error sources
 
 ## Failure Modes
 
