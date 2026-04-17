@@ -28,6 +28,7 @@ export type Toast = {
 export type SessionStoreState = {
 	dashboard: SessionDashboard;
 	toasts: Toast[];
+	recentEvents: SessionEvent[];
 	storeMtime: number;
 	eventOffset: number;
 };
@@ -171,6 +172,7 @@ export function pollTick(input: PollTickInput): PollTick {
 export function useSessionStore(options: UseSessionStoreOptions = {}): {
 	dashboard: SessionDashboard;
 	toasts: Toast[];
+	recentEvents: SessionEvent[];
 } {
 	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 	const toastTtlMs = options.toastTtlMs ?? DEFAULT_TOAST_TTL_MS;
@@ -181,6 +183,7 @@ export function useSessionStore(options: UseSessionStoreOptions = {}): {
 	const [state, setState] = useState<SessionStoreState>(() => ({
 		dashboard: loadSessionDashboard(options.dashboardOptions),
 		toasts: [],
+		recentEvents: [],
 		storeMtime: initialMtime.current,
 		eventOffset: initialEventOffset.current,
 	}));
@@ -204,6 +207,7 @@ export function useSessionStore(options: UseSessionStoreOptions = {}): {
 				return {
 					dashboard: tick.dashboard ?? prev.dashboard,
 					toasts: tick.toasts,
+					recentEvents: tick.newEvents,
 					storeMtime: tick.storeMtime,
 					eventOffset: tick.eventOffset,
 				};
@@ -212,5 +216,5 @@ export function useSessionStore(options: UseSessionStoreOptions = {}): {
 		return () => clearInterval(id);
 	}, [pollIntervalMs, toastTtlMs, options.dashboardOptions, options.runtimeSnapshotProvider, now]);
 
-	return { dashboard: state.dashboard, toasts: state.toasts };
+	return { dashboard: state.dashboard, toasts: state.toasts, recentEvents: state.recentEvents };
 }

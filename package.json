@@ -28,9 +28,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "build:ui": "tsc -p tsconfig.ui.json",
+    "build:ui": "tsc -p tsconfig.ui.json && node scripts/sync-ui-package.mjs",
     "test": "npm run build && npm run build:ui && node --test tests/*.test.mjs",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build && npm run build:ui"
   },
   "dependencies": {
     "ink": "^7.0.0",

@@ -430,13 +430,29 @@ export default function speakExtension(pi: ExtensionAPI) {
 		pi.appendEntry<SessionWakeAliasState>(SESSION_WAKE_ALIAS_TYPE, { aliases: sessionWakeAliases });
 	};
 
-	const reloadSessionRoutingIfExternallyChanged = () => {
+	const syncCurrentSessionNameFromRoutingStore = (ctx?: any) => {
+		const target = ctx || lastCtx;
+		const currentSessionPath = target?.sessionManager?.getSessionFile?.();
+		if (!currentSessionPath) return;
+		const routedName = findSessionNameByPath(currentSessionPath, sessionRegistry);
+		const currentName = pi.getSessionName() || "";
+		if (routedName && routedName !== currentName) {
+			pi.setSessionName(routedName);
+			return;
+		}
+		if (!routedName && currentName) {
+			pi.setSessionName("");
+		}
+	};
+
+	const reloadSessionRoutingIfExternallyChanged = (ctx?: any) => {
 		const mtime = readRoutingStoreMtime();
 		if (!mtime || mtime === lastRoutingStoreMtime) return false;
 		const persisted = loadPersistedSessionRouting();
 		sessionRegistry = { ...persisted.sessions };
 		sessionWakeAliases = { ...persisted.aliases };
 		lastRoutingStoreMtime = mtime;
+		syncCurrentSessionNameFromRoutingStore(ctx);
 		broadcastSessionRoutingState();
 		return true;
 	};
@@ -1598,7 +1614,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (sub === "ui") {
-				const result = launchSessionManagerPane();
+				const result = launchSessionManagerPane({
+					currentSessionPath: ctx.sessionManager.getSessionFile?.() || undefined,
+					currentSessionName: pi.getSessionName() || undefined,
+				});
 				if (result.spawned) {
 					ctx.ui.notify(`Opened session manager pane in a new terminal. Run manually with: ${result.manualCommand}`, "info");
 				} else {

@@ -364,6 +364,33 @@ test("/sess reflects external routing-store mutations on the next call", async (
 	});
 });
 
+test("external rename of the current session syncs the current label on the next /sess call", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const sess = pi.commands.get("sess");
+		assert.ok(sess);
+
+		const owner = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("name bugfix", owner);
+		assert.equal(pi.getSessionName(), "bugfix");
+
+		await sleep(20);
+		persistSessionRouting({
+			sessions: { "voice-bugfix": "/sessions/bugfix.jsonl" },
+			aliases: { one: "/sessions/bugfix.jsonl" },
+		});
+
+		const viewer = makeCtx("/sessions/bugfix.jsonl");
+		await sess.handler("", viewer);
+
+		assert.equal(pi.getSessionName(), "voice-bugfix");
+		const message = viewer.notifications.at(-1)?.message || "";
+		assert.match(message, /Current: voice-bugfix/i, `current session label did not update: ${message}`);
+		assert.match(message, /- voice-bugfix \[current\]/i, `renamed current row missing: ${message}`);
+	});
+});
+
 test("external routing-store writes do not trigger a feedback reload loop", async () => {
 	await withSessionStore(async () => {
 		const pi = makePi();

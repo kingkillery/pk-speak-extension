@@ -13,6 +13,8 @@ export interface LaunchSessionManagerPaneOptions {
 	platform?: NodeJS.Platform;
 	adminScriptPath?: string;
 	nodeBinary?: string;
+	currentSessionPath?: string;
+	currentSessionName?: string;
 }
 
 export interface LaunchSessionManagerPaneResult {
@@ -29,9 +31,20 @@ export function resolveAdminScriptPath(override?: string): string {
 	return join(__dirname, "ui", "admin.js");
 }
 
-function formatManualCommand(nodeBinary: string, adminScriptPath: string): string {
+function buildAdminCliArgs(options: LaunchSessionManagerPaneOptions, adminScriptPath: string): string[] {
+	const args = [adminScriptPath];
+	if (options.currentSessionPath) {
+		args.push("--current-path", options.currentSessionPath);
+	}
+	if (options.currentSessionName) {
+		args.push("--current-name", options.currentSessionName);
+	}
+	return args;
+}
+
+function formatManualCommand(nodeBinary: string, args: string[]): string {
 	const quote = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
-	return `${quote(nodeBinary)} ${quote(adminScriptPath)}`;
+	return [quote(nodeBinary), ...args.map(quote)].join(" ");
 }
 
 export function launchSessionManagerPane(
@@ -41,7 +54,8 @@ export function launchSessionManagerPane(
 	const spawnImpl = options.spawnImpl ?? (spawn as unknown as SpawnLike);
 	const nodeBinary = options.nodeBinary ?? process.execPath;
 	const adminScriptPath = resolveAdminScriptPath(options.adminScriptPath);
-	const manualCommand = formatManualCommand(nodeBinary, adminScriptPath);
+	const adminArgs = buildAdminCliArgs(options, adminScriptPath);
+	const manualCommand = formatManualCommand(nodeBinary, adminArgs);
 
 	if (!options.adminScriptPath && !existsSync(adminScriptPath)) {
 		return {
@@ -53,7 +67,7 @@ export function launchSessionManagerPane(
 
 	if (platform === "win32") {
 		const command = "cmd.exe";
-		const args = ["/c", "start", "", nodeBinary, adminScriptPath];
+		const args = ["/c", "start", "", nodeBinary, ...adminArgs];
 		const child = spawnImpl(command, args, {
 			detached: true,
 			stdio: "ignore",

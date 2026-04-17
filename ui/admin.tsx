@@ -1,24 +1,53 @@
 #!/usr/bin/env node
 
-const USAGE = [
-  "pi-speak-admin - management pane for pi-speak session routing",
-  "",
-  "Usage:",
-  "  pi-speak-admin [--help]",
-  "",
-  "The full Ink-based dashboard lands in a later iteration; this stub",
-  "exists so /sess ui has something to launch and so the UI build toolchain",
-  "is wired up end-to-end.",
-].join("\n");
+import React from "react";
+import { render } from "ink";
+import SessionManagerPane from "./app.js";
+import { parseAdminCliArgs } from "./admin-state.js";
+import { renderSessionManagerSnapshot } from "./render-snapshot.js";
 
-function main(argv: string[]): number {
-  const args = argv.slice(2);
-  if (args.includes("--help") || args.includes("-h")) {
-    console.log(USAGE);
-    return 0;
-  }
-  console.log("pi-speak-admin stub (run with --help for usage).");
-  return 0;
+const USAGE = [
+	"pi-speak-admin - management pane for pi-speak session routing",
+	"",
+	"Usage:",
+	"  pi-speak-admin [--help] [--snapshot] [--current-path <path>] [--current-name <name>]",
+	"",
+	"Options:",
+	"  --snapshot             Render one deterministic frame and exit",
+	"  --current-path <path>  Seed the pane with the launching session path",
+	"  --current-name <name>  Seed the pane with the launching session name",
+	].join("\n");
+
+async function main(argv: string[]): Promise<number> {
+	const options = parseAdminCliArgs(argv);
+	if (options.showHelp) {
+		console.log(USAGE);
+		return 0;
+	}
+	if (options.showSnapshot) {
+		console.log(renderSessionManagerSnapshot({
+			currentSessionPath: options.currentSessionPath,
+			currentSessionName: options.currentSessionName,
+		}));
+		return 0;
+	}
+
+	const instance = render(
+		<SessionManagerPane
+			initialCurrentSessionPath={options.currentSessionPath}
+			initialCurrentSessionName={options.currentSessionName}
+		/>,
+		{ interactive: true },
+	);
+	await instance.waitUntilExit();
+	return 0;
 }
 
-process.exit(main(process.argv));
+main(process.argv)
+	.then((code) => {
+		process.exitCode = code;
+	})
+	.catch((error: unknown) => {
+		console.error(error instanceof Error ? error.stack ?? error.message : error);
+		process.exitCode = 1;
+	});
