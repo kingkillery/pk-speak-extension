@@ -223,7 +223,7 @@ This matters because `PK bugfix` can route voice input to that named session, wh
 
 Use `/sess slots` when you want the explicit compact-route view for `PK one` / `PK1` and `PK two` / `PK2`.
 
-Use `/sess ui` to open the interactive session manager pane in a separate terminal. It mirrors the `/sess` dashboard, refreshes within one second of external mutations, supports focus movement with `↑` / `↓`, `tab`, or `j` / `k`, shows the compact PK1/PK2 route lanes plus a focused-session footer, and adds keybindings `[r] rename`, `[a] alias`, `[x] remove`, and `[q] quit`. Voice and pane-driven changes surface as toasts at the bottom of the pane.
+Use `/sess ui` to open the interactive session manager pane in a separate terminal. It mirrors the `/sess` dashboard, refreshes within one second of external mutations, supports focus movement with `↑` / `↓`, `tab`, or `j` / `k`, shows the compact PK1/PK2 route lanes plus a focused-session footer, and adds keybindings `[r] rename`, `[a] alias`, `[x] remove`, and `[q] quit`. Voice and pane-driven changes surface as toasts at the bottom of the pane. If the CLI is launched in a non-interactive shell, it now falls back to a read-only snapshot instead of crashing on raw-mode setup.
 
 For operator details, see:
 - `docs/VOICE_SESSION_BRIDGE.md`
@@ -550,6 +550,8 @@ PI_SPEAK_REMOTE_WHISPER_MODEL=base
 PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai
 ```
 
+`PI_SPEAK_PYTHON` and `PI_SPEAK_SPEAK11_PATH` are now the first-class override path for local Python audio setups. When they are unset, Pi scans the normal Windows user-site `Python*/Scripts` locations before falling back to PATH resolution.
+
 ### Telegram
 
 ```text
@@ -645,6 +647,8 @@ Current automated coverage includes:
 - Telegram link + text-turn handling
 - PWA token persistence rules
 - remote queue backpressure behavior
+- runtime path resolution for local Python / speak11
+- explicit listener shutdown signaling with force-kill fallback
 
 ## Manual Smoke Checklist
 
@@ -655,6 +659,9 @@ Before treating a machine as production-ready, verify:
 3. `/phone on` then `/phone code`, then complete a Telegram text turn and voice-note turn
 4. `/remote on`, open `/app/`, complete a text turn and voice turn, and confirm reply audio playback
 5. over Tailscale or your HTTPS tunnel, confirm non-local requests fail without the token and succeed with it
+
+For a full phone-focused run sheet with pass/fail capture fields, use `docs/REMOTE_VALIDATION_CHECKLIST.md`.
+For a compact operator worksheet, use `docs/REMOTE_VALIDATION_RUN_SHEET.md`.
 
 ## Files You Will Care About
 

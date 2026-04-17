@@ -32,6 +32,15 @@ async function main(argv: string[]): Promise<number> {
 		return 0;
 	}
 
+	if (!process.stdin.isTTY || !process.stdout.isTTY) {
+		console.log("Non-interactive terminal detected; rendering a read-only snapshot. Re-run in a live terminal for keyboard controls.");
+		console.log(renderSessionManagerSnapshot({
+			currentSessionPath: options.currentSessionPath,
+			currentSessionName: options.currentSessionName,
+		}));
+		return 0;
+	}
+
 	const instance = render(
 		<SessionManagerPane
 			initialCurrentSessionPath={options.currentSessionPath}
