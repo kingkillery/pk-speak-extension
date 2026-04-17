@@ -17,8 +17,8 @@
         "Tests pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "buildSessionDashboard selector added in session-routing.ts; formatSessionManagerSummary refactored to wrap it; 3 new tests cover busy/idle/saved and unnamed-current projection."
     },
     {
       "id": "US-002",
@@ -34,8 +34,8 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "session-events.ts exports appendSessionEvent(kind, source, payload) + tailSessionEvents(sinceOffset); stored at dirname(getSessionRoutingStorePath())/session-events.jsonl; 200-line bounded rotation; 4 new tests cover append shape, tail-from-offset, rotation at boundary, and stale-offset reset."
     },
     {
       "id": "US-003",
@@ -50,8 +50,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "/sess handler refactored into handleSessCommand(args, ctx, source); internal _sessVoice command registered for voice dispatch; routeVoiceInput now delegates voice-parsed /sess commands through handleSessCommand with source='voice'; appendSessionEvent fires for new, switch, rename, remove, name, alias.add, alias.remove across both top-level and edit-proxied paths; 3 new integration tests cover voice rename, voice wake-alias set, and typed rename (command source)."
     },
     {
       "id": "US-004",
@@ -68,8 +68,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Installed ink@^7.0.0 + react@^19.2.5 as deps and @types/react@^19.2.14 as devDep (Ink v7 peer-deps require React >=19.2). Added tsconfig.ui.json with jsx='react', outDir=dist/ui, rootDir=ui, include=ui/**/*.{ts,tsx}. package.json gains script build:ui and bin pi-speak-admin->dist/ui/admin.js. ui/admin.tsx is a stub with shebang that prints usage on --help (exit 0) and a 'stub' message otherwise. Main tsconfig still uses include:['*.ts'] so UI files are not picked up by the main build."
     },
     {
       "id": "US-005",
@@ -85,8 +85,8 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ui/selectors.ts exports loadSessionDashboard (wraps buildSessionDashboard over loadPersistedSessionRouting + readAttentionSnapshots) and projectDashboardLines/Row pure-text helpers. ui/components/Dashboard.tsx is an Ink component rendering header+store, current/ready lines, and per-session rows with [current]/[ready]/[activity] tags and aliases. tests/ui-dashboard.test.mjs covers 3 fixtures (current+busy only, saved-only, ready+busy) by snapshotting the selector output and the projected text lines (ink-testing-library fallback, since v4 of that lib pins Ink v5 and is incompatible with our Ink v7). Main tsconfig gained composite:true+declaration:true so tsconfig.ui.json can reference it; npm test now runs both builds before node --test."
     },
     {
       "id": "US-006",
@@ -101,8 +101,8 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ui/hooks/useSessionStore.ts exports React hook + pure helpers (getRoutingStoreMtime, eventToToast, filterActiveToasts, toastsFromEvents, formatEventMessage, pollTick). pollTick is the single testable tick function the hook composes; store mtime comparison detects external writes, tailSessionEvents(offset) pulls only new events, and toast TTL is enforced by filterActiveToasts with exclusive expiresAt. command-sourced events intentionally do not produce toasts (only voice/admin). ui/components/Toast.tsx renders a bottom Box with colored per-source prefix ('voice: ...' / 'admin: ...') using renderToastLine. tests/ui-polling.test.mjs adds 6 tests: defaults sanity, store-mutation detection across a 500ms+50ms sleep, event-tail-since-offset, TTL boundary (exclusive at exactly ttl), merge+expire behavior in pollTick, and formatEventMessage spec-kind coverage."
     },
     {
       "id": "US-007",
@@ -119,8 +119,8 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "ui/actions.ts exports renameSession, addWakeAlias, removeWakeAlias, beginRemoveSession, confirmRemoveSession (two-step, 15s TTL) + REMOVE_CONFIRM_TTL_MS. All writes go through loadPersistedSessionRouting -> setNamedSession/setWakeAlias/clearWakeAlias/removeSessionRoutingForPath -> persistSessionRouting, then appendSessionEvent(kind, 'admin', payload). Rename rejects duplicates via setNamedSession's existing error path. Aliases normalized via normalizeAliasInput (trim + collapse whitespace). ui/components/ActionBar.tsx shows [r] rename [a] alias [x] remove [q] quit plus a yellow inline prompt for the active ActionMode (rename/alias draft, remove-confirm). tests/ui-actions.test.mjs adds 9 tests covering rename success, duplicate rename rejected (no event emitted), alias normalized whitespace, empty alias rejected, removeWakeAlias emits alias.remove admin event, two-step remove confirm, no-pending reject, cross-session pending reject, TTL expiry reject."
     },
     {
       "id": "US-008",
@@ -135,8 +135,8 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "index.ts now watches the routing store via fs.watchFile (interval: 500ms) and calls reloadSessionRoutingIfExternallyChanged() at the top of handleSessCommand. Own-write dedupe uses lastRoutingStoreMtime, captured inside persistSessionRoutingState after each persist. External mtime bumps reload sessionRegistry + sessionWakeAliases from loadPersistedSessionRouting and re-broadcast SESSION_REGISTRY_TYPE and SESSION_WAKE_ALIAS_TYPE. Watcher started in session_start and torn down in session_shutdown. Two new tests in session-command-integration.test.mjs: external mutation reflected on next /sess call, and self-writes do not trigger a feedback re-broadcast."
     },
     {
       "id": "US-009",
@@ -152,8 +152,8 @@
         "Manual terminal verification: running /sess ui opens a new Windows terminal running the admin CLI"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "New ui-launcher.ts module exports launchSessionManagerPane(options) + resolveAdminScriptPath(). On win32 it spawns cmd.exe with args ['/c','start','', nodeBinary, adminScriptPath] using detached:true, stdio:'ignore', shell:false, windowsHide:false and calls child.unref(). Non-win32 platforms return spawned:false with a manualCommand + reason string so /sess ui can notify the operator to run it by hand. index.ts adds a /sess ui handler that calls launchSessionManagerPane() and notifies; completions + usage text now include 'ui'. tests/ui-launcher.test.mjs adds 4 tests: win32 spawn shape/args/detached flag via a stubbed spawnImpl, non-win32 manual fallback, default admin path resolution, and end-to-end /sess ui notification via the registered command handler."
     },
     {
       "id": "US-010",
@@ -169,8 +169,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "docs/SESSION_OPERATIONS.md gains a Management Pane section (launcher, layout, keybindings, toasts, cross-surface reload). README.md /sess block adds /sess ui with keybindings + toast behavior summary. SKILL.md /sess bullet enumerates the pane + adds 'open the session manager pane' to natural-phrase examples. AGENTS.md Key Files table adds session-events.ts, ui-launcher.ts, and all ui/* entries; Important Patterns gains /sess ui + pane write-path notes. CLAUDE.md Core Command Families references /sess ui; Important Source Map enumerates session-events, ui-launcher, and ui/* paths. CHANGELOG.md Unreleased gains /sess ui + event-log + extension-watcher bullets. docs/VOICE_SESSION_BRIDGE.md command-bridge table adds the pane row. docs/SESSION_MANAGER_SPEC.qmd Primary command list adds /sess ui for parity. handleSessCommand usage text (index.ts:1903) already included 'ui' from US-009 — verified no stale listings remain. npm test → 81 passing, 0 failing."
     }
   ]
 }

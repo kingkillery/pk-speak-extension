@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+	buildSessionDashboard,
 	clearWakeAlias,
 	describeSessionRoutingStore,
 	findSessionRegistryKey,
@@ -149,6 +150,130 @@ test("formatSessionRoutingList summarizes sessions and aliases", () => {
 		}),
 		"Sessions: Bugfix. Wake aliases: One → Bugfix",
 	);
+});
+
+test("buildSessionDashboard resolves busy/idle/saved activity and ready state per spec", () => {
+	const dashboard = buildSessionDashboard({
+		sessions: {
+			Bugfix: "/sessions/bugfix.jsonl",
+			Research: "/sessions/research.jsonl",
+			Docs: "/sessions/docs.jsonl",
+		},
+		aliases: {
+			One: "/sessions/bugfix.jsonl",
+			Two: "/sessions/research.jsonl",
+		},
+		runtimeSnapshots: [
+			{
+				sessionPath: "/sessions/research.jsonl",
+				sessionName: "Research",
+				phase: "llm",
+				waitingForAttention: true,
+				aliases: [],
+			},
+			{
+				sessionPath: "/sessions/bugfix.jsonl",
+				sessionName: "Bugfix",
+				phase: "ready",
+				waitingForAttention: false,
+				aliases: [],
+			},
+		],
+		currentSessionPath: "/sessions/bugfix.jsonl",
+		currentSessionName: "Bugfix",
+		currentBusy: false,
+		currentReady: false,
+		storePath: "/tmp/session-routing.json",
+	});
+
+	assert.equal(dashboard.current, "Bugfix");
+	assert.deepEqual(dashboard.ready, ["Research"]);
+	assert.equal(dashboard.storePath, "/tmp/session-routing.json");
+
+	const byName = new Map(dashboard.sessions.map((entry) => [entry.name, entry]));
+
+	const bugfix = byName.get("Bugfix");
+	assert.ok(bugfix, "Bugfix entry present");
+	assert.equal(bugfix.current, true);
+	assert.equal(bugfix.isCurrent, true);
+	assert.equal(bugfix.ready, false);
+	assert.equal(bugfix.activity, "idle");
+	assert.equal(bugfix.path, "/sessions/bugfix.jsonl");
+	assert.deepEqual(bugfix.aliases, ["One"]);
+
+	const research = byName.get("Research");
+	assert.ok(research, "Research entry present");
+	assert.equal(research.current, false);
+	assert.equal(research.ready, true);
+	assert.equal(research.activity, "busy");
+	assert.deepEqual(research.aliases, ["Two"]);
+
+	const docs = byName.get("Docs");
+	assert.ok(docs, "Docs entry present");
+	assert.equal(docs.current, false);
+	assert.equal(docs.ready, false);
+	assert.equal(docs.activity, "saved");
+	assert.deepEqual(docs.aliases, []);
+
+	assert.equal(dashboard.sessions[0].name, "Bugfix", "current session sorted first");
+});
+
+test("buildSessionDashboard surfaces an unnamed current session and empties state", () => {
+	const emptyDashboard = buildSessionDashboard({
+		sessions: {},
+		aliases: {},
+	});
+	assert.equal(emptyDashboard.current, "none");
+	assert.deepEqual(emptyDashboard.ready, []);
+	assert.deepEqual(emptyDashboard.sessions, []);
+
+	const unnamedDashboard = buildSessionDashboard({
+		sessions: {},
+		aliases: {},
+		currentSessionPath: "/sessions/anon.jsonl",
+		currentBusy: true,
+		currentReady: true,
+	});
+	assert.equal(unnamedDashboard.current, "(unnamed current session)");
+	assert.deepEqual(unnamedDashboard.ready, ["(unnamed current session)"]);
+	assert.equal(unnamedDashboard.sessions.length, 1);
+	assert.equal(unnamedDashboard.sessions[0].activity, "busy");
+	assert.equal(unnamedDashboard.sessions[0].ready, true);
+	assert.equal(unnamedDashboard.sessions[0].current, true);
+});
+
+test("formatSessionManagerSummary output matches buildSessionDashboard text projection", () => {
+	const options = {
+		sessions: {
+			Bugfix: "/sessions/bugfix.jsonl",
+			Research: "/sessions/research.jsonl",
+		},
+		aliases: {
+			One: "/sessions/bugfix.jsonl",
+		},
+		runtimeSnapshots: [
+			{
+				sessionPath: "/sessions/research.jsonl",
+				sessionName: "Research",
+				phase: "llm",
+				waitingForAttention: true,
+				aliases: [],
+			},
+		],
+		currentSessionPath: "/sessions/bugfix.jsonl",
+		currentSessionName: "Bugfix",
+		currentBusy: false,
+		currentReady: false,
+		storePath: "/tmp/session-routing.json",
+	};
+	const summary = formatSessionManagerSummary(options);
+	const dashboard = buildSessionDashboard(options);
+	assert.match(summary, new RegExp(`Current: ${dashboard.current}`));
+	assert.match(summary, new RegExp(`Ready: ${dashboard.ready.join(", ")}`));
+	for (const entry of dashboard.sessions) {
+		assert.ok(summary.includes(`- ${entry.name}`), `summary includes entry ${entry.name}`);
+		assert.ok(summary.includes(`[${entry.activity}]`), `summary includes activity ${entry.activity}`);
+	}
 });
 
 test("describeSessionRoutingStore includes store path", () => {

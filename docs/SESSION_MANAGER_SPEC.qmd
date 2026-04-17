@@ -70,6 +70,7 @@ Sessions
 /sess alias add <session> <alias>
 /sess alias remove <alias>
 /sess export
+/sess ui
 ```
 
 ### Compatibility
