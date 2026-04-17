@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+	buildCompactRouteSlots,
 	buildSessionDashboard,
 	clearWakeAlias,
 	describeSessionRoutingStore,
 	findSessionRegistryKey,
 	findWakeAliasKey,
+	formatCompactRouteSlots,
 	formatSessionManagerSummary,
 	formatSessionRoutingList,
 	removeSessionRoutingForPath,
@@ -133,9 +135,11 @@ test("formatSessionManagerSummary shows current, ready, and alias state inline",
 	assert.match(summary, /Current: Bugfix/);
 	assert.match(summary, /Ready: Research/);
 	assert.match(summary, /Store: \/tmp\/session-routing\.json/);
+	assert.match(summary, /Slots: 1 → Bugfix, 2 → none/);
 	assert.match(summary, /- Bugfix \[current\] \[idle\]/);
 	assert.match(summary, /aliases: One/);
 	assert.match(summary, /- Research \[ready\] \[busy\]/);
+	assert.match(summary, /Tip: use \/sess slots/i);
 });
 
 test("formatSessionRoutingList summarizes sessions and aliases", () => {
@@ -275,6 +279,49 @@ test("formatSessionManagerSummary output matches buildSessionDashboard text proj
 		assert.ok(summary.includes(`[${entry.activity}]`), `summary includes activity ${entry.activity}`);
 	}
 });
+
+test("buildCompactRouteSlots and formatCompactRouteSlots summarize PK1/PK2 lanes", () => {
+	const slots = buildCompactRouteSlots({
+		sessions: {
+			Bugfix: "/sessions/bugfix.jsonl",
+			Research: "/sessions/research.jsonl",
+		},
+		aliases: {
+			one: "/sessions/bugfix.jsonl",
+			two: "/sessions/research.jsonl",
+		},
+	});
+	assert.deepEqual(slots, [
+		{
+			family: "1",
+			sessionPath: "/sessions/bugfix.jsonl",
+			sessionName: "Bugfix",
+			labels: ["one"],
+			status: "mapped",
+		},
+		{
+			family: "2",
+			sessionPath: "/sessions/research.jsonl",
+			sessionName: "Research",
+			labels: ["two"],
+			status: "mapped",
+		},
+	]);
+	const text = formatCompactRouteSlots({
+		sessions: {
+			Bugfix: "/sessions/bugfix.jsonl",
+			Research: "/sessions/research.jsonl",
+		},
+		aliases: {
+			one: "/sessions/bugfix.jsonl",
+			two: "/sessions/research.jsonl",
+		},
+	});
+	assert.match(text, /Compact routes/);
+	assert.match(text, /- 1: Bugfix via one/i);
+	assert.match(text, /- 2: Research via two/i);
+});
+
 
 test("describeSessionRoutingStore includes store path", () => {
 	assert.equal(
