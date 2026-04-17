@@ -41,7 +41,7 @@ test("pi-speak-admin --help prints the real Ink CLI usage", async () => {
 	assert.doesNotMatch(stdout, /stub/i);
 });
 
-test("pi-speak-admin --snapshot renders the pane chrome with compact routes and focused footer", withIsolatedStore(async () => {
+async function seedAndRunPane(args) {
 	persistSessionRouting({
 		sessions: {
 			Voice: "/sessions/voice.jsonl",
@@ -53,11 +53,11 @@ test("pi-speak-admin --snapshot renders the pane chrome with compact routes and 
 		},
 	});
 
-	const { stdout, stderr } = await execFileAsync(
+	return execFileAsync(
 		process.execPath,
 		[
 			"dist/ui/admin.js",
-			"--snapshot",
+			...args,
 			"--current-path",
 			"/sessions/bugfix.jsonl",
 			"--current-name",
@@ -68,6 +68,10 @@ test("pi-speak-admin --snapshot renders the pane chrome with compact routes and 
 			env: { ...process.env },
 		},
 	);
+}
+
+test("pi-speak-admin --snapshot renders the pane chrome with compact routes and focused footer", withIsolatedStore(async () => {
+	const { stdout, stderr } = await seedAndRunPane(["--snapshot"]);
 
 	assert.equal(stderr, "");
 	assert.match(stdout, /pi-speak session manager/i);
@@ -78,4 +82,13 @@ test("pi-speak-admin --snapshot renders the pane chrome with compact routes and 
 	assert.match(stdout, /voice-bugfix/i);
 	assert.match(stdout, /compact: PK2 via two/i);
 	assert.match(stdout, /\[↑↓\/tab\/jk\] move/i);
+}));
+
+test("pi-speak-admin falls back to snapshot output in non-interactive exec contexts", withIsolatedStore(async () => {
+	const { stdout, stderr } = await seedAndRunPane([]);
+
+	assert.equal(stderr, "");
+	assert.match(stdout, /Non-interactive terminal detected/i);
+	assert.match(stdout, /pi-speak session manager/i);
+	assert.match(stdout, /Focused session/i);
 }));

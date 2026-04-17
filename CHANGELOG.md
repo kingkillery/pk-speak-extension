@@ -24,9 +24,13 @@ Added:
 
 Improved:
 
-- the `pi-speak-admin` CLI now runs the real Ink session-manager app instead of a placeholder stub, seeds current-session context from the launching Pi window, supports keyboard focus movement plus inline rename/alias/remove prompts, shows compact PK1/PK2 route lanes and a focused-session footer, and exposes `--snapshot` for deterministic Ink-frame rendering in tests and automation
+- the `pi-speak-admin` CLI now runs the real Ink session-manager app instead of a placeholder stub, seeds current-session context from the launching Pi window, supports keyboard focus movement plus inline rename/alias/remove prompts, shows compact PK1/PK2 route lanes and a focused-session footer, exposes `--snapshot` for deterministic Ink-frame rendering in tests and automation, and falls back to a read-only snapshot when launched without a live TTY
+- local Python/audio portability now honors `PI_SPEAK_PYTHON` and `PI_SPEAK_SPEAK11_PATH` first, scans user-site `Python*/Scripts` locations instead of pinning to `Python314`, and keeps safer fallbacks for PATH-based setups
+- listener shutdown now sends an explicit stdin `shutdown` command before ending stdin, while keeping a timed force-kill fallback so local audio resources are more likely to close cleanly on Windows
 - package publishing now builds both the core extension and the UI bundle before release so the shipped `pi-speak-admin` binary stays in sync
 - operator guidance now uses a bridge-first documentation flow with `/sess` positioned as the main session-manager interface and `/attn` positioned as the advanced/debug broker surface
+- remote/mobile operator docs now include a dedicated live validation run sheet at `docs/REMOTE_VALIDATION_CHECKLIST.md` so phone-path QA can be executed and recorded consistently
+- remote/mobile validation docs now also include `docs/REMOTE_VALIDATION_RUN_SHEET.md` as a compact pass/fail worksheet for live phone sessions
 - voice session-control phrases like `show sessions`, `current session`, `remove session bugfix`, and `what's ready` now prefer the `/sess` manager surface
 - `/sess` argument completions are now context-aware and can suggest session-specific edit and alias-removal shortcuts
 - operator guidance now uses a bridge-first documentation flow with a dedicated session-operations guide for `/sess`, `/attn`, wake aliases, and natural voice routing

@@ -494,6 +494,10 @@ def main():
                 line = sys.stdin.readline()
                 if not line:
                     break
+                command = line.strip().lower()
+                if command in {"shutdown", "stop", "exit", "quit"}:
+                    emit("status", message="Shutdown requested")
+                    break
         except Exception:
             pass
         running = False

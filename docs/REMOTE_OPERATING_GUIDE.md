@@ -83,6 +83,9 @@ This gives you:
 
 ## Operator Checks
 
+For a full live phone validation run, use `docs/REMOTE_VALIDATION_CHECKLIST.md`.
+For a compact pass/fail worksheet during the run, use `docs/REMOTE_VALIDATION_RUN_SHEET.md`.
+
 Use these when the remote path is acting up:
 
 1. `/remote status`

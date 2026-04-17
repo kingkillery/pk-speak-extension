@@ -106,7 +106,7 @@ It shows the same dashboard you get from `/sess`, refreshes within one second of
 /sess ui
 ```
 
-On Windows the pane spawns in a new terminal via `start`. On other platforms the handler reports the exact `node dist/ui/admin.js` command you can run by hand. The spawned process is detached from `pi-coding-agent`, so it does not fight for the parent TTY.
+On Windows the pane spawns in a new terminal via `start`. On other platforms the handler reports the exact `node dist/ui/admin.js` command you can run by hand. The spawned process is detached from `pi-coding-agent`, so it does not fight for the parent TTY. If you launch `pi-speak-admin` from a non-interactive shell, it falls back to a read-only snapshot instead of trying to enable raw mode.
 
 ### Pane layout
 

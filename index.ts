@@ -8,6 +8,7 @@ import { ControlServer, type ControlActionResult, type ControlServerState } from
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
+import { requestGracefulChildShutdown } from "./listener-control.js";
 import { findSessionRouteConflict, listKnownTargets, resolveSessionRoute, resolveSessionTarget } from "./voice-routing.js";
 import {
 	clearWakeAlias,
@@ -23,6 +24,7 @@ import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSession
 import { appendSessionEvent, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
+import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import {
 	describeTtsProvider,
 	getAudioMimeType,
@@ -156,18 +158,7 @@ function extractText(content: unknown): string {
 }
 
 function getSpeakInvocation(outputPath: string) {
-	const home = process.env.USERPROFILE || process.env.HOME || "";
-	const pyScript = join(home, "AppData", "Roaming", "Python", "Python314", "Scripts", "speak11.py");
-	const cmdScript = join(home, "AppData", "Roaming", "Python", "Python314", "Scripts", "speak11.cmd");
-	const python = existsSync("C:/Python314/python.exe") ? "C:/Python314/python.exe" : "python";
-
-	if (existsSync(pyScript)) {
-		return { command: python, args: [pyScript, "--stdin", "-s", "-v", DEFAULT_VOICE, "-o", outputPath] };
-	}
-	if (existsSync(cmdScript)) {
-		return { command: "cmd.exe", args: ["/c", cmdScript, "--stdin", "-s", "-v", DEFAULT_VOICE, "-o", outputPath] };
-	}
-	return { command: "cmd.exe", args: ["/c", "speak11", "--stdin", "-s", "-v", DEFAULT_VOICE, "-o", outputPath] };
+	return getSpeakInvocationFromEnv(outputPath, DEFAULT_VOICE, process.env);
 }
 
 function getPlayerInvocation(filePath: string) {
@@ -209,11 +200,7 @@ function getExtensionDir(): string {
 }
 
 function getPython(): string {
-	if (existsSync("C:/Python314/python.exe")) return "C:/Python314/python.exe";
-	const home = process.env.USERPROFILE || process.env.HOME || "";
-	const localPy = join(home, "AppData", "Local", "Microsoft", "WindowsApps", "python3.exe");
-	if (existsSync(localPy)) return localPy;
-	return "python";
+	return getPythonCommand(process.env);
 }
 
 function getListenerPythonEnv(): NodeJS.ProcessEnv {
@@ -1348,16 +1335,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			listenerRl = undefined;
 		}
 		if (listenerProcess && !listenerProcess.killed) {
-			const proc = listenerProcess;
-			// Close stdin to signal graceful shutdown to Python
-			try { proc.stdin?.end(); } catch {}
-			// Force kill after 3 seconds if still alive
-			const killTimer = setTimeout(() => {
-				if (!proc.killed) {
-					try { proc.kill(); } catch {}
-				}
-			}, 3000);
-			proc.on("exit", () => clearTimeout(killTimer));
+			requestGracefulChildShutdown(listenerProcess, { command: "shutdown", killAfterMs: 3000 });
 		}
 		listenerProcess = undefined;
 		monoActive = false;
