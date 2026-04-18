@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pi-speak-pk repo brief</title>
+  <style>
+    :root {
+      --bg: #f3f1ea;
+      --panel: #fcfbf7;
+      --surface: rgba(255,255,255,.72);
+      --line: rgba(24,38,42,.11);
+      --line-strong: rgba(72,113,103,.32);
+      --ink: #172127;
+      --ink-soft: #4f5d66;
+      --rail-text: #edf2f1;
+      --accent: #9bd0bf;
+      --accent-strong: #3d7466;
+      --chip: rgba(111,169,153,.08);
+      --chip-strong: #5b8f7e;
+      --serif: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+      --sans: "Segoe UI", Aptos, system-ui, sans-serif;
+      --mono: "Cascadia Code", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background: radial-gradient(circle at top left, rgba(86,129,117,.12), transparent 22%), linear-gradient(180deg, #f0ede4 0%, #f4f2eb 100%);
+    }
+    h1,h2,h3,h4 { font-family: var(--serif); color: var(--ink); letter-spacing: -.02em; margin: 0; }
+    p { margin: 0; }
+    code {
+      font-family: var(--mono);
+      font-size: .9rem;
+      background: rgba(11,17,21,.06);
+      border: 1px solid rgba(11,17,21,.08);
+      border-radius: .55rem;
+      padding: .18rem .42rem;
+    }
+    .shell { min-height: 100vh; display: grid; grid-template-columns: 22rem 1fr; }
+    .rail {
+      padding: 2rem 1.35rem 1.5rem;
+      border-right: 1px solid var(--line);
+      background: radial-gradient(circle at top left, rgba(85,148,132,.14), transparent 30%), linear-gradient(180deg, rgba(10,16,18,.95), rgba(11,15,20,.98));
+      color: var(--rail-text);
+      position: sticky; top: 0; height: 100vh;
+      display: flex; flex-direction: column; gap: 1.4rem;
+    }
+    .eyebrow { text-transform: uppercase; letter-spacing: .16em; font-size: .72rem; color: var(--accent); }
+    .rail h1 { font-size: 2.2rem; line-height: 1.05; margin-top: .3rem; }
+    .rail-copy { color: rgba(226,232,235,.74); max-width: 24rem; }
+    .metric-stack { display: grid; gap: .75rem; }
+    .metric-card {
+      border: 1px solid rgba(160,194,184,.18);
+      background: rgba(255,255,255,.04);
+      border-radius: 1rem;
+      padding: .9rem 1rem;
+      display: grid; gap: .2rem;
+    }
+    .metric-card.warning { border-color: rgba(210,166,93,.34); }
+    .metric-value { font-size: 1.8rem; font-weight: 700; color: #f4f6f5; }
+    .metric-label { color: rgba(226,232,235,.72); font-size: .9rem; }
+    .nav-list { display: grid; gap: .55rem; }
+    .nav-item {
+      border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.03); color: inherit;
+      border-radius: 1rem; padding: .85rem .95rem; text-align: left; cursor: pointer;
+      display: grid; gap: .2rem;
+    }
+    .nav-item.active { background: rgba(115,180,159,.12); border-color: rgba(124,190,170,.54); }
+    .nav-kicker { font-size: .74rem; color: rgba(226,232,235,.62); }
+    .nav-label { font-size: 1.02rem; font-weight: 600; }
+    .content { padding: 1.4rem; display: grid; gap: 1rem; }
+    .hero-panel, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 1.3rem; box-shadow: 0 24px 50px rgba(5,11,16,.06); }
+    .hero-panel { padding: 1.4rem 1.5rem; display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
+    .hero-panel h2 { font-size: 2rem; margin-top: .25rem; }
+    .hero-notes { display: flex; flex-wrap: wrap; gap: .55rem; justify-content: flex-end; }
+    .pill { border: 1px solid var(--line-strong); border-radius: 999px; padding: .48rem .8rem; background: var(--chip); color: var(--ink-soft); font-size: .92rem; }
+    .panel-grid { display: grid; gap: 1rem; grid-template-columns: repeat(2,minmax(0,1fr)); }
+    .panel-grid.overview { grid-template-columns: 1.15fr .85fr; }
+    .panel-grid.surfaces { grid-template-columns: .9fr 1.1fr; }
+    .panel { padding: 1.25rem 1.25rem 1.1rem; }
+    .panel.feature { background: linear-gradient(180deg, rgba(250,252,251,.9), rgba(247,249,248,.94)), radial-gradient(circle at top right, rgba(126,178,163,.14), transparent 26%); }
+    .panel.wide { grid-column: 1 / -1; }
+    .panel-kicker { text-transform: uppercase; letter-spacing: .14em; color: var(--accent-strong); font-size: .72rem; margin-bottom: .5rem; }
+    .panel p, .panel li { color: var(--ink-soft); }
+    .command-list, .signal-list, .notes ul { margin: .7rem 0 0; padding-left: 1.2rem; }
+    .command-list li, .signal-list li, .notes li { margin-bottom: .55rem; }
+    .journey-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: .85rem; margin-top: .8rem; }
+    .journey-card, .flow-card {
+      border: 1px solid var(--line); background: rgba(255,255,255,.62); border-radius: 1.1rem; padding: 1rem;
+    }
+    .journey-step { display: inline-flex; width: 2rem; height: 2rem; border-radius: 999px; align-items: center; justify-content: center; background: var(--chip-strong); color: #fff; font-weight: 700; margin-bottom: .7rem; }
+    .surface-list { display: grid; gap: .65rem; }
+    .surface-chip {
+      border: 1px solid var(--line); background: var(--surface); border-radius: 1rem; padding: .9rem 1rem;
+      text-align: left; cursor: pointer; display: grid; gap: .15rem;
+    }
+    .surface-chip span { font-family: var(--mono); color: var(--accent-strong); font-size: .86rem; }
+    .surface-chip strong { color: var(--ink); font-size: 1rem; }
+    .surface-chip.active { border-color: rgba(96,151,136,.52); background: rgba(111,169,153,.1); }
+    .surface-heading { display: flex; align-items: center; gap: .9rem; flex-wrap: wrap; }
+    .notes { margin-top: 1rem; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1rem; }
+    .flow-columns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1rem; }
+    .flow-card ol { margin: .7rem 0 0; padding-left: 1.2rem; }
+    .flow-card li { margin-bottom: .5rem; }
+    .file-list { display: grid; gap: .95rem; }
+    .file-row { display: grid; gap: .35rem; }
+    .timeline { display: grid; gap: .9rem; }
+    .timeline-row { display: grid; grid-template-columns: auto 1fr; gap: .9rem; align-items: start; padding: .85rem 0; border-top: 1px solid var(--line); }
+    .timeline-row:first-child { border-top: none; padding-top: .1rem; }
+    .status { display: inline-flex; align-items: center; justify-content: center; min-width: 4.4rem; padding: .4rem .65rem; border-radius: 999px; background: rgba(102,164,143,.15); color: #285847; font-size: .8rem; font-weight: 700; }
+    .status.pending { background: rgba(208,164,83,.16); color: #78561d; }
+    .big-stat { font-size: 2.6rem; line-height: 1; margin: .35rem 0 .6rem; color: var(--ink); font-weight: 700; }
+    .section { display: none; }
+    .section.active { display: grid; }
+    @media (max-width: 1100px) {
+      .shell { grid-template-columns: 1fr; }
+      .rail { position: static; height: auto; }
+      .hero-panel, .panel-grid, .journey-grid, .flow-columns, .notes { grid-template-columns: 1fr !important; }
+      .hero-panel { flex-direction: column; }
+      .hero-notes { justify-content: flex-start; }
+    }
+    @media (max-width: 720px) {
+      .content { padding: .9rem; }
+      .rail { padding: 1.2rem 1rem; }
+      .panel, .hero-panel { padding: 1rem; }
+      .rail h1, .hero-panel h2, .big-stat { font-size: clamp(1.7rem, 5vw, 2.2rem); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <div>
+        <p class="eyebrow">Artifact</p>
+        <h1>pi-speak-pk repo brief</h1>
+        <p class="rail-copy">An interactive orientation artifact for the voice, remote, and session-routing extension that turns Pi into a usable voice workstation.</p>
+      </div>
+      <div class="metric-stack">
+        <div class="metric-card"><span class="metric-value">5</span><span class="metric-label">primary operator surfaces</span></div>
+        <div class="metric-card"><span class="metric-value">100</span><span class="metric-label">passing tests at latest verified run</span></div>
+        <div class="metric-card warning"><span class="metric-value">1</span><span class="metric-label">big remaining production proof: live phone validation</span></div>
+      </div>
+      <nav class="nav-list">
+        <button class="nav-item active" data-section="overview"><span class="nav-kicker">What this repo is</span><span class="nav-label">Overview</span></button>
+        <button class="nav-item" data-section="surfaces"><span class="nav-kicker">Operator entry points</span><span class="nav-label">Surfaces</span></button>
+        <button class="nav-item" data-section="flows"><span class="nav-kicker">How requests move</span><span class="nav-label">Flows</span></button>
+        <button class="nav-item" data-section="files"><span class="nav-kicker">Where the logic lives</span><span class="nav-label">Files</span></button>
+        <button class="nav-item" data-section="validation"><span class="nav-kicker">What is hardened now</span><span class="nav-label">Validation</span></button>
+      </nav>
+    </aside>
+    <main class="content">
+      <section class="hero-panel">
+        <div>
+          <p class="eyebrow">Repository focus</p>
+          <h2 id="hero-title">Overview</h2>
+        </div>
+        <div class="hero-notes">
+          <span class="pill">Voice-first Pi extension</span>
+          <span class="pill">Telegram + browser remote control</span>
+          <span class="pill">Named session routing</span>
+          <span class="pill">Ink management pane</span>
+        </div>
+      </section>
+
+      <section id="overview" class="panel-grid overview section active">
+        <article class="panel feature">
+          <p class="panel-kicker">What the repo does</p>
+          <h3>Pi becomes a multi-surface voice workstation</h3>
+          <p>This package is not just text-to-speech bolted onto Pi. It adds spoken replies, local wake listening, Telegram turns, a mobile web app, a remote HTTP API, and a session manager that can route spoken work into the right Pi window.</p>
+        </article>
+        <article class="panel">
+          <p class="panel-kicker">Shortest operator paths</p>
+          <ul class="command-list">
+            <li><code>/speak on</code> for local spoken replies</li>
+            <li><code>/mono on</code> for the always-listening PK wake flow</li>
+            <li><code>/phone on</code> for reliable Telegram remote control</li>
+            <li><code>/remote on</code> then <code>/app/</code> for browser mic plus audio playback</li>
+            <li><code>/sess ui</code> for the detached session-management pane</li>
+          </ul>
+        </article>
+        <article class="panel wide">
+          <p class="panel-kicker">Runtime map</p>
+          <div class="journey-grid">
+            <div class="journey-card"><span class="journey-step">1</span><h4>Operator chooses a surface</h4><p>The repo exposes five human-facing entry points: /speak, /mono, /phone, /remote, and /sess.</p></div>
+            <div class="journey-card"><span class="journey-step">2</span><h4>Input enters the runtime</h4><p>A turn can begin from the wake listener, Telegram, the mobile web app, or the active Pi session.</p></div>
+            <div class="journey-card"><span class="journey-step">3</span><h4>Routing decides the target</h4><p>Named sessions, aliases, and compact one-versus-two route families are resolved before dispatch.</p></div>
+            <div class="journey-card"><span class="journey-step">4</span><h4>Output fans back out</h4><p>Results can return to the terminal, TTS, Telegram, or the /app/ browser client.</p></div>
+          </div>
+        </article>
+      </section>
+
+      <section id="surfaces" class="panel-grid surfaces section">
+        <article class="panel">
+          <p class="panel-kicker">Choose a control surface</p>
+          <div class="surface-list" id="surface-list"></div>
+        </article>
+        <article class="panel feature">
+          <p class="panel-kicker">Selected surface</p>
+          <div id="surface-detail"></div>
+        </article>
+      </section>
+
+      <section id="flows" class="panel-grid section">
+        <article class="panel wide">
+          <p class="panel-kicker">Main execution flows</p>
+          <div class="flow-columns">
+            <div class="flow-card"><h3>Local voice loop</h3><ol><li>Operator says <strong>PK</strong> or <strong>PK target</strong></li><li>The Python listener wakes and transcribes</li><li>Routing resolves session names, aliases, or compact numeric lanes</li><li>Pi processes the turn and can answer on screen and in audio</li></ol></div>
+            <div class="flow-card"><h3>Remote phone loop</h3><ol><li>Telegram or <code>/app/</code> submits text or voice</li><li>The control server authenticates and queues the turn</li><li>STT, routing, and Pi execution run in the current runtime</li><li>The response returns as text plus optional reply audio</li></ol></div>
+          </div>
+        </article>
+        <article class="panel"><p class="panel-kicker">Remote diagnostics signals</p><ul class="signal-list"><li><strong>queueState</strong> shows whether remote work is idle, queued, or busy</li><li><strong>queueDepth</strong> shows backlog pressure</li><li><strong>phoneLinked</strong> shows whether Telegram is paired</li><li><strong>monoState</strong> shows off, listening, or active local voice state</li><li><strong>activeErrorSources</strong> surfaces which subsystem is failing</li></ul></article>
+        <article class="panel"><p class="panel-kicker">Why the hardening matters</p><p>The high-value production work here has been about making failures diagnosable instead of mysterious: better runtime path resolution, cleaner child shutdown, a real management pane, and diagnostics that translate raw nested state into operator-ready signals.</p></article>
+      </section>
+
+      <section id="files" class="panel-grid section">
+        <article class="panel"><p class="panel-kicker">Core runtime</p><div class="file-list"><div class="file-row"><code>index.ts</code><p>Extension entry point, command registration, remote orchestration, and status wiring.</p></div><div class="file-row"><code>control-server.ts</code><p>HTTP API, /app/ hosting, auth gates, remote turns, and diagnostics payloads.</p></div><div class="file-row"><code>listener-control.ts</code><p>Graceful child-process shutdown with stdin command plus timed fallback kill.</p></div><div class="file-row"><code>runtime-paths.ts</code><p>Python and speak11 discovery, including env overrides and user-site scanning.</p></div></div></article>
+        <article class="panel"><p class="panel-kicker">Voice and routing</p><div class="file-list"><div class="file-row"><code>listener/listener.py</code><p>Wake detection and local transcription path.</p></div><div class="file-row"><code>voice-routing.ts</code><p>Route normalization, numeric family handling, and conflict detection.</p></div><div class="file-row"><code>session-routing.ts</code><p>Named sessions, aliases, summaries, removal helpers, and dashboard selectors.</p></div><div class="file-row"><code>voice-session-command.ts</code><p>Natural language bridge from spoken phrases into /sess actions.</p></div></div></article>
+        <article class="panel"><p class="panel-kicker">Operator UI</p><div class="file-list"><div class="file-row"><code>ui/admin.tsx</code><p>CLI entry for the session manager pane and snapshot fallback.</p></div><div class="file-row"><code>ui/components/Dashboard.tsx</code><p>Main pane renderer for session rows and compact routes.</p></div><div class="file-row"><code>ui/components/Toast.tsx</code><p>Voice and admin toast band.</p></div><div class="file-row"><code>ui/hooks/useSessionStore.ts</code><p>Polling and external-store reload behavior.</p></div></div></article>
+        <article class="panel"><p class="panel-kicker">Docs and validation</p><div class="file-list"><div class="file-row"><code>README.md</code><p>Main operator guide and troubleshooting reference.</p></div><div class="file-row"><code>docs/SESSION_OPERATIONS.md</code><p>Focused /sess and pane operator guide.</p></div><div class="file-row"><code>docs/REMOTE_VALIDATION_CHECKLIST.md</code><p>Manual phone validation checklist.</p></div><div class="file-row"><code>tests/*.test.mjs</code><p>Regression coverage across remote auth, queueing, routing, UI, and shutdown.</p></div></div></article>
+      </section>
+
+      <section id="validation" class="panel-grid section">
+        <article class="panel wide"><p class="panel-kicker">Production-readiness slices</p><div class="timeline"><div class="timeline-row"><span class="status">Done</span><div><h3>Session manager pane shipped</h3><p>The old placeholder pane was replaced with a working Ink app, including keybindings, focused footer, compact route display, toasts, and a snapshot mode.</p></div></div><div class="timeline-row"><span class="status">Done</span><div><h3>Runtime path portability improved</h3><p>Python and speak11 discovery now honor explicit env overrides and scan user-site Python Scripts directories instead of assuming a single Python314 path.</p></div></div><div class="timeline-row"><span class="status">Done</span><div><h3>Listener shutdown hardened</h3><p>Mono shutdown now sends an explicit stdin command and keeps a timed kill fallback, with tests covering both paths.</p></div></div><div class="timeline-row"><span class="status">Done</span><div><h3>Remote diagnostics made operator-friendly</h3><p>The /v1/diagnostics payload now exposes a compact summary block so operators can see queue state, queue depth, phone linkage, mono state, current target, and active error sources quickly.</p></div></div><div class="timeline-row"><span class="status pending">Pending</span><div><h3>Live phone validation</h3><p>The checklist and run sheet are in place, but real manual verification still needs a phone, Telegram pairing, and an HTTPS or Tailscale path.</p></div></div></div></article>
+        <article class="panel"><p class="panel-kicker">Automated confidence</p><h3>Latest verified suite</h3><p class="big-stat">100 passing tests</p><p>Coverage spans remote auth, queue limits, audio expiry, session routing, listener shutdown, admin CLI behavior, pane state, and voice-command integration.</p></article>
+        <article class="panel"><p class="panel-kicker">Next real-world proof</p><h3>Manual phone run</h3><p>The repo now has a detailed checklist and a compact run sheet. The remaining gap is live evidence for Telegram pairing, the web app, auth bootstrap, queue behavior, reply audio, and diagnostics under a real phone path.</p></article>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const surfaces = [
+      {
+        command: '/speak', title: 'Spoken replies',
+        summary: 'Turns Pi into a voice assistant with multi-provider TTS and optional audio-first rewriting.',
+        strengths: ['Auto provider fallback now steps through legacy, elevenlabs, openai, then edge', 'Keeps the full text reply on screen while producing a speech-friendly spoken version', 'Supports stop, provider switching, provider diagnostics, and rewrite toggles'],
+        risks: ['Real-world quality still depends on machine audio config and provider credentials', 'Legacy speak11 portability is better now, but operator environments still vary']
+      },
+      {
+        command: '/mono', title: 'Always-listening local voice',
+        summary: 'Runs the PK wake phrase flow locally with a faster-whisper listener and session-aware routing.',
+        strengths: ['Wake sensitivity is operator-tunable with low, medium, and high presets', 'Short numeric families stay deterministic: PK1 and PK2 remain distinct', 'Listener shutdown is now explicit and testable instead of relying only on EOF behavior'],
+        risks: ['Still depends on a healthy local Python and audio stack', 'Background audio and microphone edge cases remain the main live risk area']
+      },
+      {
+        command: '/phone', title: 'Telegram bridge',
+        summary: 'Pairs a Telegram bot to Pi for text turns, voice notes, and remote replies from a phone.',
+        strengths: ['Lowest-friction remote path when reliability matters more than low latency', 'Supports pairing, unpairing, text turns, voice notes, and optional audio replies', 'Now easier to validate with dedicated remote run sheets and clearer diagnostics'],
+        risks: ['Still needs a real phone run to prove live pairing and recovery end to end', 'Bot token and polling health are external dependencies']
+      },
+      {
+        command: '/remote', title: 'HTTP API and mobile web app',
+        summary: 'Hosts /app/, remote turn endpoints, auth, queueing, and runtime diagnostics for browser-based phone control.',
+        strengths: ['Non-local requests are authenticated, rate-limited, and queue-aware', 'The mobile app can bootstrap auth with a token and store it per session or device', 'Diagnostics now include a high-signal summary block for queue, phone linkage, mono state, and active error sources'],
+        risks: ['Browser microphone use still requires HTTPS in real phone scenarios', 'The remaining unknown is live network-path behavior, not the basic handler wiring']
+      },
+      {
+        command: '/sess', title: 'Session manager and voice routing',
+        summary: 'Names sessions, assigns aliases, manages compact PK1/PK2 lanes, and drives the detached Ink admin pane.',
+        strengths: ['The pane is now real, not a stub: rename, alias, remove, focus movement, footer, and toasts all work', 'Snapshot and non-TTY fallback protect the CLI from raw-mode crashes', 'Store reload logic keeps the pane, slash commands, and runtime state aligned across surfaces'],
+        risks: ['The pane itself is tested, but multi-session operator ergonomics still benefit from live dogfooding', 'Cross-window session naming habits still shape how useful the compact lanes feel in practice']
+      }
+    ];
+
+    const surfaceList = document.getElementById('surface-list');
+    const surfaceDetail = document.getElementById('surface-detail');
+    let activeSurface = 3;
+
+    function renderSurfaceList() {
+      surfaceList.innerHTML = surfaces.map((surface, index) => `
+        <button class="surface-chip ${index === activeSurface ? 'active' : ''}" data-surface="${index}">
+          <span>${surface.command}</span>
+          <strong>${surface.title}</strong>
+        </button>
+      `).join('');
+      surfaceList.querySelectorAll('[data-surface]').forEach((button) => {
+        button.addEventListener('click', () => {
+          activeSurface = Number(button.getAttribute('data-surface'));
+          renderSurfaceList();
+          renderSurfaceDetail();
+        });
+      });
+    }
+
+    function renderSurfaceDetail() {
+      const surface = surfaces[activeSurface];
+      surfaceDetail.innerHTML = `
+        <div class="surface-heading"><code>${surface.command}</code><h3>${surface.title}</h3></div>
+        <p style="margin-top:.75rem; color: var(--ink-soft);">${surface.summary}</p>
+        <div class="notes">
+          <div>
+            <h4>Strengths now</h4>
+            <ul>${surface.strengths.map((item) => `<li>${item}</li>`).join('')}</ul>
+          </div>
+          <div>
+            <h4>Watch points</h4>
+            <ul>${surface.risks.map((item) => `<li>${item}</li>`).join('')}</ul>
+          </div>
+        </div>
+      `;
+    }
+
+    const sectionTitles = {
+      overview: 'Overview',
+      surfaces: 'Surfaces',
+      flows: 'Flows',
+      files: 'Files',
+      validation: 'Validation'
+    };
+
+    document.querySelectorAll('.nav-item').forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = button.getAttribute('data-section');
+        document.querySelectorAll('.nav-item').forEach((el) => el.classList.remove('active'));
+        document.querySelectorAll('.section').forEach((el) => el.classList.remove('active'));
+        button.classList.add('active');
+        document.getElementById(target).classList.add('active');
+        document.getElementById('hero-title').textContent = sectionTitles[target];
+      });
+    });
+
+    renderSurfaceList();
+    renderSurfaceDetail();
+  </script>
+</body>
+</html>
