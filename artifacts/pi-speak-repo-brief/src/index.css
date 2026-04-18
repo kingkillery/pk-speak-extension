@@ -1,0 +1,78 @@
+:root {
+  --bg: #f3f1ea;
+  --panel: #fcfbf7;
+  --surface: rgba(255, 255, 255, 0.68);
+  --line: rgba(24, 38, 42, 0.11);
+  --line-strong: rgba(72, 113, 103, 0.32);
+  --ink: #172127;
+  --ink-soft: #4f5d66;
+  --rail-text: #edf2f1;
+  --accent: #9bd0bf;
+  --accent-strong: #3d7466;
+  --chip: rgba(111, 169, 153, 0.08);
+  --chip-strong: #5b8f7e;
+
+  --serif: 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+  --sans: 'Segoe UI', 'Aptos', system-ui, sans-serif;
+  --mono: 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+
+  font-family: var(--sans);
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--ink);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(circle at top left, rgba(86, 129, 117, 0.12), transparent 22%),
+    linear-gradient(180deg, #f0ede4 0%, #f4f2eb 100%);
+}
+
+body,
+button,
+input,
+textarea,
+select {
+  font-family: var(--sans);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+h1,
+ h2,
+ h3,
+ h4 {
+  color: var(--ink);
+  font-family: var(--serif);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+p {
+  margin: 0;
+}
+
+button {
+  appearance: none;
+}
+
+a {
+  color: inherit;
+}
