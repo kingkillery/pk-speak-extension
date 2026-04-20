@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { EdgeTTS } from "node-edge-tts";
+import { withAbortTimeout } from "./request-timeout.js";
 
 export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs";
 
@@ -172,31 +173,35 @@ async function rewriteForSpeech(text: string, signal?: AbortSignal) {
 	if (!apiKey) return { text, applied: false };
 
 	throwIfAborted(signal);
-	const response = await fetch(OPENROUTER_URL, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-			"HTTP-Referer": process.env.PI_SPEAK_HTTP_REFERER || "https://github.com/prest/pi-speak-extension",
-			"X-Title": "pi-speak-extension",
-		},
-		body: JSON.stringify({
-			model: DEFAULT_REWRITE_MODEL,
-			temperature: 0.2,
-			messages: [
-				{
-					role: "system",
-					content:
-						"You rewrite assistant replies for spoken delivery. Keep all key technical meaning, remove markdown/table formatting, compress long lists, and produce natural spoken English only. Do not add commentary about the rewrite.",
+	const response = await withAbortTimeout(
+		(requestSignal) =>
+			fetch(OPENROUTER_URL, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${apiKey}`,
+					"Content-Type": "application/json",
+					"HTTP-Referer": process.env.PI_SPEAK_HTTP_REFERER || "https://github.com/prest/pi-speak-extension",
+					"X-Title": "pi-speak-extension",
 				},
-				{
-					role: "user",
-					content: text.slice(0, 12000),
-				},
-			],
-		}),
+				body: JSON.stringify({
+					model: DEFAULT_REWRITE_MODEL,
+					temperature: 0.2,
+					messages: [
+						{
+							role: "system",
+							content:
+								"You rewrite assistant replies for spoken delivery. Keep all key technical meaning, remove markdown/table formatting, compress long lists, and produce natural spoken English only. Do not add commentary about the rewrite.",
+						},
+						{
+							role: "user",
+							content: text.slice(0, 12000),
+						},
+					],
+				}),
+				signal: requestSignal,
+			}),
 		signal,
-	});
+	);
 
 	if (!response.ok) {
 		throw new Error(`OpenRouter rewrite failed (${response.status})`);
@@ -231,20 +236,24 @@ async function synthesizeOpenAI(text: string, outputPath: string, signal?: Abort
 	const apiKey = getOpenAiAudioKey();
 	if (!apiKey) throw new Error("PI_SPEAK_OPENAI_KEY or VOICE_TOOLS_OPENAI_KEY is required for OpenAI TTS");
 	throwIfAborted(signal);
-	const response = await fetch(`${process.env.PI_SPEAK_OPENAI_BASE_URL || "https://api.openai.com/v1"}/audio/speech`, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify({
-			model: DEFAULT_OPENAI_MODEL,
-			voice: DEFAULT_OPENAI_VOICE,
-			input: text,
-			response_format: "mp3",
-		}),
+	const response = await withAbortTimeout(
+		(requestSignal) =>
+			fetch(`${process.env.PI_SPEAK_OPENAI_BASE_URL || "https://api.openai.com/v1"}/audio/speech`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${apiKey}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					model: DEFAULT_OPENAI_MODEL,
+					voice: DEFAULT_OPENAI_VOICE,
+					input: text,
+					response_format: "mp3",
+				}),
+				signal: requestSignal,
+			}),
 		signal,
-	});
+	);
 	if (!response.ok) {
 		throw new Error(`OpenAI TTS failed (${response.status})`);
 	}
@@ -258,20 +267,21 @@ async function synthesizeElevenLabs(text: string, outputPath: string, signal?: A
 	throwIfAborted(signal);
 	const configuredVoice = (process.env.PI_SPEAK_ELEVENLABS_VOICE_ID || DEFAULT_ELEVENLABS_VOICE_ID).trim();
 	const voiceId = elevenLabsAliases[configuredVoice.toLowerCase()] || configuredVoice;
-	const response = await fetch(
-		`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
-		{
-			method: "POST",
-			headers: {
-				"xi-api-key": apiKey,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({
-				text,
-				model_id: DEFAULT_ELEVENLABS_MODEL_ID,
+	const response = await withAbortTimeout(
+		(requestSignal) =>
+			fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
+				method: "POST",
+				headers: {
+					"xi-api-key": apiKey,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					text,
+					model_id: DEFAULT_ELEVENLABS_MODEL_ID,
+				}),
+				signal: requestSignal,
 			}),
-			signal,
-		},
+		signal,
 	);
 	if (!response.ok) {
 		throw new Error(`ElevenLabs TTS failed (${response.status})`);

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
+import { withAbortTimeout } from "./request-timeout.js";
 
 export type SttProvider = "auto" | "local" | "openai";
 
@@ -78,16 +79,17 @@ async function transcribeWithOpenAI(filePath: string, mimeType?: string, signal?
 	);
 	form.set("model", process.env.PI_SPEAK_REMOTE_OPENAI_STT_MODEL || "whisper-1");
 	form.set("response_format", "json");
-	const response = await fetch(
-		`${process.env.PI_SPEAK_OPENAI_BASE_URL || "https://api.openai.com/v1"}/audio/transcriptions`,
-		{
-			method: "POST",
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-			},
-			body: form,
-			signal,
-		},
+	const response = await withAbortTimeout(
+		(requestSignal) =>
+			fetch(`${process.env.PI_SPEAK_OPENAI_BASE_URL || "https://api.openai.com/v1"}/audio/transcriptions`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${apiKey}`,
+				},
+				body: form,
+				signal: requestSignal,
+			}),
+		signal,
 	);
 	if (!response.ok) {
 		throw new Error(`OpenAI transcription failed (${response.status})`);

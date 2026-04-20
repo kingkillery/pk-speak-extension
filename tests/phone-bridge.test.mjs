@@ -56,3 +56,38 @@ test("telegram bridge links and forwards text turns", async () => {
 		globalThis.fetch = originalFetch;
 	}
 });
+
+test("telegram bridge adds abort signals to outbound requests", async () => {
+	const originalFetch = globalThis.fetch;
+	const seenSignals = [];
+	globalThis.fetch = async (_url, options = {}) => {
+		seenSignals.push(options.signal);
+		return {
+			ok: true,
+			json: async () => ({ ok: true, result: [] }),
+		};
+	};
+
+	try {
+		const bridge = new TelegramPhoneBridge({
+			token: "test-token",
+			state: {
+				enabled: false,
+				linkCode: "123456",
+			},
+			getStatusText: () => "status",
+			onStateChange: () => {},
+			onTextTurn: async (text) => ({ replyText: text }),
+			onVoiceBuffer: async () => ({ replyText: "voice" }),
+		});
+
+		bridge.start();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		await bridge.stop();
+
+		assert.ok(seenSignals.length > 0);
+		assert.ok(seenSignals.every((signal) => signal instanceof AbortSignal));
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});

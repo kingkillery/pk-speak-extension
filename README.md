@@ -373,24 +373,24 @@ GET  /v1/diagnostics
 GET  /v1/route
 POST /v1/route
 
-GET  /v1/mono/on
-GET  /v1/mono/off
 GET  /v1/mono/status
+POST /v1/mono/on
+POST /v1/mono/off
 
-GET  /v1/speak/on
-GET  /v1/speak/off
-GET  /v1/speak/stop
 GET  /v1/speak/status
-GET  /v1/speak/test
 GET  /v1/speak/providers
-GET  /v1/speak/provider/:provider
-GET  /v1/speak/rewrite/:onOrOff
+POST /v1/speak/on
+POST /v1/speak/off
+POST /v1/speak/stop
+POST /v1/speak/test
+POST /v1/speak/provider/:provider
+POST /v1/speak/rewrite/:onOrOff
 
-GET  /v1/phone/on
-GET  /v1/phone/off
 GET  /v1/phone/status
-GET  /v1/phone/code
-GET  /v1/phone/unpair
+POST /v1/phone/on
+POST /v1/phone/off
+POST /v1/phone/code
+POST /v1/phone/unpair
 
 GET  /v1/turn/text?text=hello&audio=1
 POST /v1/turn/text
@@ -431,6 +431,8 @@ The production-oriented defaults are:
 - authenticated diagnostics at `/v1/diagnostics`, including a compact summary block for queue state, phone linkage, mono state, current session/target, and active error sources
 - queue/backpressure for remote turns so Pi returns a deterministic busy response instead of piling up unlimited work
 - synchronous remote turns fail fast when the current Pi session is already mid-turn, instead of hanging the HTTP request against the same active session
+- mutating control routes require `POST`, leaving `GET` read-only for fetch-safe status endpoints
+- outbound provider calls share a default `30s` timeout via `PI_SPEAK_OUTBOUND_TIMEOUT_MS`
 
 Inspect the active token with:
 
@@ -575,6 +577,7 @@ PI_SPEAK_HTTP_VOICE_BODY_LIMIT_BYTES=26214400
 PI_SPEAK_HTTP_RATE_LIMIT_WINDOW_MS=60000
 PI_SPEAK_HTTP_RATE_LIMIT_CONTROL=20
 PI_SPEAK_HTTP_RATE_LIMIT_VOICE=6
+PI_SPEAK_OUTBOUND_TIMEOUT_MS=30000
 ```
 
 ## Troubleshooting

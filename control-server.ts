@@ -93,6 +93,11 @@ type RateLimitBucket = {
 	voice: number;
 };
 
+const MONO_ACTIONS = new Set(["on", "off", "status"]);
+const PHONE_ACTIONS = new Set(["on", "off", "status", "code", "unpair"]);
+const SPEAK_READ_ACTIONS = new Set(["status", "providers"]);
+const SPEAK_WRITE_ACTIONS = new Set(["on", "off", "stop", "test", "provider", "rewrite"]);
+
 const DEFAULT_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
 const AUDIO_TTL_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_AUDIO_TTL_MS || "600000", 10);
@@ -338,50 +343,9 @@ export class ControlServer {
 			return;
 		}
 
-		if (req.method === "GET" && url.pathname.startsWith("/v1/mono/")) {
-			const action = decodeURIComponent(url.pathname.slice("/v1/mono/".length)) as "on" | "off" | "status";
-			this.writeJson(res, 200, await this.onMonoAction(action));
-			return;
-		}
-
-		if (req.method === "GET" && url.pathname.startsWith("/v1/phone/")) {
-			const action = decodeURIComponent(url.pathname.slice("/v1/phone/".length)) as
-				| "on"
-				| "off"
-				| "status"
-				| "code"
-				| "unpair";
-			this.writeJson(res, 200, await this.onPhoneAction(action));
-			return;
-		}
-
-		if (req.method === "GET" && url.pathname === "/v1/speak/providers") {
-			this.writeJson(res, 200, await this.onSpeakAction("providers"));
-			return;
-		}
-
-		if (req.method === "GET" && url.pathname.startsWith("/v1/speak/provider/")) {
-			const value = decodeURIComponent(url.pathname.slice("/v1/speak/provider/".length));
-			this.writeJson(res, 200, await this.onSpeakAction("provider", value));
-			return;
-		}
-
-		if (req.method === "GET" && url.pathname.startsWith("/v1/speak/rewrite/")) {
-			const value = decodeURIComponent(url.pathname.slice("/v1/speak/rewrite/".length));
-			this.writeJson(res, 200, await this.onSpeakAction("rewrite", value));
-			return;
-		}
-
-		if (req.method === "GET" && url.pathname.startsWith("/v1/speak/")) {
-			const action = decodeURIComponent(url.pathname.slice("/v1/speak/".length)) as
-				| "on"
-				| "off"
-				| "stop"
-				| "status"
-				| "test";
-			this.writeJson(res, 200, await this.onSpeakAction(action));
-			return;
-		}
+		if (await this.handleMonoRoute(req, res, url)) return;
+		if (await this.handlePhoneRoute(req, res, url)) return;
+		if (await this.handleSpeakRoute(req, res, url)) return;
 
 		if (req.method === "GET" && url.pathname === "/v1/turn/text") {
 			const text = url.searchParams.get("text") || "";
@@ -467,6 +431,91 @@ export class ControlServer {
 			return true;
 		}
 
+		return false;
+	}
+
+	private async handleMonoRoute(req: IncomingMessage, res: ServerResponse, url: URL) {
+		if (!url.pathname.startsWith("/v1/mono/")) return false;
+		const action = decodeURIComponent(url.pathname.slice("/v1/mono/".length));
+		if (!MONO_ACTIONS.has(action)) return false;
+		if (action === "status") {
+			if (req.method !== "GET") {
+				this.writeMethodNotAllowed(res, ["GET"]);
+				return true;
+			}
+		} else if (req.method !== "POST") {
+			this.writeMethodNotAllowed(res, ["POST"]);
+			return true;
+		}
+		this.writeJson(res, 200, await this.onMonoAction(action as "on" | "off" | "status"));
+		return true;
+	}
+
+	private async handlePhoneRoute(req: IncomingMessage, res: ServerResponse, url: URL) {
+		if (!url.pathname.startsWith("/v1/phone/")) return false;
+		const action = decodeURIComponent(url.pathname.slice("/v1/phone/".length));
+		if (!PHONE_ACTIONS.has(action)) return false;
+		if (action === "status") {
+			if (req.method !== "GET") {
+				this.writeMethodNotAllowed(res, ["GET"]);
+				return true;
+			}
+		} else if (req.method !== "POST") {
+			this.writeMethodNotAllowed(res, ["POST"]);
+			return true;
+		}
+		this.writeJson(res, 200, await this.onPhoneAction(action as "on" | "off" | "status" | "code" | "unpair"));
+		return true;
+	}
+
+	private async handleSpeakRoute(req: IncomingMessage, res: ServerResponse, url: URL) {
+		if (url.pathname === "/v1/speak/providers") {
+			if (req.method !== "GET") {
+				this.writeMethodNotAllowed(res, ["GET"]);
+				return true;
+			}
+			this.writeJson(res, 200, await this.onSpeakAction("providers"));
+			return true;
+		}
+
+		if (url.pathname.startsWith("/v1/speak/provider/")) {
+			if (req.method !== "POST") {
+				this.writeMethodNotAllowed(res, ["POST"]);
+				return true;
+			}
+			const value = decodeURIComponent(url.pathname.slice("/v1/speak/provider/".length));
+			this.writeJson(res, 200, await this.onSpeakAction("provider", value));
+			return true;
+		}
+
+		if (url.pathname.startsWith("/v1/speak/rewrite/")) {
+			if (req.method !== "POST") {
+				this.writeMethodNotAllowed(res, ["POST"]);
+				return true;
+			}
+			const value = decodeURIComponent(url.pathname.slice("/v1/speak/rewrite/".length));
+			this.writeJson(res, 200, await this.onSpeakAction("rewrite", value));
+			return true;
+		}
+
+		if (!url.pathname.startsWith("/v1/speak/")) return false;
+		const action = decodeURIComponent(url.pathname.slice("/v1/speak/".length));
+		if (SPEAK_READ_ACTIONS.has(action)) {
+			if (req.method !== "GET") {
+				this.writeMethodNotAllowed(res, ["GET"]);
+				return true;
+			}
+			this.writeJson(res, 200, await this.onSpeakAction(action as "status" | "providers"));
+			return true;
+		}
+		if (SPEAK_WRITE_ACTIONS.has(action)) {
+			if (req.method !== "POST") {
+				this.writeMethodNotAllowed(res, ["POST"]);
+				return true;
+			}
+			this.writeJson(res, 200, await this.onSpeakAction(action as "on" | "off" | "stop" | "test"));
+			return true;
+		}
 		return false;
 	}
 
@@ -605,6 +654,11 @@ export class ControlServer {
 		res.statusCode = status;
 		res.setHeader("Content-Type", "application/json; charset=utf-8");
 		res.end(JSON.stringify(payload));
+	}
+
+	private writeMethodNotAllowed(res: ServerResponse, allowedMethods: string[]) {
+		res.setHeader("Allow", allowedMethods.join(", "));
+		this.writeJson(res, 405, { ok: false, error: `Method not allowed. Use ${allowedMethods.join(" or ")}.` });
 	}
 
 	private async serveStaticFile(
