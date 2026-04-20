@@ -5,11 +5,11 @@ import androidx.lifecycle.viewModelScope
 import com.pkkidking.pispeak.BuildConfig
 import com.pkkidking.pispeak.core.AppAudioPlayer
 import com.pkkidking.pispeak.core.AppAudioRecorder
-import com.pkkidking.pispeak.data.repo.PiSpeakRepositoryImpl
 import com.pkkidking.pispeak.domain.model.AppSettings
 import com.pkkidking.pispeak.domain.model.validate
 import com.pkkidking.pispeak.domain.usecase.GetStatusUseCase
 import com.pkkidking.pispeak.domain.usecase.LoadSettingsUseCase
+import com.pkkidking.pispeak.domain.usecase.ResolveAudioUrlUseCase
 import com.pkkidking.pispeak.domain.usecase.SaveSettingsUseCase
 import com.pkkidking.pispeak.domain.usecase.SendTextTurnUseCase
 import com.pkkidking.pispeak.domain.usecase.SendVoiceTurnUseCase
@@ -30,6 +30,7 @@ class MainViewModel @Inject constructor(
     private val updateRouteTarget: UpdateRouteTargetUseCase,
     private val sendTextTurn: SendTextTurnUseCase,
     private val sendVoiceTurn: SendVoiceTurnUseCase,
+    private val resolveAudioUrl: ResolveAudioUrlUseCase,
     private val recorder: AppAudioRecorder,
     private val player: AppAudioPlayer,
 ) : ViewModel() {
@@ -68,6 +69,14 @@ class MainViewModel @Inject constructor(
     fun onRequestAudioRepliesChanged(value: Boolean) = _uiState.update { it.copy(requestAudioReplies = value) }
     fun onAutoplayReplyAudioChanged(value: Boolean) = _uiState.update { it.copy(autoplayReplyAudio = value) }
     fun clearError() = _uiState.update { it.copy(error = null) }
+    fun onMicrophonePermissionDenied() {
+        _uiState.update {
+            it.copy(
+                error = "Microphone access is required for voice turns. Enable it in Android settings and try again.",
+                isRecording = false,
+            )
+        }
+    }
 
     fun saveCurrentSettings() {
         val settings = validatedSettings() ?: return
@@ -186,7 +195,7 @@ class MainViewModel @Inject constructor(
         if (audioUrl.isNullOrBlank()) return
         val state = uiState.value
         if (!force && !state.autoplayReplyAudio) return
-        val resolved = PiSpeakRepositoryImpl.resolveAudioUrl(state.baseUrl, audioUrl)
+        val resolved = resolveAudioUrl(state.baseUrl, audioUrl)
         val headers = state.token.takeIf { it.isNotBlank() }?.let { mapOf("Authorization" to "Bearer $it") }.orEmpty()
         player.play(
             url = resolved,

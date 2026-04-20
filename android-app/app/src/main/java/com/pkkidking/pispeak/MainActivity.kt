@@ -5,23 +5,21 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import dagger.hilt.android.AndroidEntryPoint
-import com.pkkidking.pispeak.presentation.main.MainRoute
-import com.pkkidking.pispeak.ui.theme.PiSpeakTheme
+import com.pkkidking.pispeak.presentation.app.PiSpeakApp
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val bootstrapBaseUrl = intent.getStringExtra("base_url")
         val bootstrapToken = intent.getStringExtra("token")
         setContent {
-            PiSpeakTheme {
-                MainRoute(
-                    bootstrapBaseUrl = bootstrapBaseUrl,
-                    bootstrapToken = bootstrapToken,
-                )
-            }
+            PiSpeakApp(
+                bootstrapBaseUrl = bootstrapBaseUrl,
+                bootstrapToken = bootstrapToken,
+            )
         }
     }
 }

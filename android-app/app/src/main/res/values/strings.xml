@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Pi Speak</string>
+    <string name="microphone_permission_required">Microphone access is required for voice turns.</string>
 </resources>
