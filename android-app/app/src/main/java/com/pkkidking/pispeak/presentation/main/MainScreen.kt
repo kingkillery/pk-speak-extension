@@ -1,10 +1,5 @@
 package com.pkkidking.pispeak.presentation.main
 
-import android.Manifest
-import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -18,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,31 +29,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,76 +51,20 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
-import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 private val ScreenPadding = 20.dp
 private val PanelShape = RoundedCornerShape(28.dp)
 private val VoiceShape = RoundedCornerShape(40.dp)
 
 @Composable
-fun MainRoute(
-    bootstrapBaseUrl: String? = null,
-    bootstrapToken: String? = null,
-    viewModel: MainViewModel = hiltViewModel(),
-) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) viewModel.startRecording()
-    }
-
-    LaunchedEffect(bootstrapBaseUrl, bootstrapToken) {
-        viewModel.applyBootstrap(bootstrapBaseUrl, bootstrapToken)
-    }
-
-    MainScreen(
-        uiState = uiState,
-        onBaseUrlChanged = viewModel::onBaseUrlChanged,
-        onTokenChanged = viewModel::onTokenChanged,
-        onTargetChanged = viewModel::onTargetChanged,
-        onRequestAudioChanged = viewModel::onRequestAudioRepliesChanged,
-        onAutoplayChanged = viewModel::onAutoplayReplyAudioChanged,
-        onSaveSettings = viewModel::saveCurrentSettings,
-        onApplyTarget = viewModel::applyRouteTarget,
-        onRefresh = viewModel::refreshStatus,
-        onTextChanged = viewModel::onTextPromptChanged,
-        onSendText = viewModel::submitTextTurn,
-        onRecordToggle = {
-            if (uiState.isRecording) {
-                viewModel.stopRecordingAndSend()
-            } else {
-                val granted = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.RECORD_AUDIO,
-                ) == PackageManager.PERMISSION_GRANTED
-                if (granted) viewModel.startRecording() else permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            }
-        },
-        onPlayAudio = viewModel::playReplyAudio,
-        onDismissError = viewModel::clearError,
-    )
-}
-
-@Composable
-fun MainScreen(
+fun ConversationScreen(
     uiState: MainUiState,
-    onBaseUrlChanged: (String) -> Unit,
-    onTokenChanged: (String) -> Unit,
+    contentPadding: PaddingValues,
     onTargetChanged: (String) -> Unit,
-    onRequestAudioChanged: (Boolean) -> Unit,
-    onAutoplayChanged: (Boolean) -> Unit,
-    onSaveSettings: () -> Unit,
     onApplyTarget: () -> Unit,
     onRefresh: () -> Unit,
     onTextChanged: (String) -> Unit,
@@ -142,78 +72,62 @@ fun MainScreen(
     onRecordToggle: () -> Unit,
     onPlayAudio: () -> Unit,
     onDismissError: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
-    var showSettings by rememberSaveable { mutableStateOf(false) }
     val isSecure = remember(uiState.baseUrl) { uiState.baseUrl.trim().startsWith("https://") }
 
-    Scaffold { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = ScreenPadding, vertical = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
-        ) {
-            HeroSection(
-                statusSummary = uiState.statusSummary,
-                secure = isSecure,
-                tokenLoaded = uiState.token.isNotBlank(),
-                requestAudioReplies = uiState.requestAudioReplies,
-                onRefresh = onRefresh,
-                onToggleSettings = { showSettings = !showSettings },
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(contentPadding)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = ScreenPadding, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        HeroSection(
+            statusSummary = uiState.statusSummary,
+            secure = isSecure,
+            tokenLoaded = uiState.token.isNotBlank(),
+            requestAudioReplies = uiState.requestAudioReplies,
+            onRefresh = onRefresh,
+            onOpenSettings = onOpenSettings,
+        )
+
+        TargetPanel(
+            targetName = uiState.targetName,
+            currentSession = uiState.currentSession,
+            availableTargets = uiState.availableTargets,
+            isBusy = uiState.isBusy,
+            onTargetChanged = onTargetChanged,
+            onApplyTarget = onApplyTarget,
+        )
+
+        if (uiState.error != null) {
+            ErrorPanel(
+                message = uiState.error,
+                onDismiss = onDismissError,
             )
-
-            TargetPanel(
-                targetName = uiState.targetName,
-                currentSession = uiState.currentSession,
-                availableTargets = uiState.availableTargets,
-                isBusy = uiState.isBusy,
-                onTargetChanged = onTargetChanged,
-                onApplyTarget = onApplyTarget,
-            )
-
-            if (uiState.error != null) {
-                ErrorPanel(
-                    message = uiState.error,
-                    onDismiss = onDismissError,
-                )
-            }
-
-            VoicePanel(
-                isBusy = uiState.isBusy,
-                isRecording = uiState.isRecording,
-                onRecordToggle = onRecordToggle,
-            )
-
-            ReplyPanel(
-                transcript = uiState.transcript,
-                replyText = uiState.replyText,
-                audioAvailable = uiState.audioUrl != null,
-                onPlayAudio = onPlayAudio,
-            )
-
-            TextFallbackPanel(
-                textPrompt = uiState.textPrompt,
-                onTextChanged = onTextChanged,
-                onSendText = onSendText,
-                enabled = !uiState.isBusy,
-            )
-
-            AnimatedVisibility(visible = showSettings) {
-                SettingsPanel(
-                    baseUrl = uiState.baseUrl,
-                    token = uiState.token,
-                    requestAudioReplies = uiState.requestAudioReplies,
-                    autoplayReplyAudio = uiState.autoplayReplyAudio,
-                    onBaseUrlChanged = onBaseUrlChanged,
-                    onTokenChanged = onTokenChanged,
-                    onRequestAudioChanged = onRequestAudioChanged,
-                    onAutoplayChanged = onAutoplayChanged,
-                    onSaveSettings = onSaveSettings,
-                )
-            }
         }
+
+        VoicePanel(
+            isBusy = uiState.isBusy,
+            isRecording = uiState.isRecording,
+            onRecordToggle = onRecordToggle,
+        )
+
+        ReplyPanel(
+            transcript = uiState.transcript,
+            replyText = uiState.replyText,
+            audioAvailable = uiState.audioUrl != null,
+            onPlayAudio = onPlayAudio,
+        )
+
+        TextFallbackPanel(
+            textPrompt = uiState.textPrompt,
+            onTextChanged = onTextChanged,
+            onSendText = onSendText,
+            enabled = !uiState.isBusy,
+        )
     }
 }
 
@@ -292,7 +206,7 @@ private fun HeroSection(
     tokenLoaded: Boolean,
     requestAudioReplies: Boolean,
     onRefresh: () -> Unit,
-    onToggleSettings: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Surface(
@@ -356,10 +270,10 @@ private fun HeroSection(
                 Spacer(Modifier.width(8.dp))
                 Text("Refresh")
             }
-            TextButton(onClick = onToggleSettings) {
+            TextButton(onClick = onOpenSettings) {
                 Icon(Icons.Default.Settings, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Connection")
+                Text("Open settings")
             }
         }
     }
@@ -429,17 +343,9 @@ private fun VoiceOrbButton(
 
     val outerBrush = Brush.radialGradient(
         colors = if (isRecording) {
-            listOf(
-                Color(0x33F06B3C),
-                Color(0x12C24A27),
-                Color.Transparent,
-            )
+            listOf(Color(0x33F06B3C), Color(0x12C24A27), Color.Transparent)
         } else {
-            listOf(
-                Color(0x1A173B56),
-                Color(0x0D193A52),
-                Color.Transparent,
-            )
+            listOf(Color(0x1A173B56), Color(0x0D193A52), Color.Transparent)
         },
     )
 
@@ -610,7 +516,7 @@ private fun TextFallbackPanel(
                 value = textPrompt,
                 onValueChange = onTextChanged,
                 label = { Text("Ask Pi something") },
-                placeholder = { Text("Summarize the latest change set…") },
+                placeholder = { Text("Summarize the latest change set...") },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 4,
                 keyboardOptions = KeyboardOptions(
@@ -622,88 +528,6 @@ private fun TextFallbackPanel(
                 Text("Send text")
             }
         }
-    }
-}
-
-@Composable
-private fun SettingsPanel(
-    baseUrl: String,
-    token: String,
-    requestAudioReplies: Boolean,
-    autoplayReplyAudio: Boolean,
-    onBaseUrlChanged: (String) -> Unit,
-    onTokenChanged: (String) -> Unit,
-    onRequestAudioChanged: (Boolean) -> Unit,
-    onAutoplayChanged: (Boolean) -> Unit,
-    onSaveSettings: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = PanelShape,
-        color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp,
-            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
-        ),
-    ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Text("Connection & audio", style = MaterialTheme.typography.titleMedium)
-            Text(
-                text = "Keep setup quiet. Save only what you need.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-            )
-            OutlinedTextField(
-                value = baseUrl,
-                onValueChange = onBaseUrlChanged,
-                label = { Text("Base URL") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            OutlinedTextField(
-                value = token,
-                onValueChange = onTokenChanged,
-                label = { Text("Remote token") },
-                modifier = Modifier.fillMaxWidth(),
-                visualTransformation = PasswordVisualTransformation(),
-                singleLine = true,
-                trailingIcon = {
-                    Icon(Icons.Default.Lock, contentDescription = null)
-                },
-            )
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-            SettingRow("Request spoken replies", requestAudioReplies, onRequestAudioChanged)
-            SettingRow("Autoplay reply audio", autoplayReplyAudio, onAutoplayChanged)
-            Button(onClick = onSaveSettings) {
-                Text("Save settings")
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingRow(
-    label: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
@@ -723,7 +547,7 @@ private fun ErrorPanel(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "Couldn’t reach Pi",
+                text = "Couldn't reach Pi",
                 style = MaterialTheme.typography.titleMedium,
                 color = Color(0xFF9B3517),
             )

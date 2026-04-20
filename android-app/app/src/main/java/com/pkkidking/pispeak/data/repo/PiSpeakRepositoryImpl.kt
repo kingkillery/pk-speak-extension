@@ -15,7 +15,6 @@ import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.asRequestBody
 import java.io.File
-import java.net.URI
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -98,17 +97,4 @@ class PiSpeakRepositoryImpl @Inject constructor(
     }
 
     private fun ensureTrailingSlash(value: String): String = if (value.endsWith('/')) value else "$value/"
-
-    companion object {
-        fun resolveAudioUrl(baseUrl: String, audioUrl: String): String {
-            val base = URI.create(baseUrl)
-            val resolved = if (audioUrl.startsWith("http://") || audioUrl.startsWith("https://")) {
-                URI.create(audioUrl)
-            } else {
-                val origin = URI("${base.scheme}://${base.authority}")
-                origin.resolve(audioUrl)
-            }
-            return resolved.toString()
-        }
-    }
 }
