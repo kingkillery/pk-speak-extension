@@ -312,6 +312,40 @@ test("route endpoint reports and updates active target", async () => {
 	});
 });
 
+test("mutating mono and speak routes reject GET and require POST", async () => {
+	await withServer({}, async (port) => {
+		const monoGet = await request({
+			port,
+			path: "/v1/mono/on",
+			headers: { Host: "tailnet.example", Authorization: "Bearer secret-token" },
+		});
+		assert.equal(monoGet.statusCode, 405);
+
+		const monoPost = await request({
+			port,
+			path: "/v1/mono/on",
+			method: "POST",
+			headers: { Host: "tailnet.example", Authorization: "Bearer secret-token" },
+		});
+		assert.equal(monoPost.statusCode, 200);
+
+		const providerGet = await request({
+			port,
+			path: "/v1/speak/provider/edge",
+			headers: { Host: "tailnet.example", Authorization: "Bearer secret-token" },
+		});
+		assert.equal(providerGet.statusCode, 405);
+
+		const providerPost = await request({
+			port,
+			path: "/v1/speak/provider/edge",
+			method: "POST",
+			headers: { Host: "tailnet.example", Authorization: "Bearer secret-token" },
+		});
+		assert.equal(providerPost.statusCode, 200);
+	});
+});
+
 test("turn routes accept an explicit target", async () => {
 	await withServer({}, async (port) => {
 		const response = await request({

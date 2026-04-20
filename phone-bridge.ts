@@ -1,6 +1,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { basename } from "node:path";
 import { RemoteTurnResult } from "./remote-turn-manager.js";
+import { withAbortTimeout } from "./request-timeout.js";
 
 export type PhoneBridgeState = {
 	enabled: boolean;
@@ -205,7 +206,9 @@ export class TelegramPhoneBridge {
 		);
 		const filePath = fileInfo.result?.file_path;
 		if (!filePath) throw new Error("Telegram did not return a file path");
-		const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`);
+		const response = await withAbortTimeout((signal) =>
+			fetch(`https://api.telegram.org/file/bot${this.token}/${filePath}`, { signal }),
+		);
 		if (!response.ok) {
 			throw new Error(`Failed to download Telegram file (${response.status})`);
 		}
@@ -243,10 +246,13 @@ export class TelegramPhoneBridge {
 	}
 
 	private async callApi<T = unknown>(method: string, body: URLSearchParams | FormData) {
-		const response = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
-			method: "POST",
-			body,
-		});
+		const response = await withAbortTimeout((signal) =>
+			fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
+				method: "POST",
+				body,
+				signal,
+			}),
+		);
 		if (!response.ok) {
 			throw new Error(`Telegram ${method} failed (${response.status})`);
 		}
