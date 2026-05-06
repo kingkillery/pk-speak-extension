@@ -1,0 +1,35 @@
+{
+  "id": "packet-llm-as-a-verifier-cli-skill-5f758093",
+  "skill_id": "skill-llm-as-a-verifier-cli-skill",
+  "title": "LLM-as-a-verifier CLI skill",
+  "task_type": "workflow",
+  "goal": "Teach agents to use the real local llm-as-a-verifier CLI rather than simulating verification",
+  "executive_summary": "LLM-as-a-verifier CLI skill: Teach agents to use the real local llm-as-a-verifier CLI rather than simulating verification. Outcome: pending. Future agent shortcut: solve in 6 fewer steps by reusing the fast path.",
+  "important_context": "",
+  "outcome": "",
+  "observations": [],
+  "risks": [],
+  "next_actions": [],
+  "confidence": "high",
+  "route_decision": "complete",
+  "route_reason": "",
+  "unresolved_questions": [],
+  "artifact_refs": [
+    ".llm-wiki/skill-pipeline/briefs/20260506-223259--llm-as-a-verifier-cli-skill.md",
+    ".llm-wiki/skill-pipeline/validations/20260506-223259--llm-as-a-verifier-cli-skill.json",
+    ".llm-wiki/skill-pipeline/deltas/20260506-223259--llm-as-a-verifier-cli-skill.json"
+  ],
+  "assigned_target": "",
+  "parent_packet_id": "",
+  "hop_count": 0,
+  "retry_count": 0,
+  "long_task": false,
+  "related_skill_ids": [
+    "skill-llm-as-a-verifier-cli-skill"
+  ],
+  "created_at": "2026-05-06T22:32:59Z",
+  "updated_at": "2026-05-06T22:32:59Z",
+  "path": ".llm-wiki/skill-pipeline/packets/20260506-223259--llm-as-a-verifier-cli-skill.json",
+  "validation_status": "validated",
+  "pipeline_status": "saved"
+}
