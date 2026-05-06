@@ -1,0 +1,280 @@
+{
+  "status": "validated",
+  "score": 33,
+  "min_validation_score": 7,
+  "blockers": [],
+  "warnings": [],
+  "checks": [
+    {
+      "name": "privacy",
+      "status": "pass",
+      "detail": "No obvious PII detected."
+    },
+    {
+      "name": "title",
+      "status": "pass",
+      "detail": "Skill title is specific enough."
+    },
+    {
+      "name": "kind",
+      "status": "pass",
+      "detail": "Kind `workflow` matches the recommended taxonomy."
+    },
+    {
+      "name": "memory_scope",
+      "status": "pass",
+      "detail": "memory_scope `procedural` is supported."
+    },
+    {
+      "name": "memory_strategy",
+      "status": "pass",
+      "detail": "memory_strategy `knowledge_object` is supported."
+    },
+    {
+      "name": "update_strategy",
+      "status": "pass",
+      "detail": "update_strategy `merge_append` is supported."
+    },
+    {
+      "name": "applies_to",
+      "status": "pass",
+      "detail": "Applies-to patterns supplied."
+    },
+    {
+      "name": "trigger",
+      "status": "pass",
+      "detail": "Trigger is concrete."
+    },
+    {
+      "name": "problem",
+      "status": "pass",
+      "detail": "Problem statement is grounded."
+    },
+    {
+      "name": "preconditions",
+      "status": "pass",
+      "detail": "Preconditions captured."
+    },
+    {
+      "name": "proposal_action",
+      "status": "pass",
+      "detail": "Proposal action is valid."
+    },
+    {
+      "name": "surrogate_verdict",
+      "status": "pass",
+      "detail": "Surrogate verdict is valid."
+    },
+    {
+      "name": "verification_mode",
+      "status": "pass",
+      "detail": "Verification mode `heuristic` is supported."
+    },
+    {
+      "name": "judge_choice",
+      "status": "pass",
+      "detail": "Judge choice is normalized to A/B."
+    },
+    {
+      "name": "fast_path",
+      "status": "pass",
+      "detail": "Fast path is present."
+    },
+    {
+      "name": "failure_modes",
+      "status": "pass",
+      "detail": "Failure modes captured."
+    },
+    {
+      "name": "evidence",
+      "status": "pass",
+      "detail": "Evidence is substantive."
+    },
+    {
+      "name": "durable_facts",
+      "status": "pass",
+      "detail": "Durable facts were extracted for the skill memory object."
+    },
+    {
+      "name": "provenance_refs",
+      "status": "pass",
+      "detail": "Provenance refs were captured for later audit and deprecation."
+    },
+    {
+      "name": "canonical_keys",
+      "status": "pass",
+      "detail": "Canonical reconciliation keys were captured for write-time merge/update decisions."
+    },
+    {
+      "name": "hierarchical_memory",
+      "status": "pass",
+      "detail": "Long-task candidates use a non-flat memory strategy."
+    },
+    {
+      "name": "skip_steps",
+      "status": "pass",
+      "detail": "Exploration cost savings estimated."
+    },
+    {
+      "name": "briefing",
+      "status": "pass",
+      "detail": "Long-task context was captured with a reducer packet and supporting brief."
+    },
+    {
+      "name": "route_decision_present",
+      "status": "pass",
+      "detail": "Long-task context includes an explicit route decision."
+    },
+    {
+      "name": "route_decision_valid",
+      "status": "pass",
+      "detail": "Route decision `complete` is valid."
+    },
+    {
+      "name": "hop_budget",
+      "status": "pass",
+      "detail": "hop_count is within the configured limit (2)."
+    },
+    {
+      "name": "retry_budget",
+      "status": "pass",
+      "detail": "retry_count is within the configured limit (1)."
+    },
+    {
+      "name": "route_complete",
+      "status": "pass",
+      "detail": "Complete packets include a substantive outcome or reusable fast path."
+    },
+    {
+      "name": "summary_only",
+      "status": "pass",
+      "detail": "Packet stays summary-only and references artifacts for raw detail."
+    },
+    {
+      "name": "dedupe",
+      "status": "pass",
+      "detail": "No strong duplicate detected."
+    }
+  ],
+  "candidate": {
+    "skill_id": "",
+    "target_skill_id": "",
+    "parent_skill_id": "",
+    "title": "LLM-as-a-verifier CLI skill",
+    "kind": "workflow",
+    "applies_to": [
+      "skill:llm-as-verifier",
+      "repo:C:\\dev\\Desktop-Projects\\pi-speak-extension"
+    ],
+    "problem": "Teach agents to use the real local llm-as-a-verifier CLI rather than simulating verification",
+    "trigger": "User asks for llm-as-a verifier, verifier-gated coding-agent work, or comparison of candidate agent trajectories",
+    "preconditions": "The local verifier repo exists at C:\\dev\\Desktop-Projects\\llm-as-a-verifier; the receiving repo can write a .verifier directory; meaningful command, diff, or final-answer evidence can be collected",
+    "fast_path": "Check verifier-collect and verify-trajectories; if missing install with python -m pip install --user -e C:\\dev\\Desktop-Projects\\llm-as-a-verifier; run verifier-collect init; wrap test/build commands with verifier-collect run; capture git diff with verifier-collect diff; record the final claim with verifier-collect final; run verify-trajectories; inspect .verifier\\verification_result.json before finalizing",
+    "failure_modes": "Agent simulates verifier output instead of running the CLI; CLI is unavailable and the agent claims verification anyway; .verifier\\verifier.toml uses incorrectly quoted Windows paths; final answer claims success that is unsupported by captured command or diff evidence",
+    "evidence": "Created .codex/skills/llm-as-verifier/SKILL.md and .agents/skills/llm-as-verifier/SKILL.md; both passed quick_validate.py; verifier-collect --help and verify-trajectories --help worked from the pi-speak-extension repo\nFiles involved:\n- .codex/skills/llm-as-verifier/SKILL.md\n- .agents/skills/llm-as-verifier/SKILL.md",
+    "http_candidate": false,
+    "source_type": "trajectory",
+    "memory_scope": "procedural",
+    "memory_strategy": "knowledge_object",
+    "update_strategy": "merge_append",
+    "durable_facts": [
+      "The verifier tool source lives at C:\\dev\\Desktop-Projects\\llm-as-a-verifier and exposes verifier-collect, verify-trajectories, and evaluate-verifier CLI commands.",
+      "Agents must run the real CLI and must not report LLM-as-a-verifier success if the CLI did not run."
+    ],
+    "provenance_refs": [
+      ".codex/skills/llm-as-verifier/SKILL.md",
+      ".agents/skills/llm-as-verifier/SKILL.md",
+      ".llm-wiki/skill-pipeline/briefs/20260506-223259--llm-as-a-verifier-cli-skill.md"
+    ],
+    "retrieval_hints": [
+      "llm-as-verifier",
+      "verify-trajectories",
+      "verifier-collect"
+    ],
+    "canonical_keys": [
+      "llm-as-verifier-cli"
+    ],
+    "skip_steps_estimate": 6,
+    "confidence": "high",
+    "last_validated": "",
+    "important_context": "",
+    "observations": [],
+    "risks": [],
+    "next_actions": [],
+    "files": [
+      ".codex/skills/llm-as-verifier/SKILL.md",
+      ".agents/skills/llm-as-verifier/SKILL.md"
+    ],
+    "references": [],
+    "outcome": "",
+    "brief_refs": [
+      ".llm-wiki/skill-pipeline/briefs/20260506-223259--llm-as-a-verifier-cli-skill.md"
+    ],
+    "route_decision": "complete",
+    "route_reason": "",
+    "unresolved_questions": [],
+    "artifact_refs": [
+      ".llm-wiki/skill-pipeline/briefs/20260506-223259--llm-as-a-verifier-cli-skill.md"
+    ],
+    "assigned_target": "",
+    "parent_packet_id": "",
+    "hop_count": 0,
+    "retry_count": 0,
+    "long_task": false,
+    "proposal_action": "",
+    "proposal_reason": "",
+    "failure_summary": "",
+    "benchmark": "",
+    "iteration": null,
+    "baseline_validation_score": null,
+    "surrogate_verdict": "",
+    "surrogate_summary": "",
+    "surrogate_findings": [],
+    "oracle_verdict": "",
+    "history_refs": [],
+    "program_id": "",
+    "parent_program_id": "",
+    "verification_mode": "heuristic",
+    "subjective_task": "Teach agents to use the real local llm-as-a-verifier CLI rather than simulating verification",
+    "subjective_rubric": [],
+    "baseline_output": "",
+    "candidate_output": "",
+    "judge_choice_raw": "",
+    "judge_choice": "",
+    "judge_summary": "",
+    "judge_findings": []
+  },
+  "packet": {
+    "id": "packet-llm-as-a-verifier-cli-skill-5f758093",
+    "skill_id": "",
+    "title": "LLM-as-a-verifier CLI skill",
+    "task_type": "workflow",
+    "goal": "Teach agents to use the real local llm-as-a-verifier CLI rather than simulating verification",
+    "executive_summary": "LLM-as-a-verifier CLI skill: Teach agents to use the real local llm-as-a-verifier CLI rather than simulating verification. Outcome: pending. Future agent shortcut: solve in 6 fewer steps by reusing the fast path.",
+    "important_context": "",
+    "outcome": "",
+    "observations": [],
+    "risks": [],
+    "next_actions": [],
+    "confidence": "high",
+    "route_decision": "complete",
+    "route_reason": "",
+    "unresolved_questions": [],
+    "artifact_refs": [
+      ".llm-wiki/skill-pipeline/briefs/20260506-223259--llm-as-a-verifier-cli-skill.md"
+    ],
+    "assigned_target": "",
+    "parent_packet_id": "",
+    "hop_count": 0,
+    "retry_count": 0,
+    "long_task": false,
+    "related_skill_ids": [],
+    "created_at": "2026-05-06T22:32:59Z",
+    "updated_at": "2026-05-06T22:32:59Z",
+    "path": ".llm-wiki/skill-pipeline/packets/20260506-223259--llm-as-a-verifier-cli-skill.json"
+  },
+  "packet_path": ".llm-wiki/skill-pipeline/packets/20260506-223259--llm-as-a-verifier-cli-skill.json",
+  "duplicate_matches": [],
+  "merge_target": "",
+  "validated_at": "2026-05-06T22:32:59Z"
+}
