@@ -86,8 +86,7 @@ This is the easiest remote path. It works well when you want reliability more th
 ### 4. Remote In From Your Phone With The Built-In Web App
 
 ```text
-/remote on
-/remote token
+/remote setup
 ```
 
 Then open one of these:
@@ -106,6 +105,8 @@ The web app:
 - plays the returned reply audio
 - stores the remote token in the current browser session by default
 - can explicitly remember the token on that device if you enable it in Settings
+
+`/remote setup` is the one-command phone onboarding path. It starts the API if needed, prints a browser app URL with the token bootstrap parameter, and prints a native Android setup link using the `pi-speak://setup` deep link.
 
 For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel.
 
@@ -186,6 +187,7 @@ Controls the HTTP API and mobile web app.
 /remote off
 /remote status
 /remote token
+/remote setup
 ```
 
 Behavior:
@@ -194,6 +196,7 @@ Behavior:
 - serves the mobile app from `/app/`
 - exposes remote-control endpoints
 - generates a token if one is not already configured
+- prints one-step setup URLs for the browser app and native Android app
 
 ### `/sess`
 
@@ -492,6 +495,12 @@ What it is not good at:
 ### Core
 
 ```text
+AGENT_PROVIDER=pi|codex
+CODEX_BIN=codex
+PI_BIN=pi
+AGENT_MODEL=
+AGENT_CWD=
+AGENT_WORKSPACE=
 PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
 PI_SPEAK_REWRITE_ENABLED=true|false
 PI_SPEAK_WAKE_PHRASE=PK

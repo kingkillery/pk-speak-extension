@@ -1,43 +1,28 @@
 package com.pkkidking.pispeak.domain.model
 
 import java.net.URI
-
-enum class ConnectionProfileId(val key: String, val label: String) {
-    WINDOWS("windows", "Windows"),
-    MAC("mac", "Mac");
-
-    companion object {
-        fun fromKey(value: String?): ConnectionProfileId =
-            entries.firstOrNull { it.key.equals(value, ignoreCase = true) } ?: WINDOWS
-    }
-}
-
-data class ConnectionSettings(
-    val baseUrl: String,
-    val token: String,
-)
+import java.util.UUID
 
 data class AppSettings(
-    val activeProfileId: String,
-    val windowsConnection: ConnectionSettings,
-    val macConnection: ConnectionSettings,
+    val baseUrl: String,
+    val token: String,
     val requestAudioReplies: Boolean,
     val autoplayReplyAudio: Boolean,
-) {
-    fun activeProfile(): ConnectionProfileId = ConnectionProfileId.fromKey(activeProfileId)
+    val selectedMachineId: String? = null,
+    val machineProfiles: List<MachineProfile> = emptyList(),
+    val machineProfileName: String = "",
+    val workspacePath: String = "",
+)
 
-    fun activeConnection(): ConnectionSettings = when (activeProfile()) {
-        ConnectionProfileId.MAC -> macConnection
-        ConnectionProfileId.WINDOWS -> windowsConnection
-    }
+data class MachineProfile(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val baseUrl: String,
+    val token: String,
+    val workspacePath: String = "",
+)
 
-    fun withActiveConnection(baseUrl: String, token: String): AppSettings = when (activeProfile()) {
-        ConnectionProfileId.MAC -> copy(macConnection = ConnectionSettings(baseUrl, token))
-        ConnectionProfileId.WINDOWS -> copy(windowsConnection = ConnectionSettings(baseUrl, token))
-    }
-
-    fun withActiveProfile(profileId: ConnectionProfileId): AppSettings = copy(activeProfileId = profileId.key)
-}
+fun MachineProfile.normalizedBaseUrl(): String = baseUrl.trim().trimEnd('/')
 
 data class RemoteStatusSummary(
     val remoteEnabled: Boolean,
@@ -77,7 +62,7 @@ data class RecordedAudio(
     val mimeType: String,
 )
 
-fun ConnectionSettings.validate(allowInsecureLoopback: Boolean): String? {
+fun AppSettings.validate(allowInsecureLoopback: Boolean): String? {
     val normalized = baseUrl.trim()
     if (normalized.isEmpty()) return "Base URL is required."
 

@@ -10,6 +10,6 @@ interface PiSpeakRepository {
     fun saveSettings(settings: AppSettings)
     suspend fun getStatus(settings: AppSettings): Result<RemoteStatusSummary>
     suspend fun updateRouteTarget(settings: AppSettings, target: String?): Result<RemoteStatusSummary>
-    suspend fun sendTextTurn(settings: AppSettings, text: String): Result<TurnResult>
-    suspend fun sendVoiceTurn(settings: AppSettings, audio: RecordedAudio): Result<TurnResult>
+    suspend fun sendTextTurn(settings: AppSettings, text: String, target: String?): Result<TurnResult>
+    suspend fun sendVoiceTurn(settings: AppSettings, audio: RecordedAudio, target: String?): Result<TurnResult>
 }

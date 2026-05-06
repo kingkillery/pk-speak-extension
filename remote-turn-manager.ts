@@ -10,6 +10,7 @@ export type TurnTimingSummary = {
 };
 
 export type ProviderSummary = {
+	agent?: string;
 	stt?: string;
 	tts?: string;
 };

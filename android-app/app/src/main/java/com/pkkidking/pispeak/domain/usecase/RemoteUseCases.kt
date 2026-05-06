@@ -34,11 +34,13 @@ class UpdateRouteTargetUseCase @Inject constructor(
 class SendTextTurnUseCase @Inject constructor(
     private val repository: PiSpeakRepository,
 ) {
-    suspend operator fun invoke(settings: AppSettings, text: String) = repository.sendTextTurn(settings, text)
+    suspend operator fun invoke(settings: AppSettings, text: String, target: String?) =
+        repository.sendTextTurn(settings, text, target)
 }
 
 class SendVoiceTurnUseCase @Inject constructor(
     private val repository: PiSpeakRepository,
 ) {
-    suspend operator fun invoke(settings: AppSettings, audio: RecordedAudio) = repository.sendVoiceTurn(settings, audio)
+    suspend operator fun invoke(settings: AppSettings, audio: RecordedAudio, target: String?) =
+        repository.sendVoiceTurn(settings, audio, target)
 }

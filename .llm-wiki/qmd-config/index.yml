@@ -1,0 +1,6 @@
+collections:
+  pi-speak-extension:
+    path: C:\dev\Desktop-Projects\pi-speak-extension
+    pattern: "**/*.md"
+    context:
+      "": Official pi-speak-extension memory base at C:\dev\Desktop-Projects\pi-speak-extension

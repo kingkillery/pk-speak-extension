@@ -1,15 +1,56 @@
 package com.pkkidking.pispeak.presentation.main
 
 import com.pkkidking.pispeak.BuildConfig
-import com.pkkidking.pispeak.domain.model.ConnectionProfileId
-import com.pkkidking.pispeak.domain.model.ConnectionSettings
+import com.pkkidking.pispeak.domain.model.MachineProfile
+
+data class RecentTurnUiState(
+    val id: Long,
+    val source: String,
+    val routeLabel: String,
+    val transcript: String,
+    val replyText: String,
+    val hasAudio: Boolean,
+)
+
+data class DiagnosticEventUiState(
+    val id: Long,
+    val area: String,
+    val message: String,
+)
+
+enum class ConnectionState {
+    Unknown,
+    Connected,
+    Unauthorized,
+    Offline,
+    Misconfigured,
+}
+
+enum class TurnPhase {
+    Idle,
+    Recording,
+    Uploading,
+    Waiting,
+    Complete,
+    Failed,
+}
+
+enum class PlaybackState {
+    Idle,
+    Loading,
+    Playing,
+    Failed,
+}
 
 data class MainUiState(
-    val activeProfileId: String = ConnectionProfileId.WINDOWS.key,
-    val windowsBaseUrl: String = BuildConfig.DEFAULT_BASE_URL,
-    val windowsToken: String = "",
-    val macBaseUrl: String = BuildConfig.DEFAULT_BASE_URL,
-    val macToken: String = "",
+    val baseUrl: String = BuildConfig.DEFAULT_BASE_URL,
+    val token: String = "",
+    val workspacePath: String = "",
+    val machineProfiles: List<MachineProfile> = emptyList(),
+    val selectedMachineId: String? = null,
+    val machineProfileName: String = "",
+    val speakProvider: String? = null,
+    val speakEnabled: Boolean = false,
     val requestAudioReplies: Boolean = true,
     val autoplayReplyAudio: Boolean = true,
     val statusSummary: String = "Ready.",
@@ -20,24 +61,12 @@ data class MainUiState(
     val transcript: String = "",
     val replyText: String = "",
     val audioUrl: String? = null,
+    val recentTurns: List<RecentTurnUiState> = emptyList(),
+    val diagnostics: List<DiagnosticEventUiState> = emptyList(),
+    val connectionState: ConnectionState = ConnectionState.Unknown,
+    val turnPhase: TurnPhase = TurnPhase.Idle,
+    val playbackState: PlaybackState = PlaybackState.Idle,
     val isBusy: Boolean = false,
     val isRecording: Boolean = false,
     val error: String? = null,
-) {
-    val activeProfile: ConnectionProfileId
-        get() = ConnectionProfileId.fromKey(activeProfileId)
-
-    val baseUrl: String
-        get() = activeConnection().baseUrl
-
-    val token: String
-        get() = activeConnection().token
-
-    val activeProfileLabel: String
-        get() = activeProfile.label
-
-    private fun activeConnection(): ConnectionSettings = when (activeProfile) {
-        ConnectionProfileId.MAC -> ConnectionSettings(macBaseUrl, macToken)
-        ConnectionProfileId.WINDOWS -> ConnectionSettings(windowsBaseUrl, windowsToken)
-    }
-}
+)

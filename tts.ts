@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { EdgeTTS } from "node-edge-tts";
 import { withAbortTimeout } from "./request-timeout.js";
 
 export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs";
@@ -45,6 +44,31 @@ const OPENROUTER_URL = process.env.PI_SPEAK_OPENROUTER_URL || "https://openroute
 const elevenLabsAliases: Record<string, string> = {
 	adam: "pNInz6obpgDQGcFmaJgB",
 };
+
+function getErrorMessage(error: unknown) {
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+
+function hasEdgeTts() {
+	try {
+		require.resolve("node-edge-tts");
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function loadEdgeTts() {
+	try {
+		const mod = await import("node-edge-tts");
+		return mod.EdgeTTS;
+	} catch (error) {
+		throw new Error(
+			`Edge TTS is unavailable because the optional 'node-edge-tts' dependency could not be loaded: ${getErrorMessage(error)}`,
+		);
+	}
+}
 
 function throwIfAborted(signal?: AbortSignal) {
 	if (signal?.aborted) {
@@ -111,9 +135,24 @@ export function hasLegacySpeak11() {
 	);
 }
 
+function isProviderAvailable(provider: Exclude<TtsProvider, "auto">) {
+	switch (provider) {
+		case "legacy":
+			return hasLegacySpeak11();
+		case "elevenlabs":
+			return !!process.env.ELEVENLABS_API_KEY;
+		case "openai":
+			return !!getOpenAiAudioKey();
+		case "edge":
+			return hasEdgeTts();
+	}
+}
+
 export function resolveTtsProvider(state?: SpeakRuntimeState): Exclude<TtsProvider, "auto"> {
 	const configured = (state?.provider || process.env.PI_SPEAK_TTS_PROVIDER || "auto").toLowerCase() as TtsProvider;
-	if (configured !== "auto") return configured;
+	if (configured !== "auto") {
+		if (isProviderAvailable(configured)) return configured;
+	}
 	if (hasLegacySpeak11()) return "legacy";
 	if (process.env.ELEVENLABS_API_KEY) return "elevenlabs";
 	if (getOpenAiAudioKey()) return "openai";
@@ -151,7 +190,7 @@ export function getTtsDiagnostics(state?: SpeakRuntimeState) {
 				available: hasLegacySpeak11(),
 			},
 			edge: {
-				available: true,
+				available: hasEdgeTts(),
 				voice: DEFAULT_EDGE_VOICE,
 			},
 			openai: {
@@ -222,6 +261,7 @@ function getEdgeRate() {
 
 async function synthesizeEdge(text: string, outputPath: string, signal?: AbortSignal) {
 	throwIfAborted(signal);
+	const EdgeTTS = await loadEdgeTts();
 	const tts = new EdgeTTS({
 		voice: DEFAULT_EDGE_VOICE,
 		lang: process.env.PI_SPEAK_EDGE_LANG || DEFAULT_EDGE_VOICE.split("-").slice(0, 2).join("-"),

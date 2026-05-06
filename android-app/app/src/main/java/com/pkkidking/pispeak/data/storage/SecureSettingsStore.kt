@@ -5,11 +5,15 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.pkkidking.pispeak.BuildConfig
 import com.pkkidking.pispeak.domain.model.AppSettings
-import com.pkkidking.pispeak.domain.model.ConnectionProfileId
-import com.pkkidking.pispeak.domain.model.ConnectionSettings
+import com.pkkidking.pispeak.domain.model.MachineProfile
+import com.pkkidking.pispeak.domain.model.normalizedBaseUrl
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.LinkedHashMap
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import org.json.JSONArray
+import org.json.JSONObject
 
 @Singleton
 class SecureSettingsStore @Inject constructor(
@@ -25,40 +29,104 @@ class SecureSettingsStore @Inject constructor(
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    fun load(): AppSettings = AppSettings(
-        activeProfileId = prefs.getString(KEY_ACTIVE_PROFILE, ConnectionProfileId.WINDOWS.key).orEmpty(),
-        windowsConnection = ConnectionSettings(
-            baseUrl = prefs.getString(KEY_WINDOWS_BASE_URL, BuildConfig.DEFAULT_BASE_URL).orEmpty(),
-            token = prefs.getString(KEY_WINDOWS_TOKEN, "").orEmpty(),
-        ),
-        macConnection = ConnectionSettings(
-            baseUrl = prefs.getString(KEY_MAC_BASE_URL, BuildConfig.DEFAULT_BASE_URL).orEmpty(),
-            token = prefs.getString(KEY_MAC_TOKEN, "").orEmpty(),
-        ),
-        requestAudioReplies = prefs.getBoolean(KEY_REQUEST_AUDIO, true),
-        autoplayReplyAudio = prefs.getBoolean(KEY_AUTOPLAY_AUDIO, true),
-    )
+    fun load(): AppSettings {
+        val machineProfiles = loadMachineProfiles()
+        val selectedMachineId = prefs.getString(KEY_SELECTED_MACHINE_ID, null)
+        val selectedMachine = machineProfiles.firstOrNull { it.id == selectedMachineId }
+
+        val legacyBaseUrl = prefs.getString(KEY_BASE_URL, BuildConfig.DEFAULT_BASE_URL).orEmpty()
+        val legacyToken = prefs.getString(KEY_TOKEN, "").orEmpty()
+        val legacyWorkspacePath = prefs.getString(KEY_WORKSPACE_PATH, "").orEmpty()
+
+        return AppSettings(
+            baseUrl = selectedMachine?.baseUrl ?: legacyBaseUrl,
+            token = selectedMachine?.token ?: legacyToken,
+            requestAudioReplies = prefs.getBoolean(KEY_REQUEST_AUDIO, true),
+            autoplayReplyAudio = prefs.getBoolean(KEY_AUTOPLAY_AUDIO, true),
+            selectedMachineId = selectedMachine?.id,
+            machineProfiles = machineProfiles,
+            machineProfileName = "",
+            workspacePath = selectedMachine?.workspacePath ?: legacyWorkspacePath,
+        )
+    }
 
     fun save(settings: AppSettings) {
-        prefs.edit()
-            .putString(KEY_ACTIVE_PROFILE, settings.activeProfileId)
-            .putString(KEY_WINDOWS_BASE_URL, settings.windowsConnection.baseUrl)
-            .putString(KEY_WINDOWS_TOKEN, settings.windowsConnection.token)
-            .putString(KEY_MAC_BASE_URL, settings.macConnection.baseUrl)
-            .putString(KEY_MAC_TOKEN, settings.macConnection.token)
+        val edit = prefs.edit()
+            .putString(KEY_BASE_URL, settings.baseUrl)
+            .putString(KEY_TOKEN, settings.token)
+            .putString(KEY_WORKSPACE_PATH, settings.workspacePath)
             .putBoolean(KEY_REQUEST_AUDIO, settings.requestAudioReplies)
             .putBoolean(KEY_AUTOPLAY_AUDIO, settings.autoplayReplyAudio)
-            .apply()
+            .putString(KEY_SELECTED_MACHINE_ID, settings.selectedMachineId)
+            .putString(KEY_MACHINE_PROFILES, encodeMachineProfiles(settings.machineProfiles))
+
+        edit.apply()
+    }
+
+    private fun loadMachineProfiles(): List<MachineProfile> {
+        val raw = prefs.getString(KEY_MACHINE_PROFILES, "[]").orEmpty()
+        if (raw.isBlank()) return emptyList()
+        val parsed = runCatching { JSONArray(raw) }.getOrElse { return emptyList() }
+        val profiles = mutableListOf<MachineProfile>()
+        for (index in 0 until parsed.length()) {
+            val item = parsed.optJSONObject(index) ?: continue
+            val baseUrl = item.optString("baseUrl").trim()
+            if (baseUrl.isBlank()) continue
+            profiles.add(
+                MachineProfile(
+                    id = item.optString("id").ifBlank { UUID.randomUUID().toString() },
+                    name = item.optString("name").ifBlank { "Machine ${index + 1}" },
+                    baseUrl = item.optString("baseUrl").trim(),
+                    token = item.optString("token").trim(),
+                    workspacePath = item.optString("workspacePath").trim(),
+                ),
+            )
+        }
+        return ensureUniqueMachineProfiles(profiles)
+    }
+
+    private fun encodeMachineProfiles(machineProfiles: List<MachineProfile>): String {
+        val array = JSONArray()
+        for (profile in ensureUniqueMachineProfiles(machineProfiles)) {
+            array.put(
+                JSONObject().apply {
+                    put("id", profile.id.ifBlank { UUID.randomUUID().toString() })
+                    put("name", profile.name.ifBlank { "Machine ${array.length() + 1}" })
+                    put("baseUrl", profile.normalizedBaseUrl())
+                    put("token", profile.token.trim())
+                    put("workspacePath", profile.workspacePath.trim())
+                },
+            )
+        }
+        return array.toString()
+    }
+
+    private fun ensureUniqueMachineProfiles(machineProfiles: List<MachineProfile>): List<MachineProfile> {
+        val ordered = LinkedHashMap<String, MachineProfile>()
+        for (profile in machineProfiles) {
+            val normalizedBaseUrl = profile.normalizedBaseUrl()
+            if (normalizedBaseUrl.isBlank()) continue
+
+            val canonical = profile.copy(
+                id = profile.id.ifBlank { UUID.randomUUID().toString() },
+                name = profile.name.ifBlank { "Machine" },
+                baseUrl = normalizedBaseUrl,
+                token = profile.token.trim(),
+                workspacePath = profile.workspacePath.trim(),
+            )
+            ordered["${canonical.baseUrl}|${canonical.token}"] = canonical
+        }
+        return ordered.values.toList()
     }
 
     private companion object {
         const val PREFS_NAME = "pi_speak_secure_settings"
-        const val KEY_ACTIVE_PROFILE = "active_profile"
-        const val KEY_WINDOWS_BASE_URL = "windows_base_url"
-        const val KEY_WINDOWS_TOKEN = "windows_token"
-        const val KEY_MAC_BASE_URL = "mac_base_url"
-        const val KEY_MAC_TOKEN = "mac_token"
+        const val KEY_BASE_URL = "base_url"
+        const val KEY_TOKEN = "token"
+        const val KEY_WORKSPACE_PATH = "workspace_path"
         const val KEY_REQUEST_AUDIO = "request_audio"
         const val KEY_AUTOPLAY_AUDIO = "autoplay_audio"
+        const val KEY_SELECTED_MACHINE_ID = "selected_machine_id"
+        const val KEY_MACHINE_PROFILES = "machine_profiles"
     }
 }

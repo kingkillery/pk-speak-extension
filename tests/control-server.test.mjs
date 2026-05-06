@@ -79,8 +79,8 @@ async function withServer(overrides = {}, fn) {
 		onMonoAction: async () => ({ ok: true, message: "mono" }),
 		onSpeakAction: async () => ({ ok: true, message: "speak" }),
 		onPhoneAction: async () => ({ ok: true, message: "phone" }),
-		onTextTurn: overrides.onTextTurn || (async (text, includeAudio, target) => ({ replyText: `${text}:${includeAudio}:${target || "current"}` })),
-		onVoiceTurn: overrides.onVoiceTurn || (async (_buffer, _mimeType, _includeAudio, target) => ({ replyText: `voice:${target || "current"}` })),
+		onTextTurn: overrides.onTextTurn || (async (text, includeAudio, target, cwd) => ({ replyText: `${text}:${includeAudio}:${target || "current"}:${cwd || "default-cwd"}` })),
+		onVoiceTurn: overrides.onVoiceTurn || (async (_buffer, _mimeType, _includeAudio, target, cwd) => ({ replyText: `voice:${target || "current"}:${cwd || "default-cwd"}` })),
 	});
 	const runtime = await server.start();
 	try {
@@ -346,6 +346,60 @@ test("mutating mono and speak routes reject GET and require POST", async () => {
 	});
 });
 
+test("POST route rejects malformed JSON payload", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/route",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: "not-json",
+		});
+		assert.equal(response.statusCode, 400);
+		assert.equal(response.json().error, "Invalid JSON body.");
+	});
+});
+
+test("POST turn/text rejects malformed JSON payload", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/turn/text",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: "not-json",
+		});
+		assert.equal(response.statusCode, 400);
+		assert.equal(response.json().error, "Invalid JSON body.");
+	});
+});
+
+test("POST turn/text rejects non-string text payload", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/turn/text",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ text: 123 }),
+		});
+		assert.equal(response.statusCode, 400);
+		assert.equal(response.json().error, "Invalid payload: text is required.");
+	});
+});
+
 test("turn routes accept an explicit target", async () => {
 	await withServer({}, async (port) => {
 		const response = await request({
@@ -360,6 +414,38 @@ test("turn routes accept an explicit target", async () => {
 			body: JSON.stringify({ text: "hello", audio: false, target: "hermes" }),
 		});
 		assert.equal(response.statusCode, 200);
-		assert.equal(response.json().replyText, "hello:false:hermes");
+		assert.equal(response.json().replyText, "hello:false:hermes:default-cwd");
+	});
+});
+
+test("turn routes accept an explicit launch cwd", async () => {
+	await withServer({}, async (port) => {
+		const textResponse = await request({
+			port,
+			path: "/v1/turn/text",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ text: "hello", audio: false, target: "codex", cwd: "C:\\dev\\project" }),
+		});
+		assert.equal(textResponse.statusCode, 200);
+		assert.equal(textResponse.json().replyText, "hello:false:codex:C:\\dev\\project");
+
+		const voiceResponse = await request({
+			port,
+			path: "/v1/turn/voice?audio=0&target=codex&cwd=C%3A%5Cdev%5Cproject",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "audio/wav",
+			},
+			body: "fake-wav",
+		});
+		assert.equal(voiceResponse.statusCode, 200);
+		assert.equal(voiceResponse.json().replyText, "voice:codex:C:\\dev\\project");
 	});
 });

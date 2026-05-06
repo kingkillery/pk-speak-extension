@@ -2,9 +2,11 @@ export const STORAGE_TOKEN = "piSpeakRemoteToken";
 export const STORAGE_AUDIO = "piSpeakRemoteAudio";
 export const STORAGE_AUTOPLAY = "piSpeakRemoteAutoplay";
 export const STORAGE_REMEMBER = "piSpeakRemoteRememberToken";
+export const STORAGE_LAUNCH_PATH = "piSpeakRemoteLaunchPath";
 
 export function loadPersistedSettings({
 	queryToken = "",
+	queryLaunchPath = "",
 	sessionToken = "",
 	localToken = "",
 	rememberToken = false,
@@ -13,6 +15,7 @@ export function loadPersistedSettings({
 } = {}) {
 	return {
 		token: queryToken || sessionToken || localToken || "",
+		launchPath: queryLaunchPath || "",
 		wantAudio: audio !== "false",
 		autoplay: autoplay !== "false",
 		rememberToken,
@@ -20,11 +23,18 @@ export function loadPersistedSettings({
 	};
 }
 
-export function persistSettingsSnapshot({ token = "", wantAudio = true, autoplay = true, rememberToken = false } = {}) {
+export function persistSettingsSnapshot({
+	token = "",
+	launchPath = "",
+	wantAudio = true,
+	autoplay = true,
+	rememberToken = false,
+} = {}) {
 	return {
 		session: token ? { [STORAGE_TOKEN]: token } : {},
 		local: {
 			...(rememberToken && token ? { [STORAGE_TOKEN]: token } : {}),
+			...(launchPath ? { [STORAGE_LAUNCH_PATH]: launchPath } : {}),
 			[STORAGE_REMEMBER]: String(rememberToken),
 			[STORAGE_AUDIO]: String(wantAudio),
 			[STORAGE_AUTOPLAY]: String(autoplay),
@@ -36,6 +46,7 @@ export function persistSettingsSnapshot({ token = "", wantAudio = true, autoplay
 if (typeof document !== "undefined") {
 const state = {
 	token: "",
+	launchPath: "",
 	wantAudio: true,
 	autoplay: true,
 	rememberToken: false,
@@ -67,6 +78,7 @@ const els = {
 	textInput: document.getElementById("text-input"),
 	sendText: document.getElementById("send-text-button"),
 	clearText: document.getElementById("clear-text-button"),
+	launchPathInput: document.getElementById("launch-path-input"),
 	tokenInput: document.getElementById("token-input"),
 	saveToken: document.getElementById("save-token-button"),
 	clearToken: document.getElementById("clear-token-button"),
@@ -149,17 +161,25 @@ function syncSettingsUi() {
 	els.audioToggle.checked = state.wantAudio;
 	els.autoplayToggle.checked = state.autoplay;
 	els.rememberToken.checked = state.rememberToken;
+	els.launchPathInput.value = state.launchPath;
 	els.tokenInput.value = state.token;
 	els.auth.textContent = state.token ? "Token loaded" : "No token";
 }
 
 function loadSettings() {
-	const queryToken = new URL(window.location.href).searchParams.get("token");
+	const query = new URL(window.location.href).searchParams;
+	const queryToken = query.get("token");
+	const queryLaunchPath = query.get("cwd") || query.get("launchPath");
 	state.rememberToken = getLocalStorage().getItem(STORAGE_REMEMBER) === "true";
 	state.token =
 		queryToken ||
 		getSessionStorage().getItem(STORAGE_TOKEN) ||
 		getLocalStorage().getItem(STORAGE_TOKEN) ||
+		"";
+	state.launchPath =
+		queryLaunchPath ||
+		getSessionStorage().getItem(STORAGE_LAUNCH_PATH) ||
+		getLocalStorage().getItem(STORAGE_LAUNCH_PATH) ||
 		"";
 	state.wantAudio = (getLocalStorage().getItem(STORAGE_AUDIO) || "true") !== "false";
 	state.autoplay = (getLocalStorage().getItem(STORAGE_AUTOPLAY) || "true") !== "false";
@@ -170,6 +190,13 @@ function loadSettings() {
 		}
 		const cleaned = new URL(window.location.href);
 		cleaned.searchParams.delete("token");
+		window.history.replaceState({}, "", cleaned.pathname + cleaned.search + cleaned.hash);
+	}
+	if (queryLaunchPath) {
+		const cleaned = new URL(window.location.href);
+		cleaned.searchParams.delete("cwd");
+		cleaned.searchParams.delete("launchPath");
+		cleaned.searchParams.delete("launch");
 		window.history.replaceState({}, "", cleaned.pathname + cleaned.search + cleaned.hash);
 	}
 	syncSettingsUi();
@@ -186,6 +213,11 @@ function saveSettings() {
 	} else {
 		getSessionStorage().removeItem(STORAGE_TOKEN);
 		getLocalStorage().removeItem(STORAGE_TOKEN);
+	}
+	if (state.launchPath) {
+		getLocalStorage().setItem(STORAGE_LAUNCH_PATH, state.launchPath);
+	} else {
+		getLocalStorage().removeItem(STORAGE_LAUNCH_PATH);
 	}
 	getLocalStorage().setItem(STORAGE_REMEMBER, String(state.rememberToken));
 	getLocalStorage().setItem(STORAGE_AUDIO, String(state.wantAudio));
@@ -254,10 +286,15 @@ async function submitText() {
 	}
 	setStatus("Sending text turn...");
 	try {
+		const body = { text, audio: state.wantAudio };
+		const trimmedLaunchPath = state.launchPath.trim();
+		if (trimmedLaunchPath) {
+			body.cwd = trimmedLaunchPath;
+		}
 		const payload = await apiFetch("/v1/turn/text", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ text, audio: state.wantAudio }),
+			body: JSON.stringify(body),
 		});
 		setTranscript("");
 		setReplyText(payload && payload.replyText ? payload.replyText : "");
@@ -365,7 +402,12 @@ async function stopRecordingAndSend() {
 	});
 
 	try {
-		const payload = await apiFetch(`/v1/turn/voice?audio=${state.wantAudio ? "1" : "0"}`, {
+		const params = new URLSearchParams({ audio: state.wantAudio ? "1" : "0" });
+		const trimmedLaunchPath = state.launchPath.trim();
+		if (trimmedLaunchPath) {
+			params.set("cwd", trimmedLaunchPath);
+		}
+		const payload = await apiFetch(`/v1/turn/voice?${params.toString()}`, {
 			method: "POST",
 			headers: { "Content-Type": blob.type || "application/octet-stream" },
 			body: blob,
@@ -429,10 +471,14 @@ els.textInput.addEventListener("keydown", (event) => {
 });
 els.saveToken.addEventListener("click", () => {
 	state.token = els.tokenInput.value.trim();
+	state.launchPath = els.launchPathInput.value.trim();
 	state.rememberToken = els.rememberToken.checked;
 	saveSettings();
-	setStatus(state.token ? "Token saved." : "Token cleared.");
+	setStatus(state.token ? "Settings saved." : "Token cleared.");
 	void refreshStatus();
+});
+els.launchPathInput.addEventListener("change", () => {
+	state.launchPath = els.launchPathInput.value.trim();
 });
 els.clearToken.addEventListener("click", () => {
 	state.token = "";

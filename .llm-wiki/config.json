@@ -1,0 +1,412 @@
+{
+  "version": 1,
+  "tooling": {
+    "install_scope": "local",
+    "managed_tool_root": ".llm-wiki/tools"
+  },
+  "toolset": {
+    "cli": {
+      "python": "scripts/llm_wiki_packet.py",
+      "powershell": "scripts/llm_wiki_packet.ps1",
+      "shell": "scripts/llm_wiki_packet.sh",
+      "cmd": "scripts/llm_wiki_packet.cmd"
+    },
+    "preferred_project_bootstrap_command": "init",
+    "preferred_project_runtime_commands": [
+      "setup",
+      "check",
+      "context",
+      "evidence",
+      "memory",
+      "manifest",
+      "reduce",
+      "evaluate",
+      "promote",
+      "improve",
+      "pokemon-benchmark"
+    ]
+  },
+  "memory_base": {
+    "name": "pi-speak-extension",
+    "vault_path": "C:\\dev\\Desktop-Projects\\pi-speak-extension",
+    "vault_id": ""
+  },
+  "memory_controller": {
+    "script_path": "scripts/llm_wiki_memory_controller.py",
+    "ledger_path": ".llm-wiki/memory-ledger",
+    "generated_wiki_path": "wiki/syntheses/memory-ledger-approved.md",
+    "review_gate": true,
+    "min_confidence": "low",
+    "ranking": {
+      "lexical_weight": 0.7,
+      "confidence_weight": 0.2,
+      "recency_weight": 0.1
+    }
+  },
+  "obsidian": {
+    "mcp_server_key": "obsidian",
+    "package_name": "@bitbonsai/mcpvault",
+    "behavior_layer": "agent-cli-obsidian",
+    "behavior_layer_repo": "https://github.com/kingkillery/agent-cli-obsidian",
+    "vault_resolution_policy": "use_configured_path_or_ask_user",
+    "known_local_vault_roots": [],
+    "transport_layer": "mcpvault",
+    "alternate_transport": "mcp-obsidian",
+    "recommended_note_types": [
+      "synthesis",
+      "concept",
+      "source",
+      "decision",
+      "session"
+    ],
+    "research_note_types": [
+      "source",
+      "entity",
+      "concept",
+      "question",
+      "synthesis"
+    ],
+    "wrapper_script_path": "scripts/llm_wiki_obsidian_mcp.py",
+    "install_root": ".llm-wiki/tools/obsidian-mcp",
+    "local_command_candidates": [
+      ".llm-wiki/tools/obsidian-mcp/node_modules/.bin/mcpvault.cmd",
+      ".llm-wiki/tools/obsidian-mcp/node_modules/.bin/mcpvault.ps1",
+      ".llm-wiki/tools/obsidian-mcp/node_modules/.bin/mcpvault"
+    ],
+    "vault_path": "C:\\dev\\Desktop-Projects\\pi-speak-extension"
+  },
+  "wiki_layer": {
+    "provider": "obsidian",
+    "behavior_layer": "agent-cli-obsidian",
+    "behavior_layer_repo": "https://github.com/kingkillery/agent-cli-obsidian",
+    "vault_resolution_policy": "use_configured_path_or_ask_user",
+    "known_local_vault_roots": [],
+    "transport": "mcpvault",
+    "alternate_transport": "mcp-obsidian",
+    "vault_path": "C:\\dev\\Desktop-Projects\\pi-speak-extension",
+    "raw_path": ".raw",
+    "wiki_path": "wiki",
+    "index_path": "wiki/index.md",
+    "log_path": "wiki/log.md",
+    "hot_cache_path": "wiki/hot.md",
+    "overview_path": "wiki/overview.md",
+    "queries_path": "wiki/queries",
+    "tours_path": "wiki/tours",
+    "compile_state_path": ".llm-wiki/state/wiki-compile.json",
+    "reports_path": ".llm-wiki/reports",
+    "graph_path": "graph/graph.json",
+    "graph_html_path": "graph/graph.html",
+    "conflict_policy": "flag",
+    "saved_queries_enabled": true,
+    "overview_update_policy": "on-substantial-save",
+    "folders": {
+      "sources": "wiki/sources",
+      "concepts": "wiki/concepts",
+      "entities": "wiki/entities",
+      "questions": "wiki/questions",
+      "queries": "wiki/queries",
+      "syntheses": "wiki/syntheses",
+      "decisions": "wiki/decisions",
+      "sessions": "wiki/sessions",
+      "meta": "wiki/meta",
+      "tours": "wiki/tours"
+    },
+    "note_types": [
+      "synthesis",
+      "concept",
+      "source",
+      "decision",
+      "session",
+      "query"
+    ],
+    "research_note_types": [
+      "source",
+      "entity",
+      "concept",
+      "question",
+      "synthesis"
+    ],
+    "offer_save_for_substantial_answers": true,
+    "deep_research_save_default": true,
+    "update_existing_before_create": true,
+    "direct_file_fallback": true,
+    "log_transport_fallback": true
+  },
+  "wiki_compile": {
+    "enabled": false,
+    "changed_only_default": true,
+    "prompt_budget_chars": 200000,
+    "output_language": "",
+    "request_timeout_ms": 600000
+  },
+  "provider_settings": {
+    "provider": "direct-file",
+    "model": "",
+    "timeout_ms": 600000,
+    "language": "",
+    "endpoint": "",
+    "precedence": [
+      "environment",
+      ".env",
+      "agent_settings",
+      "packet_config",
+      "defaults"
+    ]
+  },
+  "retrieval_router": {
+    "enabled": true,
+    "max_hops": 3,
+    "overlap_stop_threshold": 0.5,
+    "progressive_disclosure": true
+  },
+  "memory_capture": {
+    "enabled": false,
+    "candidate_only": true,
+    "private_block_pattern": "<private>...</private>",
+    "pii_sensitive": false,
+    "deny_paths": [],
+    "deny_generated_artifacts": true
+  },
+  "stack": {
+    "retrieval": {
+      "primary": "pk-qmd",
+      "memory": "byterover",
+      "graph": "gitvizz"
+    },
+    "retrieval_planner": {
+      "default_context_mode": "default",
+      "default_evidence_plane": "all",
+      "planes": [
+        "source",
+        "skills",
+        "preference",
+        "graph",
+        "local"
+      ],
+      "default_timeout_sec": 20,
+      "default_max_results_per_plane": 5,
+      "broad_retrieval": "explicit-only",
+      "source_precedence": "current source evidence overrides memory",
+      "fallback_policy": "degrade to local lexical/config hints without blocking task completion",
+      "hf_enabled": false,
+      "hf_embedding_model": "BAAI/bge-m3",
+      "hf_reranker_model": "cross-encoder-testing/reranker-bert-tiny-gooaq-bce",
+      "hf_local_embedding_model": "ggml-org/embeddinggemma-300M-GGUF",
+      "hf_local_reranker_model": "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF"
+    },
+    "policy": {
+      "hide_tool_names_from_end_users": true,
+      "prefer_source_evidence_over_memory": true,
+      "qmd_for_repo_specific_tasks": true,
+      "brv_for_durable_preferences_and_decisions": true,
+      "skills_for_reusable_execution_shortcuts": true
+    }
+  },
+  "docs": {
+    "contract_path": "SYSTEM_CONTRACT.md",
+    "known_issues_path": "KNOWN_ISSUES.md"
+  },
+  "agent_runtimes": {
+    "packet_wrappers": {
+      "kade-hq": {
+        "owner": "llm-wiki-prompt-packet",
+        "source_path": "skills/home/kade-hq",
+        "status": "home-install-enabled",
+        "manual_install_required": false
+      },
+      "g-kade": {
+        "owner": "llm-wiki-prompt-packet",
+        "source_path": "skills/home/g-kade",
+        "status": "home-install-enabled",
+        "manual_install_required": false
+      },
+      "gstack": {
+        "owner": "llm-wiki-prompt-packet",
+        "source_path": "skills/home/gstack",
+        "status": "home-install-enabled",
+        "manual_install_required": false
+      },
+      "llm-wiki-skills": {
+        "owner": "llm-wiki-prompt-packet",
+        "source_path": "skills/home/llm-wiki-skills",
+        "status": "home-install-enabled",
+        "manual_install_required": false
+      }
+    },
+    "repo_dependencies": {
+      "g-kade": {
+        "name": "g-kade",
+        "contract": "repo-owned dependency/submodule/vendor path",
+        "configured_path": "deps/pk-skills1/gstack/g-kade",
+        "candidate_paths": [
+          "deps/pk-skills1/gstack/g-kade",
+          "deps/pk-skills1/g-kade",
+          ".llm-wiki/deps/g-kade",
+          "vendor/g-kade",
+          "deps/g-kade",
+          "dependencies/g-kade",
+          "submodules/g-kade"
+        ],
+        "status": "missing",
+        "detected_path": null,
+        "markers": [],
+        "reason": "not present",
+        "manual_install_required": true
+      },
+      "gstack": {
+        "name": "gstack",
+        "contract": "repo-owned dependency/submodule/vendor path",
+        "configured_path": "deps/pk-skills1/gstack",
+        "candidate_paths": [
+          "deps/pk-skills1/gstack",
+          ".llm-wiki/deps/gstack",
+          "vendor/gstack",
+          "deps/gstack",
+          "dependencies/gstack",
+          "submodules/gstack"
+        ],
+        "status": "missing",
+        "detected_path": null,
+        "markers": [],
+        "reason": "not present",
+        "manual_install_required": true
+      }
+    },
+    "source_of_truth": {
+      "submodule_path": "deps/pk-skills1",
+      "repo_url": "https://github.com/kingkillery/pk-skills1.git"
+    }
+  },
+  "pk_qmd": {
+    "command": "pk-qmd",
+    "local_command_candidates": [
+      ".llm-wiki/tools/bin/pk-qmd.cmd",
+      ".llm-wiki/tools/bin/pk-qmd.ps1",
+      ".llm-wiki/tools/bin/pk-qmd",
+      ".llm-wiki/tools/pk-qmd/dist/cli/qmd.js"
+    ],
+    "repo_url": "https://github.com/kingkillery/pk-qmd",
+    "repo_ref": "ef26cb62bb8132bc3a851b23f450af8e382e4c4e",
+    "checkout_path": ".llm-wiki/tools/pk-qmd",
+    "source_checkout_path": "",
+    "config_dir": ".llm-wiki/qmd-config",
+    "manual_install_required": false,
+    "global_install_allowed": false,
+    "mcp_url": "http://localhost:8181/mcp",
+    "collection_name": "pi-speak-extension",
+    "context": "Official pi-speak-extension memory base at C:\\dev\\Desktop-Projects\\pi-speak-extension",
+    "source_path": "C:\\dev\\Desktop-Projects\\pi-speak-extension",
+    "local_dependency_manifest": ".llm-wiki/package.json"
+  },
+  "byterover": {
+    "command": "brv",
+    "install_root": ".llm-wiki/tools/brv",
+    "local_command_candidates": [
+      ".llm-wiki/tools/brv/node_modules/.bin/brv.cmd",
+      ".llm-wiki/tools/brv/node_modules/.bin/brv.ps1",
+      ".llm-wiki/tools/brv/node_modules/.bin/brv"
+    ],
+    "package_name": "byterover-cli",
+    "global_install_allowed": false,
+    "api_key_env": "BYTEROVER_API_KEY",
+    "working_dir": ".brv",
+    "context_tree_dir": ".brv/context-tree",
+    "default_provider": "openrouter",
+    "default_model": "google/gemini-3.1-flash-lite-preview",
+    "query_experiment_provider": "google",
+    "query_experiment_model": "google/gemini-3.1-flash-lite-preview",
+    "curate_preferred_provider": "openrouter",
+    "curate_preferred_model": "google/gemini-3.1-flash-lite-preview",
+    "candidate_models": [
+      "google/gemini-3.1-flash-lite-preview",
+      "openai/gpt-oss-safeguard-20b",
+      "x-ai/grok-4.20-multi-agent",
+      "liquid/lfm-2.5-1.2b-thinking:free",
+      "openai/gpt-5-nano",
+      "arcee-ai/trinity-large-thinking"
+    ],
+    "query_format": "json",
+    "curate_format": "json"
+  },
+  "gitvizz": {
+    "frontend_url": "http://localhost:3000",
+    "backend_url": "http://localhost:8003",
+    "api_base_url": "http://localhost:8003/api",
+    "repo_id": "",
+    "authorization_env": "LLM_WIKI_GITVIZZ_AUTHORIZATION",
+    "auth_token_env": "LLM_WIKI_GITVIZZ_TOKEN",
+    "auth_scheme": "Bearer",
+    "homepage_url": "http://localhost:3000/",
+    "setup_url": "http://localhost:3000/",
+    "github_callback_url": "http://localhost:3000/api/auth/callback/github",
+    "repo_url": "https://github.com/kingkillery/GitVizz.git",
+    "checkout_path": ".llm-wiki/tools/gitvizz",
+    "repo_path": null
+  },
+  "skills": {
+    "mcp_server_key": "llm-wiki-skills",
+    "script_path": "scripts/llm_wiki_skill_mcp.py",
+    "failure_collector_script_path": "scripts/llm_wiki_failure_collector.py",
+    "failure_hook_script_path": "scripts/llm_wiki_failure_hook.py",
+    "registry_path": ".llm-wiki/skills-registry.json",
+    "index_path": "wiki/skills/index.md",
+    "log_path": "wiki/log.md",
+    "active_dir": "wiki/skills/active",
+    "feedback_dir": "wiki/skills/feedback",
+    "retired_dir": "wiki/skills/retired",
+    "retire_below_score": -3,
+    "pipeline": {
+      "pipeline_dir": ".llm-wiki/skill-pipeline",
+      "brief_dir": ".llm-wiki/skill-pipeline/briefs",
+      "delta_dir": ".llm-wiki/skill-pipeline/deltas",
+      "validation_dir": ".llm-wiki/skill-pipeline/validations",
+      "packet_dir": ".llm-wiki/skill-pipeline/packets",
+      "run_dir": ".llm-wiki/skill-pipeline/runs",
+      "proposal_dir": ".llm-wiki/skill-pipeline/proposals",
+      "surrogate_review_dir": ".llm-wiki/skill-pipeline/surrogate-reviews",
+      "evolution_run_dir": ".llm-wiki/skill-pipeline/evolution-runs",
+      "frontier_path": ".llm-wiki/skill-pipeline/frontier.json",
+      "failure_dir": ".llm-wiki/skill-pipeline/failures",
+      "failure_event_dir": ".llm-wiki/skill-pipeline/failures/events",
+      "failure_cluster_dir": ".llm-wiki/skill-pipeline/failures/clusters",
+      "failure_benchmark_dir": ".llm-wiki/skill-pipeline/failures/benchmarks",
+      "min_validation_score": 7,
+      "dedupe_similarity_threshold": 0.72,
+      "auto_merge_duplicates": true,
+      "long_task_brief_min_chars": 280,
+      "max_hops_default": 2,
+      "max_retries_default": 1,
+      "enforce_summary_only": true,
+      "frontier_size": 3,
+      "min_frontier_delta": 1,
+      "surrogate_fail_blocks": true,
+      "failure_auto_promote": true,
+      "failure_promotion_threshold": 3,
+      "failure_promotion_window_hours": 168,
+      "failure_promotion_min_unique_sessions": 2
+    }
+  },
+  "agent_failure_capture": {
+    "script_path": "scripts/llm_wiki_agent_failure_capture.py",
+    "launcher_paths": {
+      "powershell": "scripts/run_llm_wiki_agent.ps1",
+      "shell": "scripts/run_llm_wiki_agent.sh",
+      "cmd": "scripts/run_llm_wiki_agent.cmd"
+    },
+    "wrapper_supported_agents": [
+      "claude",
+      "codex",
+      "droid",
+      "pi"
+    ],
+    "native_hook_agents": [
+      "claude"
+    ],
+    "commands": {
+      "claude": "claude",
+      "codex": "codex",
+      "droid": "droid",
+      "pi": "pi"
+    }
+  }
+}
