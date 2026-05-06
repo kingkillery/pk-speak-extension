@@ -33,17 +33,18 @@ class PiSpeakRepositoryImpl @Inject constructor(
     override suspend fun getStatus(settings: AppSettings): Result<RemoteStatusSummary> = withContext(Dispatchers.IO) {
         runCatching {
             api.getStatus(
-                url = url(settings.baseUrl, "v1/status"),
-                authorization = authHeader(settings.token),
+                url = url(settings.activeConnection().baseUrl, "v1/status"),
+                authorization = authHeader(settings.activeConnection().token),
             ).toDomain()
         }
     }
 
     override suspend fun updateRouteTarget(settings: AppSettings, target: String?): Result<RemoteStatusSummary> = withContext(Dispatchers.IO) {
         runCatching {
+            val connection = settings.activeConnection()
             val route = api.updateRoute(
-                url = url(settings.baseUrl, "v1/route"),
-                authorization = authHeader(settings.token),
+                url = url(connection.baseUrl, "v1/route"),
+                authorization = authHeader(connection.token),
                 body = TargetRouteRequestDto(target = target?.trim()?.takeIf { it.isNotEmpty() }),
             ).route
             RemoteStatusSummary(
@@ -62,9 +63,10 @@ class PiSpeakRepositoryImpl @Inject constructor(
 
     override suspend fun sendTextTurn(settings: AppSettings, text: String): Result<TurnResult> = withContext(Dispatchers.IO) {
         runCatching {
+            val connection = settings.activeConnection()
             api.sendTextTurn(
-                url = url(settings.baseUrl, "v1/turn/text"),
-                authorization = authHeader(settings.token),
+                url = url(connection.baseUrl, "v1/turn/text"),
+                authorization = authHeader(connection.token),
                 body = TextTurnRequestDto(
                     text = text,
                     audio = settings.requestAudioReplies,
@@ -78,9 +80,10 @@ class PiSpeakRepositoryImpl @Inject constructor(
         val audioFile = File(audio.filePath)
         try {
             runCatching {
+                val connection = settings.activeConnection()
                 api.sendVoiceTurn(
-                    url = url(settings.baseUrl, "v1/turn/voice?audio=${if (settings.requestAudioReplies) 1 else 0}"),
-                    authorization = authHeader(settings.token),
+                    url = url(connection.baseUrl, "v1/turn/voice?audio=${if (settings.requestAudioReplies) 1 else 0}"),
+                    authorization = authHeader(connection.token),
                     body = audioFile.asRequestBody(audio.mimeType.toMediaType()),
                 ).toDomain()
             }
@@ -92,7 +95,7 @@ class PiSpeakRepositoryImpl @Inject constructor(
     private fun authHeader(token: String): String? = token.trim().takeIf { it.isNotEmpty() }?.let { "Bearer $it" }
 
     private fun url(baseUrl: String, path: String): String {
-        val normalized = ensureTrailingSlash(baseUrl.ifBlank { settingsStore.load().baseUrl })
+        val normalized = ensureTrailingSlash(baseUrl.ifBlank { settingsStore.load().activeConnection().baseUrl })
         return normalized + path.removePrefix("/")
     }
 

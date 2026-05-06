@@ -2,12 +2,42 @@ package com.pkkidking.pispeak.domain.model
 
 import java.net.URI
 
-data class AppSettings(
+enum class ConnectionProfileId(val key: String, val label: String) {
+    WINDOWS("windows", "Windows"),
+    MAC("mac", "Mac");
+
+    companion object {
+        fun fromKey(value: String?): ConnectionProfileId =
+            entries.firstOrNull { it.key.equals(value, ignoreCase = true) } ?: WINDOWS
+    }
+}
+
+data class ConnectionSettings(
     val baseUrl: String,
     val token: String,
+)
+
+data class AppSettings(
+    val activeProfileId: String,
+    val windowsConnection: ConnectionSettings,
+    val macConnection: ConnectionSettings,
     val requestAudioReplies: Boolean,
     val autoplayReplyAudio: Boolean,
-)
+) {
+    fun activeProfile(): ConnectionProfileId = ConnectionProfileId.fromKey(activeProfileId)
+
+    fun activeConnection(): ConnectionSettings = when (activeProfile()) {
+        ConnectionProfileId.MAC -> macConnection
+        ConnectionProfileId.WINDOWS -> windowsConnection
+    }
+
+    fun withActiveConnection(baseUrl: String, token: String): AppSettings = when (activeProfile()) {
+        ConnectionProfileId.MAC -> copy(macConnection = ConnectionSettings(baseUrl, token))
+        ConnectionProfileId.WINDOWS -> copy(windowsConnection = ConnectionSettings(baseUrl, token))
+    }
+
+    fun withActiveProfile(profileId: ConnectionProfileId): AppSettings = copy(activeProfileId = profileId.key)
+}
 
 data class RemoteStatusSummary(
     val remoteEnabled: Boolean,
@@ -47,7 +77,7 @@ data class RecordedAudio(
     val mimeType: String,
 )
 
-fun AppSettings.validate(allowInsecureLoopback: Boolean): String? {
+fun ConnectionSettings.validate(allowInsecureLoopback: Boolean): String? {
     val normalized = baseUrl.trim()
     if (normalized.isEmpty()) return "Base URL is required."
 

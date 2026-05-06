@@ -6,6 +6,8 @@ import com.pkkidking.pispeak.BuildConfig
 import com.pkkidking.pispeak.core.AppAudioPlayer
 import com.pkkidking.pispeak.core.AppAudioRecorder
 import com.pkkidking.pispeak.domain.model.AppSettings
+import com.pkkidking.pispeak.domain.model.ConnectionProfileId
+import com.pkkidking.pispeak.domain.model.ConnectionSettings
 import com.pkkidking.pispeak.domain.model.validate
 import com.pkkidking.pispeak.domain.usecase.GetStatusUseCase
 import com.pkkidking.pispeak.domain.usecase.LoadSettingsUseCase
@@ -40,10 +42,13 @@ class MainViewModel @Inject constructor(
 
     init {
         val settings = loadSettings()
-        _uiState.update {
-            it.copy(
-                baseUrl = settings.baseUrl,
-                token = settings.token,
+        _uiState.update { state ->
+            state.copy(
+                activeProfileId = settings.activeProfileId,
+                windowsBaseUrl = settings.windowsConnection.baseUrl,
+                windowsToken = settings.windowsConnection.token,
+                macBaseUrl = settings.macConnection.baseUrl,
+                macToken = settings.macConnection.token,
                 requestAudioReplies = settings.requestAudioReplies,
                 autoplayReplyAudio = settings.autoplayReplyAudio,
             )
@@ -53,17 +58,27 @@ class MainViewModel @Inject constructor(
 
     fun applyBootstrap(baseUrl: String?, token: String?) {
         if (baseUrl.isNullOrBlank() && token.isNullOrBlank()) return
-        val nextState = uiState.value.copy(
-            baseUrl = baseUrl?.trim().takeUnless { it.isNullOrBlank() } ?: uiState.value.baseUrl,
-            token = token?.trim().takeUnless { it.isNullOrBlank() } ?: uiState.value.token,
-        )
-        _uiState.value = nextState
+        updateActiveConnection { current ->
+            current.copy(
+                baseUrl = baseUrl?.trim().takeUnless { it.isNullOrBlank() } ?: current.baseUrl,
+                token = token?.trim().takeUnless { it.isNullOrBlank() } ?: current.token,
+            )
+        }
         saveSettings(currentSettings())
         refreshStatus()
     }
 
-    fun onBaseUrlChanged(value: String) = _uiState.update { it.copy(baseUrl = value) }
-    fun onTokenChanged(value: String) = _uiState.update { it.copy(token = value) }
+    fun onActiveProfileChanged(profileId: String) {
+        val nextProfile = ConnectionProfileId.fromKey(profileId)
+        _uiState.update { state ->
+            state.copy(activeProfileId = nextProfile.key)
+        }
+        saveSettings(currentSettings())
+        refreshStatus()
+    }
+
+    fun onBaseUrlChanged(value: String) = updateActiveConnection { it.copy(baseUrl = value) }
+    fun onTokenChanged(value: String) = updateActiveConnection { it.copy(token = value) }
     fun onTargetChanged(value: String) = _uiState.update { it.copy(targetName = value) }
     fun onTextPromptChanged(value: String) = _uiState.update { it.copy(textPrompt = value) }
     fun onRequestAudioRepliesChanged(value: Boolean) = _uiState.update { it.copy(requestAudioReplies = value) }
@@ -79,14 +94,24 @@ class MainViewModel @Inject constructor(
     }
 
     fun saveCurrentSettings() {
-        val settings = validatedSettings() ?: return
+        val settings = currentSettings()
+        val error = settings.activeConnection().validate(allowInsecureLoopback = BuildConfig.DEBUG)
+        if (error != null) {
+            _uiState.update { it.copy(error = error, isBusy = false) }
+            return
+        }
         saveSettings(settings)
         _uiState.update { it.copy(statusSummary = "Settings saved.", error = null) }
         refreshStatus()
     }
 
     fun refreshStatus() {
-        val settings = validatedSettings() ?: return
+        val settings = currentSettings()
+        val error = settings.activeConnection().validate(allowInsecureLoopback = BuildConfig.DEBUG)
+        if (error != null) {
+            _uiState.update { it.copy(error = error, isBusy = false) }
+            return
+        }
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, error = null) }
             getStatus(settings)
@@ -108,7 +133,12 @@ class MainViewModel @Inject constructor(
     }
 
     fun applyRouteTarget() {
-        val settings = validatedSettings() ?: return
+        val settings = currentSettings()
+        val error = settings.activeConnection().validate(allowInsecureLoopback = BuildConfig.DEBUG)
+        if (error != null) {
+            _uiState.update { it.copy(error = error, isBusy = false) }
+            return
+        }
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, error = null) }
             updateRouteTarget(settings, uiState.value.targetName)
@@ -125,7 +155,12 @@ class MainViewModel @Inject constructor(
             _uiState.update { it.copy(error = "Enter text before sending.") }
             return
         }
-        val settings = validatedSettings() ?: return
+        val settings = currentSettings()
+        val error = settings.activeConnection().validate(allowInsecureLoopback = BuildConfig.DEBUG)
+        if (error != null) {
+            _uiState.update { it.copy(error = error, isBusy = false) }
+            return
+        }
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, error = null, transcript = "") }
             sendTextTurn(settings, text)
@@ -159,7 +194,12 @@ class MainViewModel @Inject constructor(
     }
 
     fun stopRecordingAndSend() {
-        val settings = validatedSettings() ?: return
+        val settings = currentSettings()
+        val error = settings.activeConnection().validate(allowInsecureLoopback = BuildConfig.DEBUG)
+        if (error != null) {
+            _uiState.update { it.copy(error = error, isBusy = false) }
+            return
+        }
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, isRecording = false, error = null, statusSummary = "Uploading voice turn…") }
             runCatching { recorder.stop() }
@@ -205,20 +245,32 @@ class MainViewModel @Inject constructor(
     }
 
     private fun currentSettings(): AppSettings = AppSettings(
-        baseUrl = uiState.value.baseUrl.trim(),
-        token = uiState.value.token.trim(),
+        activeProfileId = uiState.value.activeProfileId,
+        windowsConnection = ConnectionSettings(
+            baseUrl = uiState.value.windowsBaseUrl.trim(),
+            token = uiState.value.windowsToken.trim(),
+        ),
+        macConnection = ConnectionSettings(
+            baseUrl = uiState.value.macBaseUrl.trim(),
+            token = uiState.value.macToken.trim(),
+        ),
         requestAudioReplies = uiState.value.requestAudioReplies,
         autoplayReplyAudio = uiState.value.autoplayReplyAudio,
     )
 
-    private fun validatedSettings(): AppSettings? {
-        val settings = currentSettings()
-        val error = settings.validate(allowInsecureLoopback = BuildConfig.DEBUG)
-        if (error != null) {
-            _uiState.update { it.copy(error = error, isBusy = false) }
-            return null
+    private fun updateActiveConnection(transform: (ConnectionSettings) -> ConnectionSettings) {
+        _uiState.update { state ->
+            when (state.activeProfile) {
+                ConnectionProfileId.MAC -> {
+                    val updated = transform(ConnectionSettings(state.macBaseUrl, state.macToken))
+                    state.copy(macBaseUrl = updated.baseUrl, macToken = updated.token)
+                }
+                ConnectionProfileId.WINDOWS -> {
+                    val updated = transform(ConnectionSettings(state.windowsBaseUrl, state.windowsToken))
+                    state.copy(windowsBaseUrl = updated.baseUrl, windowsToken = updated.token)
+                }
+            }
         }
-        return settings
     }
 
     override fun onCleared() {

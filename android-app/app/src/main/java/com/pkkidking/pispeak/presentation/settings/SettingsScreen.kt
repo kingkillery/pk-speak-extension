@@ -2,6 +2,7 @@ package com.pkkidking.pispeak.presentation.settings
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,7 +14,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -23,12 +27,17 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.pkkidking.pispeak.data.storage.ThemeMode
+import com.pkkidking.pispeak.domain.model.ConnectionProfileId
 import com.pkkidking.pispeak.presentation.main.MainUiState
 
 private val ScreenPadding = 20.dp
@@ -41,6 +50,7 @@ fun SettingsScreen(
     contentPadding: PaddingValues,
     onBaseUrlChanged: (String) -> Unit,
     onTokenChanged: (String) -> Unit,
+    onActiveProfileChanged: (String) -> Unit,
     onRequestAudioChanged: (Boolean) -> Unit,
     onAutoplayChanged: (Boolean) -> Unit,
     onSaveSettings: () -> Unit,
@@ -67,21 +77,48 @@ fun SettingsScreen(
             ) {
                 Text("Connection", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    text = "Keep setup visible and editable without hiding it inside the talk surface.",
+                    text = "Pick the active machine, then edit that machine’s URL and token. Windows and Mac each keep their own saved connection.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                 )
+
+                var expanded by remember { mutableStateOf(false) }
+                val selectedProfile = ConnectionProfileId.fromKey(uiState.activeProfileId)
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { expanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Active machine: ${selectedProfile.label}")
+                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                    }
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false },
+                    ) {
+                        ConnectionProfileId.entries.forEach { profile ->
+                            DropdownMenuItem(
+                                text = { Text(profile.label) },
+                                onClick = {
+                                    expanded = false
+                                    onActiveProfileChanged(profile.key)
+                                },
+                            )
+                        }
+                    }
+                }
+
                 OutlinedTextField(
                     value = uiState.baseUrl,
                     onValueChange = onBaseUrlChanged,
-                    label = { Text("Base URL") },
+                    label = { Text("${selectedProfile.label} Base URL") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                 )
                 OutlinedTextField(
                     value = uiState.token,
                     onValueChange = onTokenChanged,
-                    label = { Text("Remote token") },
+                    label = { Text("${selectedProfile.label} remote token") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
