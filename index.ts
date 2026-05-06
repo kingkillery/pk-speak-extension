@@ -2,7 +2,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { ControlServer, type ControlActionResult, type ControlServerState } from "./control-server.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
@@ -25,6 +25,9 @@ import { appendSessionEvent, type SessionEventSource } from "./session-events.js
 import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
+import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
+import { PiAgentProvider } from "./pi-agent-provider.js";
+import { CodexAgentProvider } from "./codex-agent-provider.js";
 import {
 	describeTtsProvider,
 	getAudioMimeType,
@@ -116,6 +119,8 @@ const MONO_WAKE_PHRASE = process.env.PI_SPEAK_WAKE_PHRASE || process.env.PI_SPEA
 const PHONE_TURN_WAIT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_PHONE_WAIT_TIMEOUT_MS || "180000", 10);
 const DEFAULT_REMOTE_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
+const PUBLIC_REMOTE_BASE_URL = process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim() || "";
+const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim() || process.env.AGENT_WORKSPACE?.trim() || "";
 const DEFAULT_VOICE = "adam";
 const SPEECH_MODE_PROMPT = `Activate CodeChat mode for this conversation.
 
@@ -176,6 +181,39 @@ $player.Stop()
 $player.Close()
 `;
 	return { command: "powershell.exe", args: ["-NoProfile", "-Command", ps] };
+}
+
+function getLanIPv4Addresses() {
+	const interfaces = networkInterfaces();
+	const addresses: string[] = [];
+	for (const entries of Object.values(interfaces)) {
+		for (const entry of entries || []) {
+			if (entry.family === "IPv4" && !entry.internal) addresses.push(entry.address);
+		}
+	}
+	return [...new Set(addresses)].sort((a, b) => a.localeCompare(b));
+}
+
+function normalizeBaseUrl(value: string) {
+	return value.endsWith("/") ? value : `${value}/`;
+}
+
+function buildRemoteSetupUrls(host: string, port: number, token: string) {
+	const publicBase = PUBLIC_REMOTE_BASE_URL ? normalizeBaseUrl(PUBLIC_REMOTE_BASE_URL) : "";
+	const hostUrls =
+		host === "0.0.0.0" || host === "::"
+			? [
+				`http://localhost:${port}/`,
+				...getLanIPv4Addresses().map((address) => `http://${address}:${port}/`),
+			]
+			: [`http://${host}:${port}/`];
+	const baseUrls = [...new Set([publicBase, ...hostUrls].filter(Boolean))];
+	const browserUrls = baseUrls.map((baseUrl) => `${baseUrl}app/?token=${encodeURIComponent(token)}`);
+	const appSetupUrls = baseUrls.map((baseUrl) => {
+		const params = new URLSearchParams({ base_url: baseUrl, token });
+		return `pi-speak://setup?${params.toString()}`;
+	});
+	return { baseUrls, browserUrls, appSetupUrls };
 }
 
 function playMonoCue(kind: "listening" | "idle" = "listening") {
@@ -309,6 +347,17 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const remoteTurnManager = new RemoteTurnManager({
 		onStateChange: () => updateRemoteStatus(),
 	});
+	const agentProviderConfig = resolveAgentProviderConfig(process.env);
+	const piAgentProvider = new PiAgentProvider({
+		sendUserMessage: (content, options) => pi.sendUserMessage(content, options),
+	});
+	const codexAgentProvider = new CodexAgentProvider({
+		codexBin: agentProviderConfig.codexBin,
+		model: agentProviderConfig.model,
+		cwd: DEFAULT_AGENT_CWD || process.cwd(),
+	});
+	const getAgentProvider = (): AgentProvider =>
+		agentProviderConfig.provider === "codex" ? codexAgentProvider : piAgentProvider;
 	let forceSpeechPromptNextTurn = false;
 	const diagnostics: RuntimeDiagnostics = {
 		lastErrors: {},
@@ -820,6 +869,24 @@ export default function speakExtension(pi: ExtensionAPI) {
 		});
 	};
 
+	const runAgentPrompt = async (
+		prompt: string,
+		options: { mode?: "turn" | "steer" | "followUp"; timeoutMs?: number; cwd?: string } = {},
+	) => {
+		const provider = getAgentProvider();
+		if (provider.name === "pi") {
+			forceSpeechPromptNextTurn = true;
+		}
+		const replyText = await collectAgentResponse(provider, prompt, {
+			mode: options.mode,
+			model: agentProviderConfig.model,
+			cwd: options.cwd || DEFAULT_AGENT_CWD || undefined,
+			timeoutMs: options.timeoutMs ?? PHONE_TURN_WAIT_TIMEOUT_MS,
+			instructions: SPEECH_MODE_PROMPT,
+		});
+		return replyText || "I finished the turn, but no assistant text was captured.";
+	};
+
 	const executePhoneTurn = async (
 		text: string,
 		transcript?: string,
@@ -828,6 +895,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		providers?: { stt?: string; tts?: string },
 		warnings?: string[],
 		targetName?: string,
+		cwd?: string,
 	): Promise<RemoteTurnResult> => {
 		const trimmed = text.trim();
 		if (!trimmed) {
@@ -866,38 +934,31 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const startedAt = Date.now();
 		diagnostics.lastErrors.remote = undefined;
 
-		return await new Promise<RemoteTurnResult>((resolve, reject) => {
-			const timeoutId = setTimeout(() => {
-				if (pendingRemoteTurn?.resolve !== resolve) return;
-				pendingRemoteTurn = undefined;
-				const reason = "Remote turn timed out waiting for Pi to finish.";
-				diagnostics.lastErrors.remote = reason;
-				reject(new Error(reason));
-			}, PHONE_TURN_WAIT_TIMEOUT_MS);
-			timeoutId.unref?.();
-			pendingRemoteTurn = {
-				resolve,
-				reject,
-				transcript,
-				wantAudio,
-				timings: {
-					...timings,
-					agentWaitMs: readiness.waitMs,
-				},
-				providers,
-				warnings,
-				timeoutId,
-			};
-			forceSpeechPromptNextTurn = true;
-			pi.sendUserMessage(trimmed);
-		}).then((result) => ({
-			...result,
-			timings: {
-				...result.timings,
-				agentRunMs: Date.now() - startedAt,
-				totalMs: (result.timings?.totalMs || 0) + (Date.now() - startedAt) + readiness.waitMs,
+		const replyText = await runAgentPrompt(trimmed, { timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS, cwd });
+		lastAssistantText = replyText;
+		const audioResult = wantAudio ? await renderRemoteAudio(replyText, readiness.ctx) : undefined;
+		const agentRunMs = Date.now() - startedAt;
+		const mergedTimings = {
+			...timings,
+			agentWaitMs: readiness.waitMs,
+			agentRunMs,
+			...audioResult?.timings,
+			totalMs: (timings?.totalMs || 0) + agentRunMs + readiness.waitMs + (audioResult?.timings?.ttsMs || 0),
+		};
+		diagnostics.recentTimings.lastRemoteTurn = mergedTimings;
+		return {
+			replyText,
+			audioPath: audioResult?.audioPath,
+			audioMimeType: audioResult?.audioMimeType,
+			transcript,
+			timings: mergedTimings,
+			providers: {
+				agent: getAgentProvider().name,
+				...providers,
+				...audioResult?.providers,
 			},
-		}));
+			warnings: [...(warnings || []), ...(audioResult?.warnings || [])],
+		};
 	};
 
 	const enqueuePhoneTurn = async (
@@ -909,10 +970,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 		providers?: { stt?: string; tts?: string },
 		warnings?: string[],
 		targetName?: string,
+		cwd?: string,
 	) => {
 		diagnostics.recentTimings.lastRemoteSource = source;
 		return await remoteTurnManager.enqueue(source, async () =>
-			await executePhoneTurn(text, transcript, wantAudio, timings, providers, warnings, targetName),
+			await executePhoneTurn(text, transcript, wantAudio, timings, providers, warnings, targetName, cwd),
 		);
 	};
 
@@ -1095,6 +1157,24 @@ export default function speakExtension(pi: ExtensionAPI) {
 		].join(" ");
 	};
 
+	const getRemoteSetupText = () => {
+		const runtime = remoteServer?.getRuntimeState();
+		const status = getRemoteStatus();
+		const token = runtime?.authToken || remoteState.authToken || "";
+		const urls = buildRemoteSetupUrls(status.host, status.port, token);
+		const current = status.currentSession || "current session";
+		const route = status.defaultTarget || current;
+		return [
+			"Remote setup is ready.",
+			`Route: ${route}.`,
+			`Browser app: ${urls.browserUrls[0] || "/app/"}`,
+			urls.browserUrls.length > 1 ? `Other local URLs: ${urls.browserUrls.slice(1).join(" ")}` : "",
+			`Native app setup: ${urls.appSetupUrls[0] || "not available"}`,
+			"Use HTTPS through Tailscale Serve or a tunnel for real phone microphone access.",
+			PUBLIC_REMOTE_BASE_URL ? "" : "Set PI_SPEAK_PUBLIC_BASE_URL to make /remote setup print your HTTPS phone URL first.",
+		].filter(Boolean).join("\n");
+	};
+
 	const handleMonoAction = async (action: "on" | "off" | "status", ctx?: any) => {
 		if (action === "on") {
 			startListener(ctx);
@@ -1272,8 +1352,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 				onMonoAction: (action) => handleMonoAction(action, lastCtx),
 				onSpeakAction: (action, value) => handleSpeakAction(action, value, lastCtx),
 				onPhoneAction: (action) => handlePhoneAction(action, lastCtx),
-				onTextTurn: (text, includeAudio, target) => enqueuePhoneTurn("http-text", text, undefined, includeAudio, undefined, undefined, undefined, target),
-				onVoiceTurn: async (buffer, mimeType, includeAudio, target) => {
+				onTextTurn: (text, includeAudio, target, cwd) => enqueuePhoneTurn("http-text", text, undefined, includeAudio, undefined, undefined, undefined, target, cwd),
+				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd) => {
 					try {
 						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
@@ -1289,6 +1369,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							{ stt: transcription.provider },
 							undefined,
 							target,
+							cwd,
 						);
 					} catch (error) {
 						diagnostics.lastErrors.stt = getErrorMessage(error);
@@ -1513,7 +1594,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		// Everything else -> user message to Pi (queued as followUp if busy)
 		if (voiceTarget) {
 			const sessionMatch = resolveSessionByName(voiceTarget);
-			if (sessionMatch && typeof target?.switchSession === "function") {
+			if (getAgentProvider().name === "pi" && sessionMatch && typeof target?.switchSession === "function") {
 				// Switch to target session and send the message
 				target?.ui?.notify?.(`Routing to session: ${sessionMatch.sessionName}`, "info");
 				const result = await target.switchSession(sessionMatch.sessionPath);
@@ -1525,7 +1606,20 @@ export default function speakExtension(pi: ExtensionAPI) {
 				target?.ui?.notify?.(`Unknown session "${voiceTarget}" - say "${MONO_WAKE_PHRASE}" to reset to current`, "warning");
 			}
 		}
-		pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
+		if (getAgentProvider().name === "pi") {
+			pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
+			return;
+		}
+		try {
+			const replyText = await runAgentPrompt(text, { mode: deliverAs || "turn", timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS });
+			lastAssistantText = replyText;
+			target?.ui?.notify?.(replyText.slice(0, 1200), "info");
+			if (speakState.enabled) void speakText(replyText, target);
+		} catch (error) {
+			const message = getErrorMessage(error);
+			diagnostics.lastErrors.remote = message;
+			target?.ui?.notify?.(`Agent provider failed: ${message}`, "error");
+		}
 	};
 
 	// -----------------------------------------------------------------------
@@ -1975,7 +2069,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.registerCommand("remote", {
 		description: "Control Pi through the local HTTP API for phone remotes and automations",
 		getArgumentCompletions: (prefix) => {
-			const options = ["on", "off", "status", "token"];
+			const options = ["on", "off", "status", "token", "setup"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -1998,6 +2092,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (lower === "setup") {
+				await startRemoteServer(ctx, true);
+				ctx.ui.notify(getRemoteSetupText(), "info");
+				return;
+			}
+
 			if (lower === "token") {
 				if (!remoteServer && !remoteState.authToken) {
 					await startRemoteServer(ctx, true);
@@ -2011,7 +2111,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /remote [on|off|status|token]", "error");
+			ctx.ui.notify("Usage: /remote [on|off|status|token|setup]", "error");
 		},
 	});
 
@@ -2243,6 +2343,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		rejectPendingPhoneTurn("Session changed before the phone reply was delivered");
 		remoteTurnManager.cancelAll("Session changed before queued remote work completed");
 		stopSpeaking(ctx);
+		await codexAgentProvider.stop().catch(() => {});
 		await shutdownLocalSttWorker().catch(() => {});
 	});
 
@@ -2262,15 +2363,23 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (speakState.enabled) setPhase("llm", ctx);
 	});
 
+	pi.on("message_update", async (event, ctx) => {
+		lastCtx = ctx;
+		if (!event.message || event.message.role !== "assistant") return;
+		piAgentProvider.handleMessageUpdate(event as { assistantMessageEvent?: { type?: string; delta?: string; text?: string } });
+	});
+
 	pi.on("message_end", async (event, ctx) => {
 		lastCtx = ctx;
 		if (!event.message || event.message.role !== "assistant") return;
 		const text = extractText(event.message.content);
 		if (text) lastAssistantText = text;
+		piAgentProvider.handleMessageEnd(text);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		lastCtx = ctx;
+		piAgentProvider.handleAgentEnd();
 		const replyText = lastAssistantText.trim();
 		if (speakState.enabled && ctx.hasUI) {
 			if (replyText) {

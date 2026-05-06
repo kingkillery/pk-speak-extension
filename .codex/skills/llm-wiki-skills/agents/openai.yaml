@@ -1,0 +1,6 @@
+interface:
+  display_name: "LLM Wiki Skills"
+  short_description: "Packet-owned wrapper for the llm-wiki-skills MCP lifecycle."
+  default_prompt: "Use llm-wiki-skills for this task."
+policy:
+  allow_implicit_invocation: true

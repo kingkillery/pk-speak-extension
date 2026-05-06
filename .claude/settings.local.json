@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "timeout": 30,
+            "command": "$workspace = $env:CLAUDE_PROJECT_DIR; $script = (Join-Path $env:CLAUDE_PROJECT_DIR 'scripts\\llm_wiki_failure_hook.py'); & 'python' $script --workspace $workspace"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "timeout": 30,
+            "command": "$workspace = $env:CLAUDE_PROJECT_DIR; $script = (Join-Path $env:CLAUDE_PROJECT_DIR 'scripts\\llm_wiki_failure_hook.py'); & 'python' $script --workspace $workspace"
+          }
+        ]
+      }
+    ]
+  }
+}

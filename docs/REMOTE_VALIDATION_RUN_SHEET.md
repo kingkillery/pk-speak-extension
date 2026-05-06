@@ -27,7 +27,7 @@ General notes:
 
 ```text
 [ ] P1 Desktop services reachable (/speak status, /phone status, /remote status)
-[ ] P2 Token + Telegram pair code gathered
+[ ] P2 /remote setup URL + Telegram pair code gathered
 Notes:
 ```
 
@@ -56,6 +56,7 @@ Diagnostics captured:
 [ ] W5 Voice turn works
 [ ] W6 Reply audio playback works
 [ ] W7 Remember-device behavior works as expected
+[ ] W8 Launch path is forwarded with turns
 Notes:
 Diagnostics captured:
 ```

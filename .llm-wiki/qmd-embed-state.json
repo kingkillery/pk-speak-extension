@@ -1,0 +1,9 @@
+{
+  "status": "ok",
+  "finishedAt": "2026-05-06T14:45:27.695Z",
+  "workspace": "C:\\dev\\Desktop-Projects\\pi-speak-extension",
+  "command": "C:\\dev\\Desktop-Projects\\pi-speak-extension\\.llm-wiki\\tools\\bin\\pk-qmd.cmd",
+  "collection": "pi-speak-extension",
+  "configDir": "C:\\dev\\Desktop-Projects\\pi-speak-extension\\.llm-wiki\\qmd-config",
+  "includeImages": false
+}

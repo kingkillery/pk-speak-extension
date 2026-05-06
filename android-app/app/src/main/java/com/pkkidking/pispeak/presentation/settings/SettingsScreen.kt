@@ -2,7 +2,6 @@ package com.pkkidking.pispeak.presentation.settings
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -12,20 +11,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,10 +37,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.pkkidking.pispeak.data.storage.ThemeMode
-import com.pkkidking.pispeak.domain.model.ConnectionProfileId
+import com.pkkidking.pispeak.domain.model.MachineProfile
 import com.pkkidking.pispeak.presentation.main.MainUiState
 
 private val ScreenPadding = 20.dp
@@ -50,7 +54,14 @@ fun SettingsScreen(
     contentPadding: PaddingValues,
     onBaseUrlChanged: (String) -> Unit,
     onTokenChanged: (String) -> Unit,
-    onActiveProfileChanged: (String) -> Unit,
+    onWorkspacePathChanged: (String) -> Unit,
+    machineProfiles: List<MachineProfile>,
+    selectedMachineId: String?,
+    machineProfileName: String,
+    onMachineSelected: (String?) -> Unit,
+    onMachineProfileNameChanged: (String) -> Unit,
+    onSaveMachineProfile: () -> Unit,
+    onDeleteSelectedMachine: () -> Unit,
     onRequestAudioChanged: (Boolean) -> Unit,
     onAutoplayChanged: (Boolean) -> Unit,
     onSaveSettings: () -> Unit,
@@ -77,52 +88,53 @@ fun SettingsScreen(
             ) {
                 Text("Connection", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    text = "Pick the active machine, then edit that machine’s URL and token. Windows and Mac each keep their own saved connection.",
+                    text = "Keep setup visible and editable without hiding it inside the talk surface.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                 )
 
-                var expanded by remember { mutableStateOf(false) }
-                val selectedProfile = ConnectionProfileId.fromKey(uiState.activeProfileId)
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(
-                        onClick = { expanded = true },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("Active machine: ${selectedProfile.label}")
-                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                    }
-                    DropdownMenu(
-                        expanded = expanded,
-                        onDismissRequest = { expanded = false },
-                    ) {
-                        ConnectionProfileId.entries.forEach { profile ->
-                            DropdownMenuItem(
-                                text = { Text(profile.label) },
-                                onClick = {
-                                    expanded = false
-                                    onActiveProfileChanged(profile.key)
-                                },
-                            )
-                        }
-                    }
-                }
+                MachineProfileSection(
+                    machineProfiles = machineProfiles,
+                    selectedMachineId = selectedMachineId,
+                    machineProfileName = machineProfileName,
+                    baseUrl = uiState.baseUrl,
+                    token = uiState.token,
+                    workspacePath = uiState.workspacePath,
+                    onMachineSelected = onMachineSelected,
+                    onMachineProfileNameChanged = onMachineProfileNameChanged,
+                    onSaveMachineProfile = onSaveMachineProfile,
+                    onDeleteSelectedMachine = onDeleteSelectedMachine,
+                )
 
                 OutlinedTextField(
                     value = uiState.baseUrl,
                     onValueChange = onBaseUrlChanged,
-                    label = { Text("${selectedProfile.label} Base URL") },
+                    label = { Text("Base URL") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 )
                 OutlinedTextField(
                     value = uiState.token,
                     onValueChange = onTokenChanged,
-                    label = { Text("${selectedProfile.label} remote token") },
+                    label = { Text("Remote token") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     trailingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
+                )
+                OutlinedTextField(
+                    value = uiState.workspacePath,
+                    onValueChange = onWorkspacePathChanged,
+                    label = { Text("Launch path") },
+                    placeholder = { Text("C:\\dev\\Desktop-Projects\\my-project") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Text(
+                    text = "Optional working directory for agent turns started from this phone.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                 )
                 Button(onClick = onSaveSettings) {
                     Text("Save connection settings")
@@ -182,10 +194,213 @@ fun SettingsScreen(
             }
         }
 
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = PanelShape,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Text("Diagnostics", style = MaterialTheme.typography.titleLarge)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    StateBadge("Connection", uiState.connectionState.name, Modifier.weight(1f))
+                    StateBadge("Turn", uiState.turnPhase.name, Modifier.weight(1f))
+                    StateBadge("Audio", uiState.playbackState.name, Modifier.weight(1f))
+                }
+                if (uiState.diagnostics.isEmpty()) {
+                    Text(
+                        text = "No events yet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    )
+                } else {
+                    uiState.diagnostics.forEach { event ->
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = event.area.uppercase(),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                text = event.message,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         if (uiState.error != null) {
             ErrorPanel(
                 message = uiState.error,
                 onDismiss = onDismissError,
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun MachineProfileSection(
+    machineProfiles: List<MachineProfile>,
+    selectedMachineId: String?,
+    machineProfileName: String,
+    baseUrl: String,
+    token: String,
+    workspacePath: String,
+    onMachineSelected: (String?) -> Unit,
+    onMachineProfileNameChanged: (String) -> Unit,
+    onSaveMachineProfile: () -> Unit,
+    onDeleteSelectedMachine: () -> Unit,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    val selectedMachine = machineProfiles.firstOrNull { it.id == selectedMachineId }
+    val selectedMachineLabel = selectedMachine?.name ?: "Direct connection"
+    val hasProfiles = machineProfiles.isNotEmpty()
+    val canSave = baseUrl.isNotBlank() && (selectedMachine != null || machineProfileName.isNotBlank())
+    val hasWorkspace = workspacePath.isNotBlank()
+
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Machine profiles", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = "Save one or more remote URLs and tokens so you can switch machines quickly.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+            )
+
+            ExposedDropdownMenuBox(
+                expanded = menuExpanded,
+                onExpandedChange = { menuExpanded = !menuExpanded },
+            ) {
+                OutlinedTextField(
+                    value = selectedMachineLabel,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Machine") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = menuExpanded) },
+                )
+                ExposedDropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Direct connection") },
+                        onClick = {
+                            menuExpanded = false
+                            onMachineSelected(null)
+                        },
+                    )
+                    machineProfiles.forEach { profile ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "${profile.name.ifBlank { "Machine" }} • ${profile.baseUrl}",
+                                    maxLines = 1,
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onMachineSelected(profile.id)
+                            },
+                        )
+                    }
+                }
+            }
+
+            if (hasProfiles) {
+                Text(
+                    text = "${machineProfiles.size} saved machine profile${if (machineProfiles.size != 1) "s" else ""}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                )
+            } else {
+                Text(
+                    text = "No saved machines yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                )
+            }
+
+            OutlinedTextField(
+                value = machineProfileName,
+                onValueChange = onMachineProfileNameChanged,
+                label = { Text("Profile name") },
+                placeholder = { Text("Living Room Pi") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+
+            if (selectedMachine != null) {
+                Text(
+                    text = "Selected: ${selectedMachine.name} • ${selectedMachine.baseUrl} ${if (hasWorkspace) "• ${selectedMachine.workspacePath}" else ""}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                )
+                Text(
+                    text = "Token is${if (selectedMachine.token.isNotBlank()) " " else " not "}saved for this profile.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(onClick = onSaveMachineProfile, enabled = canSave) {
+                    Text(if (selectedMachine == null) "Save machine" else "Update selected")
+                }
+                if (selectedMachine != null) {
+                    TextButton(onClick = onDeleteSelectedMachine) {
+                        Text("Delete selected")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StateBadge(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+            )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface,
             )
         }
     }

@@ -1,7 +1,10 @@
 package com.pkkidking.pispeak.presentation.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -124,10 +127,15 @@ fun PiSpeakApp(
                     uiState = uiState,
                     contentPadding = paddingValues,
                     onRefresh = mainViewModel::refreshStatus,
+                    onMachineSelected = mainViewModel::onMachineSelected,
+                    onBaseUrlChanged = mainViewModel::onBaseUrlChanged,
+                    onTokenChanged = mainViewModel::onTokenChanged,
+                    onWorkspacePathChanged = mainViewModel::onWorkspacePathChanged,
                     onTargetChanged = mainViewModel::onTargetChanged,
                     onApplyTarget = mainViewModel::applyRouteTarget,
                     onTextChanged = mainViewModel::onTextPromptChanged,
                     onSendText = mainViewModel::submitTextTurn,
+                    onSaveConnection = mainViewModel::saveCurrentSettings,
                     onRecordToggle = {
                         if (uiState.isRecording) {
                             mainViewModel.stopRecordingAndSend()
@@ -144,8 +152,16 @@ fun PiSpeakApp(
                         }
                     },
                     onPlayAudio = mainViewModel::playReplyAudio,
+                    onStopAudio = mainViewModel::stopReplyAudio,
                     onDismissError = mainViewModel::clearError,
                     onOpenSettings = { currentDestination = AppDestination.Settings },
+                    onOpenAppSettings = {
+                        val intent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null),
+                        )
+                        context.startActivity(intent)
+                    },
                 )
 
                 AppDestination.Settings -> SettingsScreen(
@@ -154,7 +170,14 @@ fun PiSpeakApp(
                     contentPadding = paddingValues,
                     onBaseUrlChanged = mainViewModel::onBaseUrlChanged,
                     onTokenChanged = mainViewModel::onTokenChanged,
-                    onActiveProfileChanged = mainViewModel::onActiveProfileChanged,
+                    onWorkspacePathChanged = mainViewModel::onWorkspacePathChanged,
+                    machineProfiles = uiState.machineProfiles,
+                    selectedMachineId = uiState.selectedMachineId,
+                    machineProfileName = uiState.machineProfileName,
+                    onMachineSelected = mainViewModel::onMachineSelected,
+                    onMachineProfileNameChanged = mainViewModel::onMachineProfileNameChanged,
+                    onSaveMachineProfile = mainViewModel::onSaveMachineProfile,
+                    onDeleteSelectedMachine = mainViewModel::onDeleteSelectedMachine,
                     onRequestAudioChanged = mainViewModel::onRequestAudioRepliesChanged,
                     onAutoplayChanged = mainViewModel::onAutoplayReplyAudioChanged,
                     onSaveSettings = mainViewModel::saveCurrentSettings,

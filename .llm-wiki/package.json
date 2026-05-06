@@ -1,0 +1,11 @@
+{
+  "name": "llm-wiki-memory-local-tools",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Managed local dependency bundle for llm-wiki-memory",
+  "dependencies": {
+    "@kingkillery/pk-qmd": "git+https://github.com/kingkillery/pk-qmd.git#ef26cb62bb8132bc3a851b23f450af8e382e4c4e",
+    "byterover-cli": "^3.3.0",
+    "@bitbonsai/mcpvault": "^0.11.0"
+  }
+}

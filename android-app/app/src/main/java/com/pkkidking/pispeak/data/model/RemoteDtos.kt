@@ -41,6 +41,7 @@ data class TextTurnRequestDto(
     val text: String,
     val audio: Boolean,
     val target: String? = null,
+    val cwd: String? = null,
 )
 
 data class TargetRouteRequestDto(

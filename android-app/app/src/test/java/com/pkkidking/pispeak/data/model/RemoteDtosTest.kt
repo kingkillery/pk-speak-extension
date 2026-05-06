@@ -73,4 +73,16 @@ class RemoteDtosTest {
             summary.summaryText(),
         )
     }
+
+    @Test
+    fun `text turn request can carry launch cwd`() {
+        val request = TextTurnRequestDto(
+            text = "build it",
+            audio = true,
+            target = "codex",
+            cwd = "C:\\dev\\Desktop-Projects\\pi-speak-extension",
+        )
+
+        assertEquals("C:\\dev\\Desktop-Projects\\pi-speak-extension", request.cwd)
+    }
 }

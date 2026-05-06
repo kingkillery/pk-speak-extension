@@ -55,11 +55,13 @@ Run:
 
 ```text
 /remote token
+/remote setup
 /phone code
 ```
 
 Have ready:
 - remote token
+- browser or native setup URL from `/remote setup`
 - Telegram pair code
 - remote base URL like `https://<your-url>/app/`
 
@@ -281,6 +283,22 @@ Test both modes:
 Expected:
 - session-only mode clears when expected
 - remembered mode persists only on that device
+
+Record:
+
+```text
+[ ] Pass  [ ] Fail
+Observed:
+```
+
+### W8 — Launch path is forwarded
+
+Set a launch path in Settings, then send one text and one voice turn.
+
+Expected:
+- text POST includes `cwd` in JSON body
+- voice upload uses `?cwd=` query parameter
+- gateway receives turns with that launch path (confirmed by diagnostics/logs)
 
 Record:
 

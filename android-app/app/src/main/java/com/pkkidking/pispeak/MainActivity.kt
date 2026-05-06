@@ -13,8 +13,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        val setupUri = intent?.data
         val bootstrapBaseUrl = intent.getStringExtra("base_url")
+            ?: setupUri?.getQueryParameter("base_url")
+            ?: setupUri?.getQueryParameter("base")
         val bootstrapToken = intent.getStringExtra("token")
+            ?: setupUri?.getQueryParameter("token")
         setContent {
             PiSpeakApp(
                 bootstrapBaseUrl = bootstrapBaseUrl,

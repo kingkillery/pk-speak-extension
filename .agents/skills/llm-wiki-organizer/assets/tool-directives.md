@@ -1,0 +1,23 @@
+# Tool Directives
+
+- Read schema and guide docs first.
+- Read `LLM_WIKI_MEMORY.md` when present before tool setup or retrieval work.
+- Read `SKILL_CREATION_AT_EXPERT_LEVEL.md` when the task touches reusable skills, trajectory extraction, review, or retirement.
+- Read `.llm-wiki/config.json` before substantive retrieval work.
+- If the stack is missing, run `scripts/setup_llm_wiki_memory.ps1` or `scripts/setup_llm_wiki_memory.sh` before deeper work.
+- Read `wiki/index.md` and recent `wiki/log.md` before substantive work.
+- Search before creating.
+- Use `pk-qmd` for repo-specific evidence retrieval.
+- Use `pk-qmd` first when the right repo area is not yet known.
+- Use `pk-qmd` first when the right skill page or prior skill feedback is not yet known.
+- If the local skill MCP server is configured, use `skill_lookup`, `skill_propose`, `skill_feedback`, `skill_get`, and `skill_retire` for skill lifecycle operations before falling back to direct markdown edits.
+- Use `GitVizz` for repo topology, API/context discovery, and narrowing from a known folder or route.
+- Use `brv` only for durable memory and repeated workflow knowledge.
+- Prefer source evidence over memory when they conflict.
+- Never edit `raw/` unless explicitly asked.
+- Prefer targeted edits.
+- Avoid duplicate pages.
+- Apply a privacy gate before saving reusable skills.
+- Treat saved skills as typed memory objects: prefer explicit memory scope, durable facts, provenance refs, and non-flat memory strategy for long tasks.
+- Store active skills, feedback, and retired skills in their dedicated wiki folders.
+- Ask before destructive or high-blast-radius changes.

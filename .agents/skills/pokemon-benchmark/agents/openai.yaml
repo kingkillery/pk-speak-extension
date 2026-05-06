@@ -1,0 +1,6 @@
+interface:
+  display_name: "Pokemon Benchmark"
+  short_description: "Bootstrap a neutral repo and run the Gym-Anything Pokemon benchmark."
+  default_prompt: "Use Pokemon Benchmark for this task."
+policy:
+  allow_implicit_invocation: true

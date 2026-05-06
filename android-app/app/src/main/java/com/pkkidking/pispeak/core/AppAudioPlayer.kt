@@ -17,6 +17,7 @@ class AppAudioPlayer @Inject constructor(
     fun play(
         url: String,
         headers: Map<String, String> = emptyMap(),
+        onStart: () -> Unit = {},
         onComplete: () -> Unit = {},
         onError: (String) -> Unit = {},
     ) {
@@ -28,7 +29,10 @@ class AppAudioPlayer @Inject constructor(
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .build(),
             )
-            setOnPreparedListener { it.start() }
+            setOnPreparedListener {
+                it.start()
+                onStart()
+            }
             setOnCompletionListener {
                 onComplete()
                 stop()

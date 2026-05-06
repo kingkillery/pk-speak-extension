@@ -31,8 +31,7 @@ Good for:
 Start it:
 
 ```text
-/remote on
-/remote token
+/remote setup
 ```
 
 Then open:
@@ -40,6 +39,22 @@ Then open:
 ```text
 https://<your-url>/app/
 ```
+
+`/remote setup` prints a token-bootstrap browser URL and a native Android `pi-speak://setup` link. Use that first so the phone does not need manual token copying.
+
+### Connect over Tailscale
+
+Both the desktop and phone need to be signed into the same Tailscale tailnet. On the desktop running Pi Speak, start the gateway with `/remote on`, then expose it with Tailscale Serve:
+
+```powershell
+tailscale serve --bg http://127.0.0.1:8767
+```
+
+Use the HTTPS URL printed by Tailscale as the Android Base URL, or run `/remote setup` after `PI_SPEAK_PUBLIC_BASE_URL` is set to that URL so the setup link is prefilled. Keep Tailscale enabled on Android before sending voice or text turns.
+
+### Choose the launch path
+
+In native Android settings, set Launch path to the project directory the active provider should run from, for example `C:\dev\Desktop-Projects\my-project`. The app sends that value as `cwd` with text and voice turns. If it is blank, the gateway uses `AGENT_CWD`, `AGENT_WORKSPACE`, or the directory where the extension process started.
 
 ### Use Unified Remote if you mainly want buttons
 

@@ -76,8 +76,14 @@ export type ControlServerOptions = {
 	onPhoneAction: (
 		action: "on" | "off" | "status" | "code" | "unpair",
 	) => Promise<ControlActionResult> | ControlActionResult;
-	onTextTurn: (text: string, includeAudio: boolean, target?: string) => Promise<RemoteTurnResult>;
-	onVoiceTurn: (buffer: Buffer, mimeType: string | undefined, includeAudio: boolean, target?: string) => Promise<RemoteTurnResult>;
+	onTextTurn: (text: string, includeAudio: boolean, target?: string, cwd?: string) => Promise<RemoteTurnResult>;
+	onVoiceTurn: (
+		buffer: Buffer,
+		mimeType: string | undefined,
+		includeAudio: boolean,
+		target?: string,
+		cwd?: string,
+	) => Promise<RemoteTurnResult>;
 };
 
 type AudioArtifact = {
@@ -333,6 +339,10 @@ export class ControlServer {
 		if (req.method === "POST" && url.pathname === "/v1/route") {
 			const body = await this.readTextBody(req, TEXT_BODY_LIMIT_BYTES);
 			const payload = parseJson<Record<string, unknown>>(body);
+			if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid JSON body." });
+				return;
+			}
 			const target = typeof payload?.target === "string" ? payload.target : "";
 			const result = await this.setRoutingTarget(target.trim() || undefined);
 			this.writeJson(res, result.ok ? 200 : 400, {
@@ -351,7 +361,8 @@ export class ControlServer {
 			const text = url.searchParams.get("text") || "";
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
 			const target = url.searchParams.get("target")?.trim() || undefined;
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target));
+			const cwd = getLaunchCwdFromUrl(url);
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -359,10 +370,19 @@ export class ControlServer {
 		if (req.method === "POST" && url.pathname === "/v1/turn/text") {
 			const body = await this.readTextBody(req, TEXT_BODY_LIMIT_BYTES);
 			const payload = parseJson<Record<string, unknown>>(body);
+			if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid JSON body." });
+				return;
+			}
+			if (typeof payload.text !== "string") {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: text is required." });
+				return;
+			}
 			const text = typeof payload?.text === "string" ? payload.text : "";
 			const includeAudio = !!payload?.audio;
 			const target = typeof payload?.target === "string" ? payload.target.trim() || undefined : undefined;
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target));
+			const cwd = getLaunchCwdFromPayload(payload);
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -376,7 +396,8 @@ export class ControlServer {
 			const buffer = await this.readBinaryBody(req, VOICE_BODY_LIMIT_BYTES);
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
 			const target = url.searchParams.get("target")?.trim() || undefined;
-			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target));
+			const cwd = getLaunchCwdFromUrl(url);
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -756,6 +777,19 @@ function parseAllowedOrigins(value: string) {
 		.split(",")
 		.map((origin) => origin.trim())
 		.filter(Boolean);
+}
+
+function getLaunchCwdFromPayload(payload: Record<string, unknown> | undefined) {
+	const value = typeof payload?.cwd === "string"
+		? payload.cwd
+		: typeof payload?.workspacePath === "string"
+			? payload.workspacePath
+			: "";
+	return value.trim() || undefined;
+}
+
+function getLaunchCwdFromUrl(url: URL) {
+	return (url.searchParams.get("cwd") || url.searchParams.get("workspacePath") || "").trim() || undefined;
 }
 
 function sameOrigin(origin: string, url: URL) {

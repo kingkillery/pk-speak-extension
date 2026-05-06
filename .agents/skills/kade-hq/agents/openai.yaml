@@ -1,0 +1,6 @@
+interface:
+  display_name: "kade-hq"
+  short_description: "Packet-owned KADE System wrapper."
+  default_prompt: "Use kade-hq for this task."
+policy:
+  allow_implicit_invocation: true

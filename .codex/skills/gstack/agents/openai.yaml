@@ -1,0 +1,6 @@
+interface:
+  display_name: "gstack"
+  short_description: "Packet-owned gstack wrapper skill."
+  default_prompt: "Use gstack for this task."
+policy:
+  allow_implicit_invocation: true
