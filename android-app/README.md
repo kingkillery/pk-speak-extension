@@ -5,6 +5,8 @@ Native Android client for the `pi-speak-pk` remote API.
 ## MVP included
 
 - Securely save base URL + remote token
+- Switch the active connection between *Windows* and *Mac* from a dropdown in settings
+- Keep separate saved connection values for each machine
 - Fetch `/v1/status`
 - Send text turns to `/v1/turn/text`
 - Record voice and upload to `/v1/turn/voice`

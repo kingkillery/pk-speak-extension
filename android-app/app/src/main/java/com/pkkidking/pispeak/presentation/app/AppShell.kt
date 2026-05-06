@@ -154,6 +154,7 @@ fun PiSpeakApp(
                     contentPadding = paddingValues,
                     onBaseUrlChanged = mainViewModel::onBaseUrlChanged,
                     onTokenChanged = mainViewModel::onTokenChanged,
+                    onActiveProfileChanged = mainViewModel::onActiveProfileChanged,
                     onRequestAudioChanged = mainViewModel::onRequestAudioRepliesChanged,
                     onAutoplayChanged = mainViewModel::onAutoplayReplyAudioChanged,
                     onSaveSettings = mainViewModel::saveCurrentSettings,
