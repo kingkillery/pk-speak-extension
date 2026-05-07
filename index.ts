@@ -10,6 +10,8 @@ import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSum
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { requestGracefulChildShutdown } from "./listener-control.js";
 import { findSessionRouteConflict, isSpeechInterruptCommand, listKnownTargets, resolveSessionRoute, resolveSessionTarget } from "./voice-routing.js";
+import { isAffirmative, isNegative } from "./voice-confirmation.js";
+import { createApprovalRegistry } from "./voice-approval.js";
 import {
 	clearWakeAlias,
 	describeSessionRoutingStore,
@@ -368,6 +370,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let pendingSessionRemoval:
 		| { sessionPath: string; sessionName: string; requestedAt: number }
 		| undefined;
+	const approvalRegistry = createApprovalRegistry();
 	let pendingSessSource: SessionEventSource | undefined;
 	let lastRoutingStoreMtime = 0;
 	let routingStoreWatcherPath: string | undefined;
@@ -779,6 +782,22 @@ export default function speakExtension(pi: ExtensionAPI) {
 				speakAbortController = undefined;
 			}
 		}
+	};
+
+	// Notify + optional TTS in one call. By default warnings and errors are
+	// spoken so a headphones-only operator hears them; info messages stay
+	// silent unless the caller passes an explicit spoken override (avoids
+	// drowning the user in routine chatter). speakText itself no-ops when
+	// speakState is disabled, so this is safe to call unconditionally.
+	const notifyAudible = (
+		ctx: any,
+		message: string,
+		severity: "info" | "warning" | "error" = "info",
+		spoken?: string,
+	) => {
+		ctx?.ui?.notify?.(message, severity);
+		if (severity === "info" && !spoken) return;
+		void speakText(spoken ?? message, ctx);
 	};
 
 	const renderRemoteAudio = async (text: string, ctx?: any) => {
@@ -1664,7 +1683,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 			case "error":
 				diagnostics.lastErrors.listener = event.message;
-				target?.ui?.notify?.(`[listener] ${event.message}`, "error");
+				notifyAudible(target, `[listener] ${event.message}`, "error", `Voice listener error. ${event.message}`);
 				break;
 		}
 	};
@@ -1677,6 +1696,46 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (isSpeechInterruptCommand(lower)) {
 			stopSpeaking(target);
 			return;
+		}
+
+		// Tool-use approval gate. When the agent asks to run a shell command or
+		// touch a file, the host suspends the turn via approvalRegistry.request
+		// and we resolve it here from the next voice utterance.
+		const pendingApproval = approvalRegistry.get();
+		if (pendingApproval) {
+			if (isAffirmative(text)) {
+				notifyAudible(target, `Approving: ${pendingApproval.description}`, "info", `Approved.`);
+				approvalRegistry.accept();
+				return;
+			}
+			if (isNegative(text)) {
+				notifyAudible(target, `Declining: ${pendingApproval.description}`, "info", `Declined.`);
+				approvalRegistry.decline();
+				return;
+			}
+			// Anything else — fall through; the request expires per its TTL and
+			// the agent receives a decline. Avoids hijacking unrelated speech.
+		}
+
+		// Voice confirmation gate. If a pending action (today: /sess remove) is
+		// awaiting confirmation, treat yes/no replies as the consume signal so
+		// the operator never has to say the literal "/sess confirm remove X".
+		if (pendingSessionRemoval && (Date.now() - pendingSessionRemoval.requestedAt) <= SESSION_REMOVE_CONFIRM_TTL_MS) {
+			if (isAffirmative(text)) {
+				const name = pendingSessionRemoval.sessionName;
+				target?.ui?.notify?.(`Confirming removal of ${name}.`, "info");
+				if (speakState.enabled) void speakText(`Removing session ${name}.`, target);
+				await handleSessCommand(`confirm remove ${name}`, target, "voice");
+				return;
+			}
+			if (isNegative(text)) {
+				const name = pendingSessionRemoval.sessionName;
+				pendingSessionRemoval = undefined;
+				target?.ui?.notify?.(`Cancelled removal of ${name}.`, "info");
+				if (speakState.enabled) void speakText(`Cancelled.`, target);
+				return;
+			}
+			// Anything else — fall through; pending entry expires per TTL.
 		}
 
 		// Determine if agent is busy so we can queue instead of interrupt
@@ -1704,15 +1763,26 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (voiceTarget) {
 			const sessionMatch = resolveSessionByName(voiceTarget);
 			if (getAgentProvider().name === "pi" && sessionMatch && typeof target?.switchSession === "function") {
-				// Switch to target session and send the message
-				target?.ui?.notify?.(`Routing to session: ${sessionMatch.sessionName}`, "info");
+				// Audible wake echo so headphone-only operators hear where the
+				// utterance was routed before the agent reply lands.
+				notifyAudible(
+					target,
+					`Routing to session: ${sessionMatch.sessionName}`,
+					"info",
+					`Routing to ${sessionMatch.sessionName}.`,
+				);
 				const result = await target.switchSession(sessionMatch.sessionPath);
 				if (!result?.cancelled) {
 					pi.sendUserMessage(text, deliverAs ? { deliverAs } : undefined);
 				}
 				return;
 			} else {
-				target?.ui?.notify?.(`Unknown session "${voiceTarget}" - say "${MONO_WAKE_PHRASE}" to reset to current`, "warning");
+				notifyAudible(
+					target,
+					`Unknown session "${voiceTarget}" - say "${MONO_WAKE_PHRASE}" to reset to current`,
+					"warning",
+					`Unknown session ${voiceTarget}. Say ${MONO_WAKE_PHRASE} to reset.`,
+				);
 			}
 		}
 		if (getAgentProvider().name === "pi") {
@@ -1727,7 +1797,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		} catch (error) {
 			const message = getErrorMessage(error);
 			diagnostics.lastErrors.remote = message;
-			target?.ui?.notify?.(`Agent provider failed: ${message}`, "error");
+			notifyAudible(target, `Agent provider failed: ${message}`, "error", `Agent failed. ${message}`);
 		}
 	};
 
@@ -1997,6 +2067,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 				if (remainder === "remove") {
 					pendingSessionRemoval = { sessionPath: sessionMatch.sessionPath, sessionName: sessionMatch.sessionName, requestedAt: Date.now() };
 					ctx.ui.notify(`Confirm with /sess confirm remove ${sessionMatch.sessionName}. This removes the saved session name and aliases from the local routing store. It does not delete the underlying Pi session file.`, "warning");
+					if (source === "voice" && speakState.enabled) {
+						void speakText(`About to remove session ${sessionMatch.sessionName}. Say yes to confirm or no to cancel.`, ctx);
+					}
 					return;
 				}
 				ctx.ui.notify(`Unknown edit action "${remainder}". Use /sess edit ${targetName} to see shortcuts.`, "error");
@@ -2015,6 +2088,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 				}
 				pendingSessionRemoval = { sessionPath: sessionMatch.sessionPath, sessionName: sessionMatch.sessionName, requestedAt: Date.now() };
 				ctx.ui.notify(`Confirm with /sess confirm remove ${sessionMatch.sessionName}. This removes the saved session name and aliases from the local routing store. It does not delete the underlying Pi session file.`, "warning");
+				if (source === "voice" && speakState.enabled) {
+					void speakText(`About to remove session ${sessionMatch.sessionName}. Say yes to confirm or no to cancel.`, ctx);
+				}
 				return;
 			}
 
@@ -2563,6 +2639,47 @@ export default function speakExtension(pi: ExtensionAPI) {
 			await resolvePendingPhoneTurn(ctx);
 		}
 	});
+
+	// Voice tool-use approval. Off by default for backwards compatibility.
+	// PI_SPEAK_VOICE_APPROVAL=writes  → gate bash/write/edit
+	// PI_SPEAK_VOICE_APPROVAL=all     → gate every tool call (very chatty)
+	// Gating is also skipped when the voice listener isn't running, since
+	// there's no way for the operator to answer.
+	pi.on("tool_call", async (event, ctx) => {
+		lastCtx = ctx;
+		const policy = (process.env.PI_SPEAK_VOICE_APPROVAL || "off").trim().toLowerCase();
+		if (policy === "off") return undefined;
+		if (!listenerProcess) return undefined;
+		const gated =
+			policy === "all" ||
+			(policy === "writes" && (event.toolName === "bash" || event.toolName === "write" || event.toolName === "edit"));
+		if (!gated) return undefined;
+		const description = describeToolCallForVoice(event);
+		notifyAudible(ctx, `Tool approval: ${description}`, "warning", `Approve ${description}. Say yes or no.`);
+		const decision = await approvalRegistry.request({
+			description,
+			spokenPrompt: `Approve ${description}. Say yes or no.`,
+			timeoutMs: 30_000,
+		});
+		if (decision === "accept") return undefined;
+		notifyAudible(ctx, `Tool denied by voice: ${description}`, "info", `Denied.`);
+		return { block: true, reason: "Denied by voice approval" };
+	});
+}
+
+function describeToolCallForVoice(event: { toolName: string; input?: any }): string {
+	const input = (event.input || {}) as Record<string, unknown>;
+	const truncate = (value: string, max = 80) => (value.length > max ? `${value.slice(0, max)}…` : value);
+	switch (event.toolName) {
+		case "bash":
+			return `bash: ${truncate(typeof input.command === "string" ? input.command : "(no command)")}`;
+		case "write":
+			return `write: ${truncate(typeof input.path === "string" ? input.path : "(no path)")}`;
+		case "edit":
+			return `edit: ${truncate(typeof input.path === "string" ? input.path : "(no path)")}`;
+		default:
+			return `${event.toolName}`;
+	}
 }
 
 
