@@ -34,9 +34,11 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
@@ -104,20 +106,20 @@ fun ConversationScreen(
         else -> "HTTPS preferred"
     }
     val focusManager = LocalFocusManager.current
+    val routeLabel = uiState.targetName.ifBlank { uiState.currentSession ?: "Current session" }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(contentPadding)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = if (expandedLayout) 32.dp else ScreenPadding, vertical = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+            .padding(horizontal = if (expandedLayout) 32.dp else 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         WalkieHeader(
             needsSetup = needsSetup,
             machineName = uiState.connection.selectedMachineName,
             currentSession = uiState.currentSession,
-            routeLabel = uiState.targetName.ifBlank { uiState.currentSession ?: "Current" },
+            routeLabel = routeLabel,
             securityLabel = securityLabel,
             trustedConnection = trustedConnection,
             speakProvider = uiState.speakProvider,
@@ -152,42 +154,87 @@ fun ConversationScreen(
             )
         }
 
-        ReplyPanel(
-            transcript = uiState.transcript,
-            replyText = uiState.replyText,
-            audioAvailable = uiState.audioUrl != null,
-            playbackState = uiState.playbackState,
-            replyModeLabel = uiState.replyModeLabel(),
-            replyModeHint = uiState.replyModeHint(),
-            onPlayAudio = onPlayAudio,
-            onStopAudio = onStopAudio,
-        )
-
-        RecentTurnsPanel(
-            recentTurns = uiState.recentTurns,
-            latestAudioAvailable = uiState.audioUrl != null,
-        )
-
-        VoicePanel(
-            isBusy = uiState.isBusy,
-            isRecording = uiState.isRecording,
-            nextTurnHint = uiState.nextTurnHint(),
-            replyModeLabel = uiState.replyModeLabel(),
-            onRecordToggle = onRecordToggle,
-            disabledReason = if (needsSetup) "Connect to a machine first to send voice turns." else null,
-        )
-
-        TextFallbackPanel(
-            textPrompt = uiState.textPrompt,
-            onTextChanged = onTextChanged,
-            onSendText = onSendText,
-            enabled = !uiState.isBusy && !needsSetup,
-            needsSetup = needsSetup,
-            onCommit = {
-                focusManager.clearFocus()
-                onSendText()
-            },
-        )
+        if (expandedLayout) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                ReplyPanel(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxSize(),
+                    transcript = uiState.transcript,
+                    replyText = uiState.replyText,
+                    recentTurns = uiState.recentTurns,
+                    statusSummary = uiState.statusSummary,
+                    securityLabel = securityLabel,
+                    audioAvailable = uiState.audioUrl != null,
+                    playbackState = uiState.playbackState,
+                    replyModeLabel = uiState.replyModeLabel(),
+                    replyModeHint = uiState.replyModeHint(),
+                    onPlayAudio = onPlayAudio,
+                    onStopAudio = onStopAudio,
+                )
+                Column(
+                    modifier = Modifier.width(420.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    TextFallbackPanel(
+                        textPrompt = uiState.textPrompt,
+                        onTextChanged = onTextChanged,
+                        onSendText = onSendText,
+                        enabled = !uiState.isBusy && !needsSetup,
+                        needsSetup = needsSetup,
+                        onCommit = {
+                            focusManager.clearFocus()
+                            onSendText()
+                        },
+                    )
+                    VoicePanel(
+                        isBusy = uiState.isBusy,
+                        isRecording = uiState.isRecording,
+                        nextTurnHint = uiState.nextTurnHint(),
+                        replyModeLabel = uiState.replyModeLabel(),
+                        onRecordToggle = onRecordToggle,
+                        disabledReason = if (needsSetup) "Connect to a machine first to send voice turns." else null,
+                    )
+                }
+            }
+        } else {
+            ReplyPanel(
+                modifier = Modifier.weight(1f),
+                transcript = uiState.transcript,
+                replyText = uiState.replyText,
+                recentTurns = uiState.recentTurns,
+                statusSummary = uiState.statusSummary,
+                securityLabel = securityLabel,
+                audioAvailable = uiState.audioUrl != null,
+                playbackState = uiState.playbackState,
+                replyModeLabel = uiState.replyModeLabel(),
+                replyModeHint = uiState.replyModeHint(),
+                onPlayAudio = onPlayAudio,
+                onStopAudio = onStopAudio,
+            )
+            TextFallbackPanel(
+                textPrompt = uiState.textPrompt,
+                onTextChanged = onTextChanged,
+                onSendText = onSendText,
+                enabled = !uiState.isBusy && !needsSetup,
+                needsSetup = needsSetup,
+                onCommit = {
+                    focusManager.clearFocus()
+                    onSendText()
+                },
+            )
+            VoicePanel(
+                isBusy = uiState.isBusy,
+                isRecording = uiState.isRecording,
+                nextTurnHint = uiState.nextTurnHint(),
+                replyModeLabel = uiState.replyModeLabel(),
+                onRecordToggle = onRecordToggle,
+                disabledReason = if (needsSetup) "Connect to a machine first to send voice turns." else null,
+            )
+        }
     }
 }
 
@@ -218,79 +265,67 @@ private fun WalkieHeader(
             MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
         ),
     ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                Text(
+                    text = "Location / session",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                )
+                Text(
+                    text = "$routeLabel - $machineName",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Talk", style = MaterialTheme.typography.titleMedium)
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(androidx.compose.foundation.shape.CircleShape)
+                            .background(
+                                if (trustedConnection && connectionState == ConnectionState.Connected) {
+                                    Color(0xFF178464)
+                                } else {
+                                    MaterialTheme.colorScheme.outline
+                                },
+                            ),
+                    )
                     Text(
-                        text = "$machineName / ${currentSession ?: "unknown"} / $routeLabel",
+                        text = listOf(
+                            connectionState.label(),
+                            turnPhase.label(),
+                            replyModeLabel,
+                            securityLabel,
+                        ).joinToString(" - "),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                OutlinedButton(onClick = onOpenSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Settings")
-                }
-            }
-            Text(
-                text = if (needsSetup) "Connect this phone to start." else nextTurnHint,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusPill(
-                    label = "Connection",
-                    value = connectionState.label(),
-                    strong = trustedConnection,
-                    modifier = Modifier.weight(1f),
-                )
-                StatusPill(
-                    label = "Replies",
-                    value = replyModeLabel,
-                    strong = replyModeLabel == "Hands-free" || replyModeLabel == "Loop on",
-                    modifier = Modifier.weight(1f),
-                )
-                StatusPill(
-                    label = "Turn",
-                    value = turnPhase.label(),
-                    strong = turnPhase == TurnPhase.Waiting || turnPhase == TurnPhase.Recording,
-                    modifier = Modifier.weight(1f),
-                )
             }
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "$securityLabel. $replyModeHint",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                OutlinedButton(
+                IconButton(
                     onClick = onRefresh,
                     enabled = connectionState != ConnectionState.Connected,
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Refresh")
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                }
+                IconButton(onClick = onOpenSettings) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings")
                 }
             }
         }
@@ -679,6 +714,8 @@ private fun VoicePanel(
     onRecordToggle: () -> Unit,
     disabledReason: String?,
 ) {
+    val enabled = disabledReason == null && !isBusy
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = PanelShape,
@@ -688,37 +725,58 @@ private fun VoicePanel(
             MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
         ),
     ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+            Surface(
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
+                color = if (isRecording) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
             ) {
-                Text("Conversation", style = MaterialTheme.typography.titleLarge)
-                Text(
-                    text = replyModeLabel,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
+                Icon(
+                    imageVector = if (isRecording) Icons.Default.GraphicEq else Icons.Default.Mic,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.padding(5.dp).size(18.dp),
                 )
             }
-            Text(
-                text = when {
-                    disabledReason != null -> disabledReason
-                    else -> nextTurnHint
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-            )
-            VoiceOrbButton(
-                isRecording = isRecording,
-                isBusy = isBusy,
-                disabledReason = disabledReason,
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = "Conversation mode",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = disabledReason ?: when {
+                        isBusy -> "Working on the last turn"
+                        isRecording -> "Listening now"
+                        else -> replyModeLabel
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.66f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Button(
                 onClick = onRecordToggle,
-            )
+                enabled = enabled,
+                shape = VoiceShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isRecording) MaterialTheme.colorScheme.error else Color(0xFFC95432),
+                    contentColor = Color.White,
+                ),
+                modifier = Modifier
+                    .width(116.dp)
+                    .height(58.dp),
+            ) {
+                Text(if (isRecording) "Send" else "Talk")
+            }
         }
     }
 }
@@ -825,8 +883,12 @@ private fun VoiceOrbButton(
 
 @Composable
 private fun ReplyPanel(
+    modifier: Modifier = Modifier,
     transcript: String,
     replyText: String,
+    recentTurns: List<RecentTurnUiState>,
+    statusSummary: String,
+    securityLabel: String,
     audioAvailable: Boolean,
     playbackState: PlaybackState,
     replyModeLabel: String,
@@ -834,8 +896,11 @@ private fun ReplyPanel(
     onPlayAudio: () -> Unit,
     onStopAudio: () -> Unit,
 ) {
+    val hasLatestTurn = transcript.isNotBlank() || replyText.isNotBlank()
+    val hasConversation = hasLatestTurn || recentTurns.isNotEmpty()
+
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         shape = PanelShape,
         color = MaterialTheme.colorScheme.surface,
         border = androidx.compose.foundation.BorderStroke(
@@ -844,33 +909,72 @@ private fun ReplyPanel(
         ),
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Latest turn", style = MaterialTheme.typography.titleLarge)
-                Text(
-                    text = replyModeLabel,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                if (!hasConversation) {
+                    Surface(
+                        shape = ControlShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+                        ),
+                    ) {
+                        Text(
+                            text = "Ready when the gateway is connected.",
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                        )
+                    }
+                } else {
+                    if (hasLatestTurn) {
+                        if (transcript.isNotBlank()) {
+                            MessageBubble(
+                                label = "You",
+                                text = transcript,
+                                muted = false,
+                                fromAgent = false,
+                            )
+                        }
+                        if (replyText.isNotBlank()) {
+                            MessageBubble(
+                                label = "Agent",
+                                text = replyText,
+                                muted = false,
+                                fromAgent = true,
+                            )
+                        }
+                    }
+                    recentTurns.forEach { turn ->
+                        if (turn.transcript.isNotBlank()) {
+                            MessageBubble(
+                                label = "You",
+                                text = turn.transcript,
+                                muted = false,
+                                fromAgent = false,
+                            )
+                        }
+                        if (turn.replyText.isNotBlank()) {
+                            MessageBubble(
+                                label = "Agent",
+                                text = turn.replyText,
+                                muted = false,
+                                fromAgent = true,
+                            )
+                        }
+                    }
+                }
             }
-            MessageBubble(
-                label = "You",
-                text = transcript.ifBlank { "Nothing heard yet." },
-                muted = transcript.isBlank(),
-                fromAgent = false,
-            )
-            MessageBubble(
-                label = "Agent",
-                text = replyText.ifBlank { "The next reply will appear here and play aloud when audio is available." },
-                muted = replyText.isBlank(),
-                fromAgent = true,
-            )
             if (audioAvailable) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(onClick = onPlayAudio, enabled = playbackState != PlaybackState.Loading) {
@@ -891,11 +995,21 @@ private fun ReplyPanel(
                         }
                     }
                 }
-            } else {
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = replyModeHint,
+                    text = statusSummary,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.64f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "$securityLabel. ${if (audioAvailable) replyModeLabel else replyModeHint}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -1050,31 +1164,35 @@ private fun TextFallbackPanel(
             MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
         ),
     ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+        Row(
+            modifier = Modifier.padding(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Type instead", style = MaterialTheme.typography.titleMedium)
-            Text(
-                text = "Use this when the thought is longer than a quick voice turn.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
-            )
             OutlinedTextField(
                 value = textPrompt,
                 onValueChange = onTextChanged,
-                label = { Text("Tell me what to do next") },
-                placeholder = { Text("Keep the last answer in mind and continue...") },
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 4,
+                placeholder = { Text("Message your agent...") },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(72.dp),
+                minLines = 2,
+                maxLines = 4,
                 enabled = !needsSetup,
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                     keyboardType = KeyboardType.Text,
                     imeAction = ImeAction.Send,
                 ),
             )
-            Button(onClick = onCommit, enabled = enabled && textPrompt.isNotBlank()) {
-                Text("Send text")
+            Button(
+                onClick = onCommit,
+                enabled = enabled && textPrompt.isNotBlank(),
+                shape = ControlShape,
+                modifier = Modifier
+                    .width(96.dp)
+                    .height(72.dp),
+            ) {
+                Text("Send")
             }
         }
     }

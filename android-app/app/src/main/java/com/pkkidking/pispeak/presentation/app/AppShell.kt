@@ -8,8 +8,6 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.material.icons.Icons
@@ -100,23 +98,12 @@ fun PiSpeakApp(
                         titleContentColor = MaterialTheme.colorScheme.onSurface,
                     ),
                     title = {
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(
-                                text = "Pi Speak",
-                                style = MaterialTheme.typography.titleLarge,
-                            )
-                            Text(
-                                text = if (currentDestination == AppDestination.Conversation) {
-                                    uiState.statusSummary
-                                } else {
-                                    "Connection, audio, and appearance"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
+                        Text(
+                            text = "Pi Speak",
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     },
                 )
             },
