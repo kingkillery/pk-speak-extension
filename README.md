@@ -235,6 +235,7 @@ Named sessions, wake aliases, and routing summaries for voice control.
 /sess slots
 /sess export
 /sess ui
+/sess ui open
 ```
 
 This matters because `PK bugfix` can route voice input to that named session, while compact routes like `PK one` / `PK1` and `PK two` / `PK2` can stay stable and distinct.
@@ -243,7 +244,7 @@ This matters because `PK bugfix` can route voice input to that named session, wh
 
 Use `/sess slots` when you want the explicit compact-route view for `PK one` / `PK1` and `PK two` / `PK2`.
 
-Use `/sess ui` to open the interactive session manager pane in a separate terminal. It mirrors the `/sess` dashboard, refreshes within one second of external mutations, supports focus movement with `↑` / `↓`, `tab`, or `j` / `k`, shows the compact PK1/PK2 route lanes plus a focused-session footer, and adds keybindings `[r] rename`, `[a] alias`, `[x] remove`, and `[q] quit`. Voice and pane-driven changes surface as toasts at the bottom of the pane. If the CLI is launched in a non-interactive shell, it now falls back to a read-only snapshot instead of crashing on raw-mode setup.
+Use `/sess ui` for inline guidance without opening another terminal. Use `/sess ui open` only when you explicitly want the older terminal pane; repeat launches reuse the existing pane instead of creating more terminal windows. The pane mirrors the `/sess` dashboard, refreshes within one second of external mutations, supports focus movement with arrow keys, `tab`, or `j` / `k`, shows the compact PK1/PK2 route lanes plus a focused-session footer, and adds keybindings `[r] rename`, `[a] alias`, `[x] remove`, and `[q] quit`.
 
 For operator details, see:
 - `docs/VOICE_SESSION_BRIDGE.md`

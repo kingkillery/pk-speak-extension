@@ -1,8 +1,10 @@
 package com.pkkidking.pispeak.domain.usecase
 
 import com.pkkidking.pispeak.domain.model.AppSettings
+import com.pkkidking.pispeak.domain.model.DiagnosticEvent
 import com.pkkidking.pispeak.domain.model.RecordedAudio
 import com.pkkidking.pispeak.domain.model.RemoteStatusSummary
+import com.pkkidking.pispeak.domain.model.TurnHistoryItem
 import com.pkkidking.pispeak.domain.repo.PiSpeakRepository
 import javax.inject.Inject
 
@@ -16,6 +18,36 @@ class SaveSettingsUseCase @Inject constructor(
     private val repository: PiSpeakRepository,
 ) {
     operator fun invoke(settings: AppSettings) = repository.saveSettings(settings)
+}
+
+class LoadTurnHistoryUseCase @Inject constructor(
+    private val repository: PiSpeakRepository,
+) {
+    operator fun invoke(): List<TurnHistoryItem> = repository.loadTurnHistory()
+}
+
+class AppendTurnHistoryUseCase @Inject constructor(
+    private val repository: PiSpeakRepository,
+) {
+    operator fun invoke(item: TurnHistoryItem): List<TurnHistoryItem> = repository.appendTurnHistory(item)
+}
+
+class ClearTurnHistoryUseCase @Inject constructor(
+    private val repository: PiSpeakRepository,
+) {
+    operator fun invoke() = repository.clearTurnHistory()
+}
+
+class LoadDiagnosticsUseCase @Inject constructor(
+    private val repository: PiSpeakRepository,
+) {
+    operator fun invoke(): List<DiagnosticEvent> = repository.loadDiagnostics()
+}
+
+class AppendDiagnosticUseCase @Inject constructor(
+    private val repository: PiSpeakRepository,
+) {
+    operator fun invoke(event: DiagnosticEvent): List<DiagnosticEvent> = repository.appendDiagnostic(event)
 }
 
 class GetStatusUseCase @Inject constructor(

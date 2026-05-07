@@ -83,19 +83,39 @@ class AppSettingsTest {
     }
 
     @Test
+    fun `approved owner lan http is accepted`() {
+        val settings = AppSettings(
+            baseUrl = "http://10.0.0.117:8767/",
+            token = "token",
+            requestAudioReplies = true,
+            autoplayReplyAudio = true,
+        )
+
+        assertNull(settings.validate(allowInsecureLoopback = false))
+    }
+
+    @Test
     fun `default machine profiles include selectable appserver mac and bluetooth targets`() {
         assertEquals("tailscale-appserver", DefaultMachineProfiles[0].id)
         assertEquals("MSI / appserver", DefaultMachineProfiles[0].name)
         assertEquals("http://100.76.136.91:8767/", DefaultMachineProfiles[0].baseUrl)
+        assertEquals("", DefaultMachineProfiles[0].token)
         assertEquals(ConnectionMode.TAILSCALE, DefaultMachineProfiles[0].connectionMode)
         assertEquals("tailscale-mac", DefaultMachineProfiles[1].id)
         assertEquals("Mac", DefaultMachineProfiles[1].name)
         assertEquals("http://100.76.176.119:8767/", DefaultMachineProfiles[1].baseUrl)
+        assertEquals("", DefaultMachineProfiles[1].token)
         assertEquals(ConnectionMode.TAILSCALE, DefaultMachineProfiles[1].connectionMode)
-        assertEquals("bluetooth-local", DefaultMachineProfiles[2].id)
-        assertEquals("Bluetooth / local link", DefaultMachineProfiles[2].name)
-        assertEquals("http://192.168.44.1:8767/", DefaultMachineProfiles[2].baseUrl)
-        assertEquals(ConnectionMode.BLUETOOTH, DefaultMachineProfiles[2].connectionMode)
+        assertEquals("lan-msi", DefaultMachineProfiles[2].id)
+        assertEquals("MSI / LAN", DefaultMachineProfiles[2].name)
+        assertEquals("http://10.0.0.117:8767/", DefaultMachineProfiles[2].baseUrl)
+        assertEquals("", DefaultMachineProfiles[2].token)
+        assertEquals(ConnectionMode.MANUAL, DefaultMachineProfiles[2].connectionMode)
+        assertEquals("bluetooth-local", DefaultMachineProfiles[3].id)
+        assertEquals("Bluetooth / local link", DefaultMachineProfiles[3].name)
+        assertEquals("http://192.168.44.1:8767/", DefaultMachineProfiles[3].baseUrl)
+        assertEquals("", DefaultMachineProfiles[3].token)
+        assertEquals(ConnectionMode.BLUETOOTH, DefaultMachineProfiles[3].connectionMode)
     }
 
     @Test

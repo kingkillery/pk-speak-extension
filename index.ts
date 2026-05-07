@@ -1920,12 +1920,25 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (sub === "ui") {
+				if (rest !== "open") {
+					ctx.ui.notify(
+						[
+							getSessionManagerSummaryText(ctx),
+							"",
+							"Terminal pane is no longer opened by default. Use /sess, /sess slots, or the phone remote for normal routing. If you really need the old terminal pane, run /sess ui open.",
+						].join("\n"),
+						"info",
+					);
+					return;
+				}
 				const result = launchSessionManagerPane({
 					currentSessionPath: ctx.sessionManager.getSessionFile?.() || undefined,
 					currentSessionName: pi.getSessionName() || undefined,
 				});
 				if (result.spawned) {
 					ctx.ui.notify(`Opened session manager pane in a new terminal. Run manually with: ${result.manualCommand}`, "info");
+				} else if (result.reused) {
+					ctx.ui.notify(result.reason || "Session manager pane is already running.", "info");
 				} else {
 					const reason = result.reason ? `${result.reason} ` : "";
 					ctx.ui.notify(`${reason}Run manually: ${result.manualCommand}`, "warning");
