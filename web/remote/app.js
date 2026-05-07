@@ -70,7 +70,9 @@ const els = {
 	recordLabel: document.getElementById("record-label"),
 	recordSubtitle: document.getElementById("record-subtitle"),
 	timer: document.getElementById("timer"),
+	statusDot: document.getElementById("status-dot"),
 	statusNote: document.getElementById("status-note"),
+	chatMessages: document.getElementById("chat-messages"),
 	transcript: document.getElementById("transcript-output"),
 	reply: document.getElementById("reply-output"),
 	audio: document.getElementById("reply-audio"),
@@ -78,6 +80,10 @@ const els = {
 	textInput: document.getElementById("text-input"),
 	sendText: document.getElementById("send-text-button"),
 	clearText: document.getElementById("clear-text-button"),
+	targetSelect: document.getElementById("target-select"),
+	targetInput: document.getElementById("target-input"),
+	saveTarget: document.getElementById("save-target-button"),
+	clearTarget: document.getElementById("clear-target-button"),
 	launchPathInput: document.getElementById("launch-path-input"),
 	tokenInput: document.getElementById("token-input"),
 	saveToken: document.getElementById("save-token-button"),
@@ -92,14 +98,34 @@ function setStatus(text, tone) {
 	els.statusNote.textContent = text;
 	els.statusNote.style.borderColor = tone === "error" ? "rgba(214, 90, 49, 0.4)" : "var(--line)";
 	els.statusNote.style.color = tone === "error" ? "#9b3517" : "var(--ink)";
+	if (els.statusDot) {
+		els.statusDot.className = `status-dot${tone === "error" ? " error" : state.lastStatus ? " ready" : ""}`;
+	}
+}
+
+function appendMessage(role, text) {
+	if (!els.chatMessages || !text || !text.trim()) return;
+	const node = document.createElement("div");
+	node.className = `message ${role}`;
+	node.textContent = text.trim();
+	els.chatMessages.appendChild(node);
+	els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 }
 
 function setReplyText(text) {
 	els.reply.textContent = text && text.trim() ? text.trim() : "No reply yet.";
+	if (text && text.trim()) appendMessage("agent", text);
 }
 
 function setTranscript(text) {
 	els.transcript.textContent = text && text.trim() ? text.trim() : "No transcript yet.";
+	if (text && text.trim()) appendMessage("user", text);
+}
+
+function turnStatusMessage(payload, fallback = "Turn complete.") {
+	const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings.filter(Boolean) : [];
+	const provider = payload && payload.providers && payload.providers.agent ? ` Agent: ${payload.providers.agent}.` : "";
+	return warnings.length ? `${fallback}${provider} ${warnings.join(" ")}` : `${fallback}${provider}`;
 }
 
 function getSessionStorage() {
@@ -164,6 +190,38 @@ function syncSettingsUi() {
 	els.launchPathInput.value = state.launchPath;
 	els.tokenInput.value = state.token;
 	els.auth.textContent = state.token ? "Token loaded" : "No token";
+}
+
+function activeTarget() {
+	const selected = els.targetSelect ? els.targetSelect.value.trim() : "";
+	const manual = els.targetInput ? els.targetInput.value.trim() : "";
+	return selected || manual || "";
+}
+
+function syncTargetUi(status) {
+	if (!els.targetSelect) return;
+	const remote = status && status.remote ? status.remote : {};
+	const targets = Array.isArray(remote.availableTargets) ? remote.availableTargets : [];
+	const selected = remote.defaultTarget || activeTarget();
+	els.targetSelect.innerHTML = "";
+	const current = document.createElement("option");
+	current.value = "";
+	current.textContent = remote.currentSession ? `Current: ${remote.currentSession}` : "Current session";
+	els.targetSelect.appendChild(current);
+	for (const target of targets) {
+		const option = document.createElement("option");
+		option.value = target;
+		option.textContent = target;
+		els.targetSelect.appendChild(option);
+	}
+	if (selected && !targets.includes(selected)) {
+		const option = document.createElement("option");
+		option.value = selected;
+		option.textContent = selected;
+		els.targetSelect.appendChild(option);
+	}
+	els.targetSelect.value = selected || "";
+	if (els.targetInput) els.targetInput.value = selected || "";
 }
 
 function loadSettings() {
@@ -262,6 +320,7 @@ async function refreshStatus() {
 	try {
 		const payload = await apiFetch("/v1/status");
 		state.lastStatus = payload ? payload.status : null;
+		syncTargetUi(state.lastStatus);
 		setStatus(summarizeStatus(state.lastStatus));
 	} catch (error) {
 		setStatus(String(error.message || error), "error");
@@ -285,8 +344,12 @@ async function submitText() {
 		return;
 	}
 	setStatus("Sending text turn...");
+	els.sendText.disabled = true;
+	appendMessage("user", text);
 	try {
 		const body = { text, audio: state.wantAudio };
+		const target = activeTarget();
+		if (target) body.target = target;
 		const trimmedLaunchPath = state.launchPath.trim();
 		if (trimmedLaunchPath) {
 			body.cwd = trimmedLaunchPath;
@@ -299,10 +362,13 @@ async function submitText() {
 		setTranscript("");
 		setReplyText(payload && payload.replyText ? payload.replyText : "");
 		setAudio(payload ? payload.audioUrl : "");
-		setStatus("Turn complete.");
+		els.textInput.value = "";
+		setStatus(turnStatusMessage(payload));
 		await refreshStatus();
 	} catch (error) {
 		setStatus(String(error.message || error), "error");
+	} finally {
+		els.sendText.disabled = false;
 	}
 }
 
@@ -356,7 +422,7 @@ function updateRecordingUi() {
 	if (!state.recording) {
 		els.record.classList.remove("recording");
 		els.recordLabel.textContent = "Tap to talk";
-		els.recordSubtitle.textContent = "Mic opens on demand";
+		els.recordSubtitle.textContent = state.wantAudio ? "Voice conversation on" : "Text replies";
 		els.timer.textContent = "Ready";
 		return;
 	}
@@ -403,6 +469,8 @@ async function stopRecordingAndSend() {
 
 	try {
 		const params = new URLSearchParams({ audio: state.wantAudio ? "1" : "0" });
+		const target = activeTarget();
+		if (target) params.set("target", target);
 		const trimmedLaunchPath = state.launchPath.trim();
 		if (trimmedLaunchPath) {
 			params.set("cwd", trimmedLaunchPath);
@@ -415,7 +483,7 @@ async function stopRecordingAndSend() {
 		setTranscript(payload && payload.transcript ? payload.transcript : "");
 		setReplyText(payload && payload.replyText ? payload.replyText : "");
 		setAudio(payload ? payload.audioUrl : "");
-		setStatus("Voice turn complete.");
+		setStatus(turnStatusMessage(payload, "Voice turn complete."));
 		await refreshStatus();
 	} catch (error) {
 		setStatus(String(error.message || error), "error");
@@ -469,6 +537,34 @@ els.textInput.addEventListener("keydown", (event) => {
 		submitText();
 	}
 });
+
+async function saveTarget(value) {
+	try {
+		const payload = await apiFetch("/v1/route", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ target: value || "" }),
+		});
+		setStatus(payload && payload.message ? payload.message : "Target updated.");
+		await refreshStatus();
+	} catch (error) {
+		setStatus(String(error.message || error), "error");
+	}
+}
+
+els.targetSelect.addEventListener("change", () => {
+	const value = els.targetSelect.value.trim();
+	if (els.targetInput) els.targetInput.value = value;
+	void saveTarget(value);
+});
+els.saveTarget.addEventListener("click", () => {
+	void saveTarget(els.targetInput.value.trim());
+});
+els.clearTarget.addEventListener("click", () => {
+	els.targetInput.value = "";
+	els.targetSelect.value = "";
+	void saveTarget("");
+});
 els.saveToken.addEventListener("click", () => {
 	state.token = els.tokenInput.value.trim();
 	state.launchPath = els.launchPathInput.value.trim();
@@ -492,6 +588,7 @@ els.rememberToken.addEventListener("change", () => {
 els.audioToggle.addEventListener("change", () => {
 	state.wantAudio = els.audioToggle.checked;
 	saveSettings();
+	updateRecordingUi();
 });
 els.autoplayToggle.addEventListener("change", () => {
 	state.autoplay = els.autoplayToggle.checked;

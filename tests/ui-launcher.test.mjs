@@ -47,6 +47,7 @@ test("launchSessionManagerPane spawns cmd.exe with start on win32", () => {
 			platform: "win32",
 			adminScriptPath: adminPath,
 			nodeBinary: "C:/node/node.exe",
+			lockPath: join(tmpdir(), `pi-speak-test-missing-${process.pid}.json`),
 			currentSessionPath: "/sessions/bugfix.jsonl",
 			currentSessionName: "voice bugfix",
 		});
@@ -85,6 +86,31 @@ test("launchSessionManagerPane spawns cmd.exe with start on win32", () => {
 	});
 });
 
+test("launchSessionManagerPane reuses existing pane when lock pid is alive", () => {
+	withTempAdminScript((adminPath) => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-speak-ui-lock-"));
+		const lockPath = join(dir, "pane.lock.json");
+		writeFileSync(lockPath, JSON.stringify({ pid: process.pid }), "utf8");
+		try {
+			const stub = makeStubSpawn();
+			const result = launchSessionManagerPane({
+				spawnImpl: stub.spawnImpl,
+				platform: "win32",
+				adminScriptPath: adminPath,
+				nodeBinary: "C:/node/node.exe",
+				lockPath,
+			});
+
+			assert.equal(result.spawned, false);
+			assert.equal(result.reused, true);
+			assert.match(result.reason, /already running/i);
+			assert.equal(stub.calls.length, 0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 test("launchSessionManagerPane returns manual command on unsupported platforms", () => {
 	withTempAdminScript((adminPath) => {
 		const stub = makeStubSpawn();
@@ -93,6 +119,7 @@ test("launchSessionManagerPane returns manual command on unsupported platforms",
 			platform: "linux",
 			adminScriptPath: adminPath,
 			nodeBinary: "/usr/bin/node",
+			lockPath: join(tmpdir(), `pi-speak-test-missing-${process.pid}.json`),
 			currentSessionPath: "/sessions/bugfix.jsonl",
 			currentSessionName: "voice bugfix",
 		});
@@ -113,7 +140,7 @@ test("resolveAdminScriptPath resolves to a non-empty path when no override is pr
 	assert.match(resolved, /admin\.js$/);
 });
 
-test("/sess ui invokes launchSessionManagerPane and notifies the operator", async () => {
+test("/sess ui renders inline guidance instead of opening a terminal", async () => {
 	const originalLocalAppData = process.env.LOCALAPPDATA;
 	const originalAppData = process.env.APPDATA;
 	const root = mkdtempSync(join(tmpdir(), "pi-speak-sess-ui-"));
@@ -182,7 +209,8 @@ test("/sess ui invokes launchSessionManagerPane and notifies the operator", asyn
 
 		assert.ok(notifications.length > 0, "expected /sess ui to emit a notification");
 		const last = notifications.at(-1);
-		assert.match(last.message, /pi-speak-admin|admin\.js|manually/i);
+		assert.match(last.message, /no longer opened by default/i);
+		assert.match(last.message, /\/sess ui open/i);
 	} finally {
 		if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
 		else process.env.LOCALAPPDATA = originalLocalAppData;

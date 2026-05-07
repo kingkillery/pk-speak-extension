@@ -20,7 +20,6 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
-        manifestPlaceholders["usesCleartextTraffic"] = "true"
     }
 
     buildTypes {
@@ -29,7 +28,6 @@ android {
             versionNameSuffix = "-dev"
             isMinifyEnabled = false
             buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
         create("staging") {
             initWith(getByName("release"))
@@ -37,7 +35,6 @@ android {
             versionNameSuffix = "-staging"
             signingConfig = signingConfigs.getByName("debug")
             buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
         release {
             isMinifyEnabled = true
@@ -47,7 +44,6 @@ android {
                 "proguard-rules.pro"
             )
             buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
     }
 

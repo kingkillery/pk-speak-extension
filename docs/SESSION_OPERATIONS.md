@@ -20,6 +20,7 @@ This is the focused operator guide for `/sess` in `pi-speak-pk`.
 /sess slots
 /sess export
 /sess ui
+/sess ui open
 ```
 
 ## What `/sess` shows
@@ -99,14 +100,15 @@ It does **not** delete the underlying Pi session file.
 
 ## Management Pane
 
-`/sess ui` opens an interactive Ink-based session manager pane in a separate terminal.
-It shows the same dashboard you get from `/sess`, refreshes within one second of any external mutation, and lets you act on sessions with keybindings instead of typing slash commands.
+`/sess ui` shows the session-manager summary inline and does not open another terminal by default.
+The old interactive Ink pane is still available as an explicit escape hatch with `/sess ui open`.
 
 ```text
 /sess ui
+/sess ui open
 ```
 
-On Windows the pane spawns in a new terminal via `start`. On other platforms the handler reports the exact `node dist/ui/admin.js` command you can run by hand. The spawned process is detached from `pi-coding-agent`, so it does not fight for the parent TTY. If you launch `pi-speak-admin` from a non-interactive shell, it falls back to a read-only snapshot instead of trying to enable raw mode.
+Use `/sess`, `/sess slots`, and the phone remote as the normal routing surfaces. If you explicitly need the older pane, `/sess ui open` opens it on Windows. The pane is single-instance guarded so repeat launches report the running pane instead of creating more terminal windows. On other platforms the handler reports the exact `node dist/ui/admin.js` command you can run by hand. If you launch `pi-speak-admin` from a non-interactive shell, it falls back to a read-only snapshot instead of trying to enable raw mode.
 
 ### Pane layout
 

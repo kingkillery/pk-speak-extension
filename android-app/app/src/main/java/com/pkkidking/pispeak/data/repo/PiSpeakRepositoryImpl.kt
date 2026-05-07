@@ -6,8 +6,10 @@ import com.pkkidking.pispeak.data.model.TextTurnRequestDto
 import com.pkkidking.pispeak.data.model.toDomain
 import com.pkkidking.pispeak.data.storage.SecureSettingsStore
 import com.pkkidking.pispeak.domain.model.AppSettings
+import com.pkkidking.pispeak.domain.model.DiagnosticEvent
 import com.pkkidking.pispeak.domain.model.RecordedAudio
 import com.pkkidking.pispeak.domain.model.RemoteStatusSummary
+import com.pkkidking.pispeak.domain.model.TurnHistoryItem
 import com.pkkidking.pispeak.domain.model.TurnResult
 import com.pkkidking.pispeak.domain.repo.PiSpeakRepository
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +35,24 @@ class PiSpeakRepositoryImpl @Inject constructor(
     override fun saveSettings(settings: AppSettings) {
         settingsStore.save(settings)
     }
+
+    override fun loadTurnHistory(): List<TurnHistoryItem> = settingsStore.loadTurnHistory()
+
+    override fun saveTurnHistory(items: List<TurnHistoryItem>) {
+        settingsStore.saveTurnHistory(items)
+    }
+
+    override fun appendTurnHistory(item: TurnHistoryItem): List<TurnHistoryItem> =
+        settingsStore.appendTurnHistory(item)
+
+    override fun clearTurnHistory() {
+        settingsStore.clearTurnHistory()
+    }
+
+    override fun loadDiagnostics(): List<DiagnosticEvent> = settingsStore.loadDiagnostics()
+
+    override fun appendDiagnostic(event: DiagnosticEvent): List<DiagnosticEvent> =
+        settingsStore.appendDiagnostic(event)
 
     override suspend fun getStatus(settings: AppSettings): Result<RemoteStatusSummary> = withContext(Dispatchers.IO) {
         remoteResult {

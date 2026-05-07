@@ -1,4 +1,4 @@
-const CACHE_NAME = "pi-speak-remote-v1";
+const CACHE_NAME = "pi-speak-remote-v4";
 const APP_SHELL = [
 	"/app/",
 	"/app/app.webmanifest",
@@ -26,6 +26,18 @@ self.addEventListener("fetch", (event) => {
 	if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
 	if (!url.pathname.startsWith("/app/")) return;
 	if (url.pathname.startsWith("/app/sw.js")) return;
+	if (url.pathname === "/app/" || url.pathname === "/app/index.html" || url.pathname === "/app/app.js") {
+		event.respondWith(
+			fetch(event.request)
+				.then((response) => {
+					const clone = response.clone();
+					caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+					return response;
+				})
+				.catch(() => caches.match(event.request)),
+		);
+		return;
+	}
 
 	event.respondWith(
 		caches.match(event.request).then((cached) => {

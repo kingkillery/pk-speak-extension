@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -19,6 +21,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -39,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pkkidking.pispeak.data.storage.ThemeMode
 import com.pkkidking.pispeak.domain.model.ConnectionMode
@@ -46,7 +50,8 @@ import com.pkkidking.pispeak.domain.model.MachineProfile
 import com.pkkidking.pispeak.presentation.main.MainUiState
 
 private val ScreenPadding = 20.dp
-private val PanelShape = RoundedCornerShape(28.dp)
+private val PanelShape = RoundedCornerShape(8.dp)
+private val ControlShape = RoundedCornerShape(16.dp)
 
 @Composable
 fun SettingsScreen(
@@ -64,8 +69,11 @@ fun SettingsScreen(
     onMachineProfileNameChanged: (String) -> Unit,
     onSaveMachineProfile: () -> Unit,
     onDeleteSelectedMachine: () -> Unit,
+    onTargetChanged: (String) -> Unit,
+    onApplyTarget: () -> Unit,
     onRequestAudioChanged: (Boolean) -> Unit,
     onAutoplayChanged: (Boolean) -> Unit,
+    onContinuousConversationChanged: (Boolean) -> Unit,
     onSaveSettings: () -> Unit,
     onThemeModeChanged: (ThemeMode) -> Unit,
     onDismissError: () -> Unit,
@@ -159,6 +167,56 @@ fun SettingsScreen(
                 modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
+                Text("Routing", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    text = "Choose which agent or session receives the next turn.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                )
+                if (uiState.availableTargets.isNotEmpty()) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(uiState.availableTargets.take(10)) { target ->
+                            FilterChip(
+                                selected = target == uiState.targetName,
+                                onClick = { onTargetChanged(target) },
+                                label = { Text(target, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            )
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = uiState.targetName,
+                        onValueChange = onTargetChanged,
+                        label = { Text("Target") },
+                        placeholder = { Text("Current session") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                    )
+                    Button(onClick = onApplyTarget, enabled = !uiState.isBusy) {
+                        Text("Apply")
+                    }
+                }
+                TextButton(onClick = { onTargetChanged("") }) {
+                    Text("Use current session")
+                }
+            }
+        }
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = PanelShape,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
                 Text("Appearance", style = MaterialTheme.typography.titleLarge)
                 Text(
                     text = "Choose whether Pi Speak follows the device or stays light or dark.",
@@ -198,6 +256,14 @@ fun SettingsScreen(
                 SettingRow("Request spoken replies", uiState.requestAudioReplies, onRequestAudioChanged)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 SettingRow("Autoplay reply audio", uiState.autoplayReplyAudio, onAutoplayChanged)
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                SettingRow(
+                    label = "Continue after replies",
+                    checked = uiState.continuousConversation,
+                    onCheckedChange = onContinuousConversationChanged,
+                    enabled = uiState.requestAudioReplies && uiState.autoplayReplyAudio,
+                    supportingText = "After a spoken voice reply finishes, Pi Speak waits a moment and starts listening again.",
+                )
             }
         }
 
@@ -427,7 +493,7 @@ private fun StateBadge(
 ) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(18.dp),
+        shape = ControlShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
     ) {
@@ -454,18 +520,32 @@ private fun SettingRow(
     label: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
+    supportingText: String? = null,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else 0.56f),
+            )
+            if (supportingText != null) {
+                Text(
+                    text = supportingText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.66f),
+                )
+            }
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 
@@ -476,9 +556,9 @@ private fun ErrorPanel(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        color = Color(0xFFFBE9E2),
-        border = BorderStroke(1.dp, Color(0x33D35A30)),
+        shape = PanelShape,
+        color = MaterialTheme.colorScheme.errorContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.22f)),
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -487,12 +567,12 @@ private fun ErrorPanel(
             Text(
                 text = "Needs attention",
                 style = MaterialTheme.typography.titleMedium,
-                color = Color(0xFF9B3517),
+                color = MaterialTheme.colorScheme.error,
             )
             Text(
                 text = message,
                 style = MaterialTheme.typography.bodyMedium,
-                color = Color(0xFF7B2A12),
+                color = MaterialTheme.colorScheme.onErrorContainer,
             )
             OutlinedButton(onClick = onDismiss) {
                 Text("Dismiss")
