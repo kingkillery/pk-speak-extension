@@ -12,6 +12,7 @@ import { requestGracefulChildShutdown } from "./listener-control.js";
 import { findSessionRouteConflict, isSpeechInterruptCommand, listKnownTargets, resolveSessionRoute, resolveSessionTarget } from "./voice-routing.js";
 import { isAffirmative, isNegative } from "./voice-confirmation.js";
 import { createApprovalRegistry } from "./voice-approval.js";
+import { extractDiff, extractErrors, parsePlaybackCommand } from "./voice-playback.js";
 import {
 	clearWakeAlias,
 	describeSessionRoutingStore,
@@ -1753,6 +1754,43 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 			// Anything else — fall through; pending entry expires per TTL.
+		}
+
+		// Voice playback over the saved last assistant reply. All operations
+		// here are extractive (regex / verbatim replay) — no LLM round-trip,
+		// so no context rot.
+		const playback = parsePlaybackCommand(text);
+		if (playback) {
+			const saved = lastAssistantText.trim();
+			if (!saved) {
+				notifyAudible(target, "No previous reply to play back.", "info", "I haven't said anything yet.");
+				return;
+			}
+			if (playback === "repeat") {
+				notifyAudible(target, "Repeating last reply.", "info");
+				if (speakState.enabled) void speakText(saved, target);
+				return;
+			}
+			if (playback === "read-error") {
+				const errors = extractErrors(saved);
+				if (!errors) {
+					notifyAudible(target, "No errors found in the last reply.", "info", "No errors found.");
+					return;
+				}
+				notifyAudible(target, `Reading errors:\n${errors}`, "info");
+				if (speakState.enabled) void speakText(errors, target);
+				return;
+			}
+			if (playback === "read-diff") {
+				const diff = extractDiff(saved);
+				if (!diff) {
+					notifyAudible(target, "No diff found in the last reply.", "info", "No diff found.");
+					return;
+				}
+				notifyAudible(target, `Reading diff:\n${diff}`, "info");
+				if (speakState.enabled) void speakText(diff, target);
+				return;
+			}
 		}
 
 		// Determine if agent is busy so we can queue instead of interrupt
