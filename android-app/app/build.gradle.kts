@@ -19,7 +19,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "DEFAULT_BASE_URL", "\"http://10.0.2.2:8767/\"")
+        buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
         manifestPlaceholders["usesCleartextTraffic"] = "true"
     }
 
@@ -28,7 +28,7 @@ android {
             applicationIdSuffix = ".dev"
             versionNameSuffix = "-dev"
             isMinifyEnabled = false
-            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://10.0.2.2:8767/\"")
+            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
             manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
         create("staging") {
@@ -36,8 +36,8 @@ android {
             applicationIdSuffix = ".staging"
             versionNameSuffix = "-staging"
             signingConfig = signingConfigs.getByName("debug")
-            buildConfigField("String", "DEFAULT_BASE_URL", "\"https://msi-1.tail1b8705.ts.net/\"")
-            manifestPlaceholders["usesCleartextTraffic"] = "false"
+            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
         release {
             isMinifyEnabled = true
@@ -46,8 +46,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            buildConfigField("String", "DEFAULT_BASE_URL", "\"https://msi-1.tail1b8705.ts.net/\"")
-            manifestPlaceholders["usesCleartextTraffic"] = "false"
+            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
     }
 

@@ -9,10 +9,17 @@ data class StatusResponseDto(
 )
 
 data class StatusDto(
+    val agent: AgentStatusDto? = null,
     val speak: SpeakStatusDto? = null,
     val mono: MonoStatusDto? = null,
     val phone: PhoneStatusDto? = null,
     val remote: RemoteStatusDto? = null,
+)
+
+data class AgentStatusDto(
+    val provider: String? = null,
+    val configuredProvider: String? = null,
+    val model: String? = null,
 )
 
 data class SpeakStatusDto(
@@ -74,6 +81,8 @@ fun StatusResponseDto.toDomain(): RemoteStatusSummary {
     return RemoteStatusSummary(
         remoteEnabled = safeStatus?.remote?.enabled == true,
         remotePort = safeStatus?.remote?.port,
+        agentProvider = safeStatus?.agent?.provider ?: safeStatus?.agent?.configuredProvider,
+        agentModel = safeStatus?.agent?.model,
         speakEnabled = safeStatus?.speak?.enabled == true,
         speakProvider = safeStatus?.speak?.provider ?: safeStatus?.speak?.configuredProvider,
         monoRunning = safeStatus?.mono?.running == true,

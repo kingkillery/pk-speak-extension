@@ -57,6 +57,8 @@ class PiSpeakRepositoryImpl @Inject constructor(
             RemoteStatusSummary(
                 remoteEnabled = true,
                 remotePort = null,
+                agentProvider = null,
+                agentModel = null,
                 speakEnabled = false,
                 speakProvider = null,
                 monoRunning = false,
@@ -146,7 +148,7 @@ class PiSpeakRepositoryImpl @Inject constructor(
             504 -> "Pi did not answer before the request timed out."
             else -> "Pi Speak request failed with HTTP ${code()}."
         }
-        is IOException -> "Pi is offline or unreachable. Check the HTTPS/Tailscale URL and network."
+        is IOException -> "Pi is offline or unreachable. Check the HTTPS, Tailscale, or Bluetooth local-link URL and network."
         else -> message ?: "Pi Speak request failed."
     }
 }

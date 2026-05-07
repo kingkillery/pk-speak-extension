@@ -41,6 +41,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.pkkidking.pispeak.data.storage.ThemeMode
+import com.pkkidking.pispeak.domain.model.ConnectionMode
 import com.pkkidking.pispeak.domain.model.MachineProfile
 import com.pkkidking.pispeak.presentation.main.MainUiState
 
@@ -54,6 +55,7 @@ fun SettingsScreen(
     contentPadding: PaddingValues,
     onBaseUrlChanged: (String) -> Unit,
     onTokenChanged: (String) -> Unit,
+    onConnectionModeChanged: (ConnectionMode) -> Unit,
     onWorkspacePathChanged: (String) -> Unit,
     machineProfiles: List<MachineProfile>,
     selectedMachineId: String?,
@@ -88,9 +90,14 @@ fun SettingsScreen(
             ) {
                 Text("Connection", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    text = "Keep setup visible and editable without hiding it inside the talk surface.",
+                    text = "Choose how the phone reaches the gateway, then save the URL and token for that machine.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                )
+
+                ConnectionModeSelector(
+                    selected = uiState.connectionMode,
+                    onSelected = onConnectionModeChanged,
                 )
 
                 MachineProfileSection(
@@ -263,7 +270,7 @@ private fun MachineProfileSection(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     val selectedMachine = machineProfiles.firstOrNull { it.id == selectedMachineId }
-    val selectedMachineLabel = selectedMachine?.name ?: "Direct connection"
+    val selectedMachineLabel = selectedMachine?.name ?: "Manual connection"
     val hasProfiles = machineProfiles.isNotEmpty()
     val canSave = baseUrl.isNotBlank() && (selectedMachine != null || machineProfileName.isNotBlank())
     val hasWorkspace = workspacePath.isNotBlank()
@@ -303,7 +310,7 @@ private fun MachineProfileSection(
                     onDismissRequest = { menuExpanded = false },
                 ) {
                     DropdownMenuItem(
-                        text = { Text("Direct connection") },
+                        text = { Text("Manual connection") },
                         onClick = {
                             menuExpanded = false
                             onMachineSelected(null)
@@ -313,7 +320,7 @@ private fun MachineProfileSection(
                         DropdownMenuItem(
                             text = {
                                 Text(
-                                    text = "${profile.name.ifBlank { "Machine" }} • ${profile.baseUrl}",
+                                    text = "${profile.name.ifBlank { "Machine" }} - ${profile.connectionMode.label} - ${profile.baseUrl}",
                                     maxLines = 1,
                                 )
                             },
@@ -351,7 +358,7 @@ private fun MachineProfileSection(
 
             if (selectedMachine != null) {
                 Text(
-                    text = "Selected: ${selectedMachine.name} • ${selectedMachine.baseUrl} ${if (hasWorkspace) "• ${selectedMachine.workspacePath}" else ""}",
+                    text = "Selected: ${selectedMachine.name} - ${selectedMachine.baseUrl}${if (hasWorkspace) " - ${selectedMachine.workspacePath}" else ""}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
                 )
@@ -373,6 +380,42 @@ private fun MachineProfileSection(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ConnectionModeSelector(
+    selected: ConnectionMode,
+    onSelected: (ConnectionMode) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "Connection type",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ConnectionMode.entries.forEach { mode ->
+                OutlinedButton(
+                    onClick = { onSelected(mode) },
+                    border = BorderStroke(
+                        1.dp,
+                        if (selected == mode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                    ),
+                ) {
+                    Text(mode.label)
+                }
+            }
+        }
+        Text(
+            text = when (selected) {
+                ConnectionMode.TAILSCALE -> "Uses your tailnet or HTTPS tunnel profile."
+                ConnectionMode.BLUETOOTH -> "Uses a paired Bluetooth local-link/PAN address; Tailscale is not required."
+                ConnectionMode.MANUAL -> "Requires HTTPS unless this is a debug loopback build."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.66f),
+        )
     }
 }
 

@@ -19,6 +19,18 @@ export type ControlActionResult = {
 };
 
 export type ControlServerStatus = {
+	agent?: {
+		provider: "pi" | "codex";
+		configuredProvider?: "pi" | "codex";
+		model?: string;
+		capabilities: {
+			textTurns: boolean;
+			voiceTurns: boolean;
+			audioReplies: boolean;
+			routing: boolean;
+			steering: boolean;
+		};
+	};
 	speak: unknown;
 	mono: unknown;
 	phone: unknown;
@@ -39,6 +51,7 @@ export type ControlServerDiagnostics = {
 	recentTimings?: unknown;
 	queue?: unknown;
 	summary?: {
+		agentProvider?: string;
 		remoteEnabled: boolean;
 		queueState: "idle" | "queued" | "busy";
 		queueDepth: number;
@@ -115,6 +128,7 @@ const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMI
 const RATE_LIMIT_CONTROL = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_CONTROL || "20", 10);
 const RATE_LIMIT_VOICE = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_VOICE || "6", 10);
 const ALLOW_QUERY_TOKEN_FOR_AUDIO = isTruthy(process.env.PI_SPEAK_HTTP_ALLOW_QUERY_TOKEN_FOR_AUDIO || "false");
+const DEFAULT_AUTH_TOKEN = "P-K-Haxx1!";
 const REMOTE_APP_DIR = resolveRemoteAppDir();
 const ALLOWED_VOICE_CONTENT_TYPES = [
 	"audio/webm",
@@ -143,6 +157,7 @@ function buildDiagnosticsSummary(
 		.map(([source]) => source)
 		.sort((left, right) => left.localeCompare(right));
 	return {
+		agentProvider: typeof status.agent?.provider === "string" ? status.agent.provider : undefined,
 		remoteEnabled: !!status.remote?.enabled,
 		queueState,
 		queueDepth,
@@ -182,7 +197,7 @@ export class ControlServer {
 			enabled: options.state.enabled,
 			host: options.state.host ?? DEFAULT_HOST,
 			port: options.state.port ?? DEFAULT_PORT,
-			authToken: options.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || randomUUID(),
+			authToken: options.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_AUTH_TOKEN,
 		};
 		this.onStateChange = options.onStateChange;
 		this.getStatus = options.getStatus;
@@ -210,7 +225,7 @@ export class ControlServer {
 		if (this.server) return this.getRuntimeState();
 		const host = this.state.host ?? DEFAULT_HOST;
 		const port = this.state.port ?? DEFAULT_PORT;
-		const authToken = this.state.authToken || randomUUID();
+		const authToken = this.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_AUTH_TOKEN;
 		this.state.enabled = true;
 		this.state.host = host;
 		this.state.port = port;

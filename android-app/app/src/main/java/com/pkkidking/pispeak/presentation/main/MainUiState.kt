@@ -1,6 +1,7 @@
 package com.pkkidking.pispeak.presentation.main
 
 import com.pkkidking.pispeak.BuildConfig
+import com.pkkidking.pispeak.domain.model.ConnectionMode
 import com.pkkidking.pispeak.domain.model.MachineProfile
 
 data class RecentTurnUiState(
@@ -45,6 +46,7 @@ enum class PlaybackState {
 data class MainUiState(
     val baseUrl: String = BuildConfig.DEFAULT_BASE_URL,
     val token: String = "",
+    val connectionMode: ConnectionMode = ConnectionMode.MANUAL,
     val workspacePath: String = "",
     val machineProfiles: List<MachineProfile> = emptyList(),
     val selectedMachineId: String? = null,

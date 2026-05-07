@@ -15,7 +15,7 @@ Date:
 Operator:
 Phone/device:
 Browser/app:
-Network path:
+Network path: Tailscale | HTTPS tunnel | Bluetooth local-link | local Wi-Fi
 Desktop host:
 Build / package source:
 General notes:
@@ -27,7 +27,8 @@ General notes:
 
 ```text
 [ ] P1 Desktop services reachable (/speak status, /phone status, /remote status)
-[ ] P2 /remote setup URL + Telegram pair code gathered
+[ ] P2 /remote setup URL or /remote setup bluetooth URL gathered
+[ ] P3 Telegram pair code gathered when Telegram is in scope
 Notes:
 ```
 

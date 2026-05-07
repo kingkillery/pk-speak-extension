@@ -23,6 +23,7 @@ _install.ps1
 pnpm-lock.yaml
 
 # Local Android / device-testing artifacts
+.verifier/
 android-app-*.png
 app-qr*.png
 window_dump*.xml

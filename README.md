@@ -69,6 +69,8 @@ Wake matching now has a sensitivity preset. Use `PI_SPEAK_WAKE_SENSITIVITY=low|m
 ### 3. Remote In From Your Phone With Telegram
 
 ```text
+/phone setup
+/phone token <bot-token>
 /phone on
 /phone code
 ```
@@ -81,12 +83,13 @@ Then in Telegram:
 
 This is the easiest remote path. It works well when you want reliability more than low latency.
 
-`PI_SPEAK_TELEGRAM_BOT_TOKEN` can point to an existing bot you already control. It does not need to be a fresh bot, but using a dedicated bot keeps the Pi workflow cleaner and easier to secure.
+`/phone setup` prints the running-session setup steps. If the token is not already in the environment, paste it with `/phone token <bot-token>`; the extension saves it, starts the bridge, and prints the `/link` code. `PI_SPEAK_TELEGRAM_BOT_TOKEN` can still point to an existing bot you already control.
 
 ### 4. Remote In From Your Phone With The Built-In Web App
 
 ```text
 /remote setup
+/remote setup bluetooth
 ```
 
 Then open one of these:
@@ -108,7 +111,15 @@ The web app:
 
 `/remote setup` is the one-command phone onboarding path. It starts the API if needed, prints a browser app URL with the token bootstrap parameter, and prints a native Android setup link using the `pi-speak://setup` deep link.
 
-For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel.
+For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel. If the phone is paired over Bluetooth networking/PAN instead, use `/remote setup bluetooth`; the Android app treats that as a Bluetooth local-link profile and does not require Tailscale.
+
+Optional Windows tray:
+
+```text
+/remote tray on
+```
+
+Right-click the tray icon and choose `Show setup QR code`. Scanning the QR opens the Android app with this computer's Tailscale endpoint, token, and saved machine profile metadata. Set `PI_SPEAK_TRAY=1` to start the tray automatically with `/remote on`.
 
 ## Main Commands
 
@@ -168,6 +179,8 @@ Controls the Telegram bridge.
 /phone on
 /phone off
 /phone status
+/phone setup
+/phone token <bot-token>
 /phone code
 /phone unpair
 ```
@@ -188,6 +201,10 @@ Controls the HTTP API and mobile web app.
 /remote status
 /remote token
 /remote setup
+/remote setup bluetooth
+/remote tray on
+/remote tray off
+/remote tray status
 ```
 
 Behavior:
@@ -231,6 +248,7 @@ Use `/sess ui` to open the interactive session manager pane in a separate termin
 For operator details, see:
 - `docs/VOICE_SESSION_BRIDGE.md`
 - `docs/SESSION_OPERATIONS.md`
+- `docs/CODEBASE_MAP.md`
 
 ## Architecture
 
@@ -338,6 +356,8 @@ Secure-origin rules:
 - random plain HTTP hostnames usually will not allow browser microphone access
 
 That is why Tailscale Serve or an HTTPS tunnel is the right remote path.
+
+Native Android can also use Bluetooth networking/PAN. Pair the phone with the desktop, start `/remote on`, run `/remote setup bluetooth`, then open the native setup link or select the built-in `Bluetooth / local link` profile and adjust the base URL to the desktop Bluetooth adapter IP if needed. Set `PI_SPEAK_BLUETOOTH_BASE_URL` before launching Pi Speak if you want `/remote setup bluetooth` to print a known adapter URL instead of the default `http://192.168.44.1:8767/`.
 
 ## HTTP API
 
@@ -684,6 +704,7 @@ For a compact operator worksheet, use `docs/REMOTE_VALIDATION_RUN_SHEET.md`.
 - [control-server.ts](./control-server.ts)
 - [listener/listener.py](./listener/listener.py)
 - [web/remote/index.html](./web/remote/index.html)
+- [docs/CODEBASE_MAP.md](./docs/CODEBASE_MAP.md)
 
 ## Release Notes
 

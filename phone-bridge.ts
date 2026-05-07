@@ -5,6 +5,7 @@ import { withAbortTimeout } from "./request-timeout.js";
 
 export type PhoneBridgeState = {
 	enabled: boolean;
+	botToken?: string;
 	linkedChatId?: string;
 	linkCode?: string;
 	lastUpdateId?: number;

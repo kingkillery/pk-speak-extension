@@ -28,7 +28,7 @@ class AppSettingsTest {
         )
 
         assertEquals(
-            "Use an HTTPS base URL. HTTP is only allowed for local debug endpoints.",
+            "Use an HTTPS base URL. HTTP is only allowed for local debug, approved Tailscale, or Bluetooth local-link endpoints.",
             settings.validate(allowInsecureLoopback = false),
         )
     }
@@ -36,13 +36,66 @@ class AppSettingsTest {
     @Test
     fun `debug loopback http is accepted`() {
         val settings = AppSettings(
-            baseUrl = "http://10.0.2.2:8767/",
+            baseUrl = "http://127.0.0.1:8767/",
             token = "token",
             requestAudioReplies = true,
             autoplayReplyAudio = true,
         )
 
         assertNull(settings.validate(allowInsecureLoopback = true))
+    }
+
+    @Test
+    fun `tailscale appserver http is accepted`() {
+        val settings = AppSettings(
+            baseUrl = "http://100.76.136.91:8767/",
+            token = "token",
+            requestAudioReplies = true,
+            autoplayReplyAudio = true,
+        )
+
+        assertNull(settings.validate(allowInsecureLoopback = false))
+    }
+
+    @Test
+    fun `tailscale mac http is accepted`() {
+        val settings = AppSettings(
+            baseUrl = "http://100.76.176.119:8767/",
+            token = "token",
+            requestAudioReplies = true,
+            autoplayReplyAudio = true,
+        )
+
+        assertNull(settings.validate(allowInsecureLoopback = false))
+    }
+
+    @Test
+    fun `bluetooth local-link http is accepted when bluetooth mode is selected`() {
+        val settings = AppSettings(
+            baseUrl = "http://192.168.44.12:8767/",
+            token = "token",
+            requestAudioReplies = true,
+            autoplayReplyAudio = true,
+            connectionMode = ConnectionMode.BLUETOOTH,
+        )
+
+        assertNull(settings.validate(allowInsecureLoopback = false))
+    }
+
+    @Test
+    fun `default machine profiles include selectable appserver mac and bluetooth targets`() {
+        assertEquals("tailscale-appserver", DefaultMachineProfiles[0].id)
+        assertEquals("MSI / appserver", DefaultMachineProfiles[0].name)
+        assertEquals("http://100.76.136.91:8767/", DefaultMachineProfiles[0].baseUrl)
+        assertEquals(ConnectionMode.TAILSCALE, DefaultMachineProfiles[0].connectionMode)
+        assertEquals("tailscale-mac", DefaultMachineProfiles[1].id)
+        assertEquals("Mac", DefaultMachineProfiles[1].name)
+        assertEquals("http://100.76.176.119:8767/", DefaultMachineProfiles[1].baseUrl)
+        assertEquals(ConnectionMode.TAILSCALE, DefaultMachineProfiles[1].connectionMode)
+        assertEquals("bluetooth-local", DefaultMachineProfiles[2].id)
+        assertEquals("Bluetooth / local link", DefaultMachineProfiles[2].name)
+        assertEquals("http://192.168.44.1:8767/", DefaultMachineProfiles[2].baseUrl)
+        assertEquals(ConnectionMode.BLUETOOTH, DefaultMachineProfiles[2].connectionMode)
     }
 
     @Test

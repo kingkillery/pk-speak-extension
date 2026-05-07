@@ -48,6 +48,9 @@ private enum class AppDestination(val label: String) {
 fun PiSpeakApp(
     bootstrapBaseUrl: String? = null,
     bootstrapToken: String? = null,
+    bootstrapMachineId: String? = null,
+    bootstrapProfileName: String? = null,
+    bootstrapConnectionMode: String? = null,
     appViewModel: AppViewModel = hiltViewModel(),
     mainViewModel: MainViewModel = hiltViewModel(),
 ) {
@@ -65,8 +68,14 @@ fun PiSpeakApp(
     }
     var currentDestination by rememberSaveable { mutableStateOf(AppDestination.Conversation) }
 
-    LaunchedEffect(bootstrapBaseUrl, bootstrapToken) {
-        mainViewModel.applyBootstrap(bootstrapBaseUrl, bootstrapToken)
+    LaunchedEffect(bootstrapBaseUrl, bootstrapToken, bootstrapMachineId, bootstrapProfileName, bootstrapConnectionMode) {
+        mainViewModel.applyBootstrap(
+            baseUrl = bootstrapBaseUrl,
+            token = bootstrapToken,
+            machineId = bootstrapMachineId,
+            profileName = bootstrapProfileName,
+            connectionMode = bootstrapConnectionMode,
+        )
     }
 
     PiSpeakTheme(
@@ -170,6 +179,7 @@ fun PiSpeakApp(
                     contentPadding = paddingValues,
                     onBaseUrlChanged = mainViewModel::onBaseUrlChanged,
                     onTokenChanged = mainViewModel::onTokenChanged,
+                    onConnectionModeChanged = mainViewModel::onConnectionModeChanged,
                     onWorkspacePathChanged = mainViewModel::onWorkspacePathChanged,
                     machineProfiles = uiState.machineProfiles,
                     selectedMachineId = uiState.selectedMachineId,

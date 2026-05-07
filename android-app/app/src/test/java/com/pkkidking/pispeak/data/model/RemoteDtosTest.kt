@@ -12,6 +12,10 @@ class RemoteDtosTest {
         val response = StatusResponseDto(
             ok = true,
             status = StatusDto(
+                agent = AgentStatusDto(
+                    provider = "codex",
+                    model = "gpt-test",
+                ),
                 speak = SpeakStatusDto(
                     enabled = true,
                     provider = null,
@@ -33,6 +37,8 @@ class RemoteDtosTest {
 
         assertTrue(domain.remoteEnabled)
         assertEquals(8767, domain.remotePort)
+        assertEquals("codex", domain.agentProvider)
+        assertEquals("gpt-test", domain.agentModel)
         assertTrue(domain.speakEnabled)
         assertEquals("edge", domain.speakProvider)
         assertTrue(domain.monoRunning)
@@ -48,6 +54,8 @@ class RemoteDtosTest {
 
         assertFalse(domain.remoteEnabled)
         assertEquals(null, domain.remotePort)
+        assertEquals(null, domain.agentProvider)
+        assertEquals(null, domain.agentModel)
         assertEquals(null, domain.defaultTarget)
         assertEquals(null, domain.currentSession)
         assertTrue(domain.availableTargets.isEmpty())
@@ -58,6 +66,7 @@ class RemoteDtosTest {
         val summary = StatusResponseDto(
             ok = true,
             status = StatusDto(
+                agent = AgentStatusDto(provider = "pi"),
                 remote = RemoteStatusDto(
                     enabled = true,
                     port = 8767,
@@ -69,7 +78,7 @@ class RemoteDtosTest {
         ).toDomain()
 
         assertEquals(
-            "Remote on at port 8767. Speak off, mono off, phone off, route hermes.",
+            "Remote on at port 8767. Agent pi. Speak off, mono off, phone off, route hermes.",
             summary.summaryText(),
         )
     }

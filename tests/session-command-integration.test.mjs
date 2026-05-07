@@ -433,3 +433,20 @@ test("typed /sess rename emits a session event with source='command'", async () 
 		assert.equal(rename.payload.to, "command-bugfix");
 	});
 });
+
+test("phone setup explains in-session Telegram configuration", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const phone = pi.commands.get("phone");
+		assert.ok(phone);
+
+		const ctx = makeCtx("/sessions/main.jsonl");
+		await phone.handler("setup", ctx);
+
+		const message = ctx.notifications.at(-1)?.message || "";
+		assert.match(message, /@BotFather/);
+		assert.match(message, /\/phone token <bot-token>/);
+		assert.match(message, /\/phone code/);
+	});
+});
