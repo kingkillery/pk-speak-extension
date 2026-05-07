@@ -396,7 +396,7 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 
 	options.onPhase?.("rewrite");
 	const rewritten = isRewriteEnabled(options.state)
-		? await rewriteForSpeech(options.text, options.signal)
+		? await rewriteForSpeech(options.text, options.signal).catch(() => ({ text: options.text, applied: false }))
 		: { text: options.text, applied: false };
 
 	throwIfAborted(options.signal);
