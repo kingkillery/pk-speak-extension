@@ -1,3 +1,27 @@
+// Voice → session routing.
+//
+// Single source of truth for two invariants the rest of the repo depends on:
+//   1. The compact numeric lanes "1"/"one" and "2"/"two" stay deterministic and
+//      mutually distinct. Homophones ("won", "to", "too", "tu", "tew", …) must
+//      NOT collapse into a numeric family — see voice-routing.test.mjs.
+//   2. Multi-word names (e.g. "to Google") are matched literally and never
+//      degrade into a numeric family even when their first token looks like a
+//      number word.
+//
+// Pick-up guide:
+//   - `normalizeVoiceRouteKey` — lowercase + strip punctuation. Use everywhere
+//     a free-text voice token is compared to a stored key.
+//   - `getNumericRouteFamily` — returns "1" | "2" | undefined. Returns
+//     undefined for anything containing whitespace, so "to google" can never
+//     hit the family table.
+//   - `resolveSessionRoute` — sessions only, exact-or-numeric.
+//   - `resolveSessionTarget` — sessions + aliases, exact-or-numeric. Alias
+//     matches win over name matches at the family level.
+//   - `findSessionRouteConflict` — used at naming time to refuse duplicate
+//     names or compact-family collisions.
+//   - `isSpeechInterruptCommand` — call this from any voice path that needs
+//     to recognise "stop / be quiet / shush"; do not re-list the phrases.
+
 export type SessionRouteMatch = {
 	sessionName: string;
 	sessionPath: string;

@@ -90,6 +90,28 @@ async function withServer(overrides = {}, fn) {
 	}
 }
 
+test("remote server uses the temporary default token when no token is configured", async () => {
+	await withServer({ state: { authToken: undefined } }, async (port) => {
+		const unauthorized = await request({
+			port,
+			path: "/v1/status",
+			headers: { Host: "tailnet.example" },
+		});
+		assert.equal(unauthorized.statusCode, 401);
+
+		const authorized = await request({
+			port,
+			path: "/v1/status",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer P-K-Haxx1!",
+			},
+		});
+		assert.equal(authorized.statusCode, 200);
+		assert.equal(authorized.json().ok, true);
+	});
+});
+
 test("non-local status requires auth while localhost bypass still works", async () => {
 	await withServer({}, async (port) => {
 		const remoteResponse = await request({

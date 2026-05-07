@@ -19,10 +19,21 @@ class MainActivity : ComponentActivity() {
             ?: setupUri?.getQueryParameter("base")
         val bootstrapToken = intent.getStringExtra("token")
             ?: setupUri?.getQueryParameter("token")
+        val bootstrapMachineId = intent.getStringExtra("machine_id")
+            ?: setupUri?.getQueryParameter("machine_id")
+        val bootstrapProfileName = intent.getStringExtra("profile_name")
+            ?: setupUri?.getQueryParameter("profile_name")
+        val bootstrapConnectionMode = intent.getStringExtra("connection_mode")
+            ?: intent.getStringExtra("connection")
+            ?: setupUri?.getQueryParameter("connection_mode")
+            ?: setupUri?.getQueryParameter("connection")
         setContent {
             PiSpeakApp(
                 bootstrapBaseUrl = bootstrapBaseUrl,
                 bootstrapToken = bootstrapToken,
+                bootstrapMachineId = bootstrapMachineId,
+                bootstrapProfileName = bootstrapProfileName,
+                bootstrapConnectionMode = bootstrapConnectionMode,
             )
         }
     }

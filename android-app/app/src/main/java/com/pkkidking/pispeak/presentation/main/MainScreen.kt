@@ -34,14 +34,10 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedTextField
@@ -49,9 +45,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -64,6 +58,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.pkkidking.pispeak.domain.model.ConnectionMode
 import com.pkkidking.pispeak.domain.model.MachineProfile
 
 private val ScreenPadding = 20.dp
@@ -95,6 +90,14 @@ fun ConversationScreen(
     val needsSetup = uiState.baseUrl.isBlank() || uiState.token.isBlank()
     val quickReady = uiState.connectionState == ConnectionState.Connected && !needsSetup
     val isSecure = remember(uiState.baseUrl) { uiState.baseUrl.trim().startsWith("https://") }
+    val trustedConnection = isSecure || uiState.connectionMode == ConnectionMode.TAILSCALE || uiState.connectionMode == ConnectionMode.BLUETOOTH
+    val securityLabel = when {
+        needsSetup -> "Setup required"
+        isSecure -> "Secure (https)"
+        uiState.connectionMode == ConnectionMode.TAILSCALE -> "Tailscale"
+        uiState.connectionMode == ConnectionMode.BLUETOOTH -> "Bluetooth link"
+        else -> "HTTPS preferred"
+    }
     val focusManager = LocalFocusManager.current
 
     Column(
@@ -108,7 +111,8 @@ fun ConversationScreen(
         WalkieHeader(
             needsSetup = needsSetup,
             currentSession = uiState.currentSession,
-            secure = isSecure,
+            securityLabel = securityLabel,
+            trustedConnection = trustedConnection,
             statusSummary = uiState.statusSummary,
             speakProvider = uiState.speakProvider,
             speakEnabled = uiState.speakEnabled,
@@ -150,7 +154,7 @@ fun ConversationScreen(
         }
 
         SessionQuickPanel(
-            isSecure = isSecure,
+            connectionTrusted = trustedConnection,
             tokenLoaded = uiState.token.isNotBlank(),
             currentSession = uiState.currentSession,
             connectionState = uiState.connectionState,
@@ -227,7 +231,8 @@ fun ConversationScreen(
 private fun WalkieHeader(
     needsSetup: Boolean,
     currentSession: String?,
-    secure: Boolean,
+    securityLabel: String,
+    trustedConnection: Boolean,
     statusSummary: String,
     speakProvider: String?,
     speakEnabled: Boolean,
@@ -236,12 +241,6 @@ private fun WalkieHeader(
     turnPhase: TurnPhase,
     onRefresh: () -> Unit,
 ) {
-    val secureText = when {
-        needsSetup -> "Setup required"
-        secure -> "Secure (https)"
-        else -> "Allow HTTPS preferred"
-    }
-
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = PanelShape,
@@ -284,8 +283,8 @@ private fun WalkieHeader(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatusPill(
                     label = "Security",
-                    value = secureText,
-                    strong = secure,
+                    value = securityLabel,
+                    strong = trustedConnection,
                     modifier = Modifier.weight(1f),
                 )
                 StatusPill(
@@ -449,16 +448,15 @@ private fun QuickConnectionPanel(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MachinePickerPanel(
     machineProfiles: List<MachineProfile>,
     selectedMachineId: String?,
     onMachineSelected: (String?) -> Unit,
 ) {
-    var expanded by remember { mutableStateOf(false) }
     val selectedMachine = machineProfiles.firstOrNull { it.id == selectedMachineId }
-    val selectedMachineLabel = selectedMachine?.name ?: "Direct connection"
+    val selectedMachineLabel = selectedMachine?.name ?: "Manual connection"
+    val selectedEndpoint = selectedMachine?.baseUrl ?: "Manual gateway"
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -473,59 +471,69 @@ private fun MachinePickerPanel(
             modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Machine", style = MaterialTheme.typography.titleMedium)
+            Text("Machine selector", style = MaterialTheme.typography.titleMedium)
             Text(
-                text = "Pick a saved machine profile to swap machines in one tap.",
+                text = "Choose the machine this phone should control.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
             )
-            ExposedDropdownMenuBox(
-                expanded = expanded,
-                onExpandedChange = { expanded = !expanded },
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedTextField(
-                    value = selectedMachineLabel,
-                    onValueChange = {},
-                    readOnly = true,
-                    singleLine = true,
-                    label = { Text("Machine profile") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .menuAnchor(MenuAnchorType.PrimaryNotEditable),
-                    trailingIcon = {
-                        ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
-                    },
-                )
-                ExposedDropdownMenu(
-                    expanded = expanded,
-                    onDismissRequest = { expanded = false },
-                ) {
-                    DropdownMenuItem(
-                        text = { Text("Direct connection") },
-                        onClick = {
-                            expanded = false
-                            onMachineSelected(null)
+                item {
+                    FilterChip(
+                        selected = selectedMachine == null,
+                        onClick = { onMachineSelected(null) },
+                        label = { Text("Manual") },
+                    )
+                }
+                items(machineProfiles, key = { it.id }) { profile ->
+                    FilterChip(
+                        selected = profile.id == selectedMachineId,
+                        onClick = { onMachineSelected(profile.id) },
+                        label = {
+                            Text(
+                                text = profile.name.ifBlank { "Machine" },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         },
                     )
-                    machineProfiles.forEach { profile ->
-                        DropdownMenuItem(
-                            text = {
-                                Text("${profile.name.ifBlank { "Machine" }} - ${profile.baseUrl}")
-                            },
-                            onClick = {
-                                expanded = false
-                                onMachineSelected(profile.id)
-                            },
+                }
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                ),
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = selectedMachineLabel,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = selectedEndpoint,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (selectedMachine?.token.isNullOrBlank()) {
+                        Text(
+                            text = "Add the remote token once for this machine in Settings.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
                         )
                     }
                 }
-            }
-            if (selectedMachine != null) {
-                Text(
-                    text = "Selected: ${selectedMachine.name} · ${selectedMachine.baseUrl}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
-                )
             }
         }
     }
@@ -533,7 +541,7 @@ private fun MachinePickerPanel(
 
 @Composable
 private fun SessionQuickPanel(
-    isSecure: Boolean,
+    connectionTrusted: Boolean,
     tokenLoaded: Boolean,
     currentSession: String?,
     connectionState: ConnectionState,
@@ -564,7 +572,7 @@ private fun SessionQuickPanel(
                     append("Session: ")
                     append(currentSession ?: "unknown")
                     append(" · ")
-                    append(if (isSecure && tokenLoaded) "secure and authenticated" else "setup needed")
+                    append(if (connectionTrusted && tokenLoaded) "ready and authenticated" else "setup needed")
                     append(" · status ")
                     append(connectionState.label())
                 },

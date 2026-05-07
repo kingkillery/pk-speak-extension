@@ -18,7 +18,7 @@ Date:
 Operator:
 Phone/device:
 Browser/app:
-Network path: Tailscale | HTTPS tunnel | local Wi-Fi
+Network path: Tailscale | HTTPS tunnel | Bluetooth local-link | local Wi-Fi
 Desktop host:
 Pi version / package source:
 Notes:

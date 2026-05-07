@@ -21,6 +21,8 @@ export type CodexAgentProviderOptions = {
 	model?: string;
 	cwd?: string;
 	timeoutMs?: number;
+	approvalPolicy?: string;
+	sandbox?: string;
 	spawnImpl?: SpawnLike;
 	env?: NodeJS.ProcessEnv;
 };
@@ -56,6 +58,8 @@ export class CodexAgentProvider implements AgentProvider {
 	private readonly model?: string;
 	private readonly cwd: string;
 	private readonly timeoutMs: number;
+	private readonly approvalPolicy: string;
+	private readonly sandbox: string;
 	private readonly spawnImpl: SpawnLike;
 	private readonly env?: NodeJS.ProcessEnv;
 	private child?: ChildProcessWithoutNullStreams;
@@ -73,6 +77,8 @@ export class CodexAgentProvider implements AgentProvider {
 		this.model = options.model;
 		this.cwd = options.cwd || process.cwd();
 		this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
+		this.approvalPolicy = options.approvalPolicy || "never";
+		this.sandbox = options.sandbox || "danger-full-access";
 		this.spawnImpl = options.spawnImpl || (spawn as unknown as SpawnLike);
 		this.env = options.env;
 	}
@@ -257,8 +263,8 @@ export class CodexAgentProvider implements AgentProvider {
 		const response = await this.request("thread/start", {
 			cwd: options.cwd || this.cwd,
 			model: options.model || this.model || null,
-			approvalPolicy: "never",
-			sandbox: "workspace-write",
+			approvalPolicy: this.approvalPolicy,
+			sandbox: this.sandbox,
 			developerInstructions: options.instructions || null,
 			sessionStartSource: "startup",
 		}, options.timeoutMs);

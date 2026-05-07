@@ -27,6 +27,8 @@ export type AgentProviderConfig = {
 	codexBin: string;
 	piBin: string;
 	model?: string;
+	approvalPolicy: string;
+	sandbox: string;
 };
 
 export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env): AgentProviderConfig {
@@ -38,6 +40,8 @@ export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env)
 		codexBin: env.CODEX_BIN?.trim() || "codex",
 		piBin: env.PI_BIN?.trim() || "pi",
 		model,
+		approvalPolicy: env.AGENT_APPROVAL_POLICY?.trim() || env.CODEX_APPROVAL_POLICY?.trim() || "never",
+		sandbox: env.AGENT_SANDBOX?.trim() || env.CODEX_SANDBOX?.trim() || "danger-full-access",
 	};
 }
 

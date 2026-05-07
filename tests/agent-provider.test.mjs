@@ -12,6 +12,8 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 		codexBin: "codex",
 		piBin: "pi",
 		model: undefined,
+		approvalPolicy: "never",
+		sandbox: "danger-full-access",
 	});
 	assert.deepEqual(resolveAgentProviderConfig({
 		AGENT_PROVIDER: "codex",
@@ -23,6 +25,8 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 		codexBin: "C:/tools/codex.cmd",
 		piBin: "C:/tools/pi.cmd",
 		model: "gpt-test",
+		approvalPolicy: "never",
+		sandbox: "danger-full-access",
 	});
 });
 

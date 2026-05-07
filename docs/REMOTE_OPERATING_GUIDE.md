@@ -15,9 +15,13 @@ Good for:
 Start it:
 
 ```text
+/phone setup
+/phone token <bot-token>
 /phone on
 /phone code
 ```
+
+If the bot token is already configured in the environment, `/phone setup` will say so and point you straight to the pair code.
 
 ### Use the built-in web app if you want the best remote voice UX
 
@@ -41,6 +45,16 @@ https://<your-url>/app/
 ```
 
 `/remote setup` prints a token-bootstrap browser URL and a native Android `pi-speak://setup` link. Use that first so the phone does not need manual token copying.
+
+### Connect over Bluetooth local-link
+
+Pair the phone with the desktop using Bluetooth networking/PAN, then run:
+
+```text
+/remote setup bluetooth
+```
+
+The native Android setup link marks the profile as Bluetooth, so Tailscale is not required. If your desktop Bluetooth adapter uses a different IP than the printed URL, edit the Base URL in Android settings and keep the connection type set to Bluetooth. Set `PI_SPEAK_BLUETOOTH_BASE_URL` before launching Pi Speak if you already know the adapter URL.
 
 ### Connect over Tailscale
 

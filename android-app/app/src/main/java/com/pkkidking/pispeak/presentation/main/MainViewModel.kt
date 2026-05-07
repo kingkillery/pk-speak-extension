@@ -6,6 +6,7 @@ import com.pkkidking.pispeak.BuildConfig
 import com.pkkidking.pispeak.core.AppAudioPlayer
 import com.pkkidking.pispeak.core.AppAudioRecorder
 import com.pkkidking.pispeak.domain.model.AppSettings
+import com.pkkidking.pispeak.domain.model.ConnectionMode
 import com.pkkidking.pispeak.domain.model.MachineProfile
 import com.pkkidking.pispeak.domain.model.validate
 import com.pkkidking.pispeak.domain.usecase.GetStatusUseCase
@@ -46,6 +47,7 @@ class MainViewModel @Inject constructor(
             it.copy(
                 baseUrl = settings.baseUrl,
                 token = settings.token,
+                connectionMode = settings.connectionMode,
                 workspacePath = settings.workspacePath,
                 machineProfiles = settings.machineProfiles,
                 selectedMachineId = settings.selectedMachineId,
@@ -57,12 +59,47 @@ class MainViewModel @Inject constructor(
         refreshStatus()
     }
 
-    fun applyBootstrap(baseUrl: String?, token: String?) {
+    fun applyBootstrap(
+        baseUrl: String?,
+        token: String?,
+        machineId: String? = null,
+        profileName: String? = null,
+        connectionMode: String? = null,
+    ) {
         if (baseUrl.isNullOrBlank() && token.isNullOrBlank()) return
+        val nextBaseUrl = baseUrl?.trim().takeUnless { it.isNullOrBlank() } ?: uiState.value.baseUrl
+        val nextToken = token?.trim().takeUnless { it.isNullOrBlank() } ?: uiState.value.token
+        val requestedMachineId = machineId?.trim().takeUnless { it.isNullOrBlank() }
+        val requestedProfileName = profileName?.trim().takeUnless { it.isNullOrBlank() }
+        val nextConnectionMode = ConnectionMode.fromStorage(
+            connectionMode,
+            inferConnectionMode(requestedMachineId, requestedProfileName, nextBaseUrl),
+        )
+        val profileId = requestedMachineId
+            ?: uiState.value.machineProfiles.firstOrNull { it.baseUrl == nextBaseUrl }?.id
+            ?: UUID.randomUUID().toString()
+        val profileLabel = requestedProfileName
+            ?: uiState.value.machineProfiles.firstOrNull { it.id == profileId || it.baseUrl == nextBaseUrl }?.name
+            ?: "Machine ${uiState.value.machineProfiles.size + 1}"
+        val nextProfiles = uiState.value.machineProfiles
+            .filterNot { it.id == profileId || it.baseUrl == nextBaseUrl }
+            .plus(
+                MachineProfile(
+                    id = profileId,
+                    name = profileLabel,
+                    baseUrl = nextBaseUrl,
+                    token = nextToken,
+                    connectionMode = nextConnectionMode,
+                    workspacePath = uiState.value.workspacePath.trim(),
+                ),
+            )
         val nextState = uiState.value.copy(
-            baseUrl = baseUrl?.trim().takeUnless { it.isNullOrBlank() } ?: uiState.value.baseUrl,
-            token = token?.trim().takeUnless { it.isNullOrBlank() } ?: uiState.value.token,
-            selectedMachineId = null,
+            baseUrl = nextBaseUrl,
+            token = nextToken,
+            connectionMode = nextConnectionMode,
+            machineProfiles = nextProfiles,
+            selectedMachineId = profileId,
+            machineProfileName = profileLabel,
         )
         _uiState.value = nextState
         addDiagnostic("setup", "Setup link applied.")
@@ -71,13 +108,20 @@ class MainViewModel @Inject constructor(
     }
 
     fun onBaseUrlChanged(value: String) = _uiState.update {
-        it.copy(baseUrl = value, selectedMachineId = null, machineProfileName = "")
+        it.copy(baseUrl = value)
     }
     fun onTokenChanged(value: String) = _uiState.update {
-        it.copy(token = value, selectedMachineId = null, machineProfileName = "")
+        it.copy(token = value)
     }
     fun onWorkspacePathChanged(value: String) = _uiState.update {
-        it.copy(workspacePath = value, selectedMachineId = null, machineProfileName = "")
+        it.copy(workspacePath = value)
+    }
+    fun onConnectionModeChanged(value: ConnectionMode) = _uiState.update {
+        it.copy(
+            connectionMode = value,
+            selectedMachineId = null,
+            machineProfileName = if (value == ConnectionMode.BLUETOOTH) "Bluetooth / local link" else "",
+        )
     }
     fun onMachineSelected(machineId: String?) {
         val profiles = uiState.value.machineProfiles
@@ -86,6 +130,7 @@ class MainViewModel @Inject constructor(
                 it.copy(
                     selectedMachineId = null,
                     machineProfileName = "",
+                    connectionMode = ConnectionMode.MANUAL,
                 )
             }
             return
@@ -97,6 +142,7 @@ class MainViewModel @Inject constructor(
                 it.copy(
                     selectedMachineId = null,
                     machineProfileName = "",
+                    connectionMode = ConnectionMode.MANUAL,
                 )
             }
             return
@@ -108,6 +154,7 @@ class MainViewModel @Inject constructor(
                 machineProfileName = selectedProfile.name,
                 baseUrl = selectedProfile.baseUrl,
                 token = selectedProfile.token,
+                connectionMode = selectedProfile.connectionMode,
                 workspacePath = selectedProfile.workspacePath,
             )
         }
@@ -138,6 +185,7 @@ class MainViewModel @Inject constructor(
                         name = profileName,
                         baseUrl = baseUrl,
                         token = token,
+                        connectionMode = uiState.value.connectionMode,
                         workspacePath = workspacePath,
                     )
                 } else {
@@ -150,6 +198,7 @@ class MainViewModel @Inject constructor(
                 name = profileName,
                 baseUrl = baseUrl,
                 token = token,
+                connectionMode = uiState.value.connectionMode,
                 workspacePath = workspacePath,
             )
         }
@@ -435,6 +484,7 @@ class MainViewModel @Inject constructor(
     private fun currentSettings(): AppSettings = AppSettings(
         baseUrl = uiState.value.baseUrl.trim(),
         token = uiState.value.token.trim(),
+        connectionMode = uiState.value.connectionMode,
         selectedMachineId = uiState.value.selectedMachineId,
         machineProfiles = uiState.value.machineProfiles,
         machineProfileName = uiState.value.machineProfileName,
@@ -444,6 +494,17 @@ class MainViewModel @Inject constructor(
     )
 
     private fun activeTarget(): String? = uiState.value.targetName.trim().takeIf { it.isNotEmpty() }
+
+    private fun inferConnectionMode(machineId: String?, profileName: String?, baseUrl: String): ConnectionMode {
+        val normalizedId = machineId?.lowercase().orEmpty()
+        val normalizedName = profileName?.lowercase().orEmpty()
+        val normalizedBaseUrl = baseUrl.lowercase()
+        return when {
+            "bluetooth" in normalizedId || "bluetooth" in normalizedName -> ConnectionMode.BLUETOOTH
+            "tailscale" in normalizedId || "tailscale" in normalizedName || "100." in normalizedBaseUrl -> ConnectionMode.TAILSCALE
+            else -> uiState.value.connectionMode
+        }
+    }
 
     private fun validatedSettings(): AppSettings? {
         val settings = currentSettings()

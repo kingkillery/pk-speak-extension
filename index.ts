@@ -2,14 +2,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { join } from "node:path";
-import { networkInterfaces, tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { ControlServer, type ControlActionResult, type ControlServerState } from "./control-server.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { requestGracefulChildShutdown } from "./listener-control.js";
-import { findSessionRouteConflict, listKnownTargets, resolveSessionRoute, resolveSessionTarget } from "./voice-routing.js";
+import { findSessionRouteConflict, isSpeechInterruptCommand, listKnownTargets, resolveSessionRoute, resolveSessionTarget } from "./voice-routing.js";
 import {
 	clearWakeAlias,
 	describeSessionRoutingStore,
@@ -28,6 +28,7 @@ import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js"
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { PiAgentProvider } from "./pi-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
+import { startRemoteTray, type RemoteTrayRuntime } from "./tray-controller.js";
 import {
 	describeTtsProvider,
 	getAudioMimeType,
@@ -120,6 +121,10 @@ const PHONE_TURN_WAIT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_PHONE_WA
 const DEFAULT_REMOTE_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
 const PUBLIC_REMOTE_BASE_URL = process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim() || "";
+const DEFAULT_REMOTE_AUTH_TOKEN = "P-K-Haxx1!";
+const TAILSCALE_APPSERVER_IP = "100.76.136.91";
+const TAILSCALE_MAC_IP = "100.76.176.119";
+const DEFAULT_BLUETOOTH_IP = "192.168.44.1";
 const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim() || process.env.AGENT_WORKSPACE?.trim() || "";
 const DEFAULT_VOICE = "adam";
 const SPEECH_MODE_PROMPT = `Activate CodeChat mode for this conversation.
@@ -183,34 +188,61 @@ $player.Close()
 	return { command: "powershell.exe", args: ["-NoProfile", "-Command", ps] };
 }
 
-function getLanIPv4Addresses() {
-	const interfaces = networkInterfaces();
-	const addresses: string[] = [];
-	for (const entries of Object.values(interfaces)) {
-		for (const entry of entries || []) {
-			if (entry.family === "IPv4" && !entry.internal) addresses.push(entry.address);
-		}
-	}
-	return [...new Set(addresses)].sort((a, b) => a.localeCompare(b));
-}
-
 function normalizeBaseUrl(value: string) {
 	return value.endsWith("/") ? value : `${value}/`;
 }
 
-function buildRemoteSetupUrls(host: string, port: number, token: string) {
+function isTruthy(value: string | undefined | null) {
+	if (!value) return false;
+	return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+}
+
+function getDefaultTailscaleBaseUrl(port: number) {
+	const configured =
+		process.env.PI_SPEAK_TRAY_BASE_URL?.trim() ||
+		process.env.PI_SPEAK_TAILSCALE_BASE_URL?.trim() ||
+		process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim();
+	if (configured) return normalizeBaseUrl(configured);
+	const address = platform() === "darwin" ? TAILSCALE_MAC_IP : TAILSCALE_APPSERVER_IP;
+	return `http://${address}:${port}/`;
+}
+
+function getDefaultBluetoothBaseUrl(port: number) {
+	const configured = process.env.PI_SPEAK_BLUETOOTH_BASE_URL?.trim();
+	if (configured) return normalizeBaseUrl(configured);
+	return `http://${DEFAULT_BLUETOOTH_IP}:${port}/`;
+}
+
+function getSetupProfileForBaseUrl(baseUrl: string, mode: "tailscale" | "bluetooth" = "tailscale") {
+	if (mode === "bluetooth") {
+		return { machineId: "bluetooth-local", profileName: "Bluetooth / local link", connectionMode: "bluetooth" };
+	}
+	if (baseUrl.includes(TAILSCALE_MAC_IP)) {
+		return { machineId: "tailscale-mac", profileName: "Mac", connectionMode: "tailscale" };
+	}
+	return { machineId: "tailscale-appserver", profileName: "MSI / appserver", connectionMode: "tailscale" };
+}
+
+function buildRemoteSetupUrls(host: string, port: number, token: string, mode: "tailscale" | "bluetooth" = "tailscale") {
 	const publicBase = PUBLIC_REMOTE_BASE_URL ? normalizeBaseUrl(PUBLIC_REMOTE_BASE_URL) : "";
-	const hostUrls =
-		host === "0.0.0.0" || host === "::"
-			? [
-				`http://localhost:${port}/`,
-				...getLanIPv4Addresses().map((address) => `http://${address}:${port}/`),
-			]
-			: [`http://${host}:${port}/`];
-	const baseUrls = [...new Set([publicBase, ...hostUrls].filter(Boolean))];
+	const fallbackBase = getDefaultTailscaleBaseUrl(port);
+	const bluetoothBase = getDefaultBluetoothBaseUrl(port);
+	const hostBase = host && host !== "0.0.0.0" && host !== "::" && host.startsWith("100.")
+		? `http://${host}:${port}/`
+		: "";
+	const baseUrls = mode === "bluetooth"
+		? [...new Set([bluetoothBase].filter(Boolean))]
+		: [...new Set([publicBase, hostBase, fallbackBase].filter(Boolean))];
 	const browserUrls = baseUrls.map((baseUrl) => `${baseUrl}app/?token=${encodeURIComponent(token)}`);
 	const appSetupUrls = baseUrls.map((baseUrl) => {
-		const params = new URLSearchParams({ base_url: baseUrl, token });
+		const profile = getSetupProfileForBaseUrl(baseUrl, mode);
+		const params = new URLSearchParams({
+			base_url: baseUrl,
+			token,
+			machine_id: profile.machineId,
+			profile_name: profile.profileName,
+			connection_mode: profile.connectionMode,
+		});
 		return `pi-speak://setup?${params.toString()}`;
 	});
 	return { baseUrls, browserUrls, appSetupUrls };
@@ -285,8 +317,14 @@ function getErrorMessage(error: unknown) {
 	return String(error);
 }
 
-function getTelegramBotToken() {
-	return process.env.PI_SPEAK_TELEGRAM_BOT_TOKEN?.trim() || process.env.TELEGRAM_BOT_TOKEN?.trim() || "";
+function getTelegramBotToken(state?: PhoneBridgeState) {
+	return process.env.PI_SPEAK_TELEGRAM_BOT_TOKEN?.trim() || process.env.TELEGRAM_BOT_TOKEN?.trim() || state?.botToken?.trim() || "";
+}
+
+function maskToken(value: string) {
+	const trimmed = value.trim();
+	if (trimmed.length <= 8) return "[set]";
+	return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
 }
 
 function isListenerEvent(value: unknown): value is ListenerEvent {
@@ -336,11 +374,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let phoneBridge: TelegramPhoneBridge | undefined;
 	let phoneState: PhoneBridgeState = { enabled: false };
 	let remoteServer: ControlServer | undefined;
+	let remoteTray: RemoteTrayRuntime | undefined;
 	let remoteState: RemoteState = {
 		enabled: false,
 		host: DEFAULT_REMOTE_HOST,
 		port: DEFAULT_REMOTE_PORT,
-		authToken: process.env.PI_SPEAK_HTTP_TOKEN || undefined,
+		authToken: process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_REMOTE_AUTH_TOKEN,
 	};
 	let remoteDefaultTarget = remoteState.defaultTarget;
 	let pendingRemoteTurn: PendingRemoteTurn | undefined;
@@ -355,6 +394,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		codexBin: agentProviderConfig.codexBin,
 		model: agentProviderConfig.model,
 		cwd: DEFAULT_AGENT_CWD || process.cwd(),
+		approvalPolicy: agentProviderConfig.approvalPolicy,
+		sandbox: agentProviderConfig.sandbox,
 	});
 	const getAgentProvider = (): AgentProvider =>
 		agentProviderConfig.provider === "codex" ? codexAgentProvider : piAgentProvider;
@@ -619,6 +660,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const syncRemoteState = (patch: Partial<RemoteState>, persist = false) => {
 		remoteState = { ...remoteState, ...patch };
+		remoteState.authToken = process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_REMOTE_AUTH_TOKEN;
 		remoteDefaultTarget = remoteState.defaultTarget;
 		if (persist) persistRemoteState();
 		updateRemoteStatus();
@@ -982,6 +1024,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const runtimeStatus = phoneBridge?.getStatus();
 		const linked = runtimeStatus?.linkedChatId || phoneState.linkedChatId;
 		const linkCode = runtimeStatus?.linkCode || phoneState.linkCode;
+		const token = getTelegramBotToken(phoneState);
 		const monoStatus = !monoActive
 			? "off"
 			: voiceInputActive
@@ -992,6 +1035,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const rewriteStatus = isRewriteEnabled(getSpeakRuntimeState()) ? "rewrite on" : "rewrite off";
 		return [
 			`Phone bridge ${phoneState.enabled ? "running" : "stopped"}.`,
+			token ? `Telegram token: ${maskToken(token)}.` : "Telegram token: not configured.",
 			linked ? "Phone is linked." : `Awaiting link code ${linkCode || "unknown"}.`,
 			`Speech replies: ${speakState.enabled ? "on" : "off"} via ${describeTtsProvider(getSpeakRuntimeState())} (${rewriteStatus}).`,
 			`Mono listener: ${monoStatus}.`,
@@ -1004,11 +1048,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 	};
 
 	const startPhoneBridge = async (ctx?: any, quiet = false) => {
-		const token = getTelegramBotToken();
+		const token = getTelegramBotToken(phoneState);
 		if (!token) {
 			const target = ctx || lastCtx;
 			target?.ui?.notify?.(
-				"Set PI_SPEAK_TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN before enabling /phone",
+				"Telegram is not configured. Run /phone setup, then /phone token <bot-token>.",
 				"error",
 			);
 			return false;
@@ -1127,6 +1171,22 @@ export default function speakExtension(pi: ExtensionAPI) {
 		lastError: phoneState.lastError,
 	});
 
+	const getAgentStatus = () => {
+		const provider = getAgentProvider().name;
+		return {
+			provider,
+			configuredProvider: agentProviderConfig.provider,
+			model: agentProviderConfig.model,
+			capabilities: {
+				textTurns: true,
+				voiceTurns: true,
+				audioReplies: true,
+				routing: provider === "pi",
+				steering: true,
+			},
+		};
+	};
+
 	const getRemoteStatus = () => {
 		const runtime = remoteServer?.getRuntimeState();
 		const queue = remoteTurnManager.getSnapshot();
@@ -1148,6 +1208,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const token = remoteServer?.getRuntimeState().authToken || remoteState.authToken || "";
 		return [
 			`Remote API ${status.enabled ? "running" : "stopped"}.`,
+			`Agent: ${getAgentStatus().provider}.`,
 			`Bind: ${status.host}:${status.port}.`,
 			token ? `Token: ${token}.` : "Token: not required.",
 			status.defaultTarget ? `Route target: ${status.defaultTarget}.` : "Route target: current session.",
@@ -1157,22 +1218,64 @@ export default function speakExtension(pi: ExtensionAPI) {
 		].join(" ");
 	};
 
-	const getRemoteSetupText = () => {
+	const getRemoteSetupText = (mode: "tailscale" | "bluetooth" = "tailscale") => {
 		const runtime = remoteServer?.getRuntimeState();
 		const status = getRemoteStatus();
 		const token = runtime?.authToken || remoteState.authToken || "";
-		const urls = buildRemoteSetupUrls(status.host, status.port, token);
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode);
 		const current = status.currentSession || "current session";
 		const route = status.defaultTarget || current;
 		return [
-			"Remote setup is ready.",
+			mode === "bluetooth" ? "Bluetooth remote setup is ready." : "Remote setup is ready.",
 			`Route: ${route}.`,
 			`Browser app: ${urls.browserUrls[0] || "/app/"}`,
 			urls.browserUrls.length > 1 ? `Other local URLs: ${urls.browserUrls.slice(1).join(" ")}` : "",
 			`Native app setup: ${urls.appSetupUrls[0] || "not available"}`,
-			"Use HTTPS through Tailscale Serve or a tunnel for real phone microphone access.",
-			PUBLIC_REMOTE_BASE_URL ? "" : "Set PI_SPEAK_PUBLIC_BASE_URL to make /remote setup print your HTTPS phone URL first.",
+			mode === "bluetooth"
+				? "Pair the phone over Bluetooth networking/PAN first; edit the base URL if your desktop Bluetooth adapter uses a different IP."
+				: "Use HTTPS through Tailscale Serve or a tunnel for real phone microphone access.",
+			mode === "tailscale" && !PUBLIC_REMOTE_BASE_URL
+				? "Set PI_SPEAK_PUBLIC_BASE_URL to make /remote setup print your HTTPS phone URL first."
+				: "",
 		].filter(Boolean).join("\n");
+	};
+
+	const startRemoteTrayForRuntime = async (ctx?: any) => {
+		if (remoteTray) return true;
+		const runtime = remoteServer?.getRuntimeState();
+		const status = getRemoteStatus();
+		const token = runtime?.authToken || remoteState.authToken || "";
+		if (!token) {
+			(ctx || lastCtx)?.ui?.notify?.("Remote tray needs a remote token. Start /remote on first.", "warning");
+			return false;
+		}
+		const urls = buildRemoteSetupUrls(status.host, status.port, token);
+		const baseUrl = urls.baseUrls[0] || getDefaultTailscaleBaseUrl(status.port);
+		const profile = getSetupProfileForBaseUrl(baseUrl);
+		const tray = await startRemoteTray({
+			title: `Pi Speak - ${profile.profileName}`,
+			appSetupUrl: urls.appSetupUrls[0] || "",
+			browserUrl: urls.browserUrls[0] || "",
+			baseUrl,
+			profileName: profile.profileName,
+		});
+		if (!tray) {
+			(ctx || lastCtx)?.ui?.notify?.("Remote tray is only available on Windows right now.", "warning");
+			return false;
+		}
+		remoteTray = tray;
+		tray.process.once("exit", () => {
+			remoteTray = undefined;
+		});
+		(ctx || lastCtx)?.ui?.notify?.("Remote tray started. Right-click the tray icon for the setup QR code.", "info");
+		return true;
+	};
+
+	const stopRemoteTray = () => {
+		if (!remoteTray) return false;
+		remoteTray.process.kill();
+		remoteTray = undefined;
+		return true;
 	};
 
 	const handleMonoAction = async (action: "on" | "off" | "status", ctx?: any) => {
@@ -1329,6 +1432,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					syncRemoteState(patch, true);
 				},
 				getStatus: () => ({
+					agent: getAgentStatus(),
 					speak: getSpeakStatus(),
 					mono: getMonoStatus(),
 					phone: getPhoneStatus(),
@@ -1336,6 +1440,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				}),
 				getDiagnostics: () => ({
 					status: {
+						agent: getAgentStatus(),
 						speak: getSpeakStatus(),
 						mono: getMonoStatus(),
 						phone: getPhoneStatus(),
@@ -1394,6 +1499,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const target = ctx || lastCtx;
 			target?.ui?.notify?.(getRemoteStatusText(), "info");
 		}
+		if (isTruthy(process.env.PI_SPEAK_TRAY || "false")) {
+			await startRemoteTrayForRuntime(ctx);
+		}
 		return true;
 	};
 
@@ -1403,6 +1511,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			await remoteServer.stop().catch(() => {});
 			remoteServer = undefined;
 		}
+		stopRemoteTray();
 		syncRemoteState({ enabled: false }, true);
 		if (!quiet) {
 			const target = ctx || lastCtx;
@@ -1565,7 +1674,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const target = ctx || lastCtx;
 
 		// Speech control -- always immediate, no agent interaction
-		if (lower === "stop speaking" || lower === "be quiet" || lower === "shut up" || lower === "shush") {
+		if (isSpeechInterruptCommand(lower)) {
 			stopSpeaking(target);
 			return;
 		}
@@ -2014,7 +2123,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.registerCommand("phone", {
 		description: "Remote Pi over Telegram text and voice messages",
 		getArgumentCompletions: (prefix) => {
-			const options = ["on", "off", "status", "code", "unpair"];
+			const options = ["on", "off", "status", "setup", "token", "code", "unpair"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -2024,6 +2133,43 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 			if (!lower || lower === "on" || lower === "start") {
 				await startPhoneBridge(ctx);
+				return;
+			}
+
+			if (lower === "setup") {
+				const token = getTelegramBotToken(phoneState);
+				const status = phoneBridge?.getStatus();
+				ctx.ui.notify(
+					[
+						"Telegram phone setup:",
+						token ? `Token is configured (${maskToken(token)}).` : "1. In Telegram, message @BotFather, create or reuse a bot, and copy its token.",
+						token ? "Run /phone on, then /phone code if you need the pair code." : "2. Run /phone token <bot-token> here.",
+						status?.linkCode ? `3. Send /link ${status.linkCode} to your bot from your phone.` : "3. Run /phone code and send the printed /link code to your bot.",
+					].join(" "),
+					"info",
+				);
+				return;
+			}
+
+			if (lower.startsWith("token ")) {
+				const token = args.slice(args.toLowerCase().indexOf("token") + "token".length).trim();
+				if (!token) {
+					ctx.ui.notify("Usage: /phone token <telegram-bot-token>", "error");
+					return;
+				}
+				if (phoneBridge) {
+					await stopPhoneBridge(ctx);
+					phoneBridge = undefined;
+				}
+				syncPhoneState({ botToken: token, enabled: false, linkedChatId: undefined, linkCode: undefined }, true);
+				const started = await startPhoneBridge(ctx, true);
+				const bridge = phoneBridge as TelegramPhoneBridge | undefined;
+				if (!started || !bridge) {
+					ctx.ui.notify(`Telegram token saved (${maskToken(token)}). Run /phone on when ready.`, "info");
+					return;
+				}
+				const status = bridge.getStatus();
+				ctx.ui.notify(`Telegram token saved (${maskToken(token)}). Send /link ${status.linkCode} to your bot to pair this phone.`, "info");
 				return;
 			}
 
@@ -2062,14 +2208,14 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /phone [on|off|status|code|unpair]", "error");
+			ctx.ui.notify("Usage: /phone [on|off|status|setup|token <bot-token>|code|unpair]", "error");
 		},
 	});
 
 	pi.registerCommand("remote", {
 		description: "Control Pi through the local HTTP API for phone remotes and automations",
 		getArgumentCompletions: (prefix) => {
-			const options = ["on", "off", "status", "token", "setup"];
+			const options = ["on", "off", "status", "token", "setup", "setup bluetooth", "tray on", "tray off", "tray status"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -2098,6 +2244,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (lower === "setup bluetooth" || lower === "bluetooth setup") {
+				await startRemoteServer(ctx, true);
+				ctx.ui.notify(getRemoteSetupText("bluetooth"), "info");
+				return;
+			}
+
 			if (lower === "token") {
 				if (!remoteServer && !remoteState.authToken) {
 					await startRemoteServer(ctx, true);
@@ -2111,7 +2263,24 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /remote [on|off|status|token|setup]", "error");
+			if (lower === "tray" || lower === "tray on") {
+				await startRemoteServer(ctx, true);
+				await startRemoteTrayForRuntime(ctx);
+				return;
+			}
+
+			if (lower === "tray off") {
+				const stopped = stopRemoteTray();
+				ctx.ui.notify(stopped ? "Remote tray stopped." : "Remote tray is not running.", "info");
+				return;
+			}
+
+			if (lower === "tray status") {
+				ctx.ui.notify(remoteTray ? "Remote tray is running." : "Remote tray is not running.", "info");
+				return;
+			}
+
+			ctx.ui.notify("Usage: /remote [on|off|status|token|setup|tray on|tray off|tray status]", "error");
 		},
 	});
 
@@ -2239,7 +2408,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			enabled: !!remoteRuntime?.enabled,
 			host: remoteRuntime?.host || DEFAULT_REMOTE_HOST,
 			port: remoteRuntime?.port || DEFAULT_REMOTE_PORT,
-			authToken: remoteRuntime?.authToken || process.env.PI_SPEAK_HTTP_TOKEN || undefined,
+			authToken: process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_REMOTE_AUTH_TOKEN,
 		};
 		lastAssistantText = "";
 		phase = "ready";
@@ -2268,6 +2437,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 			if (entry.type === "custom" && entry.customType === REMOTE_STATE_TYPE && entry.data && typeof entry.data === "object") {
 				remoteState = { ...remoteState, ...(entry.data as RemoteState) };
+				remoteState.authToken = process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_REMOTE_AUTH_TOKEN;
 				remoteDefaultTarget = remoteState.defaultTarget;
 			}
 			if (entry.type === "custom" && entry.customType === SESSION_REGISTRY_TYPE && entry.data && typeof entry.data === "object") {
@@ -2342,6 +2512,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		stopRoutingStoreWatcher();
 		rejectPendingPhoneTurn("Session changed before the phone reply was delivered");
 		remoteTurnManager.cancelAll("Session changed before queued remote work completed");
+		stopRemoteTray();
 		stopSpeaking(ctx);
 		await codexAgentProvider.stop().catch(() => {});
 		await shutdownLocalSttWorker().catch(() => {});

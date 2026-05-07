@@ -20,6 +20,8 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
 - Manages route normalization and conflict-safe resolution (`voice-routing.ts`, `session-routing.ts`, `session-routing-store.ts`).
 - Maintains append-only operator/event history for UI toast/log updates (`session-events.ts`).
 - Runs network-facing control APIs (`control-server.ts`) and turn orchestration (`remote-turn-manager.ts`).
+- Routes remote turns through the provider abstraction in `agent-provider.ts`, `pi-agent-provider.ts`, and `codex-agent-provider.ts`; the same phone/browser clients can target `AGENT_PROVIDER=pi` or `AGENT_PROVIDER=codex`.
+- Uses a shared HTTP auth token across providers. The temporary default is `P-K-Haxx1!`, overridden by `PI_SPEAK_HTTP_TOKEN`.
 
 ### Voice path
 - Wake word + transcription glue from `listener/listener.py` and `stt.ts`.
@@ -38,7 +40,8 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
 ### Android surface (`android-app/`)
 - Main app shell and screens in Kotlin under `android-app/app/src/main/java/com/pkkidking/pispeak/`.
 - Domain/data/viewmodel wiring plus repository and remote DTOs.
-- New Android persistence/audio/security/model edits landed in this sync set.
+- Stores machine profiles, remote token, optional launch path, and connection mode.
+- Supports Tailscale, Bluetooth local-link/PAN, and manual connection modes. Bluetooth mode allows HTTP local-link URLs without requiring Tailscale.
 
 ### Remote web app (`web/remote/`)
 - `index.html` and `app.js` implement the mobile remote UI, session controls, and event display.
@@ -46,6 +49,7 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
 ## Validation and quality
 - Test files now include TS + Kotlin/Compose coverage updates (`tests/`, `android-app/app/src/test/...`).
 - Documented operational runbooks and checks in:
+  - `docs/CODEBASE_MAP.md`
   - `docs/REMOTE_OPERATING_GUIDE.md`
   - `docs/REMOTE_VALIDATION_CHECKLIST.md`
   - `docs/REMOTE_VALIDATION_RUN_SHEET.md`
@@ -59,3 +63,4 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
 ## Current work context
 - Working tree contains a large workspace sync commit that adds tooling, memory, and docs scaffolding plus core app updates.
 - A previous rebase attempt onto `origin/main` hit content conflicts in Android UI/domain files and is currently paused until resolution strategy is confirmed.
+- Current remote-control work adds provider parity, runtime Telegram setup, shared default remote token handling, Android connection modes, and Bluetooth local-link onboarding through `/remote setup bluetooth`.
