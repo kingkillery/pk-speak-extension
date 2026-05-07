@@ -16,6 +16,18 @@ type SpawnLike = (
 	},
 ) => ChildProcessWithoutNullStreams;
 
+export type CodexApprovalMethod =
+	| "item/commandExecution/requestApproval"
+	| "item/fileChange/requestApproval"
+	| "item/permissions/requestApproval";
+
+export type CodexApprovalRequest = {
+	method: CodexApprovalMethod;
+	params: Record<string, unknown>;
+};
+
+export type CodexApprovalDecision = "accept" | "decline";
+
 export type CodexAgentProviderOptions = {
 	codexBin?: string;
 	model?: string;
@@ -25,6 +37,14 @@ export type CodexAgentProviderOptions = {
 	sandbox?: string;
 	spawnImpl?: SpawnLike;
 	env?: NodeJS.ProcessEnv;
+	/**
+	 * Resolve a server-initiated approval request from the codex app-server.
+	 * Called when the server emits item/commandExecution/requestApproval,
+	 * item/fileChange/requestApproval, or item/permissions/requestApproval.
+	 * If unset (or if the callback throws) the request is auto-declined so
+	 * the agent does not hang waiting for a response.
+	 */
+	onApprovalRequest?: (request: CodexApprovalRequest) => Promise<CodexApprovalDecision>;
 };
 
 type JsonRpcMessage = {
@@ -62,6 +82,7 @@ export class CodexAgentProvider implements AgentProvider {
 	private readonly sandbox: string;
 	private readonly spawnImpl: SpawnLike;
 	private readonly env?: NodeJS.ProcessEnv;
+	private readonly onApprovalRequest?: (request: CodexApprovalRequest) => Promise<CodexApprovalDecision>;
 	private child?: ChildProcessWithoutNullStreams;
 	private stdout?: Interface;
 	private stderrText = "";
@@ -81,6 +102,7 @@ export class CodexAgentProvider implements AgentProvider {
 		this.sandbox = options.sandbox || "danger-full-access";
 		this.spawnImpl = options.spawnImpl || (spawn as unknown as SpawnLike);
 		this.env = options.env;
+		this.onApprovalRequest = options.onApprovalRequest;
 	}
 
 	async start() {
@@ -302,6 +324,7 @@ export class CodexAgentProvider implements AgentProvider {
 	private handleAppServerLine(line: string) {
 		const message = parseJsonLine(line);
 		if (!message) return;
+		// Response to one of our outgoing requests
 		if (message.id !== undefined && this.pendingRequests.has(message.id)) {
 			const pending = this.pendingRequests.get(message.id)!;
 			this.pendingRequests.delete(message.id);
@@ -310,7 +333,53 @@ export class CodexAgentProvider implements AgentProvider {
 			else pending.resolve(message.result);
 			return;
 		}
+		// Server-initiated request (id + method, not a pending response)
+		if (message.id !== undefined && typeof message.method === "string") {
+			void this.handleServerRequest(message);
+			return;
+		}
 		this.handleNotification(message);
+	}
+
+	private async handleServerRequest(message: JsonRpcMessage) {
+		const id = message.id!;
+		const method = message.method as string;
+
+		if (isApprovalMethod(method)) {
+			if (!this.onApprovalRequest) {
+				// No handler installed — decline so the agent does not hang.
+				this.writeResponse(id, { decision: "decline" });
+				return;
+			}
+			let decision: CodexApprovalDecision = "decline";
+			try {
+				decision = await this.onApprovalRequest({
+					method: method as CodexApprovalMethod,
+					params: (message.params as Record<string, unknown>) || {},
+				});
+			} catch {
+				decision = "decline";
+			}
+			this.writeResponse(id, formatApprovalResult(method, decision, message.params));
+			return;
+		}
+
+		// Unknown server-initiated method — return JSON-RPC method-not-found.
+		this.writeError(id, -32601, `Method not found: ${method}`);
+	}
+
+	private writeResponse(id: string | number, result: unknown) {
+		const child = this.child;
+		if (!child || child.killed) return;
+		const payload = JSON.stringify({ id, result });
+		child.stdin.write(`${payload}\n`);
+	}
+
+	private writeError(id: string | number, code: number, message: string) {
+		const child = this.child;
+		if (!child || child.killed) return;
+		const payload = JSON.stringify({ id, error: { code, message } });
+		child.stdin.write(`${payload}\n`);
 	}
 
 	private handleNotification(message: JsonRpcMessage) {
@@ -371,6 +440,30 @@ export class CodexAgentProvider implements AgentProvider {
 			} catch {}
 		}
 	}
+}
+
+function isApprovalMethod(method: string): boolean {
+	return (
+		method === "item/commandExecution/requestApproval" ||
+		method === "item/fileChange/requestApproval" ||
+		method === "item/permissions/requestApproval"
+	);
+}
+
+function formatApprovalResult(method: string, decision: CodexApprovalDecision, params: unknown): unknown {
+	// item/permissions/requestApproval has a different accept payload —
+	// it expects the granted scope and permissions echoed back.
+	if (method === "item/permissions/requestApproval") {
+		if (decision === "accept") {
+			const requestedPermissions =
+				params && typeof params === "object" && "permissions" in (params as Record<string, unknown>)
+					? (params as { permissions?: unknown }).permissions
+					: undefined;
+			return { scope: "session", permissions: requestedPermissions ?? {} };
+		}
+		return { decision: "decline" };
+	}
+	return { decision };
 }
 
 function textInput(text: string) {
