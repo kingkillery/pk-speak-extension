@@ -399,6 +399,23 @@ export default function speakExtension(pi: ExtensionAPI) {
 		cwd: DEFAULT_AGENT_CWD || process.cwd(),
 		approvalPolicy: agentProviderConfig.approvalPolicy,
 		sandbox: agentProviderConfig.sandbox,
+		onApprovalRequest: async (request) => {
+			const description = describeCodexApprovalForVoice(request);
+			if (!listenerProcess) {
+				notifyAudible(
+					lastCtx,
+					`Codex requested approval but voice listener is off: ${description}. Auto-declining.`,
+					"warning",
+				);
+				return "decline";
+			}
+			notifyAudible(lastCtx, `Codex approval: ${description}`, "warning", `Approve ${description}. Say yes or no.`);
+			return await approvalRegistry.request({
+				description,
+				spokenPrompt: `Approve ${description}. Say yes or no.`,
+				timeoutMs: 30_000,
+			});
+		},
 	});
 	const getAgentProvider = (): AgentProvider =>
 		agentProviderConfig.provider === "codex" ? codexAgentProvider : piAgentProvider;
@@ -2679,6 +2696,23 @@ function describeToolCallForVoice(event: { toolName: string; input?: any }): str
 			return `edit: ${truncate(typeof input.path === "string" ? input.path : "(no path)")}`;
 		default:
 			return `${event.toolName}`;
+	}
+}
+
+function describeCodexApprovalForVoice(request: { method: string; params: Record<string, unknown> }): string {
+	const truncate = (value: string, max = 80) => (value.length > max ? `${value.slice(0, max)}…` : value);
+	const reason = typeof request.params.reason === "string" ? request.params.reason : "";
+	switch (request.method) {
+		case "item/commandExecution/requestApproval": {
+			const command = typeof request.params.command === "string" ? request.params.command : "(unknown command)";
+			return `bash: ${truncate(command)}`;
+		}
+		case "item/fileChange/requestApproval":
+			return reason ? `file change: ${truncate(reason)}` : "file change";
+		case "item/permissions/requestApproval":
+			return reason ? `permissions: ${truncate(reason)}` : "permissions request";
+		default:
+			return request.method;
 	}
 }
 
