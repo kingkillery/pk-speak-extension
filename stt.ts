@@ -19,7 +19,7 @@ type WorkerRequest = {
 };
 
 function getOpenAiAudioKey() {
-	return process.env.VOICE_TOOLS_OPENAI_KEY || process.env.OPENAI_API_KEY || "";
+	return process.env.VOICE_TOOLS_OPENAI_KEY || process.env.PI_SPEAK_OPENAI_KEY || process.env.OPENAI_API_KEY || "";
 }
 
 function getPythonExecutable() {

@@ -2,10 +2,13 @@
 import { ControlServer, type ControlActionResult, type ControlServerStatus } from "./control-server.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import type { RemoteTurnResult } from "./remote-turn-manager.js";
+import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
+import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const state = {
 	enabled: true,
@@ -45,8 +48,8 @@ function status(): ControlServerStatus {
 			model: agentConfig.model,
 			capabilities: {
 				textTurns: true,
-				voiceTurns: false,
-				audioReplies: false,
+				voiceTurns: true,
+				audioReplies: true,
 				routing: true,
 				steering: false,
 			},
@@ -66,7 +69,7 @@ function status(): ControlServerStatus {
 	};
 }
 
-async function runTextTurn(text: string, cwd?: string): Promise<RemoteTurnResult> {
+async function runTextTurn(text: string, includeAudio = false, cwd?: string, transcript?: string): Promise<RemoteTurnResult> {
 	const prompt = text.trim();
 	if (!prompt) return { replyText: "Send a message first." };
 	const options = {
@@ -84,19 +87,87 @@ async function runTextTurn(text: string, cwd?: string): Promise<RemoteTurnResult
 		activeProvider = fallbackProvider;
 		replyText = await collectAgentResponse(activeProvider, prompt, options);
 	}
-	return {
+	const result: RemoteTurnResult = {
 		replyText: replyText || "The agent completed the turn without returning text.",
-		transcript: prompt,
+		transcript: transcript ?? prompt,
 		providers: { agent: activeProvider.name },
 		warnings,
 	};
+	if (!includeAudio) return result;
+	const audio = await renderReplyAudio(result.replyText);
+	return {
+		...result,
+		audioPath: audio.audioPath,
+		audioMimeType: audio.audioMimeType,
+		timings: {
+			...result.timings,
+			...audio.timings,
+		},
+		providers: {
+			...result.providers,
+			...audio.providers,
+		},
+		warnings: [...(result.warnings || []), ...(audio.warnings || [])],
+	};
 }
 
-function unavailableVoiceTurn(): RemoteTurnResult {
+async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = false, cwd?: string): Promise<RemoteTurnResult> {
+	const stt = await transcribeAudioBuffer(buffer, mimeType);
+	const transcript = stt.text.trim();
+	if (!transcript) {
+		return {
+			replyText: "I did not hear enough speech to send a turn.",
+			transcript: "",
+			providers: { stt: stt.provider },
+			warnings: ["empty-transcript"],
+		};
+	}
+	const result = await runTextTurn(transcript, includeAudio, cwd, transcript);
 	return {
-		replyText: "Voice turns need the full Pi Speak extension runtime. Text turns are available from the tray gateway.",
-		warnings: ["headless-tray-gateway"],
+		...result,
+		timings: {
+			...result.timings,
+			sttMs: stt.durationMs,
+		},
+		providers: {
+			...result.providers,
+			stt: stt.provider,
+		},
 	};
+}
+
+async function renderReplyAudio(text: string): Promise<Partial<RemoteTurnResult>> {
+	const trimmed = text.trim();
+	if (!trimmed) return {};
+	const audioDir = mkdtempSync(join(tmpdir(), "pi-speak-tray-reply-"));
+	const outputPath = join(audioDir, "reply.mp3");
+	const startedAt = Date.now();
+	try {
+		const synthesis = await synthesizeToFile({
+			text: trimmed,
+			outputPath,
+			state: {
+				enabled: true,
+				provider: (process.env.PI_SPEAK_TTS_PROVIDER || "auto") as TtsProvider,
+				rewriteEnabled: process.env.PI_SPEAK_REWRITE_ENABLED
+					? !["0", "false", "off", "no"].includes(process.env.PI_SPEAK_REWRITE_ENABLED.toLowerCase())
+					: true,
+			},
+		});
+		return {
+			audioPath: outputPath,
+			audioMimeType: getAudioMimeType(outputPath),
+			timings: { ttsMs: Date.now() - startedAt },
+			providers: { tts: synthesis.provider },
+		};
+	} catch (error) {
+		try {
+			rmSync(audioDir, { recursive: true, force: true });
+		} catch {}
+		return {
+			warnings: [`Audio synthesis failed: ${error instanceof Error ? error.message : String(error)}`],
+		};
+	}
 }
 
 const ok = (message: string): ControlActionResult => ({ ok: true, message });
@@ -152,8 +223,8 @@ server = new ControlServer({
 	onMonoAction: (action) => ok(`Mono ${action} is unavailable in tray gateway mode.`),
 	onSpeakAction: (action) => ok(`Speak ${action} is unavailable in tray gateway mode.`),
 	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
-	onTextTurn: async (text, _includeAudio, _target, cwd) => runTextTurn(text, cwd),
-	onVoiceTurn: async () => unavailableVoiceTurn(),
+	onTextTurn: async (text, includeAudio, _target, cwd) => runTextTurn(text, includeAudio, cwd),
+	onVoiceTurn: async (buffer, mimeType, includeAudio, _target, cwd) => runVoiceTurn(buffer, mimeType, includeAudio, cwd),
 });
 
 Promise.resolve(provider.start?.())
@@ -171,6 +242,8 @@ process.on("SIGTERM", () => shutdown());
 
 function shutdown() {
 	Promise.resolve(provider.stop?.())
+		.catch(() => {})
+		.then(() => shutdownLocalSttWorker())
 		.catch(() => {})
 		.then(() => server.stop())
 		.catch(() => {})
