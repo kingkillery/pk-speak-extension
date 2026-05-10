@@ -1,0 +1,216 @@
+import { GoogleGenAI, Modality, type LiveServerMessage } from "@google/genai";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { RemoteTurnResult } from "./remote-turn-manager.js";
+
+const DEFAULT_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025";
+const DEFAULT_TEXT_MODEL = "gemini-2.5-flash";
+const DEFAULT_TIMEOUT_MS = 45000;
+
+export function isGeminiLiveConfigured(env: NodeJS.ProcessEnv = process.env) {
+	return !!(env.GOOGLE_API_KEY || env.GEMINI_API_KEY);
+}
+
+export function getGeminiLiveModel(env: NodeJS.ProcessEnv = process.env) {
+	return env.PI_SPEAK_GEMINI_LIVE_MODEL?.trim() || DEFAULT_LIVE_MODEL;
+}
+
+export async function runGeminiTextTurn(
+	prompt: string,
+	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
+): Promise<RemoteTurnResult> {
+	const apiKey = options.apiKey || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+	if (!apiKey) throw new Error("GOOGLE_API_KEY is required for Gemini turns.");
+	const ai = new GoogleGenAI({ apiKey, apiVersion: process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta" });
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), options.timeoutMs || DEFAULT_TIMEOUT_MS);
+	try {
+		const response = await ai.models.generateContent({
+			model: options.model || process.env.PI_SPEAK_GEMINI_TEXT_MODEL || DEFAULT_TEXT_MODEL,
+			contents: prompt,
+			config: {
+				abortSignal: controller.signal,
+			},
+		});
+		return {
+			replyText: response.text?.trim() || "Gemini completed the turn without returning text.",
+			transcript: prompt,
+			providers: { agent: "gemini" },
+		};
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+export async function runGeminiLiveTurn(
+	prompt: string,
+	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
+): Promise<RemoteTurnResult> {
+	const apiKey = options.apiKey || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+	if (!apiKey) throw new Error("GOOGLE_API_KEY is required for Gemini Live turns.");
+	const model = options.model || getGeminiLiveModel();
+	const apiVersion = process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta";
+	const ai = new GoogleGenAI({ apiKey, apiVersion });
+	const audioChunks: Buffer[] = [];
+	let audioMimeType = "audio/pcm;rate=24000";
+	let replyText = "";
+	let setupComplete = false;
+	let turnComplete = false;
+	let session: Awaited<ReturnType<typeof ai.live.connect>> | undefined;
+	const timeoutMs = options.timeoutMs || Number.parseInt(process.env.PI_SPEAK_GEMINI_LIVE_TIMEOUT_MS || String(DEFAULT_TIMEOUT_MS), 10);
+
+	const result = await new Promise<RemoteTurnResult>((resolve, reject) => {
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try {
+				session?.close();
+			} catch {}
+			if (!setupComplete) {
+				reject(new Error(`Gemini Live did not complete setup for ${model}.`));
+				return;
+			}
+			if (!turnComplete && audioChunks.length === 0 && !replyText.trim()) {
+				reject(new Error(`Gemini Live produced no content for ${model}.`));
+				return;
+			}
+			resolve(buildGeminiLiveResult({
+				model,
+				replyText,
+				prompt,
+				audioChunks,
+				audioMimeType,
+			}));
+		};
+		const fail = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try {
+				session?.close();
+			} catch {}
+			reject(error);
+		};
+		const timer = setTimeout(finish, timeoutMs);
+
+		ai.live.connect({
+			model,
+			config: {
+				responseModalities: [Modality.AUDIO],
+				outputAudioTranscription: {},
+				systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || "You are a concise voice coding assistant.",
+			},
+			callbacks: {
+				onopen: () => {},
+				onmessage: (message: LiveServerMessage) => {
+					if (message.setupComplete) setupComplete = true;
+					replyText += extractText(message);
+					for (const part of message.serverContent?.modelTurn?.parts || []) {
+						if (!part.inlineData?.data) continue;
+						if (part.inlineData.mimeType) audioMimeType = part.inlineData.mimeType;
+						audioChunks.push(Buffer.from(part.inlineData.data, "base64"));
+					}
+					if (message.serverContent?.turnComplete) {
+						turnComplete = true;
+						finish();
+					}
+				},
+				onerror: (event) => fail(event.error || event.message || event),
+				onclose: (event) => {
+					if (!settled && event.code && event.code !== 1000) {
+						fail(new Error(`Gemini Live closed ${event.code}: ${event.reason || "no reason"}`));
+					} else {
+						finish();
+					}
+				},
+			},
+		}).then((connected) => {
+			session = connected;
+			session.sendClientContent({
+				turns: [{ role: "user", parts: [{ text: prompt }] }],
+				turnComplete: true,
+			});
+		}).catch(fail);
+	});
+
+	return result;
+}
+
+function buildGeminiLiveResult({
+	model,
+	replyText,
+	prompt,
+	audioChunks,
+	audioMimeType,
+}: {
+	model: string;
+	replyText: string;
+	prompt: string;
+	audioChunks: Buffer[];
+	audioMimeType: string;
+}): RemoteTurnResult {
+	let audioPath: string | undefined;
+	let outputMimeType: string | undefined;
+	if (audioChunks.length > 0) {
+		const audioDir = mkdtempSync(join(tmpdir(), "pi-speak-gemini-live-"));
+		try {
+			const pcm = Buffer.concat(audioChunks);
+			audioPath = join(audioDir, "reply.wav");
+			writeFileSync(audioPath, toWav(pcm, parsePcmSampleRate(audioMimeType)));
+			outputMimeType = "audio/wav";
+		} catch (error) {
+			try {
+				rmSync(audioDir, { recursive: true, force: true });
+			} catch {}
+			throw error;
+		}
+	}
+	return {
+		replyText: replyText.trim() || "Gemini returned audio without a transcript.",
+		transcript: prompt,
+		audioPath,
+		audioMimeType: outputMimeType,
+		providers: { agent: "gemini-live", tts: audioPath ? "gemini-live" : undefined },
+		warnings: model.includes("3.1") ? ["gemini-3.1-live-preview is still preview; fall back if it stalls."] : undefined,
+	};
+}
+
+function extractText(message: LiveServerMessage): string {
+	let text = "";
+	const transcript = message.serverContent?.outputTranscription?.text;
+	if (typeof transcript === "string") text += transcript;
+	for (const part of message.serverContent?.modelTurn?.parts || []) {
+		if (typeof part.text === "string") text += part.text;
+	}
+	return text;
+}
+
+function parsePcmSampleRate(mimeType: string) {
+	const match = /(?:^|;)rate=(\d+)(?:;|$)/i.exec(mimeType);
+	return match ? Number.parseInt(match[1], 10) : 24000;
+}
+
+function toWav(pcm: Buffer, sampleRate: number) {
+	const channels = 1;
+	const bitsPerSample = 16;
+	const byteRate = sampleRate * channels * bitsPerSample / 8;
+	const blockAlign = channels * bitsPerSample / 8;
+	const header = Buffer.alloc(44);
+	header.write("RIFF", 0);
+	header.writeUInt32LE(36 + pcm.length, 4);
+	header.write("WAVE", 8);
+	header.write("fmt ", 12);
+	header.writeUInt32LE(16, 16);
+	header.writeUInt16LE(1, 20);
+	header.writeUInt16LE(channels, 22);
+	header.writeUInt32LE(sampleRate, 24);
+	header.writeUInt32LE(byteRate, 28);
+	header.writeUInt16LE(blockAlign, 32);
+	header.writeUInt16LE(bitsPerSample, 34);
+	header.write("data", 36);
+	header.writeUInt32LE(pcm.length, 40);
+	return Buffer.concat([header, pcm]);
+}

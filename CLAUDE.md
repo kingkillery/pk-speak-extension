@@ -29,7 +29,8 @@ When the task involves spoken replies, wake-word listening, voice session routin
 - `/sess` → session manager dashboard, naming, switching, edit wrapper, aliases, removal, export, plus `/sess ui` for the interactive Ink management pane
 - `/attn` → advanced ready-session broker controls
 - `/phone` → Telegram remote
-- `/remote` → browser remote and HTTP API
+- `/pk-remote` → one-command Android setup QR for the native app
+- `/remote` → browser remote, Android setup QR, and HTTP API
 
 ## Important Source Map
 

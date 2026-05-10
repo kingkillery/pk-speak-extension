@@ -1,4 +1,4 @@
-export type AgentProviderName = "pi" | "codex";
+export type AgentProviderName = "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
 
 export type AgentPromptMode = "turn" | "steer" | "followUp";
 
@@ -33,7 +33,13 @@ export type AgentProviderConfig = {
 
 export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env): AgentProviderConfig {
 	const configuredProvider = (env.AGENT_PROVIDER || "pi").trim().toLowerCase();
-	const provider: AgentProviderName = configuredProvider === "codex" ? "codex" : "pi";
+	const provider: AgentProviderName = configuredProvider === "codex"
+		? "codex"
+		: configuredProvider === "gemini" || configuredProvider === "gemini-live"
+			? configuredProvider
+			: configuredProvider === "elevenlabs"
+				? "elevenlabs"
+			: "pi";
 	const model = env.AGENT_MODEL?.trim() || undefined;
 	return {
 		provider,

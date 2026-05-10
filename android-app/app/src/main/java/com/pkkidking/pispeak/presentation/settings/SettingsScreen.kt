@@ -47,24 +47,52 @@ import androidx.compose.ui.unit.dp
 import com.pkkidking.pispeak.data.storage.ThemeMode
 import com.pkkidking.pispeak.domain.model.ConnectionMode
 import com.pkkidking.pispeak.domain.model.MachineProfile
-import com.pkkidking.pispeak.presentation.main.MainUiState
+import com.pkkidking.pispeak.presentation.audio.AudioUiState
+import com.pkkidking.pispeak.presentation.common.components.QrCodeImage
+import com.pkkidking.pispeak.presentation.connection.ConnectionUiState
+import com.pkkidking.pispeak.presentation.turn.TurnUiState
 
 private val ScreenPadding = 20.dp
 private val PanelShape = RoundedCornerShape(8.dp)
 private val ControlShape = RoundedCornerShape(16.dp)
 
+private fun buildSetupDeepLink(state: ConnectionUiState): String {
+    val baseUrl = state.baseUrl.trim()
+    val token = state.token.trim()
+    if (baseUrl.isBlank() || token.isBlank()) return ""
+    val machineId = state.selectedMachineId ?: ""
+    val profileName = state.machineProfiles.firstOrNull { it.id == machineId }?.name ?: ""
+    val mode = state.connectionMode.name.lowercase()
+    return buildString {
+        append("pi-speak://setup?")
+        append("base_url=")
+        append(java.net.URLEncoder.encode(baseUrl, "UTF-8"))
+        append("&token=")
+        append(java.net.URLEncoder.encode(token, "UTF-8"))
+        if (machineId.isNotBlank()) {
+            append("&machine_id=")
+            append(java.net.URLEncoder.encode(machineId, "UTF-8"))
+        }
+        if (profileName.isNotBlank()) {
+            append("&profile_name=")
+            append(java.net.URLEncoder.encode(profileName, "UTF-8"))
+        }
+        append("&connection_mode=")
+        append(java.net.URLEncoder.encode(mode, "UTF-8"))
+    }
+}
+
 @Composable
 fun SettingsScreen(
-    uiState: MainUiState,
+    connectionUiState: ConnectionUiState,
+    turnUiState: TurnUiState,
+    audioUiState: AudioUiState,
     themeMode: ThemeMode,
     contentPadding: PaddingValues,
     onBaseUrlChanged: (String) -> Unit,
     onTokenChanged: (String) -> Unit,
     onConnectionModeChanged: (ConnectionMode) -> Unit,
     onWorkspacePathChanged: (String) -> Unit,
-    machineProfiles: List<MachineProfile>,
-    selectedMachineId: String?,
-    machineProfileName: String,
     onMachineSelected: (String?) -> Unit,
     onMachineProfileNameChanged: (String) -> Unit,
     onSaveMachineProfile: () -> Unit,
@@ -104,17 +132,17 @@ fun SettingsScreen(
                 )
 
                 ConnectionModeSelector(
-                    selected = uiState.connectionMode,
+                    selected = connectionUiState.connectionMode,
                     onSelected = onConnectionModeChanged,
                 )
 
                 MachineProfileSection(
-                    machineProfiles = machineProfiles,
-                    selectedMachineId = selectedMachineId,
-                    machineProfileName = machineProfileName,
-                    baseUrl = uiState.baseUrl,
-                    token = uiState.token,
-                    workspacePath = uiState.workspacePath,
+                    machineProfiles = connectionUiState.machineProfiles,
+                    selectedMachineId = connectionUiState.selectedMachineId,
+                    machineProfileName = connectionUiState.machineProfileName,
+                    baseUrl = connectionUiState.baseUrl,
+                    token = connectionUiState.token,
+                    workspacePath = connectionUiState.workspacePath,
                     onMachineSelected = onMachineSelected,
                     onMachineProfileNameChanged = onMachineProfileNameChanged,
                     onSaveMachineProfile = onSaveMachineProfile,
@@ -122,7 +150,7 @@ fun SettingsScreen(
                 )
 
                 OutlinedTextField(
-                    value = uiState.baseUrl,
+                    value = connectionUiState.baseUrl,
                     onValueChange = onBaseUrlChanged,
                     label = { Text("Base URL") },
                     modifier = Modifier.fillMaxWidth(),
@@ -130,7 +158,7 @@ fun SettingsScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 )
                 OutlinedTextField(
-                    value = uiState.token,
+                    value = connectionUiState.token,
                     onValueChange = onTokenChanged,
                     label = { Text("Remote token") },
                     modifier = Modifier.fillMaxWidth(),
@@ -139,7 +167,7 @@ fun SettingsScreen(
                     trailingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
                 )
                 OutlinedTextField(
-                    value = uiState.workspacePath,
+                    value = connectionUiState.workspacePath,
                     onValueChange = onWorkspacePathChanged,
                     label = { Text("Launch path") },
                     placeholder = { Text("C:\\dev\\Desktop-Projects\\my-project") },
@@ -153,6 +181,30 @@ fun SettingsScreen(
                 )
                 Button(onClick = onSaveSettings) {
                     Text("Save connection settings")
+                }
+
+                val setupUrl = remember(connectionUiState.baseUrl, connectionUiState.token, connectionUiState.selectedMachineId) {
+                    buildSetupDeepLink(connectionUiState)
+                }
+                if (setupUrl.isNotBlank()) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    Text("Setup link", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = "Scan this QR code to configure another device with the same connection.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        QrCodeImage(content = setupUrl, size = 180.dp)
+                    }
+                    Text(
+                        text = setupUrl,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                    )
                 }
             }
         }
@@ -173,11 +225,11 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                 )
-                if (uiState.availableTargets.isNotEmpty()) {
+                if (connectionUiState.availableTargets.isNotEmpty()) {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(uiState.availableTargets.take(10)) { target ->
+                        items(connectionUiState.availableTargets.take(10)) { target ->
                             FilterChip(
-                                selected = target == uiState.targetName,
+                                selected = target == connectionUiState.targetName,
                                 onClick = { onTargetChanged(target) },
                                 label = { Text(target, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             )
@@ -190,14 +242,14 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     OutlinedTextField(
-                        value = uiState.targetName,
+                        value = connectionUiState.targetName,
                         onValueChange = onTargetChanged,
                         label = { Text("Target") },
                         placeholder = { Text("Current session") },
                         modifier = Modifier.weight(1f),
                         singleLine = true,
                     )
-                    Button(onClick = onApplyTarget, enabled = !uiState.isBusy) {
+                    Button(onClick = onApplyTarget, enabled = !connectionUiState.isLoading) {
                         Text("Apply")
                     }
                 }
@@ -253,15 +305,15 @@ fun SettingsScreen(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 Text("Audio behavior", style = MaterialTheme.typography.titleLarge)
-                SettingRow("Request spoken replies", uiState.requestAudioReplies, onRequestAudioChanged)
+                SettingRow("Request spoken replies", audioUiState.requestAudioReplies, onRequestAudioChanged)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                SettingRow("Autoplay reply audio", uiState.autoplayReplyAudio, onAutoplayChanged)
+                SettingRow("Autoplay reply audio", audioUiState.autoplayReplyAudio, onAutoplayChanged)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                 SettingRow(
                     label = "Continue after replies",
-                    checked = uiState.continuousConversation,
+                    checked = audioUiState.continuousConversation,
                     onCheckedChange = onContinuousConversationChanged,
-                    enabled = uiState.requestAudioReplies && uiState.autoplayReplyAudio,
+                    enabled = audioUiState.requestAudioReplies && audioUiState.autoplayReplyAudio,
                     supportingText = "After a spoken voice reply finishes, Pi Speak waits a moment and starts listening again.",
                 )
             }
@@ -282,18 +334,18 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    StateBadge("Connection", uiState.connectionState.name, Modifier.weight(1f))
-                    StateBadge("Turn", uiState.turnPhase.name, Modifier.weight(1f))
-                    StateBadge("Audio", uiState.playbackState.name, Modifier.weight(1f))
+                    StateBadge("Connection", connectionUiState.connectionState.name, Modifier.weight(1f))
+                    StateBadge("Turn", turnUiState.turnPhase.name, Modifier.weight(1f))
+                    StateBadge("Audio", audioUiState.playbackState.name, Modifier.weight(1f))
                 }
-                if (uiState.diagnostics.isEmpty()) {
+                if (connectionUiState.diagnostics.isEmpty()) {
                     Text(
                         text = "No events yet.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                     )
                 } else {
-                    uiState.diagnostics.forEach { event ->
+                    connectionUiState.diagnostics.forEach { event ->
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
                                 text = event.area.uppercase(),
@@ -311,9 +363,10 @@ fun SettingsScreen(
             }
         }
 
-        if (uiState.error != null) {
+        val error = connectionUiState.error ?: audioUiState.error
+        if (error != null) {
             ErrorPanel(
-                message = uiState.error,
+                message = error,
                 onDismiss = onDismissError,
             )
         }

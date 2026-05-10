@@ -6,6 +6,8 @@ export type TurnTimingSummary = {
 	agentWaitMs?: number;
 	agentRunMs?: number;
 	ttsMs?: number;
+	geminiLiveMs?: number;
+	reducerMs?: number;
 	totalMs?: number;
 };
 
@@ -13,6 +15,29 @@ export type ProviderSummary = {
 	agent?: string;
 	stt?: string;
 	tts?: string;
+};
+
+export type ConversationReducerSummary = {
+	goal: string;
+	actionItems: string[];
+	constraints: string[];
+	deferredReminders: string[];
+	doNotDo: string[];
+	unknowns: string[];
+	discarded: string[];
+	confidence: number;
+	shouldDispatch: boolean;
+	clarifyingQuestion: string | undefined;
+	engine: "heuristic" | "gemini";
+};
+
+export type ConversationExecutionPlan = {
+	dispatch: boolean;
+	backend: "pi" | "codex" | "shell" | "memory" | "wiki" | "defer";
+	reason: "dispatch-pi" | "dispatch-codex" | "dispatch-shell" | "dispatch-memory" | "dispatch-wiki" | "defer" | "clarify";
+	confidence: number;
+	rationale: string;
+	actionForSeed?: string;
 };
 
 export type RemoteTurnResult = {
@@ -23,6 +48,8 @@ export type RemoteTurnResult = {
 	busy?: boolean;
 	timings?: TurnTimingSummary;
 	providers?: ProviderSummary;
+	reducer?: ConversationReducerSummary;
+	execution?: ConversationExecutionPlan;
 	warnings?: string[];
 };
 

@@ -17,7 +17,9 @@
   "bin": {
     "pi-speak-admin": "dist/ui/admin.js",
     "pi-speak-tray": "dist/persistent-tray.js",
-    "pi-speak-gateway": "dist/headless-gateway.js"
+    "pi-speak-gateway": "dist/headless-gateway.js",
+    "pi-speak-gemini-live-smoke": "dist/gemini-live-smoke.js",
+    "pi-speak-qr": "scripts/qr-setup.mjs"
   },
   "files": [
     "dist",
@@ -32,9 +34,11 @@
     "build": "tsc -p tsconfig.json",
     "build:ui": "tsc -p tsconfig.ui.json && node scripts/sync-ui-package.mjs",
     "test": "npm run build && npm run build:ui && node --test tests/*.test.mjs",
-    "prepublishOnly": "npm run build && npm run build:ui"
+    "prepublishOnly": "npm run build && npm run build:ui",
+    "qr": "node scripts/qr-setup.mjs"
   },
   "dependencies": {
+    "@google/genai": "^1.52.0",
     "ink": "^7.0.0",
     "node-edge-tts": "^1.2.10",
     "qrcode": "^1.5.4",

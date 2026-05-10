@@ -20,6 +20,11 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
+        buildConfigField("int", "REMOTE_PORT", "8767")
+        buildConfigField("String", "TAILSCALE_APPSERVER_IP", "\"100.76.136.91\"")
+        buildConfigField("String", "TAILSCALE_MAC_IP", "\"100.76.176.119\"")
+        buildConfigField("String", "LAN_MSI_IP", "\"10.0.0.117\"")
+        buildConfigField("String", "BLUETOOTH_REMOTE_IP", "\"192.168.44.1\"")
     }
 
     buildTypes {
@@ -28,6 +33,11 @@ android {
             versionNameSuffix = "-dev"
             isMinifyEnabled = false
             buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
+            buildConfigField("int", "REMOTE_PORT", "8767")
+            buildConfigField("String", "TAILSCALE_APPSERVER_IP", "\"100.76.136.91\"")
+            buildConfigField("String", "TAILSCALE_MAC_IP", "\"100.76.176.119\"")
+            buildConfigField("String", "LAN_MSI_IP", "\"10.0.0.117\"")
+            buildConfigField("String", "BLUETOOTH_REMOTE_IP", "\"192.168.44.1\"")
         }
         create("staging") {
             initWith(getByName("release"))
@@ -35,6 +45,11 @@ android {
             versionNameSuffix = "-staging"
             signingConfig = signingConfigs.getByName("debug")
             buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
+            buildConfigField("int", "REMOTE_PORT", "8767")
+            buildConfigField("String", "TAILSCALE_APPSERVER_IP", "\"100.76.136.91\"")
+            buildConfigField("String", "TAILSCALE_MAC_IP", "\"100.76.176.119\"")
+            buildConfigField("String", "LAN_MSI_IP", "\"10.0.0.117\"")
+            buildConfigField("String", "BLUETOOTH_REMOTE_IP", "\"192.168.44.1\"")
         }
         release {
             isMinifyEnabled = true
@@ -44,6 +59,11 @@ android {
                 "proguard-rules.pro"
             )
             buildConfigField("String", "DEFAULT_BASE_URL", "\"http://100.76.136.91:8767/\"")
+            buildConfigField("int", "REMOTE_PORT", "8767")
+            buildConfigField("String", "TAILSCALE_APPSERVER_IP", "\"100.76.136.91\"")
+            buildConfigField("String", "TAILSCALE_MAC_IP", "\"100.76.176.119\"")
+            buildConfigField("String", "LAN_MSI_IP", "\"10.0.0.117\"")
+            buildConfigField("String", "BLUETOOTH_REMOTE_IP", "\"192.168.44.1\"")
         }
     }
 
@@ -109,6 +129,8 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.google.dagger:hilt-android:2.52")
     kapt("com.google.dagger:hilt-compiler:2.52")
+
+    implementation("com.google.zxing:core:3.5.3")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

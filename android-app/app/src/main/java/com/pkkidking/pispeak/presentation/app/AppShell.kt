@@ -37,9 +37,13 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.pkkidking.pispeak.data.storage.ThemeMode
+import com.pkkidking.pispeak.presentation.audio.AudioEvent
+import com.pkkidking.pispeak.presentation.audio.AudioViewModel
+import com.pkkidking.pispeak.presentation.connection.ConnectionViewModel
 import com.pkkidking.pispeak.presentation.main.ConversationScreen
-import com.pkkidking.pispeak.presentation.main.MainViewModel
+import com.pkkidking.pispeak.presentation.main.ConversationScreenState
 import com.pkkidking.pispeak.presentation.settings.SettingsScreen
+import com.pkkidking.pispeak.presentation.turn.TurnViewModel
 import com.pkkidking.pispeak.ui.theme.PiSpeakTheme
 
 private enum class AppDestination(val label: String) {
@@ -56,25 +60,29 @@ fun PiSpeakApp(
     bootstrapProfileName: String? = null,
     bootstrapConnectionMode: String? = null,
     appViewModel: AppViewModel = hiltViewModel(),
-    mainViewModel: MainViewModel = hiltViewModel(),
+    connectionViewModel: ConnectionViewModel = hiltViewModel(),
+    turnViewModel: TurnViewModel = hiltViewModel(),
+    audioViewModel: AudioViewModel = hiltViewModel(),
 ) {
     val themeMode by appViewModel.themeMode.collectAsStateWithLifecycle()
-    val uiState by mainViewModel.uiState.collectAsStateWithLifecycle()
+    val connectionUiState by connectionViewModel.uiState.collectAsStateWithLifecycle()
+    val turnUiState by turnViewModel.uiState.collectAsStateWithLifecycle()
+    val audioUiState by audioViewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val expandedLayout = LocalConfiguration.current.screenWidthDp >= 840
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            mainViewModel.startRecording()
+            turnViewModel.startRecording()
         } else {
-            mainViewModel.onMicrophonePermissionDenied()
+            turnViewModel.onMicrophonePermissionDenied()
         }
     }
     var currentDestination by rememberSaveable { mutableStateOf(AppDestination.Conversation) }
 
     LaunchedEffect(bootstrapBaseUrl, bootstrapToken, bootstrapMachineId, bootstrapProfileName, bootstrapConnectionMode) {
-        mainViewModel.applyBootstrap(
+        connectionViewModel.applyBootstrap(
             baseUrl = bootstrapBaseUrl,
             token = bootstrapToken,
             machineId = bootstrapMachineId,
@@ -82,6 +90,43 @@ fun PiSpeakApp(
             connectionMode = bootstrapConnectionMode,
         )
     }
+
+    // Cross-VM: audio rearm → start recording
+    LaunchedEffect(Unit) {
+        audioViewModel.events.collect { event ->
+            when (event) {
+                is AudioEvent.RequestStartRecording -> {
+                    val granted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.RECORD_AUDIO,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (granted) {
+                        turnViewModel.startRecording()
+                    } else {
+                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                }
+            }
+        }
+    }
+
+    // Cross-VM: turn completed → maybe autoplay
+    LaunchedEffect(Unit) {
+        turnViewModel.turnCompleted.collect { event ->
+            audioViewModel.maybeAutoplay(
+                audioUrl = event.result.audioUrl,
+                baseUrl = connectionUiState.baseUrl,
+                token = connectionUiState.token,
+                rearmAfterPlayback = event.source == com.pkkidking.pispeak.domain.model.TurnSource.VOICE,
+            )
+        }
+    }
+
+    val conversationScreenState = ConversationScreenState(
+        connection = connectionUiState,
+        turn = turnUiState,
+        audio = audioUiState,
+    )
 
     PiSpeakTheme(
         darkTheme = when (themeMode) {
@@ -140,37 +185,47 @@ fun PiSpeakApp(
                 }
                 when (currentDestination) {
                     AppDestination.Conversation -> ConversationScreen(
-                        uiState = uiState,
+                        uiState = conversationScreenState,
                         contentPadding = paddingValues,
                         expandedLayout = expandedLayout,
-                        onRefresh = mainViewModel::refreshStatus,
-                        onMachineSelected = mainViewModel::onMachineSelected,
-                        onBaseUrlChanged = mainViewModel::onBaseUrlChanged,
-                        onTokenChanged = mainViewModel::onTokenChanged,
-                        onWorkspacePathChanged = mainViewModel::onWorkspacePathChanged,
-                        onTargetChanged = mainViewModel::onTargetChanged,
-                        onApplyTarget = mainViewModel::applyRouteTarget,
-                        onTextChanged = mainViewModel::onTextPromptChanged,
-                        onSendText = mainViewModel::submitTextTurn,
-                        onSaveConnection = mainViewModel::saveCurrentSettings,
+                        onRefresh = connectionViewModel::refreshStatus,
+                        onMachineSelected = connectionViewModel::onMachineSelected,
+                        onBaseUrlChanged = connectionViewModel::onBaseUrlChanged,
+                        onTokenChanged = connectionViewModel::onTokenChanged,
+                        onWorkspacePathChanged = connectionViewModel::onWorkspacePathChanged,
+                        onTargetChanged = connectionViewModel::onTargetChanged,
+                        onApplyTarget = connectionViewModel::applyRouteTarget,
+                        onTextChanged = turnViewModel::onTextPromptChanged,
+                        onSendText = turnViewModel::submitTextTurn,
+                        onSaveConnection = connectionViewModel::saveCurrentSettings,
                         onRecordToggle = {
-                            if (uiState.isRecording) {
-                                mainViewModel.stopRecordingAndSend()
+                            if (turnUiState.isRecording) {
+                                turnViewModel.stopRecordingAndSend()
                             } else {
                                 val granted = ContextCompat.checkSelfPermission(
                                     context,
                                     Manifest.permission.RECORD_AUDIO,
                                 ) == PackageManager.PERMISSION_GRANTED
                                 if (granted) {
-                                    mainViewModel.startRecording()
+                                    turnViewModel.startRecording()
                                 } else {
                                     permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 }
                             }
                         },
-                        onPlayAudio = mainViewModel::playReplyAudio,
-                        onStopAudio = mainViewModel::stopReplyAudio,
-                        onDismissError = mainViewModel::clearError,
+                        onPlayAudio = {
+                            audioViewModel.playReplyAudio(
+                                turnUiState.latestAudioUrl,
+                                connectionUiState.baseUrl,
+                                connectionUiState.token,
+                            )
+                        },
+                        onStopAudio = audioViewModel::stopReplyAudio,
+                        onDismissError = {
+                            connectionViewModel.clearError()
+                            turnViewModel.clearError()
+                            audioViewModel.clearError()
+                        },
                         onOpenSettings = { currentDestination = AppDestination.Settings },
                         onOpenAppSettings = {
                             val intent = Intent(
@@ -182,28 +237,31 @@ fun PiSpeakApp(
                     )
 
                     AppDestination.Settings -> SettingsScreen(
-                        uiState = uiState,
+                        connectionUiState = connectionUiState,
+                        turnUiState = turnUiState,
+                        audioUiState = audioUiState,
                         themeMode = themeMode,
                         contentPadding = paddingValues,
-                        onBaseUrlChanged = mainViewModel::onBaseUrlChanged,
-                        onTokenChanged = mainViewModel::onTokenChanged,
-                        onConnectionModeChanged = mainViewModel::onConnectionModeChanged,
-                        onWorkspacePathChanged = mainViewModel::onWorkspacePathChanged,
-                        machineProfiles = uiState.machineProfiles,
-                        selectedMachineId = uiState.selectedMachineId,
-                        machineProfileName = uiState.machineProfileName,
-                        onMachineSelected = mainViewModel::onMachineSelected,
-                        onMachineProfileNameChanged = mainViewModel::onMachineProfileNameChanged,
-                        onSaveMachineProfile = mainViewModel::onSaveMachineProfile,
-                        onDeleteSelectedMachine = mainViewModel::onDeleteSelectedMachine,
-                        onTargetChanged = mainViewModel::onTargetChanged,
-                        onApplyTarget = mainViewModel::applyRouteTarget,
-                        onRequestAudioChanged = mainViewModel::onRequestAudioRepliesChanged,
-                        onAutoplayChanged = mainViewModel::onAutoplayReplyAudioChanged,
-                        onContinuousConversationChanged = mainViewModel::onContinuousConversationChanged,
-                        onSaveSettings = mainViewModel::saveCurrentSettings,
+                        onBaseUrlChanged = connectionViewModel::onBaseUrlChanged,
+                        onTokenChanged = connectionViewModel::onTokenChanged,
+                        onConnectionModeChanged = connectionViewModel::onConnectionModeChanged,
+                        onWorkspacePathChanged = connectionViewModel::onWorkspacePathChanged,
+                        onMachineSelected = connectionViewModel::onMachineSelected,
+                        onMachineProfileNameChanged = connectionViewModel::onMachineProfileNameChanged,
+                        onSaveMachineProfile = connectionViewModel::onSaveMachineProfile,
+                        onDeleteSelectedMachine = connectionViewModel::onDeleteSelectedMachine,
+                        onTargetChanged = connectionViewModel::onTargetChanged,
+                        onApplyTarget = connectionViewModel::applyRouteTarget,
+                        onRequestAudioChanged = audioViewModel::onRequestAudioRepliesChanged,
+                        onAutoplayChanged = audioViewModel::onAutoplayReplyAudioChanged,
+                        onContinuousConversationChanged = audioViewModel::onContinuousConversationChanged,
+                        onSaveSettings = connectionViewModel::saveCurrentSettings,
                         onThemeModeChanged = appViewModel::setThemeMode,
-                        onDismissError = mainViewModel::clearError,
+                        onDismissError = {
+                            connectionViewModel.clearError()
+                            turnViewModel.clearError()
+                            audioViewModel.clearError()
+                        },
                     )
                 }
             }

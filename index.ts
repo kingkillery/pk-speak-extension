@@ -2,8 +2,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, statSync, unwatchFile, watchFile } from "node:fs";
 import { join } from "node:path";
-import { platform, tmpdir } from "node:os";
+import { networkInterfaces, platform, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
+import QRCode from "qrcode";
 import { ControlServer, type ControlActionResult, type ControlServerState } from "./control-server.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSummary } from "./remote-turn-manager.js";
@@ -31,7 +32,14 @@ import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js"
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { PiAgentProvider } from "./pi-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
+import {
+	appendExecutionTrace,
+	type ExecutionDecision,
+	type ExecutionPlanReplay,
+} from "./conversation-execution-trace.js";
 import { startRemoteTray, type RemoteTrayRuntime } from "./tray-controller.js";
+import { reduceConversationTurn } from "./conversation-reducer.js";
+import { planConversationExecution } from "./conversation-execution-router.js";
 import {
 	describeTtsProvider,
 	getAudioMimeType,
@@ -42,6 +50,7 @@ import {
 	type SpeakRuntimeState,
 	type TtsProvider,
 } from "./tts.js";
+import { isGeminiLiveConfigured, runGeminiLiveTurn } from "./gemini-live-turn.js";
 
 type SpeakState = SpeakRuntimeState & {
 	enabled: boolean;
@@ -129,6 +138,11 @@ const TAILSCALE_APPSERVER_IP = "100.76.136.91";
 const TAILSCALE_MAC_IP = "100.76.176.119";
 const DEFAULT_BLUETOOTH_IP = "192.168.44.1";
 const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim() || process.env.AGENT_WORKSPACE?.trim() || "";
+const PI_SPEAK_REDUCER_MIN_CONFIDENCE = Number.isFinite(
+	Number.parseFloat(process.env.PI_SPEAK_REDUCER_MIN_CONFIDENCE || "0.45"),
+)
+	? Number.parseFloat(process.env.PI_SPEAK_REDUCER_MIN_CONFIDENCE || "0.45")
+	: 0.45;
 const DEFAULT_VOICE = "adam";
 const SPEECH_MODE_PROMPT = `Activate CodeChat mode for this conversation.
 
@@ -195,6 +209,38 @@ function normalizeBaseUrl(value: string) {
 	return value.endsWith("/") ? value : `${value}/`;
 }
 
+function isPrivateLanIpv4(address: string) {
+	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
+	const [a, b] = parts;
+	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+function isTailscaleIpv4(address: string) {
+	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
+	return parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
+}
+
+function getReachableIpv4Addresses() {
+	const tailscale: string[] = [];
+	const lan: string[] = [];
+	for (const entries of Object.values(networkInterfaces())) {
+		for (const entry of entries || []) {
+			if (entry.family !== "IPv4" || entry.internal) continue;
+			if (isTailscaleIpv4(entry.address)) {
+				tailscale.push(entry.address);
+			} else if (isPrivateLanIpv4(entry.address)) {
+				lan.push(entry.address);
+			}
+		}
+	}
+	return {
+		tailscale: [...new Set(tailscale)],
+		lan: [...new Set(lan)],
+	};
+}
+
 function isTruthy(value: string | undefined | null) {
 	if (!value) return false;
 	return ["1", "true", "yes", "on"].includes(value.toLowerCase());
@@ -206,6 +252,8 @@ function getDefaultTailscaleBaseUrl(port: number) {
 		process.env.PI_SPEAK_TAILSCALE_BASE_URL?.trim() ||
 		process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim();
 	if (configured) return normalizeBaseUrl(configured);
+	const detected = getReachableIpv4Addresses().tailscale[0];
+	if (detected) return `http://${detected}:${port}/`;
 	const address = platform() === "darwin" ? TAILSCALE_MAC_IP : TAILSCALE_APPSERVER_IP;
 	return `http://${address}:${port}/`;
 }
@@ -223,6 +271,9 @@ function getSetupProfileForBaseUrl(baseUrl: string, mode: "tailscale" | "bluetoo
 	if (baseUrl.includes(TAILSCALE_MAC_IP)) {
 		return { machineId: "tailscale-mac", profileName: "Mac", connectionMode: "tailscale" };
 	}
+	if (baseUrl.includes("192.168.") || baseUrl.includes("10.") || /172\.(1[6-9]|2\d|3[01])\./.test(baseUrl)) {
+		return { machineId: "local-lan", profileName: "Local network", connectionMode: "manual" };
+	}
 	return { machineId: "tailscale-appserver", profileName: "MSI / appserver", connectionMode: "tailscale" };
 }
 
@@ -230,12 +281,15 @@ function buildRemoteSetupUrls(host: string, port: number, token: string, mode: "
 	const publicBase = PUBLIC_REMOTE_BASE_URL ? normalizeBaseUrl(PUBLIC_REMOTE_BASE_URL) : "";
 	const fallbackBase = getDefaultTailscaleBaseUrl(port);
 	const bluetoothBase = getDefaultBluetoothBaseUrl(port);
-	const hostBase = host && host !== "0.0.0.0" && host !== "::" && host.startsWith("100.")
+	const detected = getReachableIpv4Addresses();
+	const tailscaleBases = detected.tailscale.map((address) => `http://${address}:${port}/`);
+	const lanBases = detected.lan.map((address) => `http://${address}:${port}/`);
+	const hostBase = host && host !== "0.0.0.0" && host !== "::" && (isTailscaleIpv4(host) || isPrivateLanIpv4(host))
 		? `http://${host}:${port}/`
 		: "";
 	const baseUrls = mode === "bluetooth"
 		? [...new Set([bluetoothBase].filter(Boolean))]
-		: [...new Set([publicBase, hostBase, fallbackBase].filter(Boolean))];
+		: [...new Set([publicBase, ...tailscaleBases, hostBase, ...lanBases, fallbackBase].filter(Boolean))];
 	const browserUrls = baseUrls.map((baseUrl) => `${baseUrl}app/?token=${encodeURIComponent(token)}`);
 	const appSetupUrls = baseUrls.map((baseUrl) => {
 		const profile = getSetupProfileForBaseUrl(baseUrl, mode);
@@ -249,6 +303,16 @@ function buildRemoteSetupUrls(host: string, port: number, token: string, mode: "
 		return `pi-speak://setup?${params.toString()}`;
 	});
 	return { baseUrls, browserUrls, appSetupUrls };
+}
+
+async function buildRemoteSetupQrText(url: string) {
+	if (!url) return "";
+	return QRCode.toString(url, {
+		type: "terminal",
+		small: true,
+		margin: 1,
+		errorCorrectionLevel: "M",
+	});
 }
 
 function playMonoCue(kind: "listening" | "idle" = "listening") {
@@ -828,24 +892,53 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const synthesis = await synthesizeToFile({
 				text: trimmed,
 				outputPath,
-				state: getSpeakRuntimeState(),
+				state: { ...getSpeakRuntimeState(), provider: "elevenlabs" },
 			});
+			const ttsMs = Date.now() - startedAt;
 			return {
 				audioPath: outputPath,
 				audioMimeType: getAudioMimeType(outputPath),
-				timings: { ttsMs: Date.now() - startedAt },
+				timings: { ttsMs },
 				providers: { tts: synthesis.provider },
 			};
 		} catch (error) {
+			const primaryError = getErrorMessage(error);
 			try {
 				rmSync(audioDir, { recursive: true, force: true });
 			} catch {}
-			diagnostics.lastErrors.tts = getErrorMessage(error);
+			let warnings = [`Audio synthesis failed: ${primaryError}`];
+			const primaryTtsMs = Date.now() - startedAt;
+			diagnostics.lastErrors.tts = primaryError;
 			const target = ctx || lastCtx;
-			target?.ui?.notify?.(`Phone audio synthesis failed: ${getErrorMessage(error)}`, "warning");
-			return {
-				warnings: [`Audio synthesis failed: ${getErrorMessage(error)}`],
-			};
+			target?.ui?.notify?.(`Phone audio synthesis failed: ${primaryError}`, "warning");
+			if (!isGeminiLiveConfigured()) {
+				return {
+					warnings,
+					timings: { ttsMs: primaryTtsMs },
+				};
+			}
+
+			const geminiStartedAt = Date.now();
+			try {
+				const geminiResult = await runGeminiLiveTurn(trimmed, {
+					timeoutMs: Number.parseInt(process.env.PI_SPEAK_GEMINI_LIVE_TIMEOUT_MS || "45000", 10),
+				});
+				return {
+					audioPath: geminiResult.audioPath,
+					audioMimeType: geminiResult.audioMimeType,
+					timings: { ttsMs: primaryTtsMs + (Date.now() - geminiStartedAt) },
+					providers: {
+						tts: geminiResult.providers?.tts || "gemini-live",
+						agent: geminiResult.providers?.agent || undefined,
+					},
+					warnings: [...warnings, ...(geminiResult.warnings || []), "Fallback used: Gemini Live."],
+				};
+			} catch (geminiError) {
+				return {
+					warnings: [...warnings, `Gemini Live fallback failed: ${getErrorMessage(geminiError)}`],
+					timings: { ttsMs: Date.now() - startedAt },
+				};
+			}
 		}
 	};
 
@@ -951,8 +1044,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const runAgentPrompt = async (
 		prompt: string,
 		options: { mode?: "turn" | "steer" | "followUp"; timeoutMs?: number; cwd?: string } = {},
+		agentProviderOverride?: AgentProvider,
 	) => {
-		const provider = getAgentProvider();
+		const provider = agentProviderOverride || getAgentProvider();
 		if (provider.name === "pi") {
 			forceSpeechPromptNextTurn = true;
 		}
@@ -967,6 +1061,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	};
 
 	const executePhoneTurn = async (
+		source: "http-text" | "http-voice" | "telegram-text" | "telegram-voice",
 		text: string,
 		transcript?: string,
 		wantAudio = true,
@@ -975,18 +1070,136 @@ export default function speakExtension(pi: ExtensionAPI) {
 		warnings?: string[],
 		targetName?: string,
 		cwd?: string,
+		mode: "auto" | "live" = "auto",
 	): Promise<RemoteTurnResult> => {
 		const trimmed = text.trim();
 		if (!trimmed) {
-			return { replyText: "I did not receive any text to send to Pi.", transcript };
+			const replyText = "I did not receive any text to send to Pi.";
+			appendExecutionTrace({
+				ts: Date.now(),
+				source,
+				rawText: trimmed,
+				targetName: targetName?.trim() || remoteDefaultTarget,
+				outcome: "no-input",
+				replyText,
+			});
+			return { replyText, transcript };
 		}
 
 		const desiredTarget = targetName?.trim() || remoteDefaultTarget;
+		const reducer = await reduceConversationTurn(trimmed, {
+			source,
+			targetName: desiredTarget,
+			minConfidence: PI_SPEAK_REDUCER_MIN_CONFIDENCE,
+		});
+		const reducerMs = reducer.reducerMs;
+		const reducerTimings = {
+			reducerMs,
+		};
+		const executionPlan = planConversationExecution(reducer.summary, { targetName: desiredTarget });
+		const makeActionPlan = (decisions: ExecutionDecision[]): ExecutionPlanReplay => ({
+			dispatch: executionPlan.dispatch,
+			backend: executionPlan.backend,
+			reason: executionPlan.reason,
+			confidence: executionPlan.confidence,
+			rationale: executionPlan.rationale,
+			actionForSeed: executionPlan.actionForSeed,
+			signals: executionPlan.signals,
+			goal: reducer.summary.goal,
+			actionItems: reducer.summary.actionItems,
+			constraints: reducer.summary.constraints,
+			deferredReminders: reducer.summary.deferredReminders,
+			doNotDo: reducer.summary.doNotDo,
+			unknowns: reducer.summary.unknowns,
+			decisions,
+		});
+
+		if (!executionPlan.dispatch || !reducer.dispatch) {
+			const completedTimings = {
+				...reducerTimings,
+				...timings,
+				totalMs: (timings?.totalMs || 0) + reducerMs,
+			};
+			diagnostics.recentTimings.lastRemoteTurn = completedTimings;
+			const replyText = executionPlan.dispatch
+				? reducer.replyText
+				: executionPlan.rationale || reducer.replyText || reducer.summary.clarifyingQuestion || "I need a clearer action before I dispatch this.";
+			appendExecutionTrace({
+				ts: Date.now(),
+				source,
+				rawText: trimmed,
+				transcript,
+				targetName: desiredTarget,
+				reducerSummary: reducer.summary,
+				executionPlan,
+				actionPlan: makeActionPlan([
+					{
+						stage: "routing",
+						outcome: "deferred",
+						reason: executionPlan.rationale,
+					},
+				]),
+				outcome: "skipped",
+				timings: completedTimings,
+				replyText,
+				warnings: [...(warnings || []), replyText],
+				providers: {
+					...providers,
+					agent: "reducer",
+				},
+			});
+			return {
+				replyText,
+				transcript,
+				execution: {
+					...executionPlan,
+					dispatch: executionPlan.dispatch,
+					reason: executionPlan.reason,
+				},
+				timings: completedTimings,
+				providers: {
+					...providers,
+					agent: "reducer",
+				},
+				reducer: reducer.summary,
+				warnings: [...(warnings || []), executionPlan.rationale || reducer.summary.clarifyingQuestion || "I need a cleaner action before I dispatch this."],
+			};
+		}
+
 		const currentCtx = lastCtx;
 		if (!currentCtx) {
 			const reason = "No active Pi session is available for remote turns.";
 			diagnostics.lastErrors.remote = reason;
-			throw new Error(reason);
+			appendExecutionTrace({
+				ts: Date.now(),
+				source,
+				rawText: trimmed,
+				transcript,
+				targetName: desiredTarget,
+				reducerSummary: reducer.summary,
+				executionPlan,
+				actionPlan: makeActionPlan([
+					{
+						stage: "routing",
+						outcome: "accepted",
+						reason: executionPlan.rationale,
+					},
+					{
+						stage: "dispatch",
+						outcome: "blocked",
+						reason,
+					},
+				]),
+				outcome: "dispatch-blocked",
+				warnings: [reason],
+			});
+			return {
+				replyText: reason,
+				transcript,
+				reducer: reducer.summary,
+				execution: executionPlan,
+				warnings: [reason],
+			};
 		}
 		const currentSessionBusy = !(currentCtx.isIdle?.() ?? true) || (currentCtx.hasPendingMessages?.() ?? false);
 		if (currentSessionBusy || pendingRemoteTurn) {
@@ -994,6 +1207,29 @@ export default function speakExtension(pi: ExtensionAPI) {
 				? `Pi is busy. Finish the current turn before routing a remote turn to \"${desiredTarget}\".`
 				: "Pi is busy in the current session. Finish the current turn, then try again.";
 			diagnostics.lastErrors.remote = reason;
+			appendExecutionTrace({
+				ts: Date.now(),
+				source,
+				rawText: trimmed,
+				transcript,
+				targetName: desiredTarget,
+				reducerSummary: reducer.summary,
+				executionPlan,
+				actionPlan: makeActionPlan([
+					{
+						stage: "routing",
+						outcome: "accepted",
+						reason: executionPlan.rationale,
+					},
+					{
+						stage: "dispatch",
+						outcome: "blocked",
+						reason,
+					},
+				]),
+				outcome: "dispatch-blocked",
+				warnings: [reason],
+			});
 			throw new BusyError(reason);
 		}
 
@@ -1002,10 +1238,58 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const sessionPath = findSessionByName(desiredTarget);
 			if (!sessionPath) {
 				const available = Object.keys(sessionRegistry).sort((a, b) => a.localeCompare(b)).join(", ") || "none";
-				return { replyText: `Unknown target "${desiredTarget}". Known: ${available}`, transcript };
+				const reason = `Unknown target "${desiredTarget}". Known: ${available}`;
+				appendExecutionTrace({
+					ts: Date.now(),
+					source,
+					rawText: trimmed,
+					transcript,
+					targetName: desiredTarget,
+					reducerSummary: reducer.summary,
+					executionPlan,
+					actionPlan: makeActionPlan([
+						{
+							stage: "routing",
+							outcome: "accepted",
+							reason: executionPlan.rationale,
+						},
+						{
+							stage: "dispatch",
+							outcome: "blocked",
+							reason,
+						},
+					]),
+					outcome: "dispatch-blocked",
+					warnings: [reason],
+				});
+				return { replyText: reason, transcript };
 			}
 			const switched = await readiness.ctx.switchSession(sessionPath);
 			if (switched?.cancelled) {
+				const reason = `Switch to target "${desiredTarget}" was cancelled.`;
+			appendExecutionTrace({
+				ts: Date.now(),
+				source,
+				rawText: trimmed,
+				transcript,
+				targetName: desiredTarget,
+				reducerSummary: reducer.summary,
+				executionPlan,
+				actionPlan: makeActionPlan([
+					{
+						stage: "routing",
+						outcome: "accepted",
+						reason: executionPlan.rationale,
+					},
+					{
+						stage: "dispatch",
+						outcome: "blocked",
+						reason,
+					},
+				]),
+				outcome: "dispatch-blocked",
+				warnings: [reason],
+			});
 				return { replyText: `Switch to target "${desiredTarget}" was cancelled.`, transcript };
 			}
 			readiness = await waitForReadyTurnContext();
@@ -1013,18 +1297,196 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const startedAt = Date.now();
 		diagnostics.lastErrors.remote = undefined;
 
-		const replyText = await runAgentPrompt(trimmed, { timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS, cwd });
+		let replyText = "";
+		let executionProvider: AgentProvider;
+		if (executionPlan.backend === "codex") {
+			executionProvider = codexAgentProvider;
+		} else if (executionPlan.backend === "pi") {
+			executionProvider = piAgentProvider;
+		} else {
+			const reason = `Execution route \"${executionPlan.backend}\" is a placeholder and cannot run this turn yet.`;
+			appendExecutionTrace({
+				ts: Date.now(),
+				source,
+				rawText: trimmed,
+				transcript,
+				targetName: desiredTarget,
+				reducerSummary: reducer.summary,
+				executionPlan,
+				actionPlan: makeActionPlan([
+					{
+						stage: "routing",
+						outcome: "accepted",
+						reason: executionPlan.rationale,
+					},
+					{
+						stage: "dispatch",
+						outcome: "blocked",
+						reason,
+					},
+				]),
+				outcome: "dispatch-blocked",
+				warnings: [reason],
+			});
+			return {
+				replyText: reason,
+				transcript,
+				reducer: reducer.summary,
+				execution: executionPlan,
+				warnings: [...(warnings || []), reason],
+			};
+		}
+		let usedLiveMode = false;
+		let audioResult: Partial<RemoteTurnResult> | undefined;
+		let agentRunMs = 0;
+		let liveFailureWarnings: string[] = [];
+		if (mode === "live" && wantAudio && isGeminiLiveConfigured()) {
+			try {
+				const liveStartedAt = Date.now();
+				const liveResult = await runGeminiLiveTurn(reducer.promptForAgent, { timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS });
+				agentRunMs = Date.now() - liveStartedAt;
+				replyText = liveResult.replyText;
+				usedLiveMode = true;
+				audioResult = {
+					audioPath: liveResult.audioPath,
+					audioMimeType: liveResult.audioMimeType,
+					timings: {
+						geminiLiveMs: agentRunMs,
+					},
+					providers: {
+						agent: liveResult.providers?.agent || "gemini-live",
+						...liveResult.providers,
+					},
+					warnings: [...(liveResult.warnings || [])],
+				};
+			} catch (error) {
+				const fallbackWarning = `Gemini Live failed: ${getErrorMessage(error)}. Falling back to ${executionPlan.backend} execution.`;
+				liveFailureWarnings = [fallbackWarning];
+			}
+		}
+
+		let startedWithAgent = 0;
+		if (!usedLiveMode) {
+			try {
+				startedWithAgent = Date.now();
+				replyText = await runAgentPrompt(
+					reducer.promptForAgent,
+					{ timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS, cwd },
+					executionProvider,
+				);
+				agentRunMs = Date.now() - startedWithAgent;
+				audioResult = wantAudio ? await renderRemoteAudio(replyText, readiness.ctx) : undefined;
+			} catch (error) {
+				const reason = `Failed to run remote turn: ${getErrorMessage(error)}`;
+				diagnostics.lastErrors.remote = reason;
+				const failedMs = Date.now() - (startedWithAgent || Date.now());
+				agentRunMs = failedMs;
+				appendExecutionTrace({
+					ts: Date.now(),
+					source,
+					rawText: trimmed,
+					transcript,
+					targetName: desiredTarget,
+					reducerSummary: reducer.summary,
+					executionPlan,
+					actionPlan: makeActionPlan([
+						{
+							stage: "routing",
+							outcome: "accepted",
+							reason: executionPlan.rationale,
+						},
+						{
+							stage: "dispatch",
+							outcome: "failed",
+							reason,
+						},
+					]),
+					outcome: "dispatch-failed",
+					timings: {
+						agentWaitMs: readiness.waitMs,
+						agentRunMs: failedMs,
+						reducerMs,
+						totalMs: (timings?.totalMs || 0) + readiness.waitMs + failedMs,
+					},
+					replyText: reason,
+					error: reason,
+					warnings: [...(warnings || []), ...liveFailureWarnings, reason],
+					providers: {
+						...providers,
+						agent: executionProvider.name,
+					},
+				});
+				return {
+					replyText: reason,
+					transcript,
+					timings: {
+						agentWaitMs: readiness.waitMs,
+						agentRunMs: failedMs,
+						reducerMs,
+						totalMs: (timings?.totalMs || 0) + readiness.waitMs + failedMs,
+					},
+					providers: {
+						...providers,
+						agent: executionProvider.name,
+					},
+					reducer: reducer.summary,
+					execution: executionPlan,
+					warnings: [...(warnings || []), ...liveFailureWarnings, reason],
+				};
+			}
+		}
 		lastAssistantText = replyText;
-		const audioResult = wantAudio ? await renderRemoteAudio(replyText, readiness.ctx) : undefined;
-		const agentRunMs = Date.now() - startedAt;
-		const mergedTimings = {
+		const mergedTimings: TurnTimingSummary = {
 			...timings,
 			agentWaitMs: readiness.waitMs,
 			agentRunMs,
+			reducerMs,
 			...audioResult?.timings,
-			totalMs: (timings?.totalMs || 0) + agentRunMs + readiness.waitMs + (audioResult?.timings?.ttsMs || 0),
+			totalMs:
+				(timings?.totalMs || 0) + readiness.waitMs + agentRunMs + (audioResult?.timings?.ttsMs || 0),
 		};
 		diagnostics.recentTimings.lastRemoteTurn = mergedTimings;
+		appendExecutionTrace({
+			ts: Date.now(),
+			source,
+			rawText: trimmed,
+			transcript,
+			targetName: desiredTarget,
+			reducerSummary: reducer.summary,
+			executionPlan,
+			actionPlan: makeActionPlan([
+				{
+					stage: "routing",
+					outcome: "accepted",
+					reason: executionPlan.rationale,
+				},
+				usedLiveMode
+					? {
+							stage: "dispatch",
+							outcome: "succeeded",
+							reason: "Dispatched via Gemini Live.",
+						}
+					: {
+							stage: "dispatch",
+							outcome: "succeeded",
+							reason: `Dispatched to ${executionPlan.backend}.`,
+						},
+				{
+					stage: "reply",
+					outcome: "succeeded",
+					reason: "Reply generated and delivered.",
+				},
+			]),
+			outcome: "dispatch-success",
+			timings: mergedTimings,
+			replyText,
+			warnings: [...(warnings || []), ...liveFailureWarnings, ...(audioResult?.warnings || [])],
+			providers: {
+				agent: usedLiveMode ? "gemini-live" : executionProvider.name,
+				...providers,
+				...audioResult?.providers,
+			},
+		});
 		return {
 			replyText,
 			audioPath: audioResult?.audioPath,
@@ -1032,11 +1494,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 			transcript,
 			timings: mergedTimings,
 			providers: {
-				agent: getAgentProvider().name,
+				agent: usedLiveMode ? "gemini-live" : executionProvider.name,
 				...providers,
 				...audioResult?.providers,
 			},
-			warnings: [...(warnings || []), ...(audioResult?.warnings || [])],
+			reducer: reducer.summary,
+			execution: executionPlan,
+			warnings: [...(warnings || []), ...liveFailureWarnings, ...(audioResult?.warnings || [])],
 		};
 	};
 
@@ -1050,10 +1514,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 		warnings?: string[],
 		targetName?: string,
 		cwd?: string,
+		mode: "auto" | "live" = "auto",
 	) => {
 		diagnostics.recentTimings.lastRemoteSource = source;
 		return await remoteTurnManager.enqueue(source, async () =>
-			await executePhoneTurn(text, transcript, wantAudio, timings, providers, warnings, targetName, cwd),
+			await executePhoneTurn(source, text, transcript, wantAudio, timings, providers, warnings, targetName, cwd, mode),
 		);
 	};
 
@@ -1255,24 +1720,29 @@ export default function speakExtension(pi: ExtensionAPI) {
 		].join(" ");
 	};
 
-	const getRemoteSetupText = (mode: "tailscale" | "bluetooth" = "tailscale") => {
+	const getRemoteSetupText = async (mode: "tailscale" | "bluetooth" = "tailscale", includeQr = false) => {
 		const runtime = remoteServer?.getRuntimeState();
 		const status = getRemoteStatus();
 		const token = runtime?.authToken || remoteState.authToken || "";
 		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode);
 		const current = status.currentSession || "current session";
 		const route = status.defaultTarget || current;
+		const nativeSetupUrl = urls.appSetupUrls[0] || "";
+		const browserUrl = urls.browserUrls[0] || "/app/";
+		const qr = includeQr && nativeSetupUrl ? await buildRemoteSetupQrText(nativeSetupUrl) : "";
 		return [
-			mode === "bluetooth" ? "Bluetooth remote setup is ready." : "Remote setup is ready.",
+			mode === "bluetooth" ? "Bluetooth remote setup is ready." : "PK remote setup is ready.",
 			`Route: ${route}.`,
-			`Browser app: ${urls.browserUrls[0] || "/app/"}`,
+			qr ? "Scan this QR from the Android phone to save this machine:" : "",
+			qr,
+			`Native app setup: ${nativeSetupUrl || "not available"}`,
+			`Browser app: ${browserUrl}`,
 			urls.browserUrls.length > 1 ? `Other local URLs: ${urls.browserUrls.slice(1).join(" ")}` : "",
-			`Native app setup: ${urls.appSetupUrls[0] || "not available"}`,
 			mode === "bluetooth"
 				? "Pair the phone over Bluetooth networking/PAN first; edit the base URL if your desktop Bluetooth adapter uses a different IP."
-				: "Use HTTPS through Tailscale Serve or a tunnel for real phone microphone access.",
-			mode === "tailscale" && !PUBLIC_REMOTE_BASE_URL
-				? "Set PI_SPEAK_PUBLIC_BASE_URL to make /remote setup print your HTTPS phone URL first."
+				: "The QR prefers PI_SPEAK_PUBLIC_BASE_URL, then detected Tailscale, then the local LAN.",
+			mode === "tailscale" && !PUBLIC_REMOTE_BASE_URL && browserUrl.startsWith("http://")
+				? "For browser microphone access on a phone, use HTTPS through Tailscale Serve or a tunnel and set PI_SPEAK_PUBLIC_BASE_URL."
 				: "",
 		].filter(Boolean).join("\n");
 	};
@@ -1494,8 +1964,31 @@ export default function speakExtension(pi: ExtensionAPI) {
 				onMonoAction: (action) => handleMonoAction(action, lastCtx),
 				onSpeakAction: (action, value) => handleSpeakAction(action, value, lastCtx),
 				onPhoneAction: (action) => handlePhoneAction(action, lastCtx),
-				onTextTurn: (text, includeAudio, target, cwd) => enqueuePhoneTurn("http-text", text, undefined, includeAudio, undefined, undefined, undefined, target, cwd),
-				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd) => {
+				onTextTurn: async (text, includeAudio, target, cwd, mode) => {
+					try {
+						return await enqueuePhoneTurn(
+							"http-text",
+							text,
+							undefined,
+							includeAudio,
+							undefined,
+							undefined,
+							undefined,
+							target,
+							cwd,
+							mode,
+						);
+					} catch (error) {
+						const reason = getErrorMessage(error);
+						diagnostics.lastErrors.remote = reason;
+						return {
+							replyText: `Remote text turn failed: ${reason}`,
+							warnings: [`Remote text turn failed: ${reason}`],
+							providers: { agent: getAgentProvider().name },
+						};
+					}
+				},
+				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, mode) => {
 					try {
 						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
@@ -1512,10 +2005,14 @@ export default function speakExtension(pi: ExtensionAPI) {
 							undefined,
 							target,
 							cwd,
+							mode,
 						);
 					} catch (error) {
 						diagnostics.lastErrors.stt = getErrorMessage(error);
-						throw error;
+						return {
+							replyText: `Voice transcription failed: ${getErrorMessage(error)}`,
+							warnings: [`Voice transcription failed: ${getErrorMessage(error)}`],
+						};
 					}
 				},
 			});
@@ -2384,13 +2881,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 			if (lower === "setup") {
 				await startRemoteServer(ctx, true);
-				ctx.ui.notify(getRemoteSetupText(), "info");
+				ctx.ui.notify(await getRemoteSetupText("tailscale", true), "info");
 				return;
 			}
 
 			if (lower === "setup bluetooth" || lower === "bluetooth setup") {
 				await startRemoteServer(ctx, true);
-				ctx.ui.notify(getRemoteSetupText("bluetooth"), "info");
+				ctx.ui.notify(await getRemoteSetupText("bluetooth", true), "info");
 				return;
 			}
 
@@ -2424,7 +2921,25 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /remote [on|off|status|token|setup|tray on|tray off|tray status]", "error");
+			ctx.ui.notify("Usage: /remote [on|off|status|token|setup|setup bluetooth|tray on|tray off|tray status] or /pk-remote", "error");
+		},
+	});
+
+	pi.registerCommand("pk-remote", {
+		description: "Start the phone remote and show a QR code that configures the Android app",
+		getArgumentCompletions: (prefix) => {
+			const options = ["", "bluetooth"];
+			const matches = options.filter((opt) => opt.startsWith(prefix));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value || "setup" })) : null;
+		},
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const lower = args.trim().toLowerCase();
+			const mode = lower === "bluetooth" || lower === "setup bluetooth" || lower === "bluetooth setup"
+				? "bluetooth"
+				: "tailscale";
+			await startRemoteServer(ctx, true);
+			ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
 		},
 	});
 
