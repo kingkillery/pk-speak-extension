@@ -1,6 +1,6 @@
 ---
 name: pi-speak
-description: "Pointer skill for pi-speak-pk. Use when the user wants spoken replies, wake-word listening, session-manager control, deterministic short voice routes like `PK one` / `PK1` vs `PK two` / `PK2`, Telegram control, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
+description: "Pointer skill for pi-speak-pk. Use when the user wants spoken replies, wake-word listening, session-manager control, deterministic short voice routes like `PK one` / `PK1` vs `PK two` / `PK2`, Telegram control, QR-based Android setup via `/pk-remote`, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
 ---
 
 # pi-speak-pk
@@ -14,6 +14,7 @@ Start here when the user wants to talk naturally about:
 - voice-driven session creation, switching, naming, aliasing, or removal
 - deterministic short voice routes like `PK one` / `PK1` and `PK two` / `PK2`
 - Telegram remote control
+- QR-based Android setup through `/pk-remote`
 - the browser remote app
 
 ## First reads
@@ -42,6 +43,7 @@ Examples of natural requests this skill should map cleanly:
 - "remove session bugfix"
 - "which sessions are ready"
 - "open the session manager pane"
+- "show the QR to connect my phone"
 - "turn on the browser remote"
 
 ## Main command families
@@ -51,7 +53,8 @@ Examples of natural requests this skill should map cleanly:
 - `/sess` → session manager dashboard, session naming, switching, edit wrapper, aliases, removal, export, and `/sess ui` to open the interactive Ink pane in a new terminal
 - `/attn` → advanced multi-session ready-state broker controls
 - `/phone` → Telegram bridge
-- `/remote` → HTTP API and built-in mobile web app
+- `/pk-remote` → one-command QR setup for the native Android app
+- `/remote` → HTTP API, QR setup, and built-in mobile web app
 
 ## Deep references
 

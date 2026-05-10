@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { ControlServer, type ControlActionResult, type ControlServerStatus } from "./control-server.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
+import { runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { RemoteTurnResult } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
@@ -27,6 +28,12 @@ let provider: AgentProvider;
 let fallbackProvider: AgentProvider | undefined;
 
 function createAgentProvider(): AgentProvider {
+	if (agentConfig.provider === "elevenlabs") {
+		return new GeminiProvider("elevenlabs");
+	}
+	if (agentConfig.provider === "gemini" || agentConfig.provider === "gemini-live") {
+		return new GeminiProvider(agentConfig.provider);
+	}
 	if (agentConfig.provider === "pi") {
 		return new PiCliProvider(agentConfig.piBin, process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
 	}
@@ -72,6 +79,56 @@ function status(): ControlServerStatus {
 async function runTextTurn(text: string, includeAudio = false, cwd?: string, transcript?: string): Promise<RemoteTurnResult> {
 	const prompt = text.trim();
 	if (!prompt) return { replyText: "Send a message first." };
+	if (agentConfig.provider === "elevenlabs") {
+		const result = await runGeminiTextTurn(prompt);
+		if (!includeAudio) return {
+			...result,
+			providers: { ...result.providers, agent: "elevenlabs" },
+		};
+		const audio = await renderReplyAudio(result.replyText, "elevenlabs");
+		if (audio.audioPath) {
+			return {
+				...result,
+				audioPath: audio.audioPath,
+				audioMimeType: audio.audioMimeType,
+				timings: { ...result.timings, ...audio.timings },
+				providers: { agent: "elevenlabs", tts: "elevenlabs" },
+				warnings: [...(result.warnings || []), ...(audio.warnings || [])],
+			};
+		}
+		if (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY) {
+			const fallback = await runGeminiLiveTurn(prompt);
+			return {
+				...fallback,
+				warnings: [
+					...(result.warnings || []),
+					...(audio.warnings || []),
+					"ElevenLabs speech failed; used Gemini Live audio fallback.",
+					...(fallback.warnings || []),
+				],
+			};
+		}
+		return {
+			...result,
+			warnings: [...(result.warnings || []), ...(audio.warnings || [])],
+		};
+	}
+	if (agentConfig.provider === "gemini-live") {
+		return includeAudio ? await runGeminiLiveTurn(prompt) : await runGeminiTextTurn(prompt);
+	}
+	if (agentConfig.provider === "gemini") {
+		const result = await runGeminiTextTurn(prompt);
+		if (!includeAudio) return result;
+		const audio = await renderReplyAudio(result.replyText);
+		return {
+			...result,
+			audioPath: audio.audioPath,
+			audioMimeType: audio.audioMimeType,
+			timings: { ...result.timings, ...audio.timings },
+			providers: { ...result.providers, ...audio.providers },
+			warnings: [...(result.warnings || []), ...(audio.warnings || [])],
+		};
+	}
 	const options = {
 		model: agentConfig.model,
 		cwd: cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd(),
@@ -136,7 +193,7 @@ async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = fa
 	};
 }
 
-async function renderReplyAudio(text: string): Promise<Partial<RemoteTurnResult>> {
+async function renderReplyAudio(text: string, providerOverride?: TtsProvider): Promise<Partial<RemoteTurnResult>> {
 	const trimmed = text.trim();
 	if (!trimmed) return {};
 	const audioDir = mkdtempSync(join(tmpdir(), "pi-speak-tray-reply-"));
@@ -148,7 +205,7 @@ async function renderReplyAudio(text: string): Promise<Partial<RemoteTurnResult>
 			outputPath,
 			state: {
 				enabled: true,
-				provider: (process.env.PI_SPEAK_TTS_PROVIDER || "auto") as TtsProvider,
+				provider: providerOverride || (process.env.PI_SPEAK_TTS_PROVIDER || "auto") as TtsProvider,
 				rewriteEnabled: process.env.PI_SPEAK_REWRITE_ENABLED
 					? !["0", "false", "off", "no"].includes(process.env.PI_SPEAK_REWRITE_ENABLED.toLowerCase())
 					: true,
@@ -203,6 +260,20 @@ class CodexExecProvider implements AgentProvider {
 	}
 }
 
+class GeminiProvider implements AgentProvider {
+	readonly name: "gemini" | "gemini-live" | "elevenlabs";
+	constructor(name: "gemini" | "gemini-live" | "elevenlabs") {
+		this.name = name;
+	}
+
+	async *sendPrompt(prompt: string) {
+		const result = this.name === "gemini-live"
+			? await runGeminiLiveTurn(prompt)
+			: await runGeminiTextTurn(prompt);
+		if (result.replyText) yield { type: "text" as const, text: result.replyText };
+	}
+}
+
 provider = createAgentProvider();
 
 server = new ControlServer({
@@ -223,8 +294,8 @@ server = new ControlServer({
 	onMonoAction: (action) => ok(`Mono ${action} is unavailable in tray gateway mode.`),
 	onSpeakAction: (action) => ok(`Speak ${action} is unavailable in tray gateway mode.`),
 	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
-	onTextTurn: async (text, includeAudio, _target, cwd) => runTextTurn(text, includeAudio, cwd),
-	onVoiceTurn: async (buffer, mimeType, includeAudio, _target, cwd) => runVoiceTurn(buffer, mimeType, includeAudio, cwd),
+	onTextTurn: async (text, includeAudio, _target, cwd, _mode) => runTextTurn(text, includeAudio, cwd),
+	onVoiceTurn: async (buffer, mimeType, includeAudio, _target, cwd, _mode) => runVoiceTurn(buffer, mimeType, includeAudio, cwd),
 });
 
 Promise.resolve(provider.start?.())

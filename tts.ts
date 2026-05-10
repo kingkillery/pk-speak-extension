@@ -35,7 +35,9 @@ export const DEFAULT_OPENAI_MODEL = process.env.PI_SPEAK_OPENAI_TTS_MODEL || "gp
 export const DEFAULT_ELEVENLABS_VOICE_ID =
 	process.env.PI_SPEAK_ELEVENLABS_VOICE_ID || "pNInz6obpgDQGcFmaJgB";
 export const DEFAULT_ELEVENLABS_MODEL_ID =
-	process.env.PI_SPEAK_ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
+	process.env.PI_SPEAK_ELEVENLABS_MODEL_ID || "eleven_flash_v2_5";
+export const DEFAULT_ELEVENLABS_OUTPUT_FORMAT =
+	process.env.PI_SPEAK_ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128";
 export const DEFAULT_REWRITE_MODEL =
 	process.env.PI_SPEAK_REWRITE_MODEL || "openai/gpt-oss-20b:nitro";
 
@@ -202,6 +204,7 @@ export function getTtsDiagnostics(state?: SpeakRuntimeState) {
 				available: !!process.env.ELEVENLABS_API_KEY,
 				model: DEFAULT_ELEVENLABS_MODEL_ID,
 				voiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+				outputFormat: DEFAULT_ELEVENLABS_OUTPUT_FORMAT,
 			},
 		},
 	};
@@ -309,7 +312,7 @@ async function synthesizeElevenLabs(text: string, outputPath: string, signal?: A
 	const voiceId = elevenLabsAliases[configuredVoice.toLowerCase()] || configuredVoice;
 	const response = await withAbortTimeout(
 		(requestSignal) =>
-			fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
+			fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(DEFAULT_ELEVENLABS_OUTPUT_FORMAT)}`, {
 				method: "POST",
 				headers: {
 					"xi-api-key": apiKey,
@@ -318,6 +321,14 @@ async function synthesizeElevenLabs(text: string, outputPath: string, signal?: A
 				body: JSON.stringify({
 					text,
 					model_id: DEFAULT_ELEVENLABS_MODEL_ID,
+					voice_settings: {
+						stability: Number.parseFloat(process.env.PI_SPEAK_ELEVENLABS_STABILITY || "0.5"),
+						similarity_boost: Number.parseFloat(process.env.PI_SPEAK_ELEVENLABS_SIMILARITY_BOOST || "0.8"),
+						style: Number.parseFloat(process.env.PI_SPEAK_ELEVENLABS_STYLE || "0"),
+						use_speaker_boost: (process.env.PI_SPEAK_ELEVENLABS_SPEAKER_BOOST || "true").toLowerCase() !== "false",
+						speed: Number.parseFloat(process.env.PI_SPEAK_ELEVENLABS_SPEED || "1"),
+					},
+					apply_text_normalization: process.env.PI_SPEAK_ELEVENLABS_TEXT_NORMALIZATION || "off",
 				}),
 				signal: requestSignal,
 			}),

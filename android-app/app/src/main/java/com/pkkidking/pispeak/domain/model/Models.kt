@@ -1,5 +1,6 @@
 package com.pkkidking.pispeak.domain.model
 
+import com.pkkidking.pispeak.BuildConfig
 import java.net.URI
 import java.util.UUID
 
@@ -37,38 +38,32 @@ data class MachineProfile(
     val workspacePath: String = "",
 )
 
-const val TAILSCALE_REMOTE_PORT = 8767
-const val TAILSCALE_APPSERVER_IP = "100.76.136.91"
-const val TAILSCALE_MAC_IP = "100.76.176.119"
-const val BLUETOOTH_REMOTE_IP = "192.168.44.1"
-const val LAN_MSI_IP = "10.0.0.117"
-
 val DefaultMachineProfiles = listOf(
     MachineProfile(
         id = "tailscale-appserver",
         name = "MSI / appserver",
-        baseUrl = "http://$TAILSCALE_APPSERVER_IP:$TAILSCALE_REMOTE_PORT/",
+        baseUrl = "http://${BuildConfig.TAILSCALE_APPSERVER_IP}:${BuildConfig.REMOTE_PORT}/",
         token = "",
         connectionMode = ConnectionMode.TAILSCALE,
     ),
     MachineProfile(
         id = "tailscale-mac",
         name = "Mac",
-        baseUrl = "http://$TAILSCALE_MAC_IP:$TAILSCALE_REMOTE_PORT/",
+        baseUrl = "http://${BuildConfig.TAILSCALE_MAC_IP}:${BuildConfig.REMOTE_PORT}/",
         token = "",
         connectionMode = ConnectionMode.TAILSCALE,
     ),
     MachineProfile(
         id = "lan-msi",
         name = "MSI / LAN",
-        baseUrl = "http://$LAN_MSI_IP:$TAILSCALE_REMOTE_PORT/",
+        baseUrl = "http://${BuildConfig.LAN_MSI_IP}:${BuildConfig.REMOTE_PORT}/",
         token = "",
         connectionMode = ConnectionMode.MANUAL,
     ),
     MachineProfile(
         id = "bluetooth-local",
         name = "Bluetooth / local link",
-        baseUrl = "http://$BLUETOOTH_REMOTE_IP:$TAILSCALE_REMOTE_PORT/",
+        baseUrl = "http://${BuildConfig.BLUETOOTH_REMOTE_IP}:${BuildConfig.REMOTE_PORT}/",
         token = "",
         connectionMode = ConnectionMode.BLUETOOTH,
     ),
@@ -90,25 +85,21 @@ data class RemoteStatusSummary(
     val availableTargets: List<String>,
 ) {
     fun summaryText(): String = buildString {
-        append("Remote ")
-        append(if (remoteEnabled) "on" else "off")
-        if (remotePort != null) append(" at port $remotePort")
-        append(". Agent ")
-        append(agentProvider ?: "unknown")
-        if (!agentModel.isNullOrBlank()) {
-            append(" (")
-            append(agentModel)
-            append(')')
+        // One-line operator summary. Keep this concise and stable; route/session detail is shown elsewhere.
+        append(if (remoteEnabled) "Remote on" else "Remote off")
+        if (agentProvider != null || !agentModel.isNullOrBlank()) {
+            append(" | Agent ")
+            append(agentProvider ?: "unknown")
+            if (!agentModel.isNullOrBlank()) {
+                append(" (")
+                append(agentModel)
+                append(')')
+            }
         }
-        append(". Speak ")
+        append(" | Speak ")
         append(if (speakEnabled) (speakProvider ?: "on") else "off")
-        append(", mono ")
-        append(if (monoRunning) "on" else "off")
-        append(", phone ")
-        append(if (phoneEnabled) "on" else "off")
-        append(", route ")
-        append(defaultTarget ?: currentSession ?: "current")
-        append('.')
+        if (!phoneEnabled) append(" | phone off")
+        if (!monoRunning) append(" | mono off")
     }
 }
 
@@ -186,8 +177,8 @@ fun AppSettings.validate(allowInsecureLoopback: Boolean): String? {
     val scheme = parsed.scheme?.lowercase().orEmpty()
     val host = parsed.host?.lowercase().orEmpty()
     val loopbackHosts = setOf("localhost", "127.0.0.1", "::1")
-    val approvedTailscaleHosts = setOf(TAILSCALE_APPSERVER_IP, TAILSCALE_MAC_IP)
-    val approvedLanHosts = setOf(LAN_MSI_IP)
+    val approvedTailscaleHosts = setOf(BuildConfig.TAILSCALE_APPSERVER_IP, BuildConfig.TAILSCALE_MAC_IP)
+    val approvedLanHosts = setOf(BuildConfig.LAN_MSI_IP)
     val activeConnectionMode = machineProfiles
         .firstOrNull { it.id == selectedMachineId }
         ?.connectionMode

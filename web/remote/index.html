@@ -3,29 +3,25 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-	<meta name="theme-color" content="#183249">
-	<title>Pi Speak Remote</title>
+	<meta name="theme-color" content="#1f3c33">
+	<title>Pi Speak Chat</title>
 	<link rel="manifest" href="/app/app.webmanifest">
 	<style>
 		:root {
-			--primary: #183249;
-			--on-primary: #f7fafc;
-			--primary-container: #dceaf3;
-			--on-primary-container: #102332;
-			--accent: #c95532;
+			--canvas: #f7f9f4;
+			--surface: #ffffff;
+			--line: #d9ded6;
+			--line-strong: #bac4bc;
+			--ink: #161b18;
+			--muted: #68736d;
+			--primary: #1f3c33;
+			--on-primary: #f8fbf6;
+			--accent: #b85f3f;
 			--on-accent: #fff8f2;
-			--success: #17765d;
-			--warning: #a86d12;
-			--danger: #b3261e;
-			--bg: #fbfcf8;
-			--panel: #f1f4ef;
-			--raised: #ffffff;
-			--ink: #17211c;
-			--muted: #738078;
-			--line: #ccd4cd;
-			--outline: #8b978f;
-			--bubble-user: #183249;
-			--bubble-agent: #ffffff;
+			--success: #19715b;
+			--danger: #a63a2a;
+			--shadow: 0 18px 54px rgba(31, 60, 51, 0.08);
+			--dock-inset: 190px;
 		}
 
 		* { box-sizing: border-box; }
@@ -33,64 +29,38 @@
 		html, body {
 			margin: 0;
 			min-height: 100%;
-			background: var(--bg);
+			background: linear-gradient(180deg, rgba(255, 255, 255, 0.62), rgba(247, 249, 244, 0.96)), var(--canvas);
 			color: var(--ink);
 		}
 
 		body {
-			font-family: Roboto, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+			font-family: "Aptos", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
 		}
 
-		button, input, textarea, select {
-			font: inherit;
-		}
+		button, input, textarea, select { font: inherit; }
 
-		.app {
-			width: min(100%, 860px);
-			min-height: 100dvh;
-			margin: 0 auto;
-			display: grid;
-			grid-template-rows: auto 1fr auto;
-			gap: 8px;
-			padding: 8px;
-		}
-
-		.topbar,
-		.chat,
-		.composer,
-		.voice-dock,
-		.settings {
-			background: var(--raised);
-			border: 1px solid var(--line);
+		button {
+			min-height: 44px;
+			border: 1px solid transparent;
 			border-radius: 8px;
+			padding: 0 14px;
+			background: var(--primary);
+			color: var(--on-primary);
+			cursor: pointer;
+			font-size: 13px;
+			font-weight: 700;
+			transition: transform 140ms ease, border-color 140ms ease, background 140ms ease, opacity 140ms ease;
 		}
 
-		.topbar {
-			display: grid;
-			grid-template-columns: 1fr auto;
-			gap: 8px;
-			align-items: center;
-			padding: 8px;
-			min-height: 64px;
+		button.secondary {
+			background: var(--canvas);
+			color: var(--primary);
+			border-color: var(--line);
 		}
 
-		.route-row {
-			display: grid;
-			grid-template-columns: minmax(120px, 1fr) auto;
-			gap: 8px;
-			align-items: center;
-		}
+		button:active { transform: translateY(1px); }
 
-		.route-label {
-			display: grid;
-			gap: 4px;
-			min-width: 0;
-		}
-
-		.route-label span {
-			font-size: 12px;
-			color: var(--muted);
-		}
+		button:disabled { opacity: 0.6; cursor: wait; }
 
 		select,
 		input[type="password"],
@@ -98,50 +68,93 @@
 		textarea {
 			width: 100%;
 			border: 1px solid var(--line);
-			border-radius: 16px;
-			background: var(--raised);
+			border-radius: 8px;
+			background: var(--surface);
 			color: var(--ink);
-			outline: none;
 		}
 
 		select,
 		input[type="password"],
 		input[type="text"] {
-			height: 48px;
+			height: 44px;
 			padding: 0 12px;
 		}
 
-		button {
-			min-height: 48px;
-			border: 1px solid transparent;
-			border-radius: 16px;
-			padding: 0 16px;
-			background: var(--primary);
-			color: var(--on-primary);
-			cursor: pointer;
-			font-size: 13px;
-			font-weight: 650;
+		select:focus,
+		input:focus,
+		textarea:focus {
+			border-color: var(--primary);
+			box-shadow: 0 0 0 3px rgba(31, 60, 51, 0.12);
+			outline: none;
 		}
 
-		button.secondary {
-			background: var(--panel);
-			color: var(--primary);
-			border-color: var(--line);
+		textarea {
+			min-height: 52px;
+			max-height: 180px;
+			resize: vertical;
+			padding: 12px;
+			line-height: 1.45;
 		}
 
-		button:disabled {
-			cursor: wait;
-			opacity: 0.65;
-		}
+		.hidden { display: none !important; }
 
-		.connection {
+		.app {
+			width: min(100%, 980px);
+			min-height: 100dvh;
+			margin: 0 auto;
 			display: flex;
-			gap: 8px;
+			flex-direction: column;
+			gap: 10px;
+			padding: 12px;
+		}
+
+		.topbar {
+			position: sticky;
+			top: 0;
+			z-index: 10;
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			gap: 10px;
+			align-items: center;
+			padding: 10px 12px;
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			background: rgba(255, 255, 255, 0.92);
+			box-shadow: var(--shadow);
+		}
+
+		.brand {
+			display: grid;
+			gap: 4px;
+		}
+
+		.brand strong {
+			font-size: 16px;
+			font-weight: 800;
+			letter-spacing: 0;
+		}
+
+		.brand span {
+			color: var(--muted);
+			font-size: 12px;
+			font-weight: 700;
+		}
+
+		.topbar .connection {
+			display: flex;
+			gap: 10px;
 			align-items: center;
 			justify-content: flex-end;
 			color: var(--muted);
-			font-size: 13px;
+			font-size: 12px;
+			font-weight: 700;
 			white-space: nowrap;
+		}
+
+		.top-actions {
+			display: flex;
+			gap: 8px;
+			align-items: center;
 		}
 
 		.status-dot {
@@ -154,42 +167,75 @@
 		.status-dot.ready { background: var(--success); }
 		.status-dot.error { background: var(--danger); }
 
+		.setup-banner {
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			background: #fefefe;
+			box-shadow: var(--shadow);
+			padding: 10px 14px;
+			display: grid;
+			gap: 10px;
+		}
+
+		.setup-banner h2 { margin: 0; font-size: 14px; }
+
+		.setup-banner code {
+			display: inline-block;
+			padding: 1px 6px;
+			border-radius: 6px;
+			background: #f3f7f2;
+			border: 1px solid var(--line);
+		}
+
+		.muted,
+		.status-note {
+			color: var(--muted);
+			font-size: 13px;
+		}
+
 		.chat {
 			min-height: 0;
+			flex: 1;
 			display: grid;
-			grid-template-rows: 1fr auto;
+			grid-template-rows: minmax(0, 1fr);
 			overflow: hidden;
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			background: var(--surface);
+			box-shadow: var(--shadow);
 		}
 
 		.messages {
-			min-height: 320px;
+			min-height: 340px;
 			overflow: auto;
-			padding: 14px;
+			padding: clamp(14px, 3vw, 24px);
+			padding-bottom: calc(clamp(14px, 3vw, 24px) + var(--dock-inset) + env(safe-area-inset-bottom));
 			display: flex;
 			flex-direction: column;
 			gap: 10px;
 		}
 
 		.message {
-			max-width: min(78%, 620px);
-			padding: 12px;
+			max-width: min(80%, 640px);
+			padding: 11px 12px;
 			border-radius: 8px;
-			line-height: 1.5;
+			line-height: 1.48;
 			white-space: pre-wrap;
 			overflow-wrap: anywhere;
+			border: 1px solid transparent;
 		}
 
 		.message.user {
 			align-self: flex-end;
-			background: var(--bubble-user);
+			background: var(--primary);
 			color: var(--on-primary);
 		}
 
 		.message.agent,
 		.message.system {
 			align-self: flex-start;
-			background: var(--bubble-agent);
-			border: 1px solid var(--line);
+			background: #f1f4ed;
+			border-color: var(--line);
 		}
 
 		.message.system {
@@ -197,62 +243,82 @@
 			font-size: 13px;
 		}
 
-		.audio-row {
-			padding: 0 14px 14px;
+		.dock {
+			position: fixed;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			z-index: 20;
+			background: rgba(247, 249, 244, 0.92);
+			backdrop-filter: blur(10px);
+			border-top: 1px solid var(--line);
+			padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+		}
+
+		.dock-inner {
+			width: min(100%, 980px);
+			margin: 0 auto;
 			display: grid;
+			gap: 10px;
+		}
+
+		.dock-status {
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			background: rgba(255, 255, 255, 0.9);
+			box-shadow: var(--shadow);
+			padding: 10px 12px;
+			display: grid;
+			gap: 6px;
+		}
+
+		.audio-controls {
+			display: flex;
 			gap: 8px;
+			align-items: center;
+			flex-wrap: wrap;
 		}
 
 		audio {
 			width: 100%;
-			border-radius: 999px;
-		}
-
-		.status-note {
-			color: var(--muted);
-			font-size: 13px;
-			min-height: 18px;
+			border-radius: 8px;
+			flex: 1 1 220px;
+			min-width: 180px;
 		}
 
 		.composer {
 			display: grid;
-			grid-template-columns: 1fr auto;
+			grid-template-columns: minmax(0, 1fr) auto;
 			gap: 8px;
-			padding: 8px;
+			align-items: end;
 		}
 
-		textarea {
-			min-height: 52px;
-			max-height: 180px;
-			resize: vertical;
-			padding: 12px;
+		.composer textarea {
+			resize: none;
+			max-height: 160px;
+		}
+
+		.composer-actions {
+			display: grid;
+			gap: 8px;
 		}
 
 		.voice-dock {
 			display: grid;
-			grid-template-columns: 1fr auto;
-			gap: 8px;
+			grid-template-columns: minmax(0, 1fr) auto auto;
+			gap: 10px;
 			align-items: center;
-			padding: 8px;
-		}
-
-		.talk-button {
-			min-width: 128px;
-			height: 64px;
-			background: var(--accent);
-			color: var(--on-accent);
-			border-radius: 28px;
-			font-weight: 700;
-		}
-
-		.talk-button.recording {
-			background: var(--danger);
 		}
 
 		.voice-mode {
 			display: flex;
 			gap: 10px;
 			align-items: center;
+			padding: 10px 12px;
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			background: rgba(255, 255, 255, 0.9);
+			box-shadow: var(--shadow);
 			min-width: 0;
 		}
 
@@ -263,56 +329,73 @@
 		}
 
 		.voice-copy {
-			min-width: 0;
 			display: grid;
 			gap: 2px;
+			min-width: 0;
 		}
 
-		.voice-copy strong,
-		.voice-copy span {
-			overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
+		#record-subtitle {
+			color: var(--muted);
+			font-size: 12px;
+			font-weight: 700;
 		}
 
-		.voice-copy span,
+		.talk-button {
+			min-width: 150px;
+			background: var(--accent);
+			color: var(--on-accent);
+			font-weight: 800;
+		}
+
+		.talk-button.recording { background: var(--danger); }
+
 		.timer {
 			color: var(--muted);
-			font-size: 13px;
+			font-size: 12px;
+			font-weight: 800;
+			border: 1px solid var(--line);
+			background: rgba(255, 255, 255, 0.9);
+			border-radius: 8px;
+			padding: 10px 12px;
+			min-width: 86px;
+			text-align: center;
 		}
 
 		details.settings {
-			box-shadow: none;
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			background: rgba(255, 255, 255, 0.86);
 		}
 
 		details.settings summary {
 			cursor: pointer;
 			list-style: none;
-			padding: 12px 16px;
-			font-weight: 700;
+			padding: 10px 14px;
+			color: var(--primary);
+			font-weight: 800;
 		}
 
-		details.settings summary::-webkit-details-marker {
-			display: none;
-		}
+		details.settings summary::-webkit-details-marker { display: none; }
 
 		.settings-body {
 			border-top: 1px solid var(--line);
-			padding: 16px;
+			padding: 14px;
 			display: grid;
-			gap: 12px;
+			gap: 10px;
 		}
 
-		.field-grid {
-			display: grid;
-			gap: 6px;
-		}
-
+		.field-grid,
 		.text-actions,
-		.quick-grid {
-			display: flex;
-			flex-wrap: wrap;
+		.settings-actions {
+			display: grid;
 			gap: 8px;
+			min-width: 0;
+		}
+
+		.field-grid span {
+			color: var(--muted);
+			font-size: 12px;
+			font-weight: 700;
 		}
 
 		label.toggle {
@@ -320,101 +403,204 @@
 			gap: 8px;
 			align-items: center;
 			color: var(--muted);
+			font-size: 13px;
 		}
 
-		.hidden {
-			display: none !important;
+		label.toggle input {
+			width: 18px;
+			height: 18px;
+			accent-color: var(--accent);
 		}
 
-		.legacy-output {
+		/* One-pane onboarding first (block chat until token is known). */
+		.app.locked .chat,
+		.app.locked .dock,
+		.app.locked details.settings {
 			display: none;
 		}
 
-		@media (max-width: 620px) {
-			.app {
-				padding: 8px;
-				gap: 8px;
-			}
+		@media (max-width: 760px) {
+			.app { padding: 8px; gap: 8px; }
 
-			.topbar {
-				grid-template-columns: 1fr;
-			}
+			.top-actions { display: grid; }
 
-			.connection {
+			.topbar .connection {
 				justify-content: flex-start;
+				flex-wrap: wrap;
 			}
 
-			.messages {
-				min-height: 300px;
-				padding: 10px;
-			}
+			.message { max-width: 92%; }
 
-			.message {
-				max-width: 90%;
-			}
+			.composer { grid-template-columns: 1fr; }
 
-			.composer {
-				grid-template-columns: 1fr;
-			}
+			.composer-actions { grid-template-columns: 1fr 1fr; }
 
-			.voice-dock {
-				grid-template-columns: 1fr;
-			}
+			.voice-dock { grid-template-columns: 1fr; }
 
-			.talk-button {
-				width: 100%;
-			}
+			.talk-button { width: 100%; }
+
+			.dock { padding-left: 8px; padding-right: 8px; }
+		}
+
+		/* ------------------------------
+		   Chat App Variation 5
+		   Objective: pure minimalism, almost no decorative text.
+		   Enable via: ?v=5 (or ?variant=5)
+		------------------------------ */
+		html[data-variant="5"] body {
+			background: var(--canvas);
+		}
+
+		html[data-variant="5"] .app {
+			gap: 8px;
+		}
+
+		html[data-variant="5"] .topbar,
+		html[data-variant="5"] .chat,
+		html[data-variant="5"] .dock {
+			box-shadow: none;
+		}
+
+		html[data-variant="5"] .brand span {
+			display: none;
+		}
+
+		/* Keep setup status, remove the onboarding UI chrome. */
+		html[data-variant="5"] .setup-banner h2,
+		html[data-variant="5"] .setup-banner .field-grid,
+		html[data-variant="5"] .setup-banner .toggle,
+		html[data-variant="5"] .setup-banner .top-actions,
+		html[data-variant="5"] #setup-link {
+			display: none !important;
+		}
+
+		html[data-variant="5"] #setup-status {
+			font-size: 12px;
+			line-height: 1.35;
+		}
+
+		/* Settings live behind the toolbar button in v5. */
+		html[data-variant="5"] details.settings summary {
+			display: none;
+		}
+
+		html[data-variant="5"] .v5-controls {
+			display: flex;
+			gap: 8px;
+			align-items: center;
+			flex-wrap: wrap;
+		}
+
+		html[data-variant="5"] .v5-controls select {
+			width: auto;
+			min-width: 200px;
+			max-width: 360px;
+			height: 40px;
+		}
+
+		html[data-variant="5"] #open-settings-button,
+		html[data-variant="5"] #refresh-button {
+			min-width: 44px;
+			width: 44px;
+			height: 44px;
+			padding: 0;
+			display: inline-grid;
+			place-items: center;
+			font-size: 0;
+		}
+
+		html[data-variant="5"] #open-settings-button::before {
+			content: "...";
+			font-size: 18px;
+			color: var(--primary);
+			line-height: 1;
+		}
+
+		html[data-variant="5"] #refresh-button::before {
+			content: "R";
+			font-size: 18px;
+			color: var(--primary);
+			line-height: 1;
 		}
 	</style>
 </head>
 <body>
-	<div class="app">
+	<div class="app" id="app-root">
 		<header class="topbar">
-			<div class="route-row">
-				<label class="route-label">
-					<span>Location / session</span>
-					<select id="target-select">
-						<option value="">Current session</option>
-					</select>
-				</label>
-				<button id="refresh-button" class="secondary" type="button">Refresh</button>
+			<div class="brand">
+				<strong>Pi Speak Chat</strong>
+				<span id="route-pill">Route: current session</span>
 			</div>
 			<div class="connection">
-				<span id="status-dot" class="status-dot"></span>
+				<div class="status-dot" id="status-dot"></div>
+				<span id="agent-pill">Agent: local</span>
 				<span id="auth-pill">Checking</span>
-				<button id="install-button" class="secondary hidden" type="button">Install</button>
+				<div class="top-actions v5-controls">
+					<select id="target-select" aria-label="Target session"></select>
+					<button id="open-settings-button" class="secondary" type="button" aria-label="Settings">Settings</button>
+					<button id="refresh-button" class="secondary" type="button" aria-label="Refresh">Refresh</button>
+				</div>
 			</div>
 		</header>
+
+		<section class="setup-banner" id="setup-banner">
+			<h2>Connect to your computer</h2>
+			<div id="setup-status">On your computer, run <code>/remote on</code>, then <code>/remote setup</code>. Paste the token below.</div>
+			<label class="field-grid">
+				<span>Remote token</span>
+				<input id="onboarding-token-input" type="password" placeholder="Paste token from /remote setup">
+			</label>
+			<label class="toggle">
+				<input id="onboarding-remember-token-toggle" type="checkbox">
+				<span>Remember token on this device</span>
+			</label>
+			<div class="top-actions">
+				<button id="onboarding-save-button" type="button">Save token and continue</button>
+				<button id="copy-setup-button" type="button" class="secondary">Copy computer commands</button>
+			</div>
+			<div id="setup-link" class="muted">Once saved, this chat controls your local agent on the computer.</div>
+		</section>
 
 		<main class="chat" aria-live="polite">
 			<div id="chat-messages" class="messages">
 				<div class="message system">Ready when the gateway is connected.</div>
 			</div>
-			<div class="audio-row">
-				<div id="status-note" class="status-note">Connecting...</div>
-				<audio id="reply-audio" controls preload="none" class="hidden"></audio>
-				<div id="audio-note" class="status-note">Audio replies are off unless conversation mode is enabled.</div>
-			</div>
 		</main>
 
-		<section class="composer">
-			<textarea id="text-input" placeholder="Message your agent..."></textarea>
-			<button id="send-text-button" type="button">Send</button>
-		</section>
+		<footer id="dock" class="dock" aria-label="Composer">
+			<div class="dock-inner">
+				<div class="dock-status">
+					<div id="status-note" class="status-note">Connecting...</div>
+					<div id="audio-note" class="muted">Audio replies are disabled unless text replies are enabled.</div>
+					<div class="audio-controls">
+						<audio id="reply-audio" controls preload="none" class="hidden"></audio>
+						<button id="play-reply-button" class="secondary hidden" type="button">Play reply</button>
+					</div>
+				</div>
 
-		<section class="voice-dock">
-			<label class="voice-mode">
-				<input id="audio-toggle" type="checkbox">
-				<span class="voice-copy">
-					<strong>Conversation mode</strong>
-					<span id="record-subtitle">Text replies unless this is on</span>
-				</span>
-			</label>
-			<button id="record-button" class="talk-button" type="button">
-				<span id="record-label">Talk</span>
-			</button>
-			<div id="timer" class="timer">Ready</div>
-		</section>
+				<section id="composer" class="composer">
+					<textarea id="text-input" placeholder="Message your local agent"></textarea>
+					<div class="composer-actions">
+						<button id="send-text-button" type="button">Send</button>
+						<button id="clear-text-button" class="secondary" type="button" title="Clear draft">Clear</button>
+					</div>
+				</section>
+
+				<section class="voice-dock" aria-label="Voice">
+					<label class="voice-mode">
+						<input id="audio-toggle" type="checkbox">
+						<span class="voice-copy">
+							<span id="record-label-main">Speak to local agent</span>
+							<span id="record-subtitle">Text reply is enabled by default</span>
+						</span>
+					</label>
+					<button id="record-button" class="talk-button" type="button">
+						<span id="record-label">Tap to talk</span>
+					</button>
+					<div id="timer" class="timer">Ready</div>
+				</section>
+			</div>
+		</footer>
 
 		<details class="settings" id="settings-panel">
 			<summary>Settings</summary>
@@ -424,8 +610,8 @@
 					<input id="target-input" type="text" placeholder="Optional route name">
 				</label>
 				<div class="text-actions">
-					<button id="save-target-button" class="secondary" type="button">Set target</button>
-					<button id="clear-target-button" class="secondary" type="button">Use current</button>
+					<button id="save-target-button" class="secondary" type="button">Save target</button>
+					<button id="clear-target-button" class="secondary" type="button">Use current session</button>
 				</div>
 				<label class="field-grid">
 					<span>API token</span>
@@ -435,35 +621,45 @@
 					<span>Launch path</span>
 					<input id="launch-path-input" type="text" placeholder="Optional working directory">
 				</label>
-				<div class="text-actions">
-					<button id="save-token-button" class="secondary" type="button">Save settings</button>
+				<div class="settings-actions">
+					<button id="save-token-button" type="button">Save settings</button>
 					<button id="clear-token-button" class="secondary" type="button">Forget token</button>
-					<button id="clear-text-button" class="secondary" type="button">Clear draft</button>
+					<button id="install-button" class="secondary hidden" type="button">Install</button>
 				</div>
 				<label class="toggle">
 					<input id="remember-token-toggle" type="checkbox">
-					<span>Remember this device</span>
+					<span>Remember token on this device</span>
 				</label>
 				<label class="toggle">
 					<input id="autoplay-toggle" type="checkbox" checked>
 					<span>Autoplay reply audio</span>
 				</label>
-				<div class="quick-grid">
-					<button type="button" data-action="mono/on">Mono on</button>
-					<button type="button" data-action="mono/off" class="secondary">Mono off</button>
-					<button type="button" data-action="speak/on">Speak on</button>
-					<button type="button" data-action="speak/off" class="secondary">Speak off</button>
-				</div>
-				<div class="legacy-output">
-					<span id="origin-pill"></span>
-					<span id="secure-pill"></span>
-					<span id="transcript-output"></span>
-					<span id="reply-output"></span>
-				</div>
+				<label class="toggle">
+					<input id="live-mode-toggle" type="checkbox">
+					<span>Use live conversation mode</span>
+				</label>
 			</div>
 		</details>
 	</div>
 
 	<script type="module" src="/app/app.js"></script>
+	<script>
+		(() => {
+			try {
+				const url = new URL(window.location.href);
+				const variant = (url.searchParams.get("v") || url.searchParams.get("variant") || "").trim();
+				if (variant === "5") document.documentElement.dataset.variant = "5";
+
+				const settings = document.getElementById("settings-panel");
+				const openSettings = document.getElementById("open-settings-button");
+				if (settings && openSettings) {
+					openSettings.addEventListener("click", () => {
+						settings.open = !settings.open;
+						if (settings.open) settings.scrollIntoView({ block: "start", behavior: "smooth" });
+					});
+				}
+			} catch {}
+		})();
+	</script>
 </body>
 </html>

@@ -85,13 +85,14 @@ P-K-Haxx1!
 Setup helpers:
 
 ```text
+/pk-remote
 /remote setup
 /remote setup bluetooth
 /remote token
 /remote tray on
 ```
 
-`/remote setup` prints Tailscale/public setup URLs. `/remote setup bluetooth` prints a Bluetooth local-link Android setup URL and marks the native profile with `connection_mode=bluetooth`.
+`/pk-remote` is the shortest setup path: it starts the HTTP gateway if needed, detects the best reachable base URL (`PI_SPEAK_PUBLIC_BASE_URL`, Tailscale IPv4, then LAN IPv4), and prints a terminal QR for the Android `pi-speak://setup` deep link. `/remote setup` prints the same QR plus native/browser fallback URLs. `/remote setup bluetooth` and `/pk-remote bluetooth` print a Bluetooth local-link Android setup URL and mark the native profile with `connection_mode=bluetooth`.
 
 ## Android Connection Modes
 

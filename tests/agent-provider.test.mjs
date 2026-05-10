@@ -28,6 +28,9 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 		approvalPolicy: "never",
 		sandbox: "danger-full-access",
 	});
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "gemini" }).provider, "gemini");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "gemini-live" }).provider, "gemini-live");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "elevenlabs" }).provider, "elevenlabs");
 });
 
 test("pi provider streams message updates and completes on agent end", async () => {

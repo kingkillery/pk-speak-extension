@@ -78,7 +78,7 @@ class RemoteDtosTest {
         ).toDomain()
 
         assertEquals(
-            "Remote on at port 8767. Agent pi. Speak off, mono off, phone off, route hermes.",
+            "Remote on | Agent pi | Speak off | phone off | mono off",
             summary.summaryText(),
         )
     }

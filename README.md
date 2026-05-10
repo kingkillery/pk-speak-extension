@@ -18,7 +18,7 @@ If you just want the shortest path:
 1. Local desktop voice: use `/speak on`
 2. Hands-free on the same machine: use `/mono on`
 3. Remote from your phone with the least friction: use `/phone on`
-4. Remote from your phone with browser mic + audio playback: use `/remote on`, then open `/app/`
+4. Remote from your phone with QR setup: use `/pk-remote`, then scan the QR from the Android phone
 5. Remote button grid on Android: use the bundled Unified Remote remote
 
 ## Install
@@ -88,11 +88,19 @@ This is the easiest remote path. It works well when you want reliability more th
 ### 4. Remote In From Your Phone With The Built-In Web App
 
 ```text
+/pk-remote
 /remote setup
 /remote setup bluetooth
 ```
 
-Then open one of these:
+`/pk-remote` is the shortest path. It starts the remote API if needed, chooses a setup URL in this order, and prints a QR code for the native Android app:
+
+1. `PI_SPEAK_PUBLIC_BASE_URL`
+2. detected Tailscale IPv4 address
+3. detected local LAN IPv4 address
+4. configured fallback
+
+Scan the QR from the Android phone to save the machine URL, token, profile name, and connection mode. If you want the browser app instead, open one of the printed browser URLs:
 
 ```text
 http://localhost:8767/app/
@@ -109,7 +117,7 @@ The web app:
 - stores the remote token in the current browser session by default
 - can explicitly remember the token on that device if you enable it in Settings
 
-`/remote setup` is the one-command phone onboarding path. It starts the API if needed, prints a browser app URL with the token bootstrap parameter, and prints a native Android setup link using the `pi-speak://setup` deep link.
+`/remote setup` prints the same QR and links as `/pk-remote`. Use `/remote setup bluetooth` or `/pk-remote bluetooth` when the phone is paired over Bluetooth networking/PAN.
 
 For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel. If the phone is paired over Bluetooth networking/PAN instead, use `/remote setup bluetooth`; the Android app treats that as a Bluetooth local-link profile and does not require Tailscale.
 
@@ -120,6 +128,44 @@ Optional Windows tray:
 ```
 
 Right-click the tray icon and choose `Show setup QR code`. Scanning the QR opens the Android app with this computer's Tailscale endpoint, token, and saved machine profile metadata. Set `PI_SPEAK_TRAY=1` to start the tray automatically with `/remote on`.
+
+### Gemini Live Smoke Test
+
+Use this before wiring a real-time session into the phone UI:
+
+```text
+set GOOGLE_API_KEY=<your-key>
+pi-speak-gemini-live-smoke --model gemini-2.5-flash-native-audio-preview-12-2025 --modality audio
+```
+
+To run the tray/headless gateway through ElevenLabs voice, backed by Gemini text reasoning:
+
+```text
+set ELEVENLABS_API_KEY=<your-elevenlabs-key>
+set GOOGLE_API_KEY=<your-google-key>
+set AGENT_PROVIDER=elevenlabs
+pi-speak-gateway
+```
+
+This is the recommended high-quality voice stack. It uses ElevenLabs Flash v2.5 by default for lower cost and latency. Set `PI_SPEAK_ELEVENLABS_MODEL_ID=eleven_multilingual_v2` when quality matters more than credit use.
+
+To run the tray/headless gateway through Gemini Live instead:
+
+```text
+set AGENT_PROVIDER=gemini-live
+set PI_SPEAK_GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+pi-speak-gateway
+```
+
+Optional environment:
+
+- `PI_SPEAK_GEMINI_LIVE_MODEL` selects the Live model
+- `PI_SPEAK_GEMINI_LIVE_MODALITY=audio|text` selects response mode
+- `PI_SPEAK_GEMINI_API_VERSION=v1beta|v1alpha` selects the Gemini API version
+- `PI_SPEAK_ELEVENLABS_MODEL_ID` selects the ElevenLabs speech model
+- `PI_SPEAK_ELEVENLABS_VOICE_ID` selects the ElevenLabs voice
+
+Keep Gemini and ElevenLabs keys server-side. Do not put them in the Android app or browser app.
 
 ## Main Commands
 

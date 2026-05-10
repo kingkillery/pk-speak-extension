@@ -274,7 +274,7 @@ Do not mix sharp and highly rounded containers in the same section.
 
 **App Shell:** Use a top app bar for product identity and a one-line live status. Use bottom navigation only for top-level Conversation and Settings on compact screens. On expanded screens, prefer a navigation rail.
 
-**Status Strip:** Always show connection state, selected machine, selected target/session, and audio reply mode. This strip is more important than brand copy.
+**Status Strip (Variation 6):** The primary line is a single, human-readable state summary. Do not include route/session chatter in that summary. Keep machine + target as a quieter secondary line, and keep advanced/diagnostic fields behind an explicit Details affordance.
 
 **Machine Profile Picker:** Present saved machines as a compact picker or chip row. Each profile should show name, connection mode, and a short URL host. Tokens stay hidden unless editing.
 
@@ -284,7 +284,7 @@ Do not mix sharp and highly rounded containers in the same section.
 
 **Text Turn Composer:** Keep text fallback visible and fast. Use a single-line collapsed field that expands while typing. The send button uses the primary or accent token depending on whether voice or text is the current action.
 
-**Turn Cards:** Recent turns should read like a compact timeline: source, route, transcript, reply, audio state, retry action, and timestamp. Long transcripts collapse after a few lines with an explicit expand action.
+**Turn Cards (Variation 6):** Recent turns read like a compact timeline: source, status, transcript, reply, audio state, retry action, and timestamp. Do not repeat route/target in every card; show it only when the user explicitly expands details.
 
 **Reply Playback:** Use clear play, stop, loading, failed, and replay states. Playback state belongs to the turn, not only to the whole screen.
 

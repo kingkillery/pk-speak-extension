@@ -3,7 +3,9 @@ import { readFile, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { BusyError, RemoteTurnResult } from "./remote-turn-manager.js";
+import { BusyError, type RemoteTurnSource, RemoteTurnResult } from "./remote-turn-manager.js";
+import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
+import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
 
 export type ControlServerState = {
 	enabled: boolean;
@@ -20,8 +22,8 @@ export type ControlActionResult = {
 
 export type ControlServerStatus = {
 	agent?: {
-		provider: "pi" | "codex";
-		configuredProvider?: "pi" | "codex";
+		provider: "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
+		configuredProvider?: "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
 		model?: string;
 		capabilities: {
 			textTurns: boolean;
@@ -89,13 +91,20 @@ export type ControlServerOptions = {
 	onPhoneAction: (
 		action: "on" | "off" | "status" | "code" | "unpair",
 	) => Promise<ControlActionResult> | ControlActionResult;
-	onTextTurn: (text: string, includeAudio: boolean, target?: string, cwd?: string) => Promise<RemoteTurnResult>;
+	onTextTurn: (
+		text: string,
+		includeAudio: boolean,
+		target?: string,
+		cwd?: string,
+		mode?: "auto" | "live",
+	) => Promise<RemoteTurnResult>;
 	onVoiceTurn: (
 		buffer: Buffer,
 		mimeType: string | undefined,
 		includeAudio: boolean,
 		target?: string,
 		cwd?: string,
+		mode?: "auto" | "live",
 	) => Promise<RemoteTurnResult>;
 };
 
@@ -241,7 +250,7 @@ export class ControlServer {
 					this.writeJson(res, error.statusCode, { ok: false, error: error.message });
 					return;
 				}
-				this.writeJson(res, 500, { ok: false, error: getErrorMessage(error) });
+				this.writeJson(res, 502, { ok: false, error: getErrorMessage(error) });
 			});
 		});
 
@@ -343,6 +352,40 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/execution-traces") {
+			const traces = readExecutionTraces({
+				limit: parsePositiveInt(url.searchParams.get("limit"), 50),
+				source: normalizeRemoteTurnSource(url.searchParams.get("source")),
+				outcome: normalizeExecutionTraceOutcome(url.searchParams.get("outcome")),
+				backend: normalizeBackend(url.searchParams.get("backend")),
+				dispatch: normalizeDispatchFilter(url.searchParams.get("dispatch")),
+			});
+			this.writeJson(res, 200, {
+				ok: true,
+				enabled: traces.enabled,
+				path: traces.path,
+				traces: traces.traces,
+			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/execution-plans") {
+			const plans = readExecutionPlans({
+				limit: parsePositiveInt(url.searchParams.get("limit"), 50),
+				source: normalizeRemoteTurnSource(url.searchParams.get("source")),
+				outcome: normalizeExecutionTraceOutcome(url.searchParams.get("outcome")),
+				backend: normalizeBackend(url.searchParams.get("backend")),
+				dispatch: normalizeDispatchFilter(url.searchParams.get("dispatch")),
+			});
+			this.writeJson(res, 200, {
+				ok: true,
+				enabled: plans.enabled,
+				path: plans.path,
+				plans: plans.plans,
+			});
+			return;
+		}
+
 		if (req.method === "GET" && url.pathname === "/v1/route") {
 			this.writeJson(res, 200, {
 				ok: true,
@@ -375,9 +418,10 @@ export class ControlServer {
 		if (req.method === "GET" && url.pathname === "/v1/turn/text") {
 			const text = url.searchParams.get("text") || "";
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
+			const mode = parseRemoteTurnMode(url.searchParams.get("mode"));
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -395,9 +439,10 @@ export class ControlServer {
 			}
 			const text = typeof payload?.text === "string" ? payload.text : "";
 			const includeAudio = !!payload?.audio;
+			const mode = parseRemoteTurnMode(typeof payload?.mode === "string" ? payload.mode : undefined);
 			const target = typeof payload?.target === "string" ? payload.target.trim() || undefined : undefined;
 			const cwd = getLaunchCwdFromPayload(payload);
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -410,9 +455,10 @@ export class ControlServer {
 			}
 			const buffer = await this.readBinaryBody(req, VOICE_BODY_LIMIT_BYTES);
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
+			const mode = parseRemoteTurnMode(url.searchParams.get("mode"));
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
-			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd));
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -622,6 +668,8 @@ export class ControlServer {
 			ok: true,
 			replyText: result.replyText,
 			transcript: result.transcript,
+			reducer: result.reducer,
+			execution: result.execution,
 			audioUrl,
 			audioMimeType: result.audioMimeType,
 			busy: result.busy,
@@ -755,6 +803,11 @@ function parseJson<T>(text: string) {
 	}
 }
 
+function parseRemoteTurnMode(value: string | null | undefined) {
+	const normalized = (value || "").trim().toLowerCase();
+	return normalized === "live" ? "live" : "auto";
+}
+
 function isTruthy(value: string | null) {
 	if (!value) return false;
 	return !["0", "false", "off", "no"].includes(value.toLowerCase());
@@ -829,4 +882,60 @@ function getBearerToken(value?: string) {
 function isSupportedVoiceContentType(mimeType?: string) {
 	const normalized = (mimeType || "").toLowerCase().split(";")[0].trim();
 	return !!normalized && ALLOWED_VOICE_CONTENT_TYPES.includes(normalized);
+}
+
+function parsePositiveInt(value: string | null, defaultValue: number) {
+	const parsed = Number.parseInt(value || "", 10);
+	if (!Number.isFinite(parsed)) return defaultValue;
+	if (parsed <= 0) return 1;
+	if (parsed > 200) return 200;
+	return parsed;
+}
+
+function normalizeRemoteTurnSource(value: string | null): RemoteTurnSource | undefined {
+	if (!value) return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "http-text") return "http-text";
+	if (normalized === "http-voice") return "http-voice";
+	if (normalized === "telegram-text") return "telegram-text";
+	if (normalized === "telegram-voice") return "telegram-voice";
+	return undefined;
+}
+
+function normalizeExecutionTraceOutcome(value: string | null): ExecutionTraceOutcome | undefined {
+	if (!value) return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (
+		normalized === "no-input" ||
+		normalized === "skipped" ||
+		normalized === "dispatch-blocked" ||
+		normalized === "dispatch-failed" ||
+		normalized === "dispatch-success"
+	) {
+		return normalized;
+	}
+	return undefined;
+}
+
+function normalizeBackend(value: string | null): "pi" | "codex" | "shell" | "memory" | "wiki" | "defer" | undefined {
+	if (!value) return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (
+		normalized === "pi" ||
+		normalized === "codex" ||
+		normalized === "shell" ||
+		normalized === "memory" ||
+		normalized === "wiki" ||
+		normalized === "defer"
+	) {
+		return normalized;
+	}
+	return undefined;
+}
+
+function normalizeDispatchFilter(value: string | null): "all" | "dispatch" | "nondispatch" {
+	const normalized = (value || "all").trim().toLowerCase();
+	if (normalized === "dispatch") return "dispatch";
+	if (normalized === "nondispatch") return "nondispatch";
+	return "all";
 }
