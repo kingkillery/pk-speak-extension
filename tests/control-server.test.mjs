@@ -79,8 +79,8 @@ async function withServer(overrides = {}, fn) {
 		onMonoAction: async () => ({ ok: true, message: "mono" }),
 		onSpeakAction: async () => ({ ok: true, message: "speak" }),
 		onPhoneAction: async () => ({ ok: true, message: "phone" }),
-		onTextTurn: overrides.onTextTurn || (async (text, includeAudio, target, cwd) => ({ replyText: `${text}:${includeAudio}:${target || "current"}:${cwd || "default-cwd"}` })),
-		onVoiceTurn: overrides.onVoiceTurn || (async (_buffer, _mimeType, _includeAudio, target, cwd) => ({ replyText: `voice:${target || "current"}:${cwd || "default-cwd"}` })),
+		onTextTurn: overrides.onTextTurn || (async (text, includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `${text}:${includeAudio}:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
+		onVoiceTurn: overrides.onVoiceTurn || (async (_buffer, _mimeType, _includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `voice:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
 	});
 	const runtime = await server.start();
 	try {
@@ -436,7 +436,7 @@ test("turn routes accept an explicit target", async () => {
 			body: JSON.stringify({ text: "hello", audio: false, target: "hermes" }),
 		});
 		assert.equal(response.statusCode, 200);
-		assert.equal(response.json().replyText, "hello:false:hermes:default-cwd");
+		assert.equal(response.json().replyText, "hello:false:hermes:default-cwd:auto:none");
 	});
 });
 
@@ -454,7 +454,7 @@ test("turn routes accept an explicit launch cwd", async () => {
 			body: JSON.stringify({ text: "hello", audio: false, target: "codex", cwd: "C:\\dev\\project" }),
 		});
 		assert.equal(textResponse.statusCode, 200);
-		assert.equal(textResponse.json().replyText, "hello:false:codex:C:\\dev\\project");
+		assert.equal(textResponse.json().replyText, "hello:false:codex:C:\\dev\\project:auto:none");
 
 		const voiceResponse = await request({
 			port,
@@ -468,6 +468,81 @@ test("turn routes accept an explicit launch cwd", async () => {
 			body: "fake-wav",
 		});
 		assert.equal(voiceResponse.statusCode, 200);
-		assert.equal(voiceResponse.json().replyText, "voice:codex:C:\\dev\\project");
+		assert.equal(voiceResponse.json().replyText, "voice:codex:C:\\dev\\project:auto:none");
+	});
+});
+
+test("turn routes accept an explicit agent provider override", async () => {
+	const seen = [];
+	await withServer({
+		onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider) => {
+			seen.push({ text, includeAudio, target, cwd, mode, agentProvider });
+			return { replyText: "ok" };
+		},
+		onVoiceTurn: async (_buffer, _mimeType, includeAudio, target, cwd, mode, agentProvider) => {
+			seen.push({ includeAudio, target, cwd, mode, agentProvider });
+			return { replyText: "ok" };
+		},
+	}, async (port) => {
+		const textResponse = await request({
+			port,
+			path: "/v1/turn/text",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ text: "hello", audio: false, agentProvider: "codex" }),
+		});
+		assert.equal(textResponse.statusCode, 200);
+
+		const textGetResponse = await request({
+			port,
+			path: "/v1/turn/text?text=hello&audio=0&agentProvider=pi",
+			method: "GET",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+			},
+		});
+		assert.equal(textGetResponse.statusCode, 200);
+
+		const voiceResponse = await request({
+			port,
+			path: "/v1/turn/voice?audio=0&agentProvider=pi",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "audio/wav",
+			},
+			body: "fake-wav",
+		});
+		assert.equal(voiceResponse.statusCode, 200);
+	});
+
+	assert.deepEqual(seen[0], {
+		text: "hello",
+		includeAudio: false,
+		target: undefined,
+		cwd: undefined,
+		mode: "auto",
+		agentProvider: "codex",
+	});
+	assert.deepEqual(seen[1], {
+		text: "hello",
+		includeAudio: false,
+		target: undefined,
+		cwd: undefined,
+		mode: "auto",
+		agentProvider: "pi",
+	});
+	assert.deepEqual(seen[2], {
+		includeAudio: false,
+		target: undefined,
+		cwd: undefined,
+		mode: "auto",
+		agentProvider: "pi",
 	});
 });

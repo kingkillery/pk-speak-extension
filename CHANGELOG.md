@@ -24,6 +24,7 @@ Added:
 
 Improved:
 
+- remote execution routing now honors explicit `AGENT_PROVIDER=pi|codex` when `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, while keeping `PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex` as the higher-priority router override
 - the `pi-speak-admin` CLI now runs the real Ink session-manager app instead of a placeholder stub, seeds current-session context from the launching Pi window, supports keyboard focus movement plus inline rename/alias/remove prompts, shows compact PK1/PK2 route lanes and a focused-session footer, exposes `--snapshot` for deterministic Ink-frame rendering in tests and automation, and falls back to a read-only snapshot when launched without a live TTY
 - local Python/audio portability now honors `PI_SPEAK_PYTHON` and `PI_SPEAK_SPEAK11_PATH` first, scans user-site `Python*/Scripts` locations instead of pinning to `Python314`, and keeps safer fallbacks for PATH-based setups
 - listener shutdown now sends an explicit stdin `shutdown` command before ending stdin, while keeping a timed force-kill fallback so local audio resources are more likely to close cleanly on Windows

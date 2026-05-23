@@ -97,6 +97,7 @@ export type ControlServerOptions = {
 		target?: string,
 		cwd?: string,
 		mode?: "auto" | "live",
+		agentProvider?: "pi" | "codex",
 	) => Promise<RemoteTurnResult>;
 	onVoiceTurn: (
 		buffer: Buffer,
@@ -105,6 +106,7 @@ export type ControlServerOptions = {
 		target?: string,
 		cwd?: string,
 		mode?: "auto" | "live",
+		agentProvider?: "pi" | "codex",
 	) => Promise<RemoteTurnResult>;
 };
 
@@ -421,7 +423,8 @@ export class ControlServer {
 			const mode = parseRemoteTurnMode(url.searchParams.get("mode"));
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode));
+			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -442,7 +445,8 @@ export class ControlServer {
 			const mode = parseRemoteTurnMode(typeof payload?.mode === "string" ? payload.mode : undefined);
 			const target = typeof payload?.target === "string" ? payload.target.trim() || undefined : undefined;
 			const cwd = getLaunchCwdFromPayload(payload);
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode));
+			const agentProvider = parseAgentProviderOverride(typeof payload?.agentProvider === "string" ? payload.agentProvider : undefined);
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -458,7 +462,8 @@ export class ControlServer {
 			const mode = parseRemoteTurnMode(url.searchParams.get("mode"));
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
-			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode));
+			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -806,6 +811,12 @@ function parseJson<T>(text: string) {
 function parseRemoteTurnMode(value: string | null | undefined) {
 	const normalized = (value || "").trim().toLowerCase();
 	return normalized === "live" ? "live" : "auto";
+}
+
+function parseAgentProviderOverride(value: string | null | undefined) {
+	const normalized = (value || "").trim().toLowerCase();
+	if (normalized === "pi" || normalized === "codex") return normalized;
+	return undefined;
 }
 
 function isTruthy(value: string | null) {

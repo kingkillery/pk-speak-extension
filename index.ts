@@ -277,7 +277,13 @@ function getSetupProfileForBaseUrl(baseUrl: string, mode: "tailscale" | "bluetoo
 	return { machineId: "tailscale-appserver", profileName: "MSI / appserver", connectionMode: "tailscale" };
 }
 
-function buildRemoteSetupUrls(host: string, port: number, token: string, mode: "tailscale" | "bluetooth" = "tailscale") {
+function buildRemoteSetupUrls(
+	host: string,
+	port: number,
+	token: string,
+	mode: "tailscale" | "bluetooth" = "tailscale",
+	agentProvider?: string,
+) {
 	const publicBase = PUBLIC_REMOTE_BASE_URL ? normalizeBaseUrl(PUBLIC_REMOTE_BASE_URL) : "";
 	const fallbackBase = getDefaultTailscaleBaseUrl(port);
 	const bluetoothBase = getDefaultBluetoothBaseUrl(port);
@@ -300,6 +306,9 @@ function buildRemoteSetupUrls(host: string, port: number, token: string, mode: "
 			profile_name: profile.profileName,
 			connection_mode: profile.connectionMode,
 		});
+		if (agentProvider) {
+			params.set("agent_provider", agentProvider);
+		}
 		return `pi-speak://setup?${params.toString()}`;
 	});
 	return { baseUrls, browserUrls, appSetupUrls };
@@ -1071,6 +1080,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		targetName?: string,
 		cwd?: string,
 		mode: "auto" | "live" = "auto",
+		agentProvider?: "pi" | "codex",
 	): Promise<RemoteTurnResult> => {
 		const trimmed = text.trim();
 		if (!trimmed) {
@@ -1096,7 +1106,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const reducerTimings = {
 			reducerMs,
 		};
-		const executionPlan = planConversationExecution(reducer.summary, { targetName: desiredTarget });
+		const executionPlan = planConversationExecution(reducer.summary, {
+			targetName: desiredTarget,
+			provider: agentProvider,
+		});
 		const makeActionPlan = (decisions: ExecutionDecision[]): ExecutionPlanReplay => ({
 			dispatch: executionPlan.dispatch,
 			backend: executionPlan.backend,
@@ -1515,10 +1528,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 		targetName?: string,
 		cwd?: string,
 		mode: "auto" | "live" = "auto",
+		agentProvider?: "pi" | "codex",
 	) => {
 		diagnostics.recentTimings.lastRemoteSource = source;
 		return await remoteTurnManager.enqueue(source, async () =>
-			await executePhoneTurn(source, text, transcript, wantAudio, timings, providers, warnings, targetName, cwd, mode),
+			await executePhoneTurn(source, text, transcript, wantAudio, timings, providers, warnings, targetName, cwd, mode, agentProvider),
 		);
 	};
 
@@ -1724,7 +1738,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const runtime = remoteServer?.getRuntimeState();
 		const status = getRemoteStatus();
 		const token = runtime?.authToken || remoteState.authToken || "";
-		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode);
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode, agentProviderConfig.provider);
 		const current = status.currentSession || "current session";
 		const route = status.defaultTarget || current;
 		const nativeSetupUrl = urls.appSetupUrls[0] || "";
@@ -1756,7 +1770,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			(ctx || lastCtx)?.ui?.notify?.("Remote tray needs a remote token. Start /remote on first.", "warning");
 			return false;
 		}
-		const urls = buildRemoteSetupUrls(status.host, status.port, token);
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, "tailscale", agentProviderConfig.provider);
 		const baseUrl = urls.baseUrls[0] || getDefaultTailscaleBaseUrl(status.port);
 		const profile = getSetupProfileForBaseUrl(baseUrl);
 		const tray = await startRemoteTray({
@@ -1964,7 +1978,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				onMonoAction: (action) => handleMonoAction(action, lastCtx),
 				onSpeakAction: (action, value) => handleSpeakAction(action, value, lastCtx),
 				onPhoneAction: (action) => handlePhoneAction(action, lastCtx),
-				onTextTurn: async (text, includeAudio, target, cwd, mode) => {
+				onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider) => {
 					try {
 						return await enqueuePhoneTurn(
 							"http-text",
@@ -1977,6 +1991,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							target,
 							cwd,
 							mode,
+							agentProvider,
 						);
 					} catch (error) {
 						const reason = getErrorMessage(error);
@@ -1988,7 +2003,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 						};
 					}
 				},
-				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, mode) => {
+				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, mode, agentProvider) => {
 					try {
 						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
@@ -2006,6 +2021,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							target,
 							cwd,
 							mode,
+							agentProvider,
 						);
 					} catch (error) {
 						diagnostics.lastErrors.stt = getErrorMessage(error);
@@ -3281,5 +3297,4 @@ function describeCodexApprovalForVoice(request: { method: string; params: Record
 			return request.method;
 	}
 }
-
 
