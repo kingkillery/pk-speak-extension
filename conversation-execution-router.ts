@@ -355,8 +355,11 @@ function findKeywordSignals(text: string, keywords: string[]) {
 }
 
 function readExecutionMode() {
-	const mode = (process.env.PI_SPEAK_EXECUTION_ROUTER_MODE || "auto").trim().toLowerCase();
-	if (mode === "pi" || mode === "codex") return mode as Exclude<ExecutionRouterMode, "auto">;
+	const configuredMode = process.env.PI_SPEAK_EXECUTION_ROUTER_MODE;
+	const mode = (configuredMode || "").trim().toLowerCase();
+	if (mode === "pi" || mode === "codex" || mode === "auto") return mode as ExecutionRouterMode;
+	const provider = (process.env.AGENT_PROVIDER || "").trim().toLowerCase();
+	if (provider === "pi" || provider === "codex") return provider as Exclude<ExecutionRouterMode, "auto">;
 	return "auto";
 }
 
@@ -474,6 +477,7 @@ export function planConversationExecution(
 	options: {
 		mode?: ExecutionRouterMode;
 		targetName?: string;
+		provider?: "pi" | "codex";
 	} = {},
 ): ConversationExecutionPlan {
 	const mode = options.mode || readExecutionMode();
@@ -503,6 +507,16 @@ export function planConversationExecution(
 	}
 
 	const targetContext = options.targetName ? ` target ${options.targetName}` : "";
+	if (options.provider) {
+		return {
+			dispatch: true,
+			backend: options.provider,
+			reason: options.provider === "codex" ? "dispatch-codex" : "dispatch-pi",
+			confidence: summary.confidence,
+			rationale: `Routing to ${options.provider === "codex" ? "Codex" : "Pi"} because the client selected that backend.${targetContext}`,
+			actionForSeed: summary.actionItems[0] || "execute task",
+		};
+	}
 	if (mode === "pi") {
 		return {
 			dispatch: true,
@@ -531,8 +545,8 @@ export function planConversationExecution(
 		reason: backend === "codex" ? "dispatch-codex" : "dispatch-pi",
 		confidence: Math.min(1, summary.confidence + (backend === "codex" ? 0.03 : 0)),
 		rationale: backend === "codex"
-			? `Routing to Codex because the action likely touches files.`
-			: `Routing to Pi for planning/analysis on ${summary.actionItems.length} action item(s).`,
+			? `Routing to Codex because the action likely touches files.${targetContext}`
+			: `Routing to Pi for planning/analysis on ${summary.actionItems.length} action item(s).${targetContext}`,
 		actionForSeed: summary.actionItems[0] || "execute task",
 	};
 }

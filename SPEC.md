@@ -89,6 +89,7 @@ AGENT_MODEL=
 ```
 
 `AGENT_PROVIDER` defaults to `pi`. Unknown values also fall back to `pi`.
+For remote-turn planning, `PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex` is the explicit router override. When that override is unset, an explicit `AGENT_PROVIDER=pi` or `AGENT_PROVIDER=codex` selects the execution backend so provider switching is authoritative for Android/browser/Telegram turns.
 
 ## Pi Provider
 
@@ -186,7 +187,7 @@ Turn routes:
 ```text
 GET  /v1/turn/text?text=hello&audio=1&target=name&cwd=/workspace/path
 POST /v1/turn/text
-POST /v1/turn/voice?audio=1&target=name&cwd=/workspace/path
+POST /v1/turn/voice?audio=1&target=name&cwd=/workspace/path&agentProvider=codex
 GET  /v1/audio/:id
 ```
 
@@ -197,11 +198,12 @@ Text request body:
   "text": "Summarize the repo",
   "audio": true,
   "target": "optional-session-target",
-  "cwd": "optional-agent-launch-directory"
+  "cwd": "optional-agent-launch-directory",
+  "agentProvider": "pi|codex"
 }
 ```
 
-`target` selects the Pi Speak session route. `cwd` selects the working directory passed to the active provider for this turn. The older `workspacePath` key is also accepted as an alias for `cwd` so clients can use a clearer UI name without changing the backend turn contract. If neither key is present, the gateway uses `AGENT_CWD`/`AGENT_WORKSPACE` when configured, otherwise the extension process directory.
+`target` selects the Pi Speak session route. `cwd` selects the working directory passed to the active provider for this turn. The older `workspacePath` key is also accepted as an alias for `cwd` so clients can use a clearer UI name without changing the backend turn contract. `agentProvider` is optional. Omit it or set it to `auto` in the Android UI to follow the gateway default; set it to `pi` or `codex` to force that backend for the turn. If neither path is present, the gateway uses `AGENT_CWD`/`AGENT_WORKSPACE` when configured, otherwise the extension process directory.
 
 Turn response body:
 

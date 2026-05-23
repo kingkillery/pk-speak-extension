@@ -49,3 +49,13 @@ android-app/local.properties
 
 # Ralph local session scratch
 scripts/ralph/.last-branch
+
+# Transient screen/testing dumps and CLI runtimes
+screen*.png
+archive/
+artifacts/
+.antigravitycli/
+.codex/
+.build-outputs/
+
+

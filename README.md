@@ -566,6 +566,7 @@ AGENT_PROVIDER=pi|codex
 CODEX_BIN=codex
 PI_BIN=pi
 AGENT_MODEL=
+PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex
 AGENT_CWD=
 AGENT_WORKSPACE=
 PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
@@ -577,6 +578,8 @@ PI_SPEAK_WAKE_FUZZY_ENABLED=true|false              # optional override
 PI_SPEAK_WAKE_FUZZY_MAX_DISTANCE=0|1|2              # optional override
 PI_SPEAK_WAKE_COMPACT_PREFIX_ENABLED=true|false     # optional override
 ```
+
+If `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, explicit `AGENT_PROVIDER=pi` or `AGENT_PROVIDER=codex` controls which backend remote turns dispatch to. Set the router mode to `auto` when you want the conversation router to choose Pi or Codex from the reduced task.
 
 ### Rewrite
 

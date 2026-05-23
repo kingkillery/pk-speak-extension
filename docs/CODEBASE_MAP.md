@@ -71,6 +71,7 @@ AGENT_PROVIDER=codex
 ```
 
 `/v1/status` now includes an `agent` block so clients can display the active provider. Codex turns default to approval policy `never` and sandbox `danger-full-access`, with `AGENT_APPROVAL_POLICY`, `CODEX_APPROVAL_POLICY`, `AGENT_SANDBOX`, and `CODEX_SANDBOX` available as overrides.
+Remote-turn planning treats `PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex` as the explicit router override. If that variable is unset, `AGENT_PROVIDER=pi|codex` selects the execution backend for Android, browser, and Telegram turns.
 
 ## Remote Auth And Setup
 
@@ -118,6 +119,7 @@ Common runtime variables:
 AGENT_PROVIDER=pi|codex
 CODEX_BIN=codex
 AGENT_MODEL=<optional model>
+PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex
 AGENT_CWD=<default launch directory>
 PI_SPEAK_HTTP_TOKEN=<remote token override>
 PI_SPEAK_PUBLIC_BASE_URL=<HTTPS/Tailscale/tunnel base URL>
