@@ -633,7 +633,7 @@ export class ControlServer {
 				this.discoveryDiagnostics.lastError = `mDNS error: ${getErrorMessage(error)}`;
 			});
 			this.bonjourService = this.bonjour.publish({
-				name: `Pi Speak on ${hostname() || "machine"}`,
+				name: getMdnsServiceInstanceName(port),
 				type: "pispeak",
 				protocol: "tcp",
 				port,
@@ -1112,6 +1112,12 @@ function parseJson<T>(text: string) {
 
 function getDiscoveryPort() {
 	return Number.parseInt(process.env.PI_SPEAK_DISCOVERY_PORT || "8768", 10);
+}
+
+function getMdnsServiceInstanceName(port: number) {
+	const host = hostname() || "machine";
+	const serverId = getStableServerId().slice(0, 8);
+	return `Pi Speak on ${host} ${serverId} ${port}`;
 }
 
 function parseRemoteTurnMode(value: string | null | undefined) {
