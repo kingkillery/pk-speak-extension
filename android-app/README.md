@@ -1,21 +1,14 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Pi Speak Android App
 
-# Run and deploy your AI Studio app
-
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/6f29bd21-601f-4cf6-ab0e-782b0f5de1d7
+This app is a remote client for a Pi Speak tray/gateway host. It should not hold Gemini, Vertex AI, or ElevenLabs credentials.
 
 ## Run Locally
 
-**Prerequisites:**  [Android Studio](https://developer.android.com/studio)
+Prerequisite: Android Studio or the checked-in Gradle wrapper.
 
+```powershell
+.\gradlew.bat assembleDebug
+adb install -r .\app\build\outputs\apk\debug\app-debug.apk
+```
 
-1. Open Android Studio
-2. Select **Open** and choose the directory containing this project
-3. Allow Android Studio to fix any incompatibilities as it imports the project.
-4. Create a file named `.env` in the project directory and set `GEMINI_API_KEY` in that file to your Gemini API key (see `.env.example` for an example)
-5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
-6. Run the app on an emulator or physical device
+The app connects by scanning the `/setup` QR served by `pi-speak-tray` or `/pk-remote`. The host machine owns all provider credentials and can use Codex, ElevenLabs, or Vertex AI server-side.

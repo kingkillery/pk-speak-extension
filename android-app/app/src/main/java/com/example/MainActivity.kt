@@ -107,12 +107,26 @@ class MainActivity : ComponentActivity() {
                 val token = uri.getQueryParameter("token")
                 val profileName = uri.getQueryParameter("profile_name") ?: uri.getQueryParameter("machine_id")
                 val connectionMode = uri.getQueryParameter("connection_mode")
+                val defaultTarget = uri.getQueryParameter("default_target")
+                    ?: uri.getQueryParameter("target")
+                    ?: uri.getQueryParameter("session")
+                val agentProvider = uri.getQueryParameter("agent_provider")
+                val workspaceRoot = uri.getQueryParameter("workspace_root")
+                val workspacePath = uri.getQueryParameter("workspace_path")
 
-                baseUrl?.let { appPreferences.targetIpAddress = it }
+                baseUrl?.let { appPreferences.targetIpAddress = it.trim().trimEnd('/') }
                 token?.let { appPreferences.remoteToken = it }
-                profileName?.let { appPreferences.codexSessionName = it }
+                profileName?.let { appPreferences.machineProfileName = it }
+                defaultTarget?.takeIf { it.isNotBlank() }?.let { appPreferences.codexSessionName = it }
+                workspaceRoot?.takeIf { it.isNotBlank() }?.let { appPreferences.workspaceRoot = it }
+                workspacePath?.takeIf { it.isNotBlank() }?.let { appPreferences.workspacePath = it }
                 connectionMode?.let { appPreferences.connectionMode = it }
-                Log.d("MainActivity", "Successfully processed zero-touch onboarding QR link: base_url=$baseUrl, profile=$profileName")
+                when (agentProvider?.lowercase()) {
+                    "codex", "pi" -> appPreferences.activeAgent = "Local Codex (Pi)"
+                    "elevenlabs" -> appPreferences.activeAgent = "Gateway Voice (ElevenLabs)"
+                    "gemini", "gemini-live", "vertex" -> appPreferences.activeAgent = "Gateway Gemini (Vertex AI)"
+                }
+                Log.d("MainActivity", "Successfully processed zero-touch onboarding QR link: base_url=$baseUrl, profile=$profileName, target=$defaultTarget")
             }
         }
     }
@@ -369,6 +383,8 @@ fun StudioTabContent(
 
     // Real-time synchronized simulated transcription stream
     var wordStreamJob by remember { mutableStateOf<Job?>(null) }
+    var recordingStartedAtMs by remember { mutableLongStateOf(0L) }
+    val minimumVoiceCaptureMs = 1200L
 
     val startSimulatedTranscription = {
         wordStreamJob?.cancel()
@@ -401,7 +417,9 @@ fun StudioTabContent(
             ttsHelper.stop()
             audioHelper.stopPlayback()
             isRecording = true
-            currentRecordPath = audioHelper.startRecording("turn.mp4")
+            recordingStartedAtMs = System.currentTimeMillis()
+            currentRecordPath = audioHelper.startRecording("turn.wav")
+            Log.d("MainActivity", "Voice recording started: $currentRecordPath")
             startSimulatedTranscription()
             startAmplitudeSampling()
         }
@@ -412,15 +430,21 @@ fun StudioTabContent(
             isRecording = false
             liveAmplitudeJob?.cancel()
             wordStreamJob?.cancel()
-            audioHelper.stopRecording()
 
             scope.launch {
                 isProcessing = true
                 try {
-                    val file = audioHelper.getRecordedFile("turn.mp4")
-                    if (file.exists() && file.length() > 0) {
+                    val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
+                    if (elapsedMs in 0 until minimumVoiceCaptureMs) {
+                        delay(minimumVoiceCaptureMs - elapsedMs)
+                    }
+                    val stoppedCleanly = audioHelper.stopRecording()
+                    val file = audioHelper.getRecordedFile("turn.wav")
+                    Log.d("MainActivity", "Voice recording stopped: stoppedCleanly=$stoppedCleanly, exists=${file.exists()}, bytes=${file.length()}")
+                    if (stoppedCleanly && file.exists() && file.length() >= 12_000) {
                         // Deliver audio file turn to API
-                        val result = client.sendVoiceTurn(file)
+                        Log.d("MainActivity", "Sending voice recording to gateway: ${file.absolutePath}, bytes=${file.length()}")
+                        val result = client.sendVoiceTurn(file, transcription)
                         transcription = result.first
                         latestReply = result.second
 
@@ -449,6 +473,7 @@ fun StudioTabContent(
                         }
                     } else {
                         transcription = "Failed to record voice correctly."
+                        latestReply = "The audio clip was too short or could not be finalized. Hold the voice button a little longer and try again."
                     }
                 } catch (e: Exception) {
                     latestReply = "System error contacting voice node: ${e.localizedMessage}"
@@ -1033,14 +1058,22 @@ fun SettingsTabContent(
 ) {
     var agentType by remember(prefs.activeAgent) { mutableStateOf(prefs.activeAgent) }
     var codexSessionName by remember(prefs.codexSessionName) { mutableStateOf(prefs.codexSessionName) }
+    var machineProfileName by remember(prefs.machineProfileName) { mutableStateOf(prefs.machineProfileName) }
     var elevenLabsApiKey by remember(prefs.elevenLabsApiKey) { mutableStateOf(prefs.elevenLabsApiKey) }
     var elevenLabsVoiceId by remember(prefs.elevenLabsVoiceId) { mutableStateOf(prefs.elevenLabsVoiceId) }
     var transmissionMode by remember(prefs.transmissionMode) { mutableStateOf(prefs.transmissionMode) }
     var targetIpAddress by remember(prefs.targetIpAddress) { mutableStateOf(prefs.targetIpAddress) }
     var remoteToken by remember(prefs.remoteToken) { mutableStateOf(prefs.remoteToken) }
     var connectionMode by remember(prefs.connectionMode) { mutableStateOf(prefs.connectionMode) }
+    var workspaceRoot by remember(prefs.workspaceRoot) { mutableStateOf(prefs.workspaceRoot) }
+    var workspacePath by remember(prefs.workspacePath) { mutableStateOf(prefs.workspacePath) }
+    var workspaceEntries by remember { mutableStateOf<List<com.example.api.WorkspaceEntry>>(emptyList()) }
+    var workspaceParent by remember { mutableStateOf<String?>(null) }
+    var workspaceLoading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
-    val agents = listOf("Local Codex (Pi)", "Gemini Dev-Pro (No Host)", "ElevenLabs Synthesizer")
+    val agents = listOf("Local Codex (Pi)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -1172,6 +1205,27 @@ fun SettingsTabContent(
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
+                    // Machine profile label
+                    Text(text = "Machine Profile Name", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = machineProfileName,
+                        onValueChange = {
+                            machineProfileName = it
+                            prefs.machineProfileName = it
+                            onConfigChanged()
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFFD0E4FF),
+                            unfocusedBorderColor = Color(0xFF44474B),
+                            focusedTextColor = Color(0xFFE2E2E6),
+                            unfocusedTextColor = Color(0xFFE0E2E6)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     // Session tag
                     Text(text = "Target Session Name", color = Color(0xFF8E9199), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
@@ -1211,6 +1265,99 @@ fun SettingsTabContent(
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(text = "Workspace Folder", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = workspacePath,
+                        onValueChange = {
+                            workspacePath = it
+                            prefs.workspacePath = it
+                            onConfigChanged()
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFFD0E4FF),
+                            unfocusedBorderColor = Color(0xFF44474B),
+                            focusedTextColor = Color(0xFFE2E2E6),
+                            unfocusedTextColor = Color(0xFFE2E2E6)
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text(workspaceRoot, color = Color(0xFF8E9199)) }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    workspaceLoading = true
+                                    val listing = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        com.example.api.VoiceAgentClient(context, prefs).listWorkspace(workspaceRoot)
+                                    }
+                                    if (listing != null) {
+                                        workspaceRoot = listing.root
+                                        workspacePath = listing.current
+                                        workspaceParent = listing.parent
+                                        workspaceEntries = listing.entries
+                                        prefs.workspaceRoot = listing.root
+                                        prefs.workspacePath = listing.current
+                                        onConfigChanged()
+                                    }
+                                    workspaceLoading = false
+                                }
+                            }
+                        ) { Text("Browse root") }
+                        TextButton(
+                            enabled = workspaceParent != null,
+                            onClick = {
+                                val parent = workspaceParent ?: return@TextButton
+                                scope.launch {
+                                    workspaceLoading = true
+                                    val listing = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                        com.example.api.VoiceAgentClient(context, prefs).listWorkspace(parent)
+                                    }
+                                    if (listing != null) {
+                                        workspacePath = listing.current
+                                        workspaceParent = listing.parent
+                                        workspaceEntries = listing.entries
+                                        prefs.workspacePath = listing.current
+                                        onConfigChanged()
+                                    }
+                                    workspaceLoading = false
+                                }
+                            }
+                        ) { Text("Up") }
+                    }
+                    if (workspaceLoading) {
+                        Text(text = "Loading folders...", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    }
+                    workspaceEntries.take(12).forEach { entry ->
+                        Text(
+                            text = entry.name,
+                            color = Color(0xFFD0E4FF),
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    scope.launch {
+                                        workspaceLoading = true
+                                        val listing = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                            com.example.api.VoiceAgentClient(context, prefs).listWorkspace(entry.path)
+                                        }
+                                        if (listing != null) {
+                                            workspacePath = listing.current
+                                            workspaceParent = listing.parent
+                                            workspaceEntries = listing.entries
+                                            prefs.workspacePath = listing.current
+                                            onConfigChanged()
+                                        }
+                                        workspaceLoading = false
+                                    }
+                                }
+                                .padding(vertical = 6.dp)
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(12.dp))
 

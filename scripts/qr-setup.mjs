@@ -64,6 +64,8 @@ function buildRemoteSetupUrls(port, token) {
 	const tailscaleBases = detected.tailscale.map((address) => `http://${address}:${port}/`);
 	const lanBases = detected.lan.map((address) => `http://${address}:${port}/`);
 	const baseUrls = [...new Set([...tailscaleBases, ...lanBases, fallbackBase].filter(Boolean))];
+	const setupPageUrls = baseUrls.map((baseUrl) => `${baseUrl}setup?token=${encodeURIComponent(token)}`);
+	const downloadUrls = baseUrls.map((baseUrl) => `${baseUrl}download/pi-speak.apk`);
 	const appSetupUrls = baseUrls.map((baseUrl) => {
 		const profile = getSetupProfileForBaseUrl(baseUrl);
 		const params = new URLSearchParams({
@@ -75,13 +77,13 @@ function buildRemoteSetupUrls(port, token) {
 		});
 		return `pi-speak://setup?${params.toString()}`;
 	});
-	return { baseUrls, appSetupUrls };
+	return { baseUrls, setupPageUrls, downloadUrls, appSetupUrls };
 }
 
 async function main() {
 	const mode = process.argv.includes("--bluetooth") || process.argv.includes("bluetooth") ? "bluetooth" : "tailscale";
 	const urls = buildRemoteSetupUrls(PORT, TOKEN);
-	const setupUrl = urls.appSetupUrls[0];
+	const setupUrl = urls.setupPageUrls[0];
 	const baseUrl = urls.baseUrls[0];
 
 	if (!setupUrl) {
@@ -100,10 +102,12 @@ async function main() {
 	console.log(`Base: ${baseUrl}`);
 	console.log(`Token: ${TOKEN}`);
 	console.log("");
-	console.log("Scan this QR from the Android phone to save this machine:");
+	console.log("Scan this QR from the Android phone to download the app and save this machine:");
 	console.log(qr);
 	console.log("");
-	console.log(`Native app setup: ${setupUrl}`);
+	console.log(`Phone setup page: ${setupUrl}`);
+	console.log(`Android APK: ${urls.downloadUrls[0]}`);
+	console.log(`Native app setup: ${urls.appSetupUrls[0]}`);
 }
 
 main().catch((err) => {

@@ -93,14 +93,14 @@ This is the easiest remote path. It works well when you want reliability more th
 /remote setup bluetooth
 ```
 
-`/pk-remote` is the shortest path. It starts the remote API if needed, chooses a setup URL in this order, and prints a QR code for the native Android app:
+`/pk-remote` is the shortest path. It starts the remote API if needed, chooses a setup URL in this order, and prints a QR code for the phone setup page:
 
 1. `PI_SPEAK_PUBLIC_BASE_URL`
 2. detected Tailscale IPv4 address
 3. detected local LAN IPv4 address
 4. configured fallback
 
-Scan the QR from the Android phone to save the machine URL, token, profile name, and connection mode. If you want the browser app instead, open one of the printed browser URLs:
+Scan the QR from the Android phone to open the setup page. From there you can download the bundled APK, open the native `pi-speak://setup` link, and save the machine URL, token, profile name, connection mode, and Codex route metadata. If you want the browser app instead, open one of the printed browser URLs:
 
 ```text
 http://localhost:8767/app/
@@ -129,43 +129,71 @@ Optional Windows tray:
 
 Right-click the tray icon and choose `Show setup QR code`. Scanning the QR opens the Android app with this computer's Tailscale endpoint, token, and saved machine profile metadata. Set `PI_SPEAK_TRAY=1` to start the tray automatically with `/remote on`.
 
+NPM-installed tray/service path:
+
+```text
+npx -p pi-speak-pk pi-speak-tray
+```
+
+Or, after global install:
+
+```text
+pi-speak-tray --install-startup
+```
+
+The tray keeps the headless gateway running in the background, restarts it if it exits, and exposes setup, APK download, status, settings, restart, and web remote actions from the tray menu.
+
 ### Gemini Live Smoke Test
 
 Use this before wiring a real-time session into the phone UI:
 
 ```text
-set GOOGLE_API_KEY=<your-key>
+set PI_SPEAK_GEMINI_BACKEND=vertex
+set PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
+set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
+set GOOGLE_CLOUD_LOCATION=us-central1
+gcloud auth application-default login
 pi-speak-gemini-live-smoke --model gemini-2.5-flash-native-audio-preview-12-2025 --modality audio
 ```
 
-To run the tray/headless gateway through ElevenLabs voice, backed by Gemini text reasoning:
+To run the tray/headless gateway through ElevenLabs voice, backed by Vertex AI Gemini text reasoning:
 
 ```text
 set REDACTED_ELEVENLABS_HISTORY_LINE<your-elevenlabs-key>
-set GOOGLE_API_KEY=<your-google-key>
+set PI_SPEAK_GEMINI_BACKEND=vertex
+set PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
+set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
+set GOOGLE_CLOUD_LOCATION=us-central1
+gcloud auth application-default login
 set AGENT_PROVIDER=elevenlabs
 pi-speak-gateway
 ```
 
-This is the recommended high-quality voice stack. It uses ElevenLabs Flash v2.5 by default for lower cost and latency. Set `REDACTED_ELEVENLABS_HISTORY_LINE` when quality matters more than credit use.
+This is the recommended high-quality voice stack. It uses ElevenLabs for reply audio and Vertex AI for Gemini reasoning so Google Cloud billing/credits apply through your Cloud project. Set `REDACTED_ELEVENLABS_HISTORY_LINE` when quality matters more than credit use.
 
 To run the tray/headless gateway through Gemini Live instead:
 
 ```text
 set AGENT_PROVIDER=gemini-live
+set PI_SPEAK_GEMINI_BACKEND=vertex
+set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
+set GOOGLE_CLOUD_LOCATION=us-central1
 set PI_SPEAK_GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
 pi-speak-gateway
 ```
 
 Optional environment:
 
+- `PI_SPEAK_GEMINI_BACKEND=vertex|developer-api` selects Vertex AI or direct Gemini Developer API
+- `PI_SPEAK_VERTEX_API_KEY` uses a Vertex AI API key instead of Application Default Credentials
+- `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` configure Vertex AI
 - `PI_SPEAK_GEMINI_LIVE_MODEL` selects the Live model
 - `PI_SPEAK_GEMINI_LIVE_MODALITY=audio|text` selects response mode
 - `PI_SPEAK_GEMINI_API_VERSION=v1beta|v1alpha` selects the Gemini API version
 - `PI_SPEAK_ELEVENLABS_MODEL_ID` selects the ElevenLabs speech model
 - `PI_SPEAK_ELEVENLABS_VOICE_ID` selects the ElevenLabs voice
 
-Keep Gemini and ElevenLabs keys server-side. Do not put them in the Android app or browser app.
+Keep Gemini, Vertex, and ElevenLabs credentials server-side. Do not put them in the Android app or browser app.
 
 ## Main Commands
 
@@ -257,6 +285,8 @@ Behavior:
 
 - starts the HTTP server
 - serves the mobile app from `/app/`
+- serves the phone setup page from `/setup`
+- serves the bundled Android APK from `/download/pi-speak.apk`
 - exposes remote-control endpoints
 - generates a token if one is not already configured
 - prints one-step setup URLs for the browser app and native Android app
@@ -562,7 +592,7 @@ What it is not good at:
 ### Core
 
 ```text
-AGENT_PROVIDER=pi|codex
+AGENT_PROVIDER=pi|codex|elevenlabs|gemini|gemini-live
 CODEX_BIN=codex
 PI_BIN=pi
 AGENT_MODEL=
@@ -609,6 +639,19 @@ ELEVENLABS_API_KEY_REDACTED
 REDACTED_ELEVENLABS_HISTORY_LINE
 REDACTED_ELEVENLABS_HISTORY_LINE
 ```
+
+### Vertex AI Gemini
+
+```text
+PI_SPEAK_GEMINI_BACKEND=vertex
+PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
+GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
+GOOGLE_CLOUD_LOCATION=us-central1
+PI_SPEAK_GEMINI_TEXT_MODEL=gemini-2.5-flash
+PI_SPEAK_GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+```
+
+Run `gcloud auth application-default login` on the machine hosting the tray/gateway, or set `PI_SPEAK_VERTEX_API_KEY` to a Vertex AI API key. Enable the Vertex AI API on the Cloud project.
 
 ### Edge TTS
 

@@ -72,6 +72,10 @@ type ActiveTurn = {
 
 const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_CODEX_TIMEOUT_MS || "180000", 10);
 
+function shouldUseShell(command: string) {
+	return process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command);
+}
+
 export class CodexAgentProvider implements AgentProvider {
 	readonly name = "codex" as const;
 	private readonly codexBin: string;
@@ -197,7 +201,7 @@ export class CodexAgentProvider implements AgentProvider {
 		const child = this.spawnImpl(this.codexBin, args, {
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
-			shell: false,
+			shell: shouldUseShell(this.codexBin),
 			env: this.env,
 			cwd: options.cwd || this.cwd,
 		});
@@ -245,7 +249,7 @@ export class CodexAgentProvider implements AgentProvider {
 		this.child = this.spawnImpl(this.codexBin, ["app-server", "--listen", "stdio://"], {
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
-			shell: false,
+			shell: shouldUseShell(this.codexBin),
 			env: this.env,
 			cwd: this.cwd,
 		});
