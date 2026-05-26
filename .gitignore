@@ -58,4 +58,7 @@ artifacts/
 .codex/
 .build-outputs/
 
+# Local code index and phone-turn capture scratch
+.codegraph/
+tmp-phone-turn.*
 

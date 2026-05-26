@@ -619,6 +619,49 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
+    suspend fun listSlashCommands(): List<RemoteSlashCommand> {
+        return withContext(Dispatchers.IO) {
+            val gatewayUrl = "${gatewayBaseUrl()}/v1/commands"
+            val request = Request.Builder()
+                .url(gatewayUrl)
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
+
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@withContext emptyList()
+                    val body = response.body?.string() ?: return@withContext emptyList()
+                    val commandsJson = JSONObject(body).optJSONArray("commands") ?: return@withContext emptyList()
+                    val commands = mutableListOf<RemoteSlashCommand>()
+                    for (i in 0 until commandsJson.length()) {
+                        val item = commandsJson.optJSONObject(i) ?: continue
+                        val examplesJson = item.optJSONArray("examples")
+                        val examples = mutableListOf<String>()
+                        if (examplesJson != null) {
+                            for (j in 0 until examplesJson.length()) {
+                                val example = examplesJson.optString(j)
+                                if (example.isNotBlank()) examples.add(example)
+                            }
+                        }
+                        commands.add(
+                            RemoteSlashCommand(
+                                name = item.optString("name"),
+                                description = item.optString("description"),
+                                usage = item.optString("usage"),
+                                examples = examples
+                            )
+                        )
+                    }
+                    commands.filter { it.name.isNotBlank() }
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "Slash command list failed", e)
+                emptyList()
+            }
+        }
+    }
+
     private fun gatewayBaseUrl(): String = prefs.targetIpAddress.trim().trimEnd('/')
 
     private fun activeGatewayProvider(): String = when (prefs.activeAgent) {
@@ -665,6 +708,13 @@ data class WorkspaceListing(
 data class WorkspaceEntry(
     val name: String,
     val path: String
+)
+
+data class RemoteSlashCommand(
+    val name: String,
+    val description: String,
+    val usage: String,
+    val examples: List<String>
 )
 
 data class GatewayTurnResult(

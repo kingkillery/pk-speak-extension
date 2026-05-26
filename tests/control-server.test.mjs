@@ -80,6 +80,7 @@ async function withServer(overrides = {}, fn) {
 		onMonoAction: async () => ({ ok: true, message: "mono" }),
 		onSpeakAction: async () => ({ ok: true, message: "speak" }),
 		onPhoneAction: async () => ({ ok: true, message: "phone" }),
+		getSlashCommands: overrides.getSlashCommands || (() => []),
 		onTextTurn: overrides.onTextTurn || (async (text, includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `${text}:${includeAudio}:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
 		onVoiceTurn: overrides.onVoiceTurn || (async (_buffer, _mimeType, _includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `voice:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
 		onTurnCancel: overrides.onTurnCancel,
@@ -91,6 +92,31 @@ async function withServer(overrides = {}, fn) {
 		await server.stop();
 	}
 }
+
+test("remote server exposes slash commands to authenticated app clients", async () => {
+	await withServer({
+		getSlashCommands: () => [
+			{
+				name: "sess",
+				description: "Manage named sessions",
+				usage: "/sess [list|slots]",
+				examples: ["/sess", "/sess slots"],
+				source: "extension",
+			},
+		],
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/commands",
+			headers: { "X-Pi-Speak-Token": "secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		const payload = response.json();
+		assert.equal(payload.ok, true);
+		assert.equal(payload.commands[0].name, "sess");
+		assert.deepEqual(payload.commands[0].examples, ["/sess", "/sess slots"]);
+	});
+});
 
 async function withTemporaryEnv(name, value, fn) {
 	const previous = process.env[name];
