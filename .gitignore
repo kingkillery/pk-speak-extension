@@ -55,10 +55,25 @@ screen*.png
 archive/
 artifacts/
 .antigravitycli/
-.codex/
+.codex/*
+!.codex/skills/
+.codex/skills/*
+!.codex/skills/android-development/
+!.codex/skills/android-development/**
+!.codex/skills/g-kade/
+!.codex/skills/g-kade/**
+!.codex/skills/gstack/
+!.codex/skills/gstack/**
+!.codex/skills/kade-hq/
+!.codex/skills/kade-hq/**
+!.codex/skills/llm-as-verifier/
+!.codex/skills/llm-as-verifier/**
+!.codex/skills/llm-wiki-skills/
+!.codex/skills/llm-wiki-skills/**
+!.codex/skills/pokemon-benchmark/
+!.codex/skills/pokemon-benchmark/**
 .build-outputs/
 
 # Local code index and phone-turn capture scratch
 .codegraph/
 tmp-phone-turn.*
-
