@@ -126,6 +126,146 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
+    suspend fun testConnection(): ConnectionTestReport {
+        return withContext(Dispatchers.IO) {
+            val checks = mutableListOf<ConnectionCheck>()
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) {
+                return@withContext ConnectionTestReport(
+                    ok = false,
+                    summary = "No gateway URL is configured.",
+                    checks = listOf(ConnectionCheck("Gateway URL", "fail", "Open setup QR or enter a gateway URL.")),
+                    capabilities = emptyList()
+                )
+            }
+
+            var descriptor: JSONObject? = null
+            val healthOk = try {
+                val request = Request.Builder().url("$baseUrl/health").get().build()
+                client.newCall(request).execute().use { response ->
+                    val ok = response.isSuccessful
+                    checks.add(
+                        ConnectionCheck(
+                            label = "Health",
+                            status = if (ok) "ok" else "fail",
+                            detail = if (ok) "Gateway responded." else "Gateway returned ${response.code}."
+                        )
+                    )
+                    ok
+                }
+            } catch (e: Exception) {
+                checks.add(ConnectionCheck("Health", "fail", "Cannot reach $baseUrl. ${shortError(e)}"))
+                false
+            }
+
+            val descriptorOk = try {
+                val request = Request.Builder().url("$baseUrl/.well-known/pi-speak").get().build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        checks.add(ConnectionCheck("Descriptor", "fail", "Descriptor returned ${response.code}."))
+                        false
+                    } else {
+                        val json = JSONObject(response.body?.string() ?: "{}")
+                        descriptor = json
+                        val ok = json.optString("app") == "pi-speak"
+                        checks.add(
+                            ConnectionCheck(
+                                "Descriptor",
+                                if (ok) "ok" else "fail",
+                                if (ok) json.optString("name", "Pi Speak server detected.") else "Response was not a Pi Speak descriptor."
+                            )
+                        )
+                        ok
+                    }
+                }
+            } catch (e: Exception) {
+                checks.add(ConnectionCheck("Descriptor", "fail", "Descriptor fetch failed. ${shortError(e)}"))
+                false
+            }
+
+            var authOk = false
+            var workspaceOk = false
+            val statusOk = try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/status")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .get()
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    authOk = response.isSuccessful
+                    checks.add(
+                        ConnectionCheck(
+                            "Auth / Status",
+                            if (response.isSuccessful) "ok" else if (response.code == 401) "fail" else "warn",
+                            when {
+                                response.isSuccessful -> "Token accepted; status API is available."
+                                response.code == 401 -> "Token rejected. Scan the setup QR again."
+                                else -> "Status returned ${response.code}."
+                            }
+                        )
+                    )
+                    response.isSuccessful
+                }
+            } catch (e: Exception) {
+                checks.add(ConnectionCheck("Auth / Status", "fail", "Status check failed. ${shortError(e)}"))
+                false
+            }
+
+            if (statusOk) {
+                workspaceOk = try {
+                    val request = Request.Builder()
+                        .url("$baseUrl/v1/workspace?path=${urlParam(prefs.workspacePath)}")
+                        .header("X-Pi-Speak-Token", prefs.remoteToken)
+                        .get()
+                        .build()
+                    client.newCall(request).execute().use { response ->
+                        val ok = response.isSuccessful
+                        checks.add(
+                            ConnectionCheck(
+                                "Workspace",
+                                if (ok) "ok" else "warn",
+                                if (ok) "Workspace browser can read ${prefs.workspacePath}." else "Workspace check returned ${response.code}."
+                            )
+                        )
+                        ok
+                    }
+                } catch (e: Exception) {
+                    checks.add(ConnectionCheck("Workspace", "warn", "Workspace check failed. ${shortError(e)}"))
+                    false
+                }
+            }
+
+            val capabilities = descriptor?.optJSONArray("capabilities")?.let { array ->
+                (0 until array.length()).mapNotNull { i -> array.optString(i).takeIf { it.isNotBlank() } }
+            } ?: emptyList()
+            if (descriptorOk) {
+                val required = listOf("text-turn", "voice-turn", "audio-reply", "routing", "turn-cancel", "progress-events")
+                val available = required.filter { capabilities.contains(it) }
+                checks.add(
+                    ConnectionCheck(
+                        "Capabilities",
+                        if (available.containsAll(required)) "ok" else "warn",
+                        if (available.isEmpty()) "Descriptor did not report turn capabilities." else available.joinToString(", ")
+                    )
+                )
+            }
+
+            val ok = healthOk && descriptorOk && authOk && workspaceOk
+            ConnectionTestReport(
+                ok = ok,
+                summary = when {
+                    ok -> "Connection ready."
+                    !healthOk -> "Gateway is unreachable."
+                    !descriptorOk -> "Server identity could not be verified."
+                    !authOk -> "Setup required or token rejected."
+                    else -> "Connected with warnings."
+                },
+                checks = checks,
+                capabilities = capabilities
+            )
+        }
+    }
+
     // Optional direct test helper. Normal phone turns use the Pi Speak gateway so API keys stay off the device.
     suspend fun synthesizeWithElevenLabs(textToSpeak: String): File? {
         val apiKey = prefs.elevenLabsApiKey
@@ -664,6 +804,8 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
 
     private fun gatewayBaseUrl(): String = prefs.targetIpAddress.trim().trimEnd('/')
 
+    private fun shortError(error: Exception): String = error.localizedMessage ?: error.javaClass.simpleName
+
     private fun activeGatewayProvider(): String = when (prefs.activeAgent) {
         "Gateway Voice (ElevenLabs)" -> "elevenlabs"
         "Gateway Gemini (Vertex AI)" -> "gemini"
@@ -715,6 +857,19 @@ data class RemoteSlashCommand(
     val description: String,
     val usage: String,
     val examples: List<String>
+)
+
+data class ConnectionCheck(
+    val label: String,
+    val status: String,
+    val detail: String
+)
+
+data class ConnectionTestReport(
+    val ok: Boolean,
+    val summary: String,
+    val checks: List<ConnectionCheck>,
+    val capabilities: List<String>
 )
 
 data class GatewayTurnResult(

@@ -1504,6 +1504,8 @@ fun SettingsTabContent(
     var workspaceEntries by remember { mutableStateOf<List<com.example.api.WorkspaceEntry>>(emptyList()) }
     var workspaceParent by remember { mutableStateOf<String?>(null) }
     var workspaceLoading by remember { mutableStateOf(false) }
+    var connectionTesting by remember { mutableStateOf(false) }
+    var connectionReport by remember { mutableStateOf<com.example.api.ConnectionTestReport?>(null) }
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -1522,6 +1524,109 @@ fun SettingsTabContent(
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF232529),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(
+                    1.dp,
+                    when {
+                        connectionReport?.ok == true -> Color(0xFF22C55E)
+                        connectionReport != null -> Color(0xFFC95532)
+                        else -> Color(0xFF383A3E)
+                    }
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Connection Test",
+                                color = Color(0xFFE2E2E6),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = connectionReport?.summary ?: "Check gateway reachability, setup token, workspace, and capabilities.",
+                                color = when {
+                                    connectionReport?.ok == true -> Color(0xFF4ADE80)
+                                    connectionReport != null -> Color(0xFFFFB4A8)
+                                    else -> Color(0xFF8E9199)
+                                },
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp
+                            )
+                        }
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    connectionTesting = true
+                                    connectionReport = com.example.api.VoiceAgentClient(context, prefs).testConnection()
+                                    connectionTesting = false
+                                }
+                            },
+                            enabled = !connectionTesting,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFD0E4FF),
+                                contentColor = Color(0xFF003355)
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(if (connectionTesting) "Testing" else "Test", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    val report = connectionReport
+                    if (report != null) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        report.checks.forEach { check ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .padding(top = 4.dp)
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            when (check.status) {
+                                                "ok" -> Color(0xFF22C55E)
+                                                "warn" -> Color(0xFFF59E0B)
+                                                else -> Color(0xFFC95532)
+                                            }
+                                        )
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = check.label,
+                                        color = Color(0xFFE2E2E6),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = check.detail,
+                                        color = Color(0xFFB0B3BC),
+                                        fontSize = 10.sp,
+                                        lineHeight = 14.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Active Voice Agent Matrix Config
