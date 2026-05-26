@@ -55,6 +55,7 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -192,12 +193,31 @@ fun PiSpeakConsoleScreen(
                     .weight(1f)
                     .padding(horizontal = 16.dp)
             ) {
+                val studioConversationKey = prefs.conversationKey()
+                val studioState = remember {
+                    StudioRuntimeState(
+                        conversationKey = studioConversationKey,
+                        chatMessages = prefs.getChatMessages(studioConversationKey)
+                    )
+                }
+                LaunchedEffect(studioConversationKey) {
+                    if (studioState.conversationKey != studioConversationKey && !studioState.isProcessing && !studioState.isRecording) {
+                        studioState.conversationKey = studioConversationKey
+                        studioState.chatMessages = prefs.getChatMessages(studioConversationKey)
+                        studioState.transcription = ""
+                        studioState.latestReply = ""
+                        studioState.progressText = ""
+                        studioState.stopStatusText = ""
+                    }
+                }
                 when (currentTab) {
                     "studio" -> StudioTabContent(
                         audioHelper = audioHelper,
                         ttsHelper = ttsHelper,
                         prefs = prefs,
-                        client = client
+                        client = client,
+                        runtimeState = studioState,
+                        appScope = scope
                     )
                     "sessions" -> SessionsTabContent(
                         audioHelper = audioHelper,
@@ -367,29 +387,37 @@ fun TabSelector(
     }
 }
 
+class StudioRuntimeState(
+    conversationKey: String,
+    chatMessages: List<ChatMessage>
+) {
+    var isRecording by mutableStateOf(false)
+    var isProcessing by mutableStateOf(false)
+    var transcription by mutableStateOf("")
+    var latestReply by mutableStateOf("")
+    var progressText by mutableStateOf("")
+    var currentRecordPath by mutableStateOf<String?>(null)
+    var textInputState by mutableStateOf("")
+    var activeTurnJob by mutableStateOf<Job?>(null)
+    var turnGeneration by mutableIntStateOf(0)
+    var stopStatusText by mutableStateOf("")
+    var conversationKey by mutableStateOf(conversationKey)
+    var chatMessages by mutableStateOf(chatMessages)
+}
+
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun StudioTabContent(
     audioHelper: AudioHelper,
     ttsHelper: TtsHelper,
     prefs: AppPreferences,
-    client: VoiceAgentClient
+    client: VoiceAgentClient,
+    runtimeState: StudioRuntimeState,
+    appScope: CoroutineScope
 ) {
     val permissionState = rememberPermissionState(permission = Manifest.permission.RECORD_AUDIO)
-    val scope = rememberCoroutineScope()
-
-    var isRecording by remember { mutableStateOf(false) }
-    var isProcessing by remember { mutableStateOf(false) }
-    var transcription by remember { mutableStateOf("") }
-    var latestReply by remember { mutableStateOf("") }
-    var progressText by remember { mutableStateOf("") }
-    var currentRecordPath by remember { mutableStateOf<String?>(null) }
-    var textInputState by remember { mutableStateOf("") }
-    var activeTurnJob by remember { mutableStateOf<Job?>(null) }
-    var turnGeneration by remember { mutableIntStateOf(0) }
-    var stopStatusText by remember { mutableStateOf("") }
-    val conversationKey = prefs.conversationKey()
-    var chatMessages by remember(conversationKey) { mutableStateOf(prefs.getChatMessages(conversationKey)) }
+    val scope = appScope
+    val state = runtimeState
 
     // Live decibels state for custom drawing
     val amplitudeList = remember { mutableStateListOf<Float>().apply { addAll(List(16) { 0.1f }) } }
@@ -402,21 +430,21 @@ fun StudioTabContent(
 
     fun setProgress(message: String) {
         if (prefs.showTurnProgress) {
-            progressText = message
+            state.progressText = message
         }
     }
 
     fun persistChat(messages: List<ChatMessage>) {
         val capped = messages.takeLast(50)
-        chatMessages = capped
-        prefs.saveChatMessages(conversationKey, capped)
+        state.chatMessages = capped
+        prefs.saveChatMessages(state.conversationKey, capped)
     }
 
     fun appendChat(role: String, text: String, progress: List<String> = emptyList(), audioPath: String? = null) {
         val trimmed = text.trim()
         if (trimmed.isBlank() && progress.isEmpty()) return
         persistChat(
-            chatMessages + ChatMessage(
+            state.chatMessages + ChatMessage(
                 id = UUID.randomUUID().toString(),
                 role = role,
                 text = trimmed,
@@ -431,43 +459,43 @@ fun StudioTabContent(
     }
 
     fun stopCurrentTurn() {
-        val stoppedTurnGeneration = turnGeneration + 1
-        turnGeneration = stoppedTurnGeneration
+        val stoppedTurnGeneration = state.turnGeneration + 1
+        state.turnGeneration = stoppedTurnGeneration
         client.cancelActiveTurnCall()
-        activeTurnJob?.cancel()
-        activeTurnJob = null
-        stopStatusText = "Stopping..."
-        isProcessing = true
+        state.activeTurnJob?.cancel()
+        state.activeTurnJob = null
+        state.stopStatusText = "Stopping..."
+        state.isProcessing = true
         setProgress("Stopping local request. Asking gateway to cancel the current turn.")
-        latestReply = "Stopping..."
+        state.latestReply = "Stopping..."
         ttsHelper.stop()
         audioHelper.stopPlayback()
         scope.launch {
             val message = client.cancelTurn()
-            if (turnGeneration == stoppedTurnGeneration) {
+            if (state.turnGeneration == stoppedTurnGeneration) {
                 val stoppedMessage = if (message.startsWith("Stop request failed")) {
                     "Agent did not acknowledge cancellation. $message"
                 } else {
                     "Cancelled. $message"
                 }
-                stopStatusText = stoppedMessage
+                state.stopStatusText = stoppedMessage
                 setProgress(stoppedMessage)
-                latestReply = stoppedMessage
+                state.latestReply = stoppedMessage
                 appendChat("system", stoppedMessage)
-                isProcessing = false
+                state.isProcessing = false
             }
         }
     }
 
     val startSimulatedTranscription = {
         wordStreamJob?.cancel()
-        transcription = "Streaming wireless audio loop..."
+        state.transcription = "Streaming wireless audio loop..."
     }
 
     val startAmplitudeSampling = {
         liveAmplitudeJob?.cancel()
         liveAmplitudeJob = scope.launch {
-            while (isRecording) {
+            while (state.isRecording) {
                 val amp = audioHelper.getAmplitude().toFloat()
                 // Normalize amplitude to reasonable range (0.1 to 1.0)
                 val normalized = (amp / 32768f).coerceIn(0.1f, 1.0f)
@@ -486,29 +514,29 @@ fun StudioTabContent(
     }
 
     val recordTriggerAction = {
-        if (!isRecording && !isProcessing) {
+        if (!state.isRecording && !state.isProcessing) {
             ttsHelper.stop()
             audioHelper.stopPlayback()
-            isRecording = true
+            state.isRecording = true
             recordingStartedAtMs = System.currentTimeMillis()
-            currentRecordPath = audioHelper.startRecording("turn.wav")
-            Log.d("MainActivity", "Voice recording started: $currentRecordPath")
+            state.currentRecordPath = audioHelper.startRecording("turn.wav")
+            Log.d("MainActivity", "Voice recording started: ${state.currentRecordPath}")
             startSimulatedTranscription()
             startAmplitudeSampling()
         }
     }
 
     val stopAndSendAction = {
-        if (isRecording) {
-            isRecording = false
+        if (state.isRecording) {
+            state.isRecording = false
             liveAmplitudeJob?.cancel()
             wordStreamJob?.cancel()
-            turnGeneration += 1
-            val myTurnGeneration = turnGeneration
-            stopStatusText = ""
+            state.turnGeneration += 1
+            val myTurnGeneration = state.turnGeneration
+            state.stopStatusText = ""
 
             val job = scope.launch {
-                isProcessing = true
+                state.isProcessing = true
                 var progressJob: Job? = null
                 try {
                     val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
@@ -530,9 +558,9 @@ fun StudioTabContent(
                                 "Preparing spoken reply."
                             )
                             var index = 0
-                            while (isProcessing) {
+                            while (state.isProcessing) {
                                 delay(7000)
-                                if (myTurnGeneration != turnGeneration) break
+                                if (myTurnGeneration != state.turnGeneration) break
                                 val message = updates[index.coerceAtMost(updates.lastIndex)]
                                 setProgress(message)
                                 if (prefs.speakTurnProgress) {
@@ -541,14 +569,14 @@ fun StudioTabContent(
                                 if (index < updates.lastIndex) index += 1
                             }
                         }
-                        val result = client.sendVoiceTurnDetailed(file, transcription)
-                        if (myTurnGeneration != turnGeneration) return@launch
+                        val result = client.sendVoiceTurnDetailed(file, state.transcription)
+                        if (myTurnGeneration != state.turnGeneration) return@launch
                         progressJob?.cancel()
                         ttsHelper.stop()
-                        transcription = result.transcript
+                        state.transcription = result.transcript
                         val finalProgressText = result.progress.joinToString("\n")
-                        progressText = finalProgressText
-                        latestReply = result.replyText
+                        state.progressText = finalProgressText
+                        state.latestReply = result.replyText
 
                         // Try to fetch audio synthesized voice if using ElevenLabs/Gemini Text
                         val replyVoiceFile = File(file.parentFile, "elevenlabs_reply.mp3")
@@ -575,33 +603,33 @@ fun StudioTabContent(
                         // If ElevenLabs spoke, play it!
                         if (path != null) {
                             audioHelper.startPlayback(path)
-                        } else if (prefs.autoSpeakEnabled && latestReply.isNotEmpty()) {
-                            ttsHelper.speak(latestReply)
+                        } else if (prefs.autoSpeakEnabled && state.latestReply.isNotEmpty()) {
+                            ttsHelper.speak(state.latestReply)
                         }
                     } else {
-                        if (myTurnGeneration != turnGeneration) return@launch
-                        transcription = "Failed to record voice correctly."
-                        latestReply = "The audio clip was too short or could not be finalized. Hold the voice button a little longer and try again."
-                        appendChat("system", latestReply)
+                        if (myTurnGeneration != state.turnGeneration) return@launch
+                        state.transcription = "Failed to record voice correctly."
+                        state.latestReply = "The audio clip was too short or could not be finalized. Hold the voice button a little longer and try again."
+                        appendChat("system", state.latestReply)
                     }
                 } catch (_: CancellationException) {
-                    if (myTurnGeneration == turnGeneration) {
-                        stopStatusText = "Local request cancelled."
+                    if (myTurnGeneration == state.turnGeneration) {
+                        state.stopStatusText = "Local request cancelled."
                         setProgress("Local request cancelled.")
                     }
                 } catch (e: Exception) {
-                    if (myTurnGeneration == turnGeneration) {
-                        latestReply = "System error contacting voice node: ${e.localizedMessage}"
+                    if (myTurnGeneration == state.turnGeneration) {
+                        state.latestReply = "System error contacting voice node: ${e.localizedMessage}"
                     }
                 } finally {
                     progressJob?.cancel()
-                    if (myTurnGeneration == turnGeneration) {
-                        activeTurnJob = null
-                        isProcessing = false
+                    if (myTurnGeneration == state.turnGeneration) {
+                        state.activeTurnJob = null
+                        state.isProcessing = false
                     }
                 }
             }
-            activeTurnJob = job
+            state.activeTurnJob = job
         }
     }
 
@@ -619,12 +647,12 @@ fun StudioTabContent(
         ) {
             Text(
                 text = when {
-                    isRecording -> "MICROPHONE TRANSMITTING"
-                    stopStatusText == "Stopping..." -> "STOPPING CURRENT TURN"
-                    isProcessing -> "CODING AGENT WORKING"
+                    state.isRecording -> "MICROPHONE TRANSMITTING"
+                    state.stopStatusText == "Stopping..." -> "STOPPING CURRENT TURN"
+                    state.isProcessing -> "CODING AGENT WORKING"
                     else -> "TACTICAL CONSOLE IDLE"
                 },
-                color = if (isRecording) Color(0xFFC95532) else Color(0xFF8E9199),
+                color = if (state.isRecording) Color(0xFFC95532) else Color(0xFF8E9199),
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 8.dp)
@@ -639,7 +667,7 @@ fun StudioTabContent(
                     .height(80.dp),
                 contentAlignment = Alignment.Center
             ) {
-                WaveformBars(amplitudes = amplitudeList, active = isRecording)
+                WaveformBars(amplitudes = amplitudeList, active = state.isRecording)
             }
         }
 
@@ -662,7 +690,7 @@ fun StudioTabContent(
                         .padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    if (chatMessages.isNotEmpty()) {
+                    if (state.chatMessages.isNotEmpty()) {
                         item {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -678,20 +706,20 @@ fun StudioTabContent(
                                 )
                                 TextButton(
                                     onClick = {
-                                        prefs.clearChatMessages(conversationKey)
-                                        chatMessages = emptyList()
-                                        transcription = ""
-                                        latestReply = ""
-                                        progressText = ""
+                                        prefs.clearChatMessages(state.conversationKey)
+                                        state.chatMessages = emptyList()
+                                        state.transcription = ""
+                                        state.latestReply = ""
+                                        state.progressText = ""
                                     },
-                                    enabled = !isProcessing,
+                                    enabled = !state.isProcessing,
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                                 ) {
                                     Text("Clear", color = Color(0xFF8E9199), fontSize = 10.sp)
                                 }
                             }
                         }
-                        items(chatMessages, key = { it.id }) { message ->
+                        items(state.chatMessages, key = { it.id }) { message ->
                             val isUser = message.role == "user"
                             val isProgress = message.role == "progress"
                             Column(
@@ -746,7 +774,7 @@ fun StudioTabContent(
                         }
                     }
 
-                    if (transcription.isNotEmpty()) {
+                    if (state.transcription.isNotEmpty()) {
                         item {
                             Column {
                                 Text(
@@ -758,7 +786,7 @@ fun StudioTabContent(
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "$transcription...",
+                                    text = "${state.transcription}...",
                                     color = Color(0xFFE2E2E6),
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.Medium
@@ -767,7 +795,7 @@ fun StudioTabContent(
                         }
                     }
 
-                    if (isProcessing) {
+                    if (state.isProcessing) {
                         item {
                             Column(
                                 modifier = Modifier
@@ -780,10 +808,10 @@ fun StudioTabContent(
                                     strokeWidth = 2.dp,
                                     modifier = Modifier.size(24.dp)
                                 )
-                                if (prefs.showTurnProgress && progressText.isNotBlank()) {
+                                if (prefs.showTurnProgress && state.progressText.isNotBlank()) {
                                     Spacer(modifier = Modifier.height(10.dp))
                                     Text(
-                                        text = progressText,
+                                        text = state.progressText,
                                         color = Color(0xFFDCEAF3),
                                         fontSize = 12.sp,
                                         lineHeight = 17.sp,
@@ -793,13 +821,13 @@ fun StudioTabContent(
                                 Spacer(modifier = Modifier.height(12.dp))
                                 OutlinedButton(
                                     onClick = { stopCurrentTurn() },
-                                    enabled = stopStatusText != "Stopping...",
+                                    enabled = state.stopStatusText != "Stopping...",
                                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFFB4A8)),
                                     border = BorderStroke(1.dp, Color(0xFFC95532)),
                                     shape = RoundedCornerShape(8.dp)
                                 ) {
                                     Text(
-                                        if (stopStatusText == "Stopping...") "Stopping..." else "Stop turn",
+                                        if (state.stopStatusText == "Stopping...") "Stopping..." else "Stop turn",
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -808,7 +836,7 @@ fun StudioTabContent(
                         }
                     }
 
-                    if (latestReply.isNotEmpty() && !isProcessing) {
+                    if (state.latestReply.isNotEmpty() && !state.isProcessing) {
                         item {
                             Column(
                                 modifier = Modifier
@@ -834,9 +862,9 @@ fun StudioTabContent(
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
-                                if (prefs.showTurnProgress && progressText.isNotBlank()) {
+                                if (prefs.showTurnProgress && state.progressText.isNotBlank()) {
                                     Text(
-                                        text = progressText,
+                                        text = state.progressText,
                                         color = Color(0xFF8E9199),
                                         fontSize = 11.sp,
                                         lineHeight = 16.sp
@@ -844,7 +872,7 @@ fun StudioTabContent(
                                     Spacer(modifier = Modifier.height(8.dp))
                                 }
                                 Text(
-                                    text = "\"$latestReply\"",
+                                    text = "\"${state.latestReply}\"",
                                     color = Color(0xFFDCEAF3),
                                     fontSize = 15.sp,
                                     lineHeight = 22.sp,
@@ -855,7 +883,7 @@ fun StudioTabContent(
                     }
 
                     // Empty State Guidelines
-                    if (transcription.isEmpty() && latestReply.isEmpty()) {
+                    if (state.transcription.isEmpty() && state.latestReply.isEmpty()) {
                         item {
                             Column(
                                 modifier = Modifier
@@ -892,8 +920,8 @@ fun StudioTabContent(
             verticalAlignment = Alignment.CenterVertically
         ) {
             OutlinedTextField(
-                value = textInputState,
-                onValueChange = { textInputState = it },
+                value = state.textInputState,
+                onValueChange = { state.textInputState = it },
                 placeholder = { Text("Enter manual codex instruction...", color = Color(0xFF8E9199), fontSize = 13.sp) },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Color(0xFFD0E4FF),
@@ -906,30 +934,30 @@ fun StudioTabContent(
                 textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, color = Color(0xFFE2E2E6)),
                 singleLine = true,
                 modifier = Modifier.weight(1f),
-                enabled = !isProcessing
+                enabled = !state.isProcessing
             )
             Spacer(modifier = Modifier.width(8.dp))
             IconButton(
                 onClick = {
-                    if (textInputState.trim().isNotEmpty() && !isProcessing) {
-                        val promptText = textInputState.trim()
-                        textInputState = ""
-                        turnGeneration += 1
-                        val myTurnGeneration = turnGeneration
-                        stopStatusText = ""
+                    if (state.textInputState.trim().isNotEmpty() && !state.isProcessing) {
+                        val promptText = state.textInputState.trim()
+                        state.textInputState = ""
+                        state.turnGeneration += 1
+                        val myTurnGeneration = state.turnGeneration
+                        state.stopStatusText = ""
                         val job = scope.launch {
-                            isProcessing = true
-                            transcription = promptText
+                            state.isProcessing = true
+                            state.transcription = promptText
                             setProgress("Sending text to gateway.")
                             appendChat("user", promptText)
                             try {
                                 val result = client.sendTextTurnDetailed(promptText)
-                                if (myTurnGeneration != turnGeneration) return@launch
+                                if (myTurnGeneration != state.turnGeneration) return@launch
                                 ttsHelper.stop()
-                                transcription = result.transcript
+                                state.transcription = result.transcript
                                 val finalProgressText = result.progress.joinToString("\n")
-                                progressText = finalProgressText
-                                latestReply = result.replyText
+                                state.progressText = finalProgressText
+                                state.latestReply = result.replyText
 
                                 // Try to fetch audio synthesized voice if using ElevenLabs
                                 val replyVoiceFile = File(context.cacheDir, "elevenlabs_reply.mp3")
@@ -954,26 +982,26 @@ fun StudioTabContent(
 
                                 if (path != null) {
                                     audioHelper.startPlayback(path)
-                                } else if (prefs.autoSpeakEnabled && latestReply.isNotEmpty()) {
-                                    ttsHelper.speak(latestReply)
+                                } else if (prefs.autoSpeakEnabled && state.latestReply.isNotEmpty()) {
+                                    ttsHelper.speak(state.latestReply)
                                 }
                             } catch (_: CancellationException) {
-                                if (myTurnGeneration == turnGeneration) {
-                                    stopStatusText = "Local request cancelled."
+                                if (myTurnGeneration == state.turnGeneration) {
+                                    state.stopStatusText = "Local request cancelled."
                                     setProgress("Local request cancelled.")
                                 }
                             } catch (e: Exception) {
-                                if (myTurnGeneration == turnGeneration) {
-                                    latestReply = "System error contacting local node: ${e.localizedMessage}"
+                                if (myTurnGeneration == state.turnGeneration) {
+                                    state.latestReply = "System error contacting local node: ${e.localizedMessage}"
                                 }
                             } finally {
-                                if (myTurnGeneration == turnGeneration) {
-                                    activeTurnJob = null
-                                    isProcessing = false
+                                if (myTurnGeneration == state.turnGeneration) {
+                                    state.activeTurnJob = null
+                                    state.isProcessing = false
                                 }
                             }
                         }
-                        activeTurnJob = job
+                        state.activeTurnJob = job
                     }
                 },
                 modifier = Modifier
@@ -981,9 +1009,9 @@ fun StudioTabContent(
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xFF2D2F33))
                     .border(BorderStroke(1.dp, Color(0xFF44474B)), RoundedCornerShape(8.dp)),
-                enabled = textInputState.trim().isNotEmpty() && !isProcessing
+                enabled = state.textInputState.trim().isNotEmpty() && !state.isProcessing
             ) {
-                Text("⚡", color = if (textInputState.trim().isNotEmpty()) Color(0xFFD0E4FF) else Color(0xFF8E9199))
+                Text("⚡", color = if (state.textInputState.trim().isNotEmpty()) Color(0xFFD0E4FF) else Color(0xFF8E9199))
             }
         }
 
@@ -1024,7 +1052,7 @@ fun StudioTabContent(
                     modifier = Modifier.size(140.dp)
                 ) {
                     val scaleFactor by animateFloatAsState(
-                        targetValue = if (isRecording) 1.2f else 1.0f,
+                        targetValue = if (state.isRecording) 1.2f else 1.0f,
                         animationSpec = spring(dampingRatio = 0.6f, stiffness = 80f)
                     )
 
@@ -1035,9 +1063,9 @@ fun StudioTabContent(
                             .scale(scaleFactor)
                             .clip(CircleShape)
                             .background(
-                                color = if (isRecording) Color(0x33B3261E) else Color(0x1AD0E4FF)
+                                color = if (state.isRecording) Color(0x33B3261E) else Color(0x1AD0E4FF)
                             )
-                            .blur(if (isRecording) 16.dp else 4.dp)
+                            .blur(if (state.isRecording) 16.dp else 4.dp)
                     )
 
                     // Actual Button
@@ -1048,7 +1076,7 @@ fun StudioTabContent(
                             .clip(CircleShape)
                             .background(
                                 brush = Brush.radialGradient(
-                                    colors = if (isRecording) {
+                                    colors = if (state.isRecording) {
                                         listOf(Color(0xFFE04F2A), Color(0xFFB3261E))
                                     } else {
                                         listOf(Color(0xFFD0E4FF), Color(0xFF76A8FF))
@@ -1067,7 +1095,7 @@ fun StudioTabContent(
                                     },
                                     onTap = {
                                         if (prefs.transmissionMode == "TOGGLE") {
-                                            if (isRecording) stopAndSendAction() else recordTriggerAction()
+                                            if (state.isRecording) stopAndSendAction() else recordTriggerAction()
                                         }
                                     }
                                 )
@@ -1076,9 +1104,9 @@ fun StudioTabContent(
                     ) {
                         // Tactical Mic Icon
                         Text(
-                            text = if (isRecording) "🎙" else "π",
+                            text = if (state.isRecording) "🎙" else "π",
                             fontSize = 32.sp,
-                            color = if (isRecording) Color.White else Color(0xFF003355),
+                            color = if (state.isRecording) Color.White else Color(0xFF003355),
                             fontWeight = FontWeight.Black
                         )
                     }
@@ -1089,7 +1117,7 @@ fun StudioTabContent(
                     text = if (prefs.transmissionMode == "PTT") "HOLD TACTICAL PAD TO TALK" else "TAP TO TOGGLE MICROPHONE",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (isRecording) Color(0xFFC95532) else Color(0xFF8E9199),
+                    color = if (state.isRecording) Color(0xFFC95532) else Color(0xFF8E9199),
                     letterSpacing = 0.5.sp
                 )
             }
