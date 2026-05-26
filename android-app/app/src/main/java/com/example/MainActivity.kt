@@ -387,6 +387,7 @@ fun StudioTabContent(
     var textInputState by remember { mutableStateOf("") }
     var activeTurnJob by remember { mutableStateOf<Job?>(null) }
     var turnGeneration by remember { mutableIntStateOf(0) }
+    var stopStatusText by remember { mutableStateOf("") }
     val conversationKey = prefs.conversationKey()
     var chatMessages by remember(conversationKey) { mutableStateOf(prefs.getChatMessages(conversationKey)) }
 
@@ -430,18 +431,31 @@ fun StudioTabContent(
     }
 
     fun stopCurrentTurn() {
-        turnGeneration += 1
+        val stoppedTurnGeneration = turnGeneration + 1
+        turnGeneration = stoppedTurnGeneration
+        client.cancelActiveTurnCall()
         activeTurnJob?.cancel()
         activeTurnJob = null
-        setProgress("Stop requested. Asking gateway to cancel the current turn.")
+        stopStatusText = "Stopping..."
+        isProcessing = true
+        setProgress("Stopping local request. Asking gateway to cancel the current turn.")
+        latestReply = "Stopping..."
         ttsHelper.stop()
         audioHelper.stopPlayback()
         scope.launch {
             val message = client.cancelTurn()
-            setProgress(message)
-            latestReply = message
-            appendChat("system", message)
-            isProcessing = false
+            if (turnGeneration == stoppedTurnGeneration) {
+                val stoppedMessage = if (message.startsWith("Stop request failed")) {
+                    "Agent did not acknowledge cancellation. $message"
+                } else {
+                    "Cancelled. $message"
+                }
+                stopStatusText = stoppedMessage
+                setProgress(stoppedMessage)
+                latestReply = stoppedMessage
+                appendChat("system", stoppedMessage)
+                isProcessing = false
+            }
         }
     }
 
@@ -491,6 +505,7 @@ fun StudioTabContent(
             wordStreamJob?.cancel()
             turnGeneration += 1
             val myTurnGeneration = turnGeneration
+            stopStatusText = ""
 
             val job = scope.launch {
                 isProcessing = true
@@ -570,7 +585,10 @@ fun StudioTabContent(
                         appendChat("system", latestReply)
                     }
                 } catch (_: CancellationException) {
-                    setProgress("Turn stopped.")
+                    if (myTurnGeneration == turnGeneration) {
+                        stopStatusText = "Local request cancelled."
+                        setProgress("Local request cancelled.")
+                    }
                 } catch (e: Exception) {
                     if (myTurnGeneration == turnGeneration) {
                         latestReply = "System error contacting voice node: ${e.localizedMessage}"
@@ -602,7 +620,8 @@ fun StudioTabContent(
             Text(
                 text = when {
                     isRecording -> "MICROPHONE TRANSMITTING"
-                    isProcessing -> "COMPILING CODEX SHARDS"
+                    stopStatusText == "Stopping..." -> "STOPPING CURRENT TURN"
+                    isProcessing -> "CODING AGENT WORKING"
                     else -> "TACTICAL CONSOLE IDLE"
                 },
                 color = if (isRecording) Color(0xFFC95532) else Color(0xFF8E9199),
@@ -774,11 +793,16 @@ fun StudioTabContent(
                                 Spacer(modifier = Modifier.height(12.dp))
                                 OutlinedButton(
                                     onClick = { stopCurrentTurn() },
+                                    enabled = stopStatusText != "Stopping...",
                                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFFB4A8)),
                                     border = BorderStroke(1.dp, Color(0xFFC95532)),
                                     shape = RoundedCornerShape(8.dp)
                                 ) {
-                                    Text("Stop turn", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text(
+                                        if (stopStatusText == "Stopping...") "Stopping..." else "Stop turn",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }
@@ -892,6 +916,7 @@ fun StudioTabContent(
                         textInputState = ""
                         turnGeneration += 1
                         val myTurnGeneration = turnGeneration
+                        stopStatusText = ""
                         val job = scope.launch {
                             isProcessing = true
                             transcription = promptText
@@ -933,7 +958,10 @@ fun StudioTabContent(
                                     ttsHelper.speak(latestReply)
                                 }
                             } catch (_: CancellationException) {
-                                setProgress("Turn stopped.")
+                                if (myTurnGeneration == turnGeneration) {
+                                    stopStatusText = "Local request cancelled."
+                                    setProgress("Local request cancelled.")
+                                }
                             } catch (e: Exception) {
                                 if (myTurnGeneration == turnGeneration) {
                                     latestReply = "System error contacting local node: ${e.localizedMessage}"
