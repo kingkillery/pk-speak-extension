@@ -52,12 +52,12 @@ async function withServer(overrides = {}, fn) {
 			...overrides.state,
 		},
 		onStateChange: () => {},
-		getStatus: () => ({
+		getStatus: overrides.getStatus || (() => ({
 			speak: { enabled: false },
 			mono: { running: false },
 			phone: { enabled: false },
 			remote: { enabled: true, host: "127.0.0.1", port: 0, authRequired: true },
-		}),
+		})),
 		getDiagnostics: overrides.getDiagnostics || (() => ({
 			status: {
 				speak: { enabled: false },
@@ -128,6 +128,40 @@ test("non-local status requires auth while localhost bypass still works", async 
 		});
 		assert.equal(localResponse.statusCode, 200);
 		assert.equal(localResponse.json().ok, true);
+	});
+});
+
+test("phone setup page is public and includes install plus connect links", async () => {
+	await withServer({
+		getStatus: () => ({
+			agent: { provider: "elevenlabs", configuredProvider: "elevenlabs", capabilities: { textTurns: true, voiceTurns: true, audioReplies: true, routing: true, steering: false } },
+			speak: { enabled: false },
+			mono: { running: false },
+			phone: { enabled: false },
+			remote: { enabled: true, host: "127.0.0.1", port: 0, authRequired: true, currentSession: "pi" },
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/setup?token=secret-token&profile_name=Test%20Rig",
+			headers: { Host: `100.76.136.91:${port}` },
+		});
+		assert.equal(response.statusCode, 200);
+		assert.match(response.headers["content-type"], /text\/html/);
+		assert.match(response.body, /Pi Speak phone setup/);
+		assert.match(response.body, /download\/pi-speak\.apk/);
+		assert.match(response.body, /pi-speak:\/\/setup/);
+		assert.match(response.body, /token=secret-token/);
+		assert.match(response.body, /agent_provider=elevenlabs/);
+		assert.match(response.body, /Test Rig/);
+
+		const downloadRedirect = await request({
+			port,
+			path: "/download",
+			headers: { Host: `100.76.136.91:${port}` },
+		});
+		assert.equal(downloadRedirect.statusCode, 302);
+		assert.equal(downloadRedirect.headers.location, "/download/pi-speak.apk");
 	});
 });
 

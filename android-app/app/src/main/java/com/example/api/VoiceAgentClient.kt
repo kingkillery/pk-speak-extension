@@ -2,28 +2,26 @@ package com.example.api
 
 import android.content.Context
 import android.util.Log
-import com.example.BuildConfig
 import com.example.data.AppPreferences
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
-import java.util.UUID
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class VoiceAgentClient(private val context: Context, private val prefs: AppPreferences) {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
     /**
@@ -34,25 +32,8 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         val targetAgent = prefs.activeAgent
         Log.d("VoiceAgent", "Sending text turn using: $targetAgent")
 
-        return when {
-            targetAgent.contains("Gemini", ignoreCase = true) -> {
-                val response = callGeminiText(text)
-                Pair(text, response)
-            }
-            targetAgent.contains("ElevenLabs", ignoreCase = true) -> {
-                // ElevenLabs handles text-to-speech, but Gemini handles coding intelligence
-                val responseText = callGeminiText(text)
-                try {
-                    synthesizeWithElevenLabs(responseText)
-                } catch (e: Exception) {
-                    Log.e("VoiceAgent", "ElevenLabs failed, fallback to built-in system speakers", e)
-                }
-                Pair(text, responseText)
-            }
-            else -> {
-                // Local Codex (Pi Speak local gateway)
-                callLocalGatewayText(text)
-            }
+        return withContext(Dispatchers.IO) {
+            callLocalGatewayText(text)
         }
     }
 
@@ -60,176 +41,29 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
      * Sends an audio file turn to the active agent.
      * Returns a Pair of: (Recognized Transcription, Agent Response Text)
      */
-    suspend fun sendVoiceTurn(audioFile: File): Pair<String, String> {
+    suspend fun sendVoiceTurn(audioFile: File, fallbackPrompt: String = ""): Pair<String, String> {
         val targetAgent = prefs.activeAgent
         Log.d("VoiceAgent", "Sending voice turn using: $targetAgent")
 
-        return when {
-            targetAgent.contains("Gemini", ignoreCase = true) || targetAgent.contains("ElevenLabs", ignoreCase = true) -> {
-                val result = callGeminiVoice(audioFile)
-                val transcript = result.first
-                val responseText = result.second
-                
-                if (targetAgent.contains("ElevenLabs", ignoreCase = true)) {
-                    try {
-                        synthesizeWithElevenLabs(responseText)
-                    } catch (e: Exception) {
-                        Log.e("VoiceAgent", "ElevenLabs synthesis failed", e)
-                    }
-                }
-                Pair(transcript, responseText)
-            }
-            else -> {
-                // Local Codex / Gateway audio upload
-                callLocalGatewayVoice(audioFile)
-            }
+        val result = withContext(Dispatchers.IO) {
+            callLocalGatewayVoice(audioFile)
         }
-    }
-
-    private fun callGeminiVoice(audioFile: File): Pair<String, String> {
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
-            return Pair(
-                "Voice transmission ignored",
-                "Developer Setup Required: Please configure your GEMINI_API_KEY inside the Secrets panel of AI Studio to enable wireless AI Codex responses."
-            )
-        }
-
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey"
-
-        val bytes = try {
-            audioFile.readBytes()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return Pair("Could not read audio file.", "Error loading audio capture buffer.")
-        }
-        val base64Audio = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-
-        val jsonBody = JSONObject().apply {
-            put("systemInstruction", JSONObject().apply {
-                put("parts", JSONArray().put(JSONObject().apply {
-                    put("text", "You are a professional physical coding machine companion named Pi Speak. " +
-                            "Listen to the audio. " +
-                            "First, transcribe exactly what the user said, word-for-word, on line 1 starting with 'TRANSCRIPT: <text>'. Do NOT add extra stars or quotes around this prefix. " +
-                            "Second, on a new line, write your expert, highly compact operational response to their request starting with 'REPLY: <text>'. " +
-                            "Current Codex session context: '${prefs.codexSessionName}'. Keep replies elite, operational, compact, direct, and focused on remote code execution. No introductory fluff.")
-                }))
-            })
-            put("contents", JSONArray().put(JSONObject().apply {
-                put("parts", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("inlineData", JSONObject().apply {
-                            put("mimeType", "audio/mp4")
-                            put("data", base64Audio)
-                        })
-                    })
-                    put(JSONObject().apply {
-                        put("text", "Please analyze this remote voice instruction tape.")
-                    })
-                })
-            }))
-        }
-
-        val request = Request.Builder()
-            .url(url)
-            .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Pair(
-                        "Voice transmission failed.",
-                        "Error querying Gemini cloud node: Code ${response.code}\n${response.body?.string()}"
-                    )
-                } else {
-                    val respString = response.body?.string() ?: ""
-                    val jsonResponse = JSONObject(respString)
-                    val candidates = jsonResponse.getJSONArray("candidates")
-                    val content = candidates.getJSONObject(0).getJSONObject("content")
-                    val parts = content.getJSONArray("parts")
-                    val fullResponse = parts.getJSONObject(0).getString("text").trim()
-
-                    Log.d("VoiceAgent", "Raw Gemini speech response: $fullResponse")
-
-                    var transcript = ""
-                    var reply = ""
-
-                    fullResponse.lines().forEach { line ->
-                        val trimmedLine = line.trim()
-                        if (trimmedLine.startsWith("TRANSCRIPT:", ignoreCase = true)) {
-                            transcript = trimmedLine.substring("TRANSCRIPT:".length).trim()
-                        } else if (trimmedLine.trim().startsWith("REPLY:", ignoreCase = true)) {
-                            reply = trimmedLine.substring("REPLY:".length).trim()
-                        }
-                    }
-
-                    if (transcript.isEmpty() && reply.isEmpty()) {
-                        reply = fullResponse
-                        transcript = "Transcribed Voice Command"
-                    } else if (transcript.isEmpty()) {
-                        transcript = "Transcribed Voice Command"
-                    } else if (reply.isEmpty()) {
-                        reply = fullResponse
-                    }
-
-                    Pair(transcript, reply)
+        val reply = result.second.lowercase()
+        if (reply.contains("operational status returned by remote: 502")
+            || reply.contains("operational status returned by remote: 429")
+            || reply.contains("voice transmission offline")
+            || reply.contains("gateway connection error")) {
+            val prompt = fallbackPrompt.trim()
+            if (prompt.isNotEmpty() && !prompt.equals("Listening...", ignoreCase = true)) {
+                return withContext(Dispatchers.IO) {
+                    callLocalGatewayText(prompt)
                 }
             }
-        } catch (e: Exception) {
-            Pair(
-                "Voice transmission timeout.",
-                "Gateway timeout trying to reach Gemini API edge: ${e.localizedMessage}"
-            )
         }
+        return result
     }
 
-    // --- GEMINI CO-PILOT INTEGRATION ---
-    private fun callGeminiText(prompt: String): String {
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
-            return "Developer Setup Required: Please configure your GEMINI_API_KEY inside the Secrets panel of AI Studio to enable wireless AI Codex responses."
-        }
-
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey"
-        
-        val systemInstruction = "You are a professional physical coding machine companion named Pi Speak. " +
-                "You assist the user with remote deployments, file editing, workspace configuration, and coding. " +
-                "Current Codex session context: '${prefs.codexSessionName}'. " +
-                "Keep responses compact, highly operational, direct, and elite. Do not include verbose introductory fluff."
-
-        val jsonBody = JSONObject().apply {
-            put("contents", JSONArray().put(JSONObject().apply {
-                put("parts", JSONArray().put(JSONObject().apply {
-                    put("text", "$systemInstruction\n\nUser request: $prompt")
-                }))
-            }))
-        }
-
-        val request = Request.Builder()
-            .url(url)
-            .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    "Error querying Gemini cloud node: Code ${response.code}\n${response.body?.string()}"
-                } else {
-                    val respString = response.body?.string() ?: ""
-                    val jsonResponse = JSONObject(respString)
-                    val candidates = jsonResponse.getJSONArray("candidates")
-                    val content = candidates.getJSONObject(0).getJSONObject("content")
-                    val parts = content.getJSONArray("parts")
-                    parts.getJSONObject(0).getString("text").trim()
-                }
-            }
-        } catch (e: Exception) {
-            "Gateway timeout trying to reach Gemini API edge: ${e.localizedMessage}"
-        }
-    }
-
-    // --- ELEVENLABS TEXT-TO-SPEECH ---
+    // Optional direct test helper. Normal phone turns use the Pi Speak gateway so API keys stay off the device.
     suspend fun synthesizeWithElevenLabs(textToSpeak: String): File? {
         val apiKey = prefs.elevenLabsApiKey
         val voiceId = prefs.elevenLabsVoiceId
@@ -281,11 +115,15 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
 
     // --- PI SPEAK LOCAL REMOTE GATEWAY ---
     private fun callLocalGatewayText(text: String): Pair<String, String> {
-        val gatewayUrl = "${prefs.targetIpAddress}/v1/turn/text"
+        val gatewayUrl = "${gatewayBaseUrl()}/v1/turn/text"
+        Log.d("VoiceAgent", "POST text turn to gateway: $gatewayUrl")
         val requestBody = JSONObject().apply {
             put("session", prefs.codexSessionName)
+            put("target", prefs.codexSessionName)
+            put("agentProvider", activeGatewayProvider())
             put("text", text)
             put("audio", prefs.autoSpeakEnabled)
+            put("cwd", prefs.workspacePath)
         }.toString().toRequestBody("application/json".toMediaType())
 
         val request = Request.Builder()
@@ -310,19 +148,22 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                     }
                     Pair(text, reply)
                 } else {
+                    Log.e("VoiceAgent", "Gateway text turn failed: ${response.code} ${response.message}")
                     Pair(text, "Local gateway returned operational status: ${response.code}")
                 }
             }
         } catch (e: Exception) {
+            Log.e("VoiceAgent", "Gateway text turn connection failed", e)
             Pair(text, "Gateway connection error: Ensure you are connected to the Tailscale subnet or Bluetooth local link. Details:\n${e.localizedMessage}")
         }
     }
 
     private fun callLocalGatewayVoice(audioFile: File): Pair<String, String> {
         val audioParam = if (prefs.autoSpeakEnabled) "1" else "0"
-        val gatewayUrl = "${prefs.targetIpAddress}/v1/turn/voice?audio=$audioParam&target=${prefs.codexSessionName}&agentProvider=codex"
+        val gatewayUrl = "${gatewayBaseUrl()}/v1/turn/voice?audio=$audioParam&target=${urlParam(prefs.codexSessionName)}&agentProvider=${urlParam(activeGatewayProvider())}&cwd=${urlParam(prefs.workspacePath)}"
+        Log.d("VoiceAgent", "POST voice turn to gateway: $gatewayUrl")
         
-        val requestBody = audioFile.asRequestBody("audio/mp4".toMediaType())
+        val requestBody = audioFile.asRequestBody(recordingMimeType(audioFile).toMediaType())
 
         val request = Request.Builder()
             .url(gatewayUrl)
@@ -348,13 +189,17 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                     }
                     Pair(transcript, reply)
                 } else {
+                    val errorBody = response.body?.string()?.take(240) ?: ""
+                    Log.e("VoiceAgent", "Gateway voice turn failed: ${response.code} ${response.message} $errorBody")
                     Pair("Voice transmission completed.", "Operational status returned by remote: ${response.code}")
                 }
             }
         } catch (e: Exception) {
+            Log.e("VoiceAgent", "Gateway voice turn connection failed", e)
+            val detail = e.localizedMessage ?: e.javaClass.simpleName
             Pair(
                 "Voice transmission offline.",
-                "Offline: Couldn't connect to target gateway IP (${prefs.targetIpAddress}). Verify if Pi Speak machine service is hosting on port 8767."
+                "Offline: Couldn't connect to target gateway IP (${gatewayBaseUrl()}). Verify Pi Speak machine service is hosting on port 8767. Details: $detail"
             )
         }
     }
@@ -363,9 +208,10 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         val fullUrl = if (relativeUrl.startsWith("http")) {
             relativeUrl
         } else {
-            val base = prefs.targetIpAddress.removeSuffix("/")
+            val base = gatewayBaseUrl()
             "$base${if (relativeUrl.startsWith("/")) "" else "/"}$relativeUrl"
         }
+        Log.d("VoiceAgent", "GET gateway synthesized audio: $fullUrl")
         
         val request = Request.Builder()
             .url(fullUrl)
@@ -404,7 +250,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     }
 
     suspend fun discoverMachines(): List<DiscoveredMachine> {
-        val targetIp = prefs.targetIpAddress
+        val targetIp = gatewayBaseUrl()
         val resultList = mutableListOf<DiscoveredMachine>()
 
         // 1. Attempt a Real Scan on the configured target gateway diagnostics
@@ -462,52 +308,66 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             Log.d("VoiceAgent", "Real target diagnostics discovery failed: ${e.message}")
         }
 
-        // 2. Scan and add additional simulated Tailscale Nodes
-        // Machine 1: Tailnode Alpha
-        resultList.add(
-            DiscoveredMachine(
-                name = "Tailnode-Alpha-Pi5",
-                ip = "http://100.80.45.12:8767",
-                status = "online",
-                latencyMs = 28L,
-                activeSessions = listOf(
-                    ActiveCodexSession("Main-Project-Alpha", "CODEX", "Active Codex code compiler node", "active"),
-                    ActiveCodexSession("Agy-Live-Deployer", "AGY", "AGY continuous deployment node", "active"),
-                    ActiveCodexSession("Claude-Architect", "CLAUDE", "Claude structural system analyst", "idle")
-                )
-            )
-        )
-
-        // Machine 2: Giga Mona Cluster
-        resultList.add(
-            DiscoveredMachine(
-                name = "Giga-Mona-Cluster",
-                ip = "http://100.76.136.91:8767",
-                status = "online",
-                latencyMs = 45L,
-                activeSessions = listOf(
-                    ActiveCodexSession("Mona-Codex-Prod", "CODEX", "Production release branch sandbox", "active"),
-                    ActiveCodexSession("Kimi-Context-Layer", "KIMI", "Kimi 100k context engine instance", "active"),
-                    ActiveCodexSession("Claude-Refactor-Branch", "CLAUDE", "Claude deep code restructurer", "idle"),
-                    ActiveCodexSession("Agy-Automata", "AGY", "Autonomous code loop engine", "idle")
-                )
-            )
-        )
-
-        // Machine 3: Dormant/Offline node
-        resultList.add(
-            DiscoveredMachine(
-                name = "Pi-Speak-Tail-03",
-                ip = "http://100.112.5.40:8767",
-                status = "offline",
-                latencyMs = 999L,
-                activeSessions = listOf(
-                    ActiveCodexSession("Dormant-Sandbox", "CODEX", "Suspended debugging zone", "inactive")
-                )
-            )
-        )
-
         return resultList
+    }
+
+    fun listWorkspace(path: String = prefs.workspacePath): WorkspaceListing? {
+        val gatewayUrl = "${gatewayBaseUrl()}/v1/workspace?path=${urlParam(path)}"
+        val request = Request.Builder()
+            .url(gatewayUrl)
+            .header("X-Pi-Speak-Token", prefs.remoteToken)
+            .get()
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body?.string() ?: return null
+                val workspace = JSONObject(body).optJSONObject("workspace") ?: return null
+                val entriesJson = workspace.optJSONArray("entries")
+                val entries = mutableListOf<WorkspaceEntry>()
+                if (entriesJson != null) {
+                    for (i in 0 until entriesJson.length()) {
+                        val item = entriesJson.optJSONObject(i) ?: continue
+                        entries.add(
+                            WorkspaceEntry(
+                                name = item.optString("name"),
+                                path = item.optString("path"),
+                            )
+                        )
+                    }
+                }
+                WorkspaceListing(
+                    root = workspace.optString("root"),
+                    current = workspace.optString("current"),
+                    parent = workspace.optString("parent").ifBlank { null },
+                    defaultPath = workspace.optString("defaultPath").ifBlank { null },
+                    entries = entries
+                )
+            }
+        } catch (e: Exception) {
+            Log.e("VoiceAgent", "Workspace listing failed", e)
+            null
+        }
+    }
+
+    private fun gatewayBaseUrl(): String = prefs.targetIpAddress.trim().trimEnd('/')
+
+    private fun activeGatewayProvider(): String = when (prefs.activeAgent) {
+        "Gateway Voice (ElevenLabs)" -> "elevenlabs"
+        "Gateway Gemini (Vertex AI)" -> "gemini"
+        else -> "codex"
+    }
+
+    private fun urlParam(value: String): String = URLEncoder.encode(value, "UTF-8")
+
+    private fun recordingMimeType(file: File): String = when (file.extension.lowercase()) {
+        "wav" -> "audio/wav"
+        "mp3" -> "audio/mpeg"
+        "m4a", "mp4" -> "audio/mp4"
+        "webm" -> "audio/webm"
+        "ogg" -> "audio/ogg"
+        else -> "application/octet-stream"
     }
 }
 
@@ -524,4 +384,17 @@ data class ActiveCodexSession(
     val engineType: String, // "CODEX" | "AGY" | "CLAUDE" | "KIMI"
     val description: String,
     val status: String
+)
+
+data class WorkspaceListing(
+    val root: String,
+    val current: String,
+    val parent: String?,
+    val defaultPath: String?,
+    val entries: List<WorkspaceEntry>
+)
+
+data class WorkspaceEntry(
+    val name: String,
+    val path: String
 )

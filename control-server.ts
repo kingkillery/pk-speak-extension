@@ -1,8 +1,10 @@
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
+import { platform } from "node:os";
+import QRCode from "qrcode";
 import { BusyError, type RemoteTurnSource, RemoteTurnResult } from "./remote-turn-manager.js";
 import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
 import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
@@ -70,6 +72,12 @@ export type ControlServerDiagnostics = {
 		allowedOrigins: string[];
 	};
 	providers?: unknown;
+};
+
+export type WorkspaceEntry = {
+	name: string;
+	path: string;
+	type: "directory";
 };
 
 export type ControlServerOptions = {
@@ -141,6 +149,7 @@ const RATE_LIMIT_VOICE = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_VO
 const ALLOW_QUERY_TOKEN_FOR_AUDIO = isTruthy(process.env.PI_SPEAK_HTTP_ALLOW_QUERY_TOKEN_FOR_AUDIO || "false");
 const DEFAULT_AUTH_TOKEN = "P-K-Haxx1!";
 const REMOTE_APP_DIR = resolveRemoteAppDir();
+const ANDROID_APK_PATH = resolveAndroidApkPath();
 const ALLOWED_VOICE_CONTENT_TYPES = [
 	"audio/webm",
 	"audio/ogg",
@@ -291,6 +300,7 @@ export class ControlServer {
 
 	private async handleRequest(req: IncomingMessage, res: ServerResponse) {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
 		this.applyCors(req, res, url);
 
 		if (req.method === "OPTIONS") {
@@ -299,7 +309,7 @@ export class ControlServer {
 			return;
 		}
 
-		if (req.method === "GET" && (await this.handlePublicRoute(url, res))) {
+		if (req.method === "GET" && (await this.handlePublicRoute(req, url, res))) {
 			return;
 		}
 
@@ -396,6 +406,14 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/workspace") {
+			this.writeJson(res, 200, {
+				ok: true,
+				workspace: listWorkspaceDirectory(url.searchParams.get("path") || undefined),
+			});
+			return;
+		}
+
 		if (req.method === "POST" && url.pathname === "/v1/route") {
 			const body = await this.readTextBody(req, TEXT_BODY_LIMIT_BYTES);
 			const payload = parseJson<Record<string, unknown>>(body);
@@ -471,9 +489,24 @@ export class ControlServer {
 		this.writeJson(res, 404, { ok: false, error: "Not found" });
 	}
 
-	private async handlePublicRoute(url: URL, res: ServerResponse) {
+	private async handlePublicRoute(req: IncomingMessage, url: URL, res: ServerResponse) {
 		if (url.pathname === "/" || url.pathname === "/app") {
 			this.redirect(res, "/app/");
+			return true;
+		}
+
+		if (url.pathname === "/setup" || url.pathname === "/setup/") {
+			await this.handleSetupPage(req, url, res);
+			return true;
+		}
+
+		if (url.pathname === "/download" || url.pathname === "/download/") {
+			this.redirect(res, "/download/pi-speak.apk");
+			return true;
+		}
+
+		if (url.pathname === "/download/pi-speak.apk") {
+			await this.serveStaticFile(ANDROID_APK_PATH, "application/vnd.android.package-archive", res, "no-store");
 			return true;
 		}
 
@@ -519,6 +552,58 @@ export class ControlServer {
 		}
 
 		return false;
+	}
+
+	private async handleSetupPage(req: IncomingMessage, url: URL, res: ServerResponse) {
+		const baseUrl = getRequestBaseUrl(req, url);
+		const token = url.searchParams.get("token") || "";
+		const status = this.getStatus();
+		const profileName = url.searchParams.get("profile_name")
+			|| status.remote.currentSession
+			|| "Pi Speak";
+		const setupParams = new URLSearchParams({
+			base_url: baseUrl,
+			token,
+			machine_id: url.hostname || "pi-speak",
+			profile_name: profileName,
+			connection_mode: isTailscaleHostname(url.hostname) ? "tailscale" : "manual",
+			workspace_root: getWorkspaceRoot(),
+			workspace_path: getDefaultWorkspacePath(),
+		});
+		const defaultTarget = status.remote.defaultTarget || status.remote.currentSession || "";
+		if (defaultTarget) {
+			setupParams.set("default_target", defaultTarget);
+		}
+		const agentProvider = status.agent?.provider;
+		if (agentProvider === "pi"
+			|| agentProvider === "codex"
+			|| agentProvider === "elevenlabs"
+			|| agentProvider === "gemini"
+			|| agentProvider === "gemini-live") {
+			setupParams.set("agent_provider", agentProvider);
+		}
+		const appSetupUrl = `pi-speak://setup?${setupParams.toString()}`;
+		const apkUrl = new URL("/download/pi-speak.apk", baseUrl).toString();
+		const browserUrl = new URL(`/app/${token ? `?token=${encodeURIComponent(token)}` : ""}`, baseUrl).toString();
+		const [setupQrSvg, apkQrSvg] = await Promise.all([
+			QRCode.toString(appSetupUrl, { type: "svg", errorCorrectionLevel: "M", margin: 2, width: 240 }),
+			QRCode.toString(apkUrl, { type: "svg", errorCorrectionLevel: "M", margin: 2, width: 240 }),
+		]);
+
+		res.statusCode = 200;
+		res.setHeader("Content-Type", "text/html; charset=utf-8");
+		res.setHeader("Cache-Control", "no-store");
+		res.end(renderSetupHtml({
+			appSetupUrl,
+			apkUrl,
+			baseUrl,
+			browserUrl,
+			profileName,
+			setupQrSvg,
+			apkQrSvg,
+			status,
+			apkAvailable: existsSync(ANDROID_APK_PATH),
+		}));
 	}
 
 	private async handleMonoRoute(req: IncomingMessage, res: ServerResponse, url: URL) {
@@ -845,6 +930,107 @@ function resolveRemoteAppDir() {
 	return parentCandidate;
 }
 
+function resolveAndroidApkPath() {
+	const parentCandidate = join(__dirname, "..", "android-app", ".build-outputs", "app-debug.apk");
+	if (existsSync(parentCandidate)) return parentCandidate;
+	const localCandidate = join(__dirname, "android-app", ".build-outputs", "app-debug.apk");
+	if (existsSync(localCandidate)) return localCandidate;
+	return parentCandidate;
+}
+
+function getRequestBaseUrl(req: IncomingMessage, url: URL) {
+	const forwardedProto = getPrimaryHeaderValue(req.headers["x-forwarded-proto"]);
+	const protocol = forwardedProto || url.protocol.replace(":", "") || "http";
+	return `${protocol}://${req.headers.host || url.host}/`;
+}
+
+function isTailscaleHostname(hostname: string) {
+	const parts = hostname.split(".").map((part) => Number.parseInt(part, 10));
+	return parts.length === 4 && parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
+}
+
+function renderSetupHtml({
+	appSetupUrl,
+	apkUrl,
+	baseUrl,
+	browserUrl,
+	profileName,
+	setupQrSvg,
+	apkQrSvg,
+	status,
+	apkAvailable,
+}: {
+	appSetupUrl: string;
+	apkUrl: string;
+	baseUrl: string;
+	browserUrl: string;
+	profileName: string;
+	setupQrSvg: string;
+	apkQrSvg: string;
+	status: ControlServerStatus;
+	apkAvailable: boolean;
+}) {
+	const queue = status.remote.enabled ? "online" : "offline";
+	return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Speak Phone Setup</title>
+<style>
+:root { color-scheme: light; font-family: Segoe UI, Arial, sans-serif; color: #182033; background: #f4f7fb; }
+body { margin: 0; }
+main { max-width: 980px; margin: 0 auto; padding: 28px; }
+.hero { margin-bottom: 18px; }
+h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }
+p { line-height: 1.45; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.panel { background: #fff; border: 1px solid #d9e1ec; border-radius: 8px; padding: 18px; box-shadow: 0 10px 28px rgba(17, 24, 39, 0.08); }
+.qr { display: flex; justify-content: center; margin: 14px 0; }
+.meta { font-size: 14px; color: #526173; overflow-wrap: anywhere; }
+.status { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 4px; }
+.pill { background: #e9eef6; color: #253246; border: 1px solid #d3dce8; border-radius: 999px; padding: 6px 10px; font-size: 13px; }
+a.button { display: inline-block; margin-top: 8px; background: #174b7a; color: white; text-decoration: none; border-radius: 6px; padding: 10px 12px; font-weight: 700; }
+code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+<section class="hero">
+<h1>Pi Speak phone setup</h1>
+<p>Use the Android phone on Tailscale. Install the APK first, then scan the connection QR to register this machine profile.</p>
+<div class="status">
+<span class="pill">Gateway: ${escapeHtml(queue)}</span>
+<span class="pill">Profile: ${escapeHtml(profileName)}</span>
+<span class="pill">Target: ${escapeHtml(status.remote.defaultTarget || status.remote.currentSession || "current session")}</span>
+</div>
+</section>
+<section class="grid">
+<article class="panel">
+<h2>1. Install Android app</h2>
+${apkAvailable ? `<div class="qr">${apkQrSvg}</div><p class="meta"><a class="button" href="${escapeHtml(apkUrl)}">Download APK</a></p><p class="meta"><code>${escapeHtml(apkUrl)}</code></p>` : `<p class="meta">APK is not bundled in this install. Build it with the Android project, then publish the package again.</p>`}
+</article>
+<article class="panel">
+<h2>2. Connect this machine</h2>
+<div class="qr">${setupQrSvg}</div>
+<p class="meta"><a class="button" href="${escapeHtml(appSetupUrl)}">Open setup link</a></p>
+<p class="meta"><strong>Endpoint:</strong> <code>${escapeHtml(baseUrl)}</code></p>
+<p class="meta"><strong>Web fallback:</strong> <a href="${escapeHtml(browserUrl)}">${escapeHtml(browserUrl)}</a></p>
+</article>
+</section>
+</main>
+</body>
+</html>`;
+}
+
+function escapeHtml(value: string) {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
+}
+
 function getErrorMessage(error: unknown) {
 	if (error instanceof RequestLimitError) return error.message;
 	if (error instanceof Error) return error.message;
@@ -869,6 +1055,58 @@ function getLaunchCwdFromPayload(payload: Record<string, unknown> | undefined) {
 
 function getLaunchCwdFromUrl(url: URL) {
 	return (url.searchParams.get("cwd") || url.searchParams.get("workspacePath") || "").trim() || undefined;
+}
+
+function getWorkspaceRoot() {
+	return process.env.PI_SPEAK_WORKSPACE_ROOT?.trim()
+		|| (platform() === "win32" ? parse(process.cwd()).root || "C:\\" : "/");
+}
+
+function getDefaultWorkspacePath() {
+	return process.env.AGENT_CWD?.trim()
+		|| process.env.AGENT_WORKSPACE?.trim()
+		|| process.cwd();
+}
+
+function listWorkspaceDirectory(requestedPath?: string) {
+	const root = resolve(getWorkspaceRoot());
+	const requested = resolve(requestedPath?.trim() || root);
+	const currentPath = isPathInsideRoot(requested, root) ? requested : root;
+	const current = safeStatDirectory(currentPath) ? currentPath : root;
+	const entries: WorkspaceEntry[] = [];
+	try {
+		for (const dirent of readdirSync(current, { withFileTypes: true })) {
+			if (!dirent.isDirectory()) continue;
+			if (dirent.name === "$RECYCLE.BIN" || dirent.name === "System Volume Information") continue;
+			const childPath = join(current, dirent.name);
+			entries.push({ name: dirent.name, path: childPath, type: "directory" });
+		}
+	} catch {}
+	entries.sort((left, right) => left.name.localeCompare(right.name));
+	const parent = current !== root ? dirname(current) : undefined;
+	return {
+		root,
+		current,
+		parent: parent && isPathInsideRoot(parent, root) ? parent : undefined,
+		defaultPath: getDefaultWorkspacePath(),
+		entries,
+	};
+}
+
+function safeStatDirectory(path: string) {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function isPathInsideRoot(path: string, root: string) {
+	const normalizedPath = resolve(path).toLowerCase();
+	const normalizedRoot = resolve(root).toLowerCase();
+	const separator = platform() === "win32" ? "\\" : "/";
+	const rootWithSeparator = normalizedRoot.endsWith(separator) ? normalizedRoot : `${normalizedRoot}${separator}`;
+	return normalizedPath === normalizedRoot || normalizedPath.startsWith(rootWithSeparator);
 }
 
 function sameOrigin(origin: string, url: URL) {

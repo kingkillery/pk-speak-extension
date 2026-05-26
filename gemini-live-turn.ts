@@ -8,25 +8,84 @@ const DEFAULT_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025";
 const DEFAULT_TEXT_MODEL = "gemini-2.5-flash";
 const DEFAULT_TIMEOUT_MS = 45000;
 
+type GeminiBackend = "developer-api" | "vertex";
+
 export function isGeminiLiveConfigured(env: NodeJS.ProcessEnv = process.env) {
-	return !!(env.GOOGLE_API_KEY || env.GEMINI_API_KEY);
+	return !!(env.PI_SPEAK_VERTEX_API_KEY || env.GOOGLE_API_KEY || env.GEMINI_API_KEY || getVertexConfig(env));
 }
 
 export function getGeminiLiveModel(env: NodeJS.ProcessEnv = process.env) {
 	return env.PI_SPEAK_GEMINI_LIVE_MODEL?.trim() || DEFAULT_LIVE_MODEL;
 }
 
+export function getGeminiBackend(env: NodeJS.ProcessEnv = process.env): GeminiBackend {
+	const configured = (env.PI_SPEAK_GEMINI_BACKEND || env.GOOGLE_GENAI_BACKEND || "").trim().toLowerCase();
+	if (configured === "vertex" || configured === "vertexai" || configured === "gcloud") return "vertex";
+	if (isTruthy(env.GOOGLE_GENAI_USE_VERTEXAI) || isTruthy(env.GOOGLE_GENAI_USE_ENTERPRISE)) return "vertex";
+	if (env.PI_SPEAK_VERTEX_API_KEY) return "vertex";
+	if (!env.GOOGLE_API_KEY && !env.GEMINI_API_KEY && getVertexConfig(env)) return "vertex";
+	return "developer-api";
+}
+
+function getVertexConfig(env: NodeJS.ProcessEnv = process.env) {
+	const project = env.GOOGLE_CLOUD_PROJECT?.trim() || env.GCLOUD_PROJECT?.trim() || env.PI_SPEAK_VERTEX_PROJECT?.trim();
+	const location = env.GOOGLE_CLOUD_LOCATION?.trim() || env.GOOGLE_CLOUD_REGION?.trim() || env.PI_SPEAK_VERTEX_LOCATION?.trim();
+	if (!project || !location) return undefined;
+	return { project, location };
+}
+
+function createGeminiClient(env: NodeJS.ProcessEnv = process.env, apiVersion = env.PI_SPEAK_GEMINI_API_VERSION || "v1beta") {
+	if (getGeminiBackend(env) === "vertex") {
+		const vertex = getVertexConfig(env);
+		if (vertex) {
+			return {
+				ai: new GoogleGenAI({
+					vertexai: true,
+					project: vertex.project,
+					location: vertex.location,
+					apiVersion,
+				}),
+				backend: "vertex" as const,
+			};
+		}
+		const apiKey = env.PI_SPEAK_VERTEX_API_KEY?.trim();
+		if (!apiKey) {
+			throw new Error("Vertex AI Gemini requires PI_SPEAK_VERTEX_API_KEY, or GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION.");
+		}
+		return {
+			ai: new GoogleGenAI({
+				vertexai: true,
+				apiKey,
+				apiVersion,
+			}),
+			backend: "vertex" as const,
+		};
+	}
+	const apiKey = env.GOOGLE_API_KEY || env.GEMINI_API_KEY;
+	if (!apiKey) throw new Error("GOOGLE_API_KEY is required for Gemini Developer API turns, or configure Vertex AI.");
+	return {
+		ai: new GoogleGenAI({ apiKey, apiVersion }),
+		backend: "developer-api" as const,
+	};
+}
+
+function isTruthy(value: string | undefined) {
+	if (!value) return false;
+	return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
 export async function runGeminiTextTurn(
 	prompt: string,
 	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
 ): Promise<RemoteTurnResult> {
-	const apiKey = options.apiKey || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-	if (!apiKey) throw new Error("GOOGLE_API_KEY is required for Gemini turns.");
-	const ai = new GoogleGenAI({ apiKey, apiVersion: process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta" });
+	const apiVersion = process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta";
+	const client = options.apiKey
+		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion }), backend: "developer-api" as const }
+		: createGeminiClient(process.env, apiVersion);
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), options.timeoutMs || DEFAULT_TIMEOUT_MS);
 	try {
-		const response = await ai.models.generateContent({
+		const response = await client.ai.models.generateContent({
 			model: options.model || process.env.PI_SPEAK_GEMINI_TEXT_MODEL || DEFAULT_TEXT_MODEL,
 			contents: prompt,
 			config: {
@@ -36,7 +95,7 @@ export async function runGeminiTextTurn(
 		return {
 			replyText: response.text?.trim() || "Gemini completed the turn without returning text.",
 			transcript: prompt,
-			providers: { agent: "gemini" },
+			providers: { agent: client.backend === "vertex" ? "vertex" : "gemini" },
 		};
 	} finally {
 		clearTimeout(timeout);
@@ -47,11 +106,12 @@ export async function runGeminiLiveTurn(
 	prompt: string,
 	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
 ): Promise<RemoteTurnResult> {
-	const apiKey = options.apiKey || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-	if (!apiKey) throw new Error("GOOGLE_API_KEY is required for Gemini Live turns.");
 	const model = options.model || getGeminiLiveModel();
 	const apiVersion = process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta";
-	const ai = new GoogleGenAI({ apiKey, apiVersion });
+	const client = options.apiKey
+		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion }), backend: "developer-api" as const }
+		: createGeminiClient(process.env, apiVersion);
+	const ai = client.ai;
 	const audioChunks: Buffer[] = [];
 	let audioMimeType = "audio/pcm;rate=24000";
 	let replyText = "";
@@ -83,6 +143,7 @@ export async function runGeminiLiveTurn(
 				prompt,
 				audioChunks,
 				audioMimeType,
+				providerName: client.backend === "vertex" ? "vertex-live" : "gemini-live",
 			}));
 		};
 		const fail = (error: unknown) => {
@@ -145,12 +206,14 @@ function buildGeminiLiveResult({
 	prompt,
 	audioChunks,
 	audioMimeType,
+	providerName,
 }: {
 	model: string;
 	replyText: string;
 	prompt: string;
 	audioChunks: Buffer[];
 	audioMimeType: string;
+	providerName: "gemini-live" | "vertex-live";
 }): RemoteTurnResult {
 	let audioPath: string | undefined;
 	let outputMimeType: string | undefined;
@@ -173,7 +236,7 @@ function buildGeminiLiveResult({
 		transcript: prompt,
 		audioPath,
 		audioMimeType: outputMimeType,
-		providers: { agent: "gemini-live", tts: audioPath ? "gemini-live" : undefined },
+		providers: { agent: providerName, tts: audioPath ? providerName : undefined },
 		warnings: model.includes("3.1") ? ["gemini-3.1-live-preview is still preview; fall back if it stalls."] : undefined,
 	};
 }

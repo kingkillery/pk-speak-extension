@@ -47,9 +47,21 @@ class AppPreferences(context: Context) {
         get() = prefs.getString("codex_session_name", "Main-Project-Alpha") ?: "Main-Project-Alpha"
         set(value) = prefs.edit().putString("codex_session_name", value).apply()
 
+    var machineProfileName: String
+        get() = prefs.getString("machine_profile_name", "MSI / appserver") ?: "MSI / appserver"
+        set(value) = prefs.edit().putString("machine_profile_name", value).apply()
+
     var targetIpAddress: String
         get() = prefs.getString("target_ip_address", "http://100.76.136.91:8767") ?: "http://100.76.136.91:8767"
         set(value) = prefs.edit().putString("target_ip_address", value).apply()
+
+    var workspaceRoot: String
+        get() = prefs.getString("workspace_root", "C:\\") ?: "C:\\"
+        set(value) = prefs.edit().putString("workspace_root", value).apply()
+
+    var workspacePath: String
+        get() = prefs.getString("workspace_path", workspaceRoot) ?: workspaceRoot
+        set(value) = prefs.edit().putString("workspace_path", value).apply()
 
     var secureModeEnabled: Boolean
         get() = prefs.getBoolean("secure_mode_enabled", false)

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { ControlServer, type ControlActionResult, type ControlServerStatus } from "./control-server.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
-import { runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
+import { CodexAgentProvider } from "./codex-agent-provider.js";
+import { isGeminiLiveConfigured, runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { RemoteTurnResult } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
@@ -29,7 +30,7 @@ let fallbackProvider: AgentProvider | undefined;
 
 function createAgentProvider(): AgentProvider {
 	if (agentConfig.provider === "elevenlabs") {
-		return new GeminiProvider("elevenlabs");
+		return createCodingAgentProvider();
 	}
 	if (agentConfig.provider === "gemini" || agentConfig.provider === "gemini-live") {
 		return new GeminiProvider(agentConfig.provider);
@@ -37,8 +38,27 @@ function createAgentProvider(): AgentProvider {
 	if (agentConfig.provider === "pi") {
 		return new PiCliProvider(agentConfig.piBin, process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
 	}
+	return createCodexProvider();
+}
+
+function createCodingAgentProvider(): AgentProvider {
+	const backend = (process.env.PI_SPEAK_AGENT_BACKEND || process.env.PI_SPEAK_CODING_AGENT || "codex").trim().toLowerCase();
+	if (backend === "pi") {
+		return new PiCliProvider(agentConfig.piBin, process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
+	}
+	return createCodexProvider();
+}
+
+function createCodexProvider(): AgentProvider {
 	fallbackProvider = new PiCliProvider(agentConfig.piBin, process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
-	return new CodexExecProvider(agentConfig.codexBin, process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd(), agentConfig.model);
+	return new CodexAgentProvider({
+		codexBin: agentConfig.codexBin,
+		cwd: process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd(),
+		model: agentConfig.model,
+		approvalPolicy: agentConfig.approvalPolicy,
+		sandbox: agentConfig.sandbox,
+		env: process.env,
+	});
 }
 
 const routing = {
@@ -47,10 +67,18 @@ const routing = {
 	availableTargets: [] as string[],
 };
 
+function refreshRoutingTargets() {
+	const discovered = discoverOpenAgentTargets();
+	const explicit = routing.defaultTarget ? [routing.defaultTarget] : [];
+	routing.availableTargets = [...new Set([...explicit, ...discovered])].sort((left, right) => left.localeCompare(right));
+	routing.currentSession = routing.defaultTarget || routing.availableTargets[0] || undefined;
+}
+
 function status(): ControlServerStatus {
+	refreshRoutingTargets();
 	return {
 		agent: {
-			provider: agentConfig.provider,
+			provider: provider.name,
 			configuredProvider: agentConfig.provider,
 			model: agentConfig.model,
 			capabilities: {
@@ -58,7 +86,7 @@ function status(): ControlServerStatus {
 				voiceTurns: true,
 				audioReplies: true,
 				routing: true,
-				steering: false,
+				steering: provider.name === "codex",
 			},
 		},
 		speak: { enabled: false, configuredProvider: "auto", provider: "tray", rewriteEnabled: false, phase: "standby" },
@@ -80,45 +108,18 @@ async function runTextTurn(text: string, includeAudio = false, cwd?: string, tra
 	const prompt = text.trim();
 	if (!prompt) return { replyText: "Send a message first." };
 	if (agentConfig.provider === "elevenlabs") {
-		const result = await runGeminiTextTurn(prompt);
-		if (!includeAudio) return {
-			...result,
-			providers: { ...result.providers, agent: "elevenlabs" },
-		};
-		const audio = await renderReplyAudio(result.replyText, "elevenlabs");
-		if (audio.audioPath) {
-			return {
-				...result,
-				audioPath: audio.audioPath,
-				audioMimeType: audio.audioMimeType,
-				timings: { ...result.timings, ...audio.timings },
-				providers: { agent: "elevenlabs", tts: "elevenlabs" },
-				warnings: [...(result.warnings || []), ...(audio.warnings || [])],
-			};
-		}
-		if (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY) {
-			const fallback = await runGeminiLiveTurn(prompt);
-			return {
-				...fallback,
-				warnings: [
-					...(result.warnings || []),
-					...(audio.warnings || []),
-					"ElevenLabs speech failed; used Gemini Live audio fallback.",
-					...(fallback.warnings || []),
-				],
-			};
-		}
-		return {
-			...result,
-			warnings: [...(result.warnings || []), ...(audio.warnings || [])],
-		};
+		const result = await runCodingAgentTurn(prompt, includeAudio, cwd, transcript, "elevenlabs");
+		return result;
 	}
 	if (agentConfig.provider === "gemini-live") {
 		return includeAudio ? await runGeminiLiveTurn(prompt) : await runGeminiTextTurn(prompt);
 	}
 	if (agentConfig.provider === "gemini") {
 		const result = await runGeminiTextTurn(prompt);
-		if (!includeAudio) return result;
+		if (!includeAudio) return {
+			...result,
+			providers: { ...result.providers, agent: "gemini" },
+		};
 		const audio = await renderReplyAudio(result.replyText);
 		return {
 			...result,
@@ -129,6 +130,16 @@ async function runTextTurn(text: string, includeAudio = false, cwd?: string, tra
 			warnings: [...(result.warnings || []), ...(audio.warnings || [])],
 		};
 	}
+	return runCodingAgentTurn(prompt, includeAudio, cwd, transcript);
+}
+
+async function runCodingAgentTurn(
+	prompt: string,
+	includeAudio = false,
+	cwd?: string,
+	transcript?: string,
+	audioProvider?: TtsProvider,
+): Promise<RemoteTurnResult> {
 	const options = {
 		model: agentConfig.model,
 		cwd: cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd(),
@@ -151,7 +162,7 @@ async function runTextTurn(text: string, includeAudio = false, cwd?: string, tra
 		warnings,
 	};
 	if (!includeAudio) return result;
-	const audio = await renderReplyAudio(result.replyText);
+	const audio = await renderReplyAudio(result.replyText, audioProvider);
 	return {
 		...result,
 		audioPath: audio.audioPath,
@@ -169,7 +180,28 @@ async function runTextTurn(text: string, includeAudio = false, cwd?: string, tra
 }
 
 async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = false, cwd?: string): Promise<RemoteTurnResult> {
-	const stt = await transcribeAudioBuffer(buffer, mimeType);
+	let stt: Awaited<ReturnType<typeof transcribeAudioBuffer>>;
+	try {
+		stt = await transcribeAudioBuffer(buffer, mimeType);
+	} catch (error) {
+		const replyText = `I received your voice message, but transcription is temporarily unavailable: ${error instanceof Error ? error.message : String(error)}.`;
+		const result: RemoteTurnResult = {
+			replyText,
+			transcript: "Voice message received.",
+			providers: { stt: "local" },
+			warnings: ["stt-unavailable"],
+		};
+		if (!includeAudio) return result;
+		const audio = await renderReplyAudio(replyText, agentConfig.provider === "elevenlabs" ? "elevenlabs" : undefined);
+		return {
+			...result,
+			audioPath: audio.audioPath,
+			audioMimeType: audio.audioMimeType,
+			timings: audio.timings,
+			providers: { ...result.providers, ...audio.providers },
+			warnings: [...(result.warnings || []), ...(audio.warnings || [])],
+		};
+	}
 	const transcript = stt.text.trim();
 	if (!transcript) {
 		return {
@@ -281,14 +313,24 @@ server = new ControlServer({
 	onStateChange: (patch) => Object.assign(state, patch),
 	getStatus: status,
 	getDiagnostics: () => ({
+		...(refreshRoutingTargets(), {}),
 		status: status(),
 		lastErrors: {},
 		recentTimings: {},
 		queue: { processing: false, queued: 0, maxQueued: 0, completedTurns: 0 },
 	}),
-	getRoutingStatus: () => ({ ...routing }),
+	getRoutingStatus: () => {
+		refreshRoutingTargets();
+		return { ...routing };
+	},
 	setRoutingTarget: (target) => {
-		routing.defaultTarget = target?.trim() || undefined;
+		refreshRoutingTargets();
+		const trimmed = target?.trim();
+		if (trimmed && routing.availableTargets.length > 0 && !routing.availableTargets.includes(trimmed)) {
+			return { ok: false, message: `Unknown target "${trimmed}". Detected: ${routing.availableTargets.join(", ") || "none"}.` };
+		}
+		routing.defaultTarget = trimmed || undefined;
+		refreshRoutingTargets();
 		return ok(routing.defaultTarget ? `Route target set to ${routing.defaultTarget}.` : "Route target cleared.");
 	},
 	onMonoAction: (action) => ok(`Mono ${action} is unavailable in tray gateway mode.`),
@@ -411,6 +453,43 @@ function resolveWindowsPiNodeCommand(piBin: string): { file: string; args: strin
 	const normalized = piBin.toLowerCase().replace(/\\/g, "/");
 	if (!normalized.endsWith("/pi.cmd") && !normalized.endsWith("/pi")) return undefined;
 	return { file: process.execPath, args: [cli], shell: false };
+}
+
+function discoverOpenAgentTargets(): string[] {
+	if (process.platform !== "win32") return [];
+	try {
+		const script = [
+			"$selfPid = " + process.pid,
+			"Get-CimInstance Win32_Process |",
+			"Where-Object { $_.ProcessId -ne $selfPid -and $_.Name -match '^(codex|pi)(\\.exe)?$' } |",
+			"ForEach-Object {",
+			"  $name = [IO.Path]::GetFileNameWithoutExtension($_.Name).ToLowerInvariant()",
+			"  $cwd = ''",
+			"  if ($_.CommandLine -match '-C\\s+([^\\s]+)') { $cwd = $Matches[1] }",
+			"  if (-not $cwd -and $_.CommandLine -match '--cwd\\s+([^\\s]+)') { $cwd = $Matches[1] }",
+			"  [PSCustomObject]@{ name = $name; pid = $_.ProcessId; cwd = $cwd }",
+			"} | ConvertTo-Json -Compress",
+		].join("\n");
+		const output = execFileSync("powershell.exe", ["-NoProfile", "-Command", script], {
+			encoding: "utf8",
+			windowsHide: true,
+			timeout: 5000,
+		}).trim();
+		if (!output) return [];
+		const parsed = JSON.parse(output);
+		const rows = Array.isArray(parsed) ? parsed : [parsed];
+		return rows
+			.map((row) => {
+				const name = typeof row.name === "string" ? row.name : "agent";
+				const pid = typeof row.pid === "number" || typeof row.pid === "string" ? String(row.pid) : "";
+				const cwd = typeof row.cwd === "string" ? row.cwd.trim() : "";
+				const suffix = cwd ? ` ${cwd.replace(/^.*[\\/]/, "")}` : "";
+				return pid ? `${name}:${pid}${suffix}` : "";
+			})
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
 }
 
 function resolveDefaultAgentProvider(): "pi" | "codex" {

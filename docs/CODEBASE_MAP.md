@@ -93,7 +93,7 @@ Setup helpers:
 /remote tray on
 ```
 
-`/pk-remote` is the shortest setup path: it starts the HTTP gateway if needed, detects the best reachable base URL (`PI_SPEAK_PUBLIC_BASE_URL`, Tailscale IPv4, then LAN IPv4), and prints a terminal QR for the Android `pi-speak://setup` deep link. `/remote setup` prints the same QR plus native/browser fallback URLs. `/remote setup bluetooth` and `/pk-remote bluetooth` print a Bluetooth local-link Android setup URL and mark the native profile with `connection_mode=bluetooth`.
+`/pk-remote` is the shortest setup path: it starts the HTTP gateway if needed, detects the best reachable base URL (`PI_SPEAK_PUBLIC_BASE_URL`, Tailscale IPv4, then LAN IPv4), and prints a terminal QR for `/setup`. That setup page serves the Android APK download and the native `pi-speak://setup` connection link. `/remote setup` prints the same QR plus native/browser fallback URLs. `/remote setup bluetooth` and `/pk-remote bluetooth` print a Bluetooth local-link Android setup URL and mark the native profile with `connection_mode=bluetooth`. The npm-installed `pi-speak-tray` path runs the gateway as a tray-owned background service and exposes setup, status, settings, restart, and web remote actions from the tray menu.
 
 ## Android Connection Modes
 
@@ -116,7 +116,7 @@ Important Android files:
 Common runtime variables:
 
 ```text
-AGENT_PROVIDER=pi|codex
+AGENT_PROVIDER=pi|codex|elevenlabs|gemini|gemini-live
 CODEX_BIN=codex
 AGENT_MODEL=<optional model>
 PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex
@@ -125,7 +125,14 @@ PI_SPEAK_HTTP_TOKEN=<remote token override>
 PI_SPEAK_PUBLIC_BASE_URL=<HTTPS/Tailscale/tunnel base URL>
 PI_SPEAK_BLUETOOTH_BASE_URL=<Bluetooth adapter base URL>
 PI_SPEAK_TELEGRAM_BOT_TOKEN=<Telegram bot token>
+PI_SPEAK_GEMINI_BACKEND=vertex
+PI_SPEAK_VERTEX_API_KEY=<optional Vertex AI API key>
+GOOGLE_CLOUD_PROJECT=<Vertex AI project>
+GOOGLE_CLOUD_LOCATION=<Vertex AI location>
+ELEVENLABS_API_KEY=<server-side ElevenLabs key>
 ```
+
+Android clients should not call AI Studio or hold Gemini API keys. They send text/voice turns to the tray/gateway, which can use ElevenLabs and Vertex AI server-side.
 
 ## Validation Commands
 

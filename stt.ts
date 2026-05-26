@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { withAbortTimeout } from "./request-timeout.js";
 
-export type SttProvider = "auto" | "local" | "openai";
+export type SttProvider = "auto" | "local" | "openai" | "elevenlabs";
 
 export type SttResult = {
 	provider: Exclude<SttProvider, "auto">;
@@ -20,6 +20,10 @@ type WorkerRequest = {
 
 function getOpenAiAudioKey() {
 	return process.env.VOICE_TOOLS_OPENAI_KEY || process.env.PI_SPEAK_OPENAI_KEY || process.env.OPENAI_API_KEY || "";
+}
+
+function getElevenLabsKey() {
+	return process.env.ELEVENLABS_API_KEY || process.env.XI_API_KEY || "";
 }
 
 function getPythonExecutable() {
@@ -38,10 +42,7 @@ function getExtensionDir() {
 }
 
 function getLocalSttWorkerEnv(): NodeJS.ProcessEnv {
-	const env: NodeJS.ProcessEnv = {
-		PATH: process.env.PATH || "",
-		PYTHONPATH: process.env.PYTHONPATH || "",
-	};
+	const env: NodeJS.ProcessEnv = { ...process.env };
 	const optionalEnv = {
 		PI_SPEAK_REMOTE_WHISPER_MODEL: process.env.PI_SPEAK_REMOTE_WHISPER_MODEL,
 		WHISPER_MODEL: process.env.WHISPER_MODEL,
@@ -58,6 +59,7 @@ function getLocalSttWorkerEnv(): NodeJS.ProcessEnv {
 export function resolveSttProvider(): Exclude<SttProvider, "auto"> {
 	const configured = (process.env.PI_SPEAK_REMOTE_STT_PROVIDER || "auto").trim().toLowerCase() as SttProvider;
 	if (configured !== "auto") return configured;
+	if (getElevenLabsKey()) return "elevenlabs";
 	if (getOpenAiAudioKey()) return "openai";
 	return "local";
 }
@@ -93,6 +95,38 @@ async function transcribeWithOpenAI(filePath: string, mimeType?: string, signal?
 	);
 	if (!response.ok) {
 		throw new Error(`OpenAI transcription failed (${response.status})`);
+	}
+	const json = (await response.json()) as { text?: string };
+	return normalizeTranscriptionText(json.text || "");
+}
+
+async function transcribeWithElevenLabs(filePath: string, mimeType?: string, signal?: AbortSignal) {
+	const apiKey = getElevenLabsKey();
+	if (!apiKey) throw new Error("ELEVENLABS_API_KEY is required for ElevenLabs STT");
+	const fileBytes = await readFile(filePath);
+	const form = new FormData();
+	form.set("model_id", process.env.PI_SPEAK_ELEVENLABS_STT_MODEL || "scribe_v2");
+	form.set("file", new File([fileBytes], basename(filePath), {
+		type: mimeType || "application/octet-stream",
+	}));
+	form.set("language_code", process.env.PI_SPEAK_STT_LANGUAGE || "en");
+	form.set("tag_audio_events", "false");
+	form.set("diarize", "false");
+	const response = await withAbortTimeout(
+		(requestSignal) =>
+			fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+				method: "POST",
+				headers: {
+					"xi-api-key": apiKey,
+				},
+				body: form,
+				signal: requestSignal,
+			}),
+		signal,
+	);
+	if (!response.ok) {
+		const body = await response.text().catch(() => "");
+		throw new Error(`ElevenLabs transcription failed (${response.status})${body ? `: ${body.slice(0, 240)}` : ""}`);
 	}
 	const json = (await response.json()) as { text?: string };
 	return normalizeTranscriptionText(json.text || "");
@@ -241,14 +275,44 @@ export async function transcribeAudioBuffer(buffer: Buffer, mimeType?: string, s
 	try {
 		await writeFile(filePath, buffer);
 		const provider = resolveSttProvider();
-		const text =
-			provider === "openai"
-				? await transcribeWithOpenAI(filePath, mimeType, signal)
+		const text = provider === "elevenlabs"
+			? await transcribeWithElevenLabsFallback(filePath, mimeType, signal)
+			: provider === "openai"
+				? await transcribeWithOpenAiFallback(filePath, mimeType, signal)
 				: await transcribeWithLocal(filePath, signal);
 		return { provider, text, durationMs: Date.now() - startedAt };
 	} finally {
 		await rm(tempDir, { recursive: true, force: true });
 	}
+}
+
+async function transcribeWithOpenAiFallback(filePath: string, mimeType?: string, signal?: AbortSignal) {
+	try {
+		return await transcribeWithOpenAI(filePath, mimeType, signal);
+	} catch (error) {
+		if (!isRetryableOpenAiTranscriptionError(error)) throw error;
+		return await transcribeWithLocal(filePath, signal);
+	}
+}
+
+async function transcribeWithElevenLabsFallback(filePath: string, mimeType?: string, signal?: AbortSignal) {
+	try {
+		return await transcribeWithElevenLabs(filePath, mimeType, signal);
+	} catch (error) {
+		if (!isRetryableElevenLabsTranscriptionError(error)) throw error;
+		if (getOpenAiAudioKey()) return await transcribeWithOpenAI(filePath, mimeType, signal);
+		return await transcribeWithLocal(filePath, signal);
+	}
+}
+
+function isRetryableOpenAiTranscriptionError(error: unknown) {
+	const message = error instanceof Error ? error.message : String(error);
+	return /OpenAI transcription failed \((429|5\d\d)\)/.test(message);
+}
+
+function isRetryableElevenLabsTranscriptionError(error: unknown) {
+	const message = error instanceof Error ? error.message : String(error);
+	return /ElevenLabs transcription failed \((429|5\d\d)\)/.test(message);
 }
 
 function mimeTypeToExtension(mimeType?: string) {

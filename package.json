@@ -1,6 +1,6 @@
 {
   "name": "pi-speak-pk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Voice, wake-word, Telegram, and mobile web remote extensions for Pi.",
   "keywords": [
     "pi",
@@ -24,6 +24,7 @@
   "files": [
     "dist",
     "web",
+    "android-app/.build-outputs/app-debug.apk",
     "listener",
     "unified-remote",
     "SKILL.md",

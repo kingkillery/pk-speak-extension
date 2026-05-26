@@ -283,6 +283,7 @@ function buildRemoteSetupUrls(
 	token: string,
 	mode: "tailscale" | "bluetooth" = "tailscale",
 	agentProvider?: string,
+	defaultTarget?: string,
 ) {
 	const publicBase = PUBLIC_REMOTE_BASE_URL ? normalizeBaseUrl(PUBLIC_REMOTE_BASE_URL) : "";
 	const fallbackBase = getDefaultTailscaleBaseUrl(port);
@@ -297,6 +298,8 @@ function buildRemoteSetupUrls(
 		? [...new Set([bluetoothBase].filter(Boolean))]
 		: [...new Set([publicBase, ...tailscaleBases, hostBase, ...lanBases, fallbackBase].filter(Boolean))];
 	const browserUrls = baseUrls.map((baseUrl) => `${baseUrl}app/?token=${encodeURIComponent(token)}`);
+	const setupPageUrls = baseUrls.map((baseUrl) => `${baseUrl}setup?token=${encodeURIComponent(token)}`);
+	const downloadUrls = baseUrls.map((baseUrl) => `${baseUrl}download/pi-speak.apk`);
 	const appSetupUrls = baseUrls.map((baseUrl) => {
 		const profile = getSetupProfileForBaseUrl(baseUrl, mode);
 		const params = new URLSearchParams({
@@ -309,9 +312,12 @@ function buildRemoteSetupUrls(
 		if (agentProvider) {
 			params.set("agent_provider", agentProvider);
 		}
+		if (defaultTarget) {
+			params.set("default_target", defaultTarget);
+		}
 		return `pi-speak://setup?${params.toString()}`;
 	});
-	return { baseUrls, browserUrls, appSetupUrls };
+	return { baseUrls, browserUrls, setupPageUrls, downloadUrls, appSetupUrls };
 }
 
 async function buildRemoteSetupQrText(url: string) {
@@ -1738,17 +1744,21 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const runtime = remoteServer?.getRuntimeState();
 		const status = getRemoteStatus();
 		const token = runtime?.authToken || remoteState.authToken || "";
-		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode, agentProviderConfig.provider);
 		const current = status.currentSession || "current session";
 		const route = status.defaultTarget || current;
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode, agentProviderConfig.provider, route);
+		const phoneSetupUrl = urls.setupPageUrls[0] || "";
 		const nativeSetupUrl = urls.appSetupUrls[0] || "";
+		const downloadUrl = urls.downloadUrls[0] || "";
 		const browserUrl = urls.browserUrls[0] || "/app/";
-		const qr = includeQr && nativeSetupUrl ? await buildRemoteSetupQrText(nativeSetupUrl) : "";
+		const qr = includeQr && phoneSetupUrl ? await buildRemoteSetupQrText(phoneSetupUrl) : "";
 		return [
 			mode === "bluetooth" ? "Bluetooth remote setup is ready." : "PK remote setup is ready.",
 			`Route: ${route}.`,
-			qr ? "Scan this QR from the Android phone to save this machine:" : "",
+			qr ? "Scan this QR from the Android phone to download the app and save this machine:" : "",
 			qr,
+			`Phone setup page: ${phoneSetupUrl || "not available"}`,
+			`Android APK: ${downloadUrl || "not available"}`,
 			`Native app setup: ${nativeSetupUrl || "not available"}`,
 			`Browser app: ${browserUrl}`,
 			urls.browserUrls.length > 1 ? `Other local URLs: ${urls.browserUrls.slice(1).join(" ")}` : "",
@@ -1770,12 +1780,15 @@ export default function speakExtension(pi: ExtensionAPI) {
 			(ctx || lastCtx)?.ui?.notify?.("Remote tray needs a remote token. Start /remote on first.", "warning");
 			return false;
 		}
-		const urls = buildRemoteSetupUrls(status.host, status.port, token, "tailscale", agentProviderConfig.provider);
+		const route = status.defaultTarget || status.currentSession;
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, "tailscale", agentProviderConfig.provider, route);
 		const baseUrl = urls.baseUrls[0] || getDefaultTailscaleBaseUrl(status.port);
 		const profile = getSetupProfileForBaseUrl(baseUrl);
 		const tray = await startRemoteTray({
 			title: `Pi Speak - ${profile.profileName}`,
 			appSetupUrl: urls.appSetupUrls[0] || "",
+			setupPageUrl: urls.setupPageUrls[0] || "",
+			downloadUrl: urls.downloadUrls[0] || "",
 			browserUrl: urls.browserUrls[0] || "",
 			baseUrl,
 			profileName: profile.profileName,
@@ -3297,4 +3310,3 @@ function describeCodexApprovalForVoice(request: { method: string; params: Record
 			return request.method;
 	}
 }
-

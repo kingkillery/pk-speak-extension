@@ -7,6 +7,8 @@ import QRCode from "qrcode";
 export type RemoteTrayOptions = {
 	title: string;
 	appSetupUrl: string;
+	setupPageUrl: string;
+	downloadUrl: string;
 	browserUrl: string;
 	baseUrl: string;
 	profileName: string;
@@ -26,7 +28,7 @@ export async function startRemoteTray(options: RemoteTrayOptions): Promise<Remot
 	const htmlPath = join(tempDir, "pi-speak-setup.html");
 	const scriptPath = join(tempDir, "pi-speak-tray.ps1");
 	const configPath = join(tempDir, "pi-speak-tray.json");
-	const qrSvg = await QRCode.toString(options.appSetupUrl, {
+	const qrSvg = await QRCode.toString(options.setupPageUrl || options.appSetupUrl, {
 		type: "svg",
 		errorCorrectionLevel: "M",
 		margin: 2,
@@ -53,10 +55,12 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
 <main>
 <section class="panel">
 <h1>Pi Speak setup</h1>
-<p>Scan this QR code with the Android phone to open Pi Speak and save this computer profile.</p>
+<p>Scan this QR code with the Android phone to open the setup page, download the APK, and save this computer profile.</p>
 <div class="qr">${qrSvg}</div>
 <p class="meta"><strong>Profile:</strong> ${escapeHtml(options.profileName)}</p>
 <p class="meta"><strong>Endpoint:</strong> <code>${escapeHtml(options.baseUrl)}</code></p>
+<p class="meta"><strong>Setup page:</strong> <code>${escapeHtml(options.setupPageUrl || options.appSetupUrl)}</code></p>
+<p class="meta"><strong>APK:</strong> <code>${escapeHtml(options.downloadUrl)}</code></p>
 </section>
 </main>
 </body>
@@ -88,9 +92,19 @@ $openItem.Text = "Open web remote"
 $openItem.Add_Click({ Start-Process -FilePath $config.browserUrl })
 [void]$menu.Items.Add($openItem)
 
+$setupItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$setupItem.Text = "Open phone setup page"
+$setupItem.Add_Click({ Start-Process -FilePath $config.setupPageUrl })
+[void]$menu.Items.Add($setupItem)
+
+$downloadItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$downloadItem.Text = "Open Android APK download"
+$downloadItem.Add_Click({ Start-Process -FilePath $config.downloadUrl })
+[void]$menu.Items.Add($downloadItem)
+
 $copyItem = New-Object System.Windows.Forms.ToolStripMenuItem
-$copyItem.Text = "Copy app setup link"
-$copyItem.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($config.appSetupUrl) })
+$copyItem.Text = "Copy setup page link"
+$copyItem.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($config.setupPageUrl) })
 [void]$menu.Items.Add($copyItem)
 
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
