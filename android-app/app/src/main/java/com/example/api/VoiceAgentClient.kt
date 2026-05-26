@@ -7,6 +7,7 @@ import android.net.wifi.WifiManager
 import android.util.Log
 import com.example.data.AppPreferences
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -22,6 +23,7 @@ import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -32,6 +34,8 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
+    @Volatile
+    private var activeTurnCall: Call? = null
 
     /**
      * Sends a text turn to the current active agent.
@@ -124,6 +128,10 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 "Stop request failed: ${e.localizedMessage ?: e.javaClass.simpleName}"
             }
         }
+    }
+
+    fun cancelActiveTurnCall() {
+        activeTurnCall?.cancel()
     }
 
     suspend fun testConnection(): ConnectionTestReport {
@@ -340,8 +348,11 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             .post(requestBody)
             .build()
 
+        val call = client.newCall(request)
+        activeTurnCall = call
+
         return try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (response.isSuccessful) {
                     val body = response.body?.string() ?: ""
                     val json = JSONObject(body)
@@ -360,9 +371,18 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                     GatewayTurnResult(text, "Local gateway returned operational status: ${response.code}")
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
+            if (call.isCanceled()) {
+                throw CancellationException("Local request cancelled")
+            }
             Log.e("VoiceAgent", "Gateway text turn connection failed", e)
             GatewayTurnResult(text, "Gateway connection error: Ensure you are connected to the Tailscale subnet or Bluetooth local link. Details:\n${e.localizedMessage}")
+        } finally {
+            if (activeTurnCall === call) {
+                activeTurnCall = null
+            }
         }
     }
 
@@ -384,8 +404,11 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             .post(requestBody)
             .build()
 
+        val call = client.newCall(request)
+        activeTurnCall = call
+
         return try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (response.isSuccessful) {
                     val body = response.body?.string() ?: ""
                     val json = JSONObject(body)
@@ -407,13 +430,22 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                     GatewayTurnResult("Voice transmission completed.", "Operational status returned by remote: ${response.code}")
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
+            if (call.isCanceled()) {
+                throw CancellationException("Local request cancelled")
+            }
             Log.e("VoiceAgent", "Gateway voice turn connection failed", e)
             val detail = e.localizedMessage ?: e.javaClass.simpleName
             GatewayTurnResult(
                 "Voice transmission offline.",
                 "Offline: Couldn't connect to target gateway IP (${gatewayBaseUrl()}). Verify Pi Speak machine service is hosting on port 8767. Details: $detail"
             )
+        } finally {
+            if (activeTurnCall === call) {
+                activeTurnCall = null
+            }
         }
     }
 
