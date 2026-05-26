@@ -1,10 +1,12 @@
-import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
+import dgram, { type Socket as UdpSocket } from "node:dgram";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join, parse, resolve } from "node:path";
-import { platform } from "node:os";
+import { hostname, networkInterfaces, platform } from "node:os";
 import QRCode from "qrcode";
+import Bonjour from "bonjour-service";
 import { BusyError, type RemoteTurnSource, RemoteTurnResult } from "./remote-turn-manager.js";
 import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
 import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
@@ -54,6 +56,7 @@ export type ControlServerDiagnostics = {
 	lastErrors?: Record<string, string | undefined>;
 	recentTimings?: unknown;
 	queue?: unknown;
+	discovery?: DiscoveryDiagnostics;
 	summary?: {
 		agentProvider?: string;
 		remoteEnabled: boolean;
@@ -72,6 +75,14 @@ export type ControlServerDiagnostics = {
 		allowedOrigins: string[];
 	};
 	providers?: unknown;
+};
+
+export type DiscoveryDiagnostics = {
+	udpEnabled: boolean;
+	udpPort: number;
+	mdnsEnabled: boolean;
+	mdnsService: string;
+	lastError?: string;
 };
 
 export type WorkspaceEntry = {
@@ -116,6 +127,7 @@ export type ControlServerOptions = {
 		mode?: "auto" | "live",
 		agentProvider?: "pi" | "codex",
 	) => Promise<RemoteTurnResult>;
+	onTurnCancel?: () => Promise<ControlActionResult> | ControlActionResult;
 };
 
 type AudioArtifact = {
@@ -147,7 +159,6 @@ const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMI
 const RATE_LIMIT_CONTROL = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_CONTROL || "20", 10);
 const RATE_LIMIT_VOICE = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_VOICE || "6", 10);
 const ALLOW_QUERY_TOKEN_FOR_AUDIO = isTruthy(process.env.PI_SPEAK_HTTP_ALLOW_QUERY_TOKEN_FOR_AUDIO || "false");
-const DEFAULT_AUTH_TOKEN = "P-K-Haxx1!";
 const REMOTE_APP_DIR = resolveRemoteAppDir();
 const ANDROID_APK_PATH = resolveAndroidApkPath();
 const ALLOWED_VOICE_CONTENT_TYPES = [
@@ -196,6 +207,9 @@ function buildDiagnosticsSummary(
 
 export class ControlServer {
 	private server?: Server;
+	private discoverySocket?: UdpSocket;
+	private bonjour?: Bonjour;
+	private bonjourService?: unknown;
 	private cleanupTimer?: NodeJS.Timeout;
 	private readonly onStateChange: (patch: Partial<ControlServerState>) => void;
 	private readonly getStatus: () => ControlServerStatus;
@@ -207,17 +221,24 @@ export class ControlServer {
 	private readonly onPhoneAction: ControlServerOptions["onPhoneAction"];
 	private readonly onTextTurn: ControlServerOptions["onTextTurn"];
 	private readonly onVoiceTurn: ControlServerOptions["onVoiceTurn"];
+	private readonly onTurnCancel?: ControlServerOptions["onTurnCancel"];
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
+	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
+		udpEnabled: false,
+		udpPort: getDiscoveryPort(),
+		mdnsEnabled: false,
+		mdnsService: "_pispeak._tcp.local",
+	};
 
 	constructor(options: ControlServerOptions) {
 		this.state = {
 			enabled: options.state.enabled,
 			host: options.state.host ?? DEFAULT_HOST,
 			port: options.state.port ?? DEFAULT_PORT,
-			authToken: options.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_AUTH_TOKEN,
+			authToken: options.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken(),
 		};
 		this.onStateChange = options.onStateChange;
 		this.getStatus = options.getStatus;
@@ -229,6 +250,7 @@ export class ControlServer {
 		this.onPhoneAction = options.onPhoneAction;
 		this.onTextTurn = options.onTextTurn;
 		this.onVoiceTurn = options.onVoiceTurn;
+		this.onTurnCancel = options.onTurnCancel;
 	}
 
 	getRuntimeState() {
@@ -245,7 +267,7 @@ export class ControlServer {
 		if (this.server) return this.getRuntimeState();
 		const host = this.state.host ?? DEFAULT_HOST;
 		const port = this.state.port ?? DEFAULT_PORT;
-		const authToken = this.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_AUTH_TOKEN;
+		const authToken = this.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
 		this.state.enabled = true;
 		this.state.host = host;
 		this.state.port = port;
@@ -281,6 +303,11 @@ export class ControlServer {
 		this.cleanupTimer = setInterval(() => this.cleanupExpiredAudio(), CLEANUP_INTERVAL_MS);
 		this.cleanupTimer.unref?.();
 		this.onStateChange({ enabled: true, host, port: this.state.port, authToken });
+		await this.startDiscoveryResponder().catch((error) => {
+			this.discoveryDiagnostics.udpEnabled = false;
+			this.discoveryDiagnostics.lastError = `UDP discovery startup failed: ${getErrorMessage(error)}`;
+		});
+		this.startMdnsAdvertisement();
 		return this.getRuntimeState();
 	}
 
@@ -290,6 +317,11 @@ export class ControlServer {
 			clearInterval(this.cleanupTimer);
 			this.cleanupTimer = undefined;
 		}
+		if (this.discoverySocket) {
+			this.discoverySocket.close();
+			this.discoverySocket = undefined;
+		}
+		await this.stopMdnsAdvertisement();
 		const server = this.server;
 		this.server = undefined;
 		await new Promise<void>((resolve) => {
@@ -335,11 +367,6 @@ export class ControlServer {
 			return;
 		}
 
-		if (req.method === "GET" && url.pathname === "/v1/health") {
-			this.writeJson(res, 200, { ok: true });
-			return;
-		}
-
 		if (req.method === "GET" && url.pathname === "/v1/status") {
 			this.writeJson(res, 200, { ok: true, status: this.getStatus() });
 			return;
@@ -359,6 +386,7 @@ export class ControlServer {
 						allowQueryTokenForAudio: ALLOW_QUERY_TOKEN_FOR_AUDIO,
 						allowedOrigins: [...this.allowedOrigins],
 					},
+					discovery: { ...this.discoveryDiagnostics },
 				},
 			});
 			return;
@@ -435,6 +463,16 @@ export class ControlServer {
 		if (await this.handlePhoneRoute(req, res, url)) return;
 		if (await this.handleSpeakRoute(req, res, url)) return;
 
+		if (req.method === "POST" && url.pathname === "/v1/turn/cancel") {
+			if (!this.onTurnCancel) {
+				this.writeJson(res, 501, { ok: false, error: "Turn cancellation is not available on this gateway." });
+				return;
+			}
+			const result = await this.onTurnCancel();
+			this.writeJson(res, result.ok ? 200 : 400, { ok: result.ok, message: result.message });
+			return;
+		}
+
 		if (req.method === "GET" && url.pathname === "/v1/turn/text") {
 			const text = url.searchParams.get("text") || "";
 			const includeAudio = isTruthy(url.searchParams.get("audio"));
@@ -490,6 +528,20 @@ export class ControlServer {
 	}
 
 	private async handlePublicRoute(req: IncomingMessage, url: URL, res: ServerResponse) {
+		if (url.pathname === "/health") {
+			this.writeJson(res, 200, {
+				ok: true,
+				app: "pi-speak",
+				authRequired: !!this.state.authToken,
+			});
+			return true;
+		}
+
+		if (url.pathname === "/.well-known/pi-speak" || url.pathname === "/v1/discovery") {
+			this.writeJson(res, 200, this.buildDiscoveryDescriptor(req, url));
+			return true;
+		}
+
 		if (url.pathname === "/" || url.pathname === "/app") {
 			this.redirect(res, "/app/");
 			return true;
@@ -552,6 +604,144 @@ export class ControlServer {
 		}
 
 		return false;
+	}
+
+	private startMdnsAdvertisement() {
+		if (this.bonjour || isTruthy(process.env.PI_SPEAK_DISABLE_MDNS || "false")) return;
+		const port = this.state.port ?? DEFAULT_PORT;
+		try {
+			this.bonjour = new Bonjour(undefined, (error: unknown) => {
+				this.discoveryDiagnostics.lastError = `mDNS error: ${getErrorMessage(error)}`;
+			});
+			this.bonjourService = this.bonjour.publish({
+				name: `Pi Speak on ${hostname() || "machine"}`,
+				type: "pispeak",
+				protocol: "tcp",
+				port,
+				disableIPv6: true,
+				txt: {
+					app: "pi-speak",
+					pkg: "pi-speak-pk",
+					version: process.env.npm_package_version || "0.0.0",
+					api: "1",
+					auth: "required",
+					pairing: "setup-v1",
+					path: "/.well-known/pi-speak",
+					caps: "text,voice,audio,routing,pwa,android,progress,cancel",
+				},
+			});
+			this.discoveryDiagnostics.mdnsEnabled = true;
+		} catch (error) {
+			this.discoveryDiagnostics.mdnsEnabled = false;
+			this.discoveryDiagnostics.lastError = `mDNS startup failed: ${getErrorMessage(error)}`;
+		}
+	}
+
+	private async stopMdnsAdvertisement() {
+		const bonjour = this.bonjour;
+		this.bonjour = undefined;
+		this.bonjourService = undefined;
+		this.discoveryDiagnostics.mdnsEnabled = false;
+		if (!bonjour) return;
+		await new Promise<void>((resolve) => {
+			try {
+				bonjour.unpublishAll(() => {
+					bonjour.destroy(() => resolve());
+				});
+			} catch {
+				resolve();
+			}
+		});
+	}
+
+	private async startDiscoveryResponder() {
+		this.discoveryDiagnostics.udpPort = getDiscoveryPort();
+		if (this.discoverySocket || isTruthy(process.env.PI_SPEAK_DISABLE_UDP_DISCOVERY || "false")) return;
+		const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+		this.discoverySocket = socket;
+		socket.on("error", (error) => {
+			this.discoveryDiagnostics.udpEnabled = false;
+			this.discoveryDiagnostics.lastError = `UDP discovery error: ${getErrorMessage(error)}`;
+		});
+		socket.on("message", (message, remote) => {
+			let payload: any;
+			try {
+				payload = JSON.parse(message.toString("utf8"));
+			} catch {
+				return;
+			}
+			if (payload?.type !== "pi-speak.discover" || payload?.version !== 1) return;
+			const response = Buffer.from(JSON.stringify({
+				type: "pi-speak.announce",
+				version: 1,
+				nonce: typeof payload.nonce === "string" ? payload.nonce : undefined,
+				id: getStableServerId(),
+				name: `Pi Speak on ${hostname() || "machine"}`,
+				httpPort: this.state.port ?? DEFAULT_PORT,
+				baseUrls: getReachableBaseUrls(this.state.port ?? DEFAULT_PORT),
+				authRequired: !!this.state.authToken,
+				descriptorPath: "/.well-known/pi-speak",
+			}));
+			socket.send(response, remote.port, remote.address);
+		});
+		await new Promise<void>((resolve, reject) => {
+			socket.once("error", reject);
+			socket.bind(getDiscoveryPort(), () => {
+				socket.off("error", reject);
+				try {
+					socket.setBroadcast(true);
+				} catch {}
+				this.discoveryDiagnostics.udpEnabled = true;
+				resolve();
+			});
+		});
+	}
+
+	private buildDiscoveryDescriptor(req: IncomingMessage, url: URL) {
+		const status = this.getStatus();
+		const baseUrl = getRequestBaseUrl(req, url);
+		return {
+			schema: "pi-speak.discovery.v1",
+			app: "pi-speak",
+			package: "pi-speak-pk",
+			version: process.env.npm_package_version || "0.0.0",
+			serverId: getStableServerId(),
+			name: `Pi Speak on ${hostname() || "machine"}`,
+			authRequired: !!this.state.authToken,
+			pairingRequired: true,
+			pairingMethods: ["setup-qr"],
+			baseUrls: [...new Set([baseUrl, ...getReachableBaseUrls(this.state.port ?? DEFAULT_PORT)])],
+			endpoints: {
+				app: "/app/",
+				setup: "/setup",
+				health: "/health",
+				status: "/v1/status",
+				diagnostics: "/v1/diagnostics",
+				textTurn: "/v1/turn/text",
+				voiceTurn: "/v1/turn/voice",
+				cancelTurn: "/v1/turn/cancel",
+				route: "/v1/route",
+				workspace: "/v1/workspace",
+			},
+			capabilities: [
+				"text-turn",
+				"voice-turn",
+				"audio-reply",
+				"routing",
+				"workspace-browse",
+				"turn-cancel",
+				"progress-events",
+				"pwa",
+				"android-apk",
+			],
+			agent: status.agent
+				? {
+					provider: status.agent.provider,
+					configuredProvider: status.agent.configuredProvider,
+					capabilities: status.agent.capabilities,
+				}
+				: undefined,
+		};
 	}
 
 	private async handleSetupPage(req: IncomingMessage, url: URL, res: ServerResponse) {
@@ -766,6 +956,7 @@ export class ControlServer {
 			timings: result.timings,
 			providers: result.providers,
 			warnings: result.warnings,
+			progress: result.progress,
 		};
 	}
 
@@ -891,6 +1082,10 @@ function parseJson<T>(text: string) {
 	} catch {
 		return undefined;
 	}
+}
+
+function getDiscoveryPort() {
+	return Number.parseInt(process.env.PI_SPEAK_DISCOVERY_PORT || "8768", 10);
 }
 
 function parseRemoteTurnMode(value: string | null | undefined) {
@@ -1091,6 +1286,63 @@ function listWorkspaceDirectory(requestedPath?: string) {
 		defaultPath: getDefaultWorkspacePath(),
 		entries,
 	};
+}
+
+function getOrCreateInstallAuthToken() {
+	const tokenFile = getInstallAuthTokenPath();
+	try {
+		const existing = readFileSync(tokenFile, "utf8").trim();
+		if (existing.length >= 24) return existing;
+	} catch {
+		// Generate below.
+	}
+	const token = randomBytes(32).toString("base64url");
+	try {
+		mkdirSync(dirname(tokenFile), { recursive: true });
+		writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
+	} catch {
+		// Keep the server usable even when the config directory is read-only.
+	}
+	return token;
+}
+
+function getInstallAuthTokenPath() {
+	const base = process.env.PI_SPEAK_CONFIG_DIR
+		|| process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "pi-speak")
+		|| process.env.APPDATA && join(process.env.APPDATA, "pi-speak")
+		|| join(process.cwd(), ".pi-speak");
+	return join(base, "http-token");
+}
+
+function getStableServerId() {
+	const explicit = process.env.PI_SPEAK_SERVER_ID?.trim();
+	if (explicit) return explicit;
+	return hostname() || "pi-speak";
+}
+
+function getReachableBaseUrls(port: number) {
+	const urls: string[] = [];
+	for (const entries of Object.values(networkInterfaces())) {
+		for (const entry of entries || []) {
+			if (entry.family !== "IPv4" || entry.internal) continue;
+			if (!isPrivateLanIpv4(entry.address) && !isTailscaleIpv4(entry.address)) continue;
+			urls.push(`http://${entry.address}:${port}/`);
+		}
+	}
+	return [...new Set(urls)];
+}
+
+function isPrivateLanIpv4(address: string) {
+	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
+	const [a, b] = parts;
+	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+function isTailscaleIpv4(address: string) {
+	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
+	return parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
 }
 
 function safeStatDirectory(path: string) {

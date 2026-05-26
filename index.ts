@@ -1,7 +1,8 @@
 ﻿import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, statSync, unwatchFile, watchFile } from "node:fs";
-import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { networkInterfaces, platform, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
@@ -133,7 +134,7 @@ const PHONE_TURN_WAIT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_PHONE_WA
 const DEFAULT_REMOTE_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
 const PUBLIC_REMOTE_BASE_URL = process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim() || "";
-const DEFAULT_REMOTE_AUTH_TOKEN = "P-K-Haxx1!";
+const DEFAULT_REMOTE_AUTH_TOKEN = process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
 const TAILSCALE_APPSERVER_IP = "100.76.136.91";
 const TAILSCALE_MAC_IP = "100.76.176.119";
 const DEFAULT_BLUETOOTH_IP = "192.168.44.1";
@@ -144,6 +145,33 @@ const PI_SPEAK_REDUCER_MIN_CONFIDENCE = Number.isFinite(
 	? Number.parseFloat(process.env.PI_SPEAK_REDUCER_MIN_CONFIDENCE || "0.45")
 	: 0.45;
 const DEFAULT_VOICE = "adam";
+
+function getOrCreateInstallAuthToken() {
+	const tokenFile = getInstallAuthTokenPath();
+	try {
+		const existing = readFileSync(tokenFile, "utf8").trim();
+		if (existing.length >= 24) return existing;
+	} catch {
+		// Generate below.
+	}
+	const token = randomBytes(32).toString("base64url");
+	try {
+		mkdirSync(dirname(tokenFile), { recursive: true });
+		writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
+	} catch {
+		// State sync still persists the generated token when filesystem config is unavailable.
+	}
+	return token;
+}
+
+function getInstallAuthTokenPath() {
+	const base = process.env.PI_SPEAK_CONFIG_DIR
+		|| process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "pi-speak")
+		|| process.env.APPDATA && join(process.env.APPDATA, "pi-speak")
+		|| join(process.cwd(), ".pi-speak");
+	return join(base, "http-token");
+}
+
 const SPEECH_MODE_PROMPT = `Activate CodeChat mode for this conversation.
 
 Speech pipeline for this session:
@@ -2043,6 +2071,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 							warnings: [`Voice transcription failed: ${getErrorMessage(error)}`],
 						};
 					}
+				},
+				onTurnCancel: () => {
+					remoteTurnManager.cancelAll("Remote turn cancelled by phone.");
+					return { ok: true, message: "Remote turn cancellation requested." };
 				},
 			});
 		}

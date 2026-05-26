@@ -3,7 +3,7 @@ import { ControlServer, type ControlActionResult, type ControlServerStatus } fro
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
 import { isGeminiLiveConfigured, runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
-import type { RemoteTurnResult } from "./remote-turn-manager.js";
+import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { spawn } from "node:child_process";
@@ -139,11 +139,14 @@ async function runCodingAgentTurn(
 	cwd?: string,
 	transcript?: string,
 	audioProvider?: TtsProvider,
+	progress: TurnProgressEvent[] = [],
 ): Promise<RemoteTurnResult> {
 	const options = {
 		model: agentConfig.model,
 		cwd: cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd(),
 	};
+	const startedAt = Date.now();
+	addProgress(progress, "agent", `Sending request to ${provider.name} in ${options.cwd}.`, startedAt);
 	let activeProvider = provider;
 	let warnings: string[] | undefined;
 	let replyText: string;
@@ -152,17 +155,22 @@ async function runCodingAgentTurn(
 	} catch (error) {
 		if (!fallbackProvider) throw error;
 		warnings = [`Primary ${activeProvider.name} backend failed; used ${fallbackProvider.name} fallback.`];
+		addProgress(progress, "agent", warnings[0], startedAt);
 		activeProvider = fallbackProvider;
 		replyText = await collectAgentResponse(activeProvider, prompt, options);
 	}
+	addProgress(progress, "agent", `${activeProvider.name} returned a reply.`, startedAt);
 	const result: RemoteTurnResult = {
 		replyText: replyText || "The agent completed the turn without returning text.",
 		transcript: transcript ?? prompt,
 		providers: { agent: activeProvider.name },
 		warnings,
+		progress,
 	};
 	if (!includeAudio) return result;
+	addProgress(progress, "tts", "Generating spoken reply audio.", startedAt);
 	const audio = await renderReplyAudio(result.replyText, audioProvider);
+	addProgress(progress, "complete", "Turn complete.", startedAt);
 	return {
 		...result,
 		audioPath: audio.audioPath,
@@ -176,10 +184,15 @@ async function runCodingAgentTurn(
 			...audio.providers,
 		},
 		warnings: [...(result.warnings || []), ...(audio.warnings || [])],
+		progress,
 	};
 }
 
 async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = false, cwd?: string): Promise<RemoteTurnResult> {
+	const startedAt = Date.now();
+	const progress: TurnProgressEvent[] = [];
+	addProgress(progress, "upload", `Received ${Math.round(buffer.length / 1024)} KB voice clip.`, startedAt);
+	addProgress(progress, "stt", "Transcribing voice input.", startedAt);
 	let stt: Awaited<ReturnType<typeof transcribeAudioBuffer>>;
 	try {
 		stt = await transcribeAudioBuffer(buffer, mimeType);
@@ -190,6 +203,10 @@ async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = fa
 			transcript: "Voice message received.",
 			providers: { stt: "local" },
 			warnings: ["stt-unavailable"],
+			progress: [
+				...progress,
+				makeProgress("error", "Transcription failed.", startedAt),
+			],
 		};
 		if (!includeAudio) return result;
 		const audio = await renderReplyAudio(replyText, agentConfig.provider === "elevenlabs" ? "elevenlabs" : undefined);
@@ -203,15 +220,20 @@ async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = fa
 		};
 	}
 	const transcript = stt.text.trim();
+	addProgress(progress, "stt", stt.provider ? `Transcription finished with ${stt.provider}.` : "Transcription finished.", startedAt);
 	if (!transcript) {
 		return {
 			replyText: "I did not hear enough speech to send a turn.",
 			transcript: "",
 			providers: { stt: stt.provider },
 			warnings: ["empty-transcript"],
+			progress: [
+				...progress,
+				makeProgress("complete", "No speech text was detected.", startedAt),
+			],
 		};
 	}
-	const result = await runTextTurn(transcript, includeAudio, cwd, transcript);
+	const result = await runTextTurnWithProgress(transcript, includeAudio, cwd, transcript, progress);
 	return {
 		...result,
 		timings: {
@@ -222,7 +244,41 @@ async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = fa
 			...result.providers,
 			stt: stt.provider,
 		},
+		progress: result.progress || progress,
 	};
+}
+
+async function runTextTurnWithProgress(
+	text: string,
+	includeAudio = false,
+	cwd?: string,
+	transcript?: string,
+	progress: TurnProgressEvent[] = [],
+): Promise<RemoteTurnResult> {
+	const prompt = text.trim();
+	if (!prompt) return { replyText: "Send a message first.", progress };
+	if (agentConfig.provider === "elevenlabs") {
+		return await runCodingAgentTurn(prompt, includeAudio, cwd, transcript, "elevenlabs", progress);
+	}
+	return await runTextTurn(prompt, includeAudio, cwd, transcript);
+}
+
+async function cancelCurrentTurn(): Promise<ControlActionResult> {
+	await Promise.resolve(provider.stop?.()).catch(() => {});
+	await Promise.resolve(fallbackProvider?.stop?.()).catch(() => {});
+	fallbackProvider = undefined;
+	provider = createAgentProvider();
+	await Promise.resolve(provider.start?.());
+	return ok("Current turn stopped and coding agent provider restarted.");
+}
+
+function makeProgress(phase: TurnProgressEvent["phase"], message: string, startedAt = Date.now()): TurnProgressEvent {
+	const now = Date.now();
+	return { ts: now, phase, message, elapsedMs: now - startedAt };
+}
+
+function addProgress(progress: TurnProgressEvent[], phase: TurnProgressEvent["phase"], message: string, startedAt = Date.now()) {
+	progress.push(makeProgress(phase, message, startedAt));
 }
 
 async function renderReplyAudio(text: string, providerOverride?: TtsProvider): Promise<Partial<RemoteTurnResult>> {
@@ -338,6 +394,7 @@ server = new ControlServer({
 	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
 	onTextTurn: async (text, includeAudio, _target, cwd, _mode) => runTextTurn(text, includeAudio, cwd),
 	onVoiceTurn: async (buffer, mimeType, includeAudio, _target, cwd, _mode) => runVoiceTurn(buffer, mimeType, includeAudio, cwd),
+	onTurnCancel: cancelCurrentTurn,
 });
 
 Promise.resolve(provider.start?.())

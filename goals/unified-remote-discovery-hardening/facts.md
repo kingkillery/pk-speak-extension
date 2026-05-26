@@ -1,0 +1,9 @@
+- The gateway advertises Pi Speak over mDNS/DNS-SD as `_pispeak._tcp.local` and includes only non-secret TXT metadata.
+- The Android app discovers Pi Speak servers with `NsdManager` and validates each candidate through `/.well-known/pi-speak`.
+- The Android app keeps UDP broadcast discovery as a fallback, but UI copy does not imply UDP broadcast is reliable over Tailscale.
+- Pressing Stop turn cancels the remote gateway turn and prevents the original in-flight Android turn result from overwriting the stopped UI state.
+- The public discovery descriptor and UDP/mDNS advertisements never expose the auth token, workspace paths, private session names, or setup URLs containing tokens.
+- The gateway exposes discovery diagnostics showing whether UDP and mDNS are enabled, which ports/service names are used, and the last discovery startup error if one occurred.
+- Tests cover no-token-leak descriptor behavior, UDP discovery response shape, cancel-turn routing, and generated install token behavior.
+- The updated debug APK is built, installed on the connected phone, and copied to the served APK download path.
+- Generated files such as `.codegraph/` and temporary phone audio captures are not staged for commit.
