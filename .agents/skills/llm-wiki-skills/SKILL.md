@@ -24,7 +24,7 @@ Use it when the job is not just "answer this once", but "make this reusable, rev
 Every MCP tool in this skill has an identical CLI subcommand. When MCP is not wired, call the script directly:
 
 ```
-python scripts/llm_wiki_skills.py <subcommand> [options]
+python scripts/llm_wiki_skill_mcp.py <subcommand> [options]
 ```
 
 The script prints a JSON result to stdout and exits 0 on success, 1 on `blocked` or `missing`.
@@ -43,17 +43,43 @@ The script prints a JSON result to stdout and exits 0 on success, 1 on `blocked`
 | `skill_frontier` | `frontier` | (none required) |
 | `skill_get` | `get` | `--skill-id` |
 | `skill_retire` | `retire` | `--skill-id`, `--reason` |
+| `wiki_bootstrap` | `wiki-bootstrap` | (none required) |
+
+### Vault Bootstrap
+
+When `kade-hq` or `g-kade` detects a missing wiki vault, delegate here for a deterministic scaffold:
+
+1. **Directories** — create if missing:
+   - `wiki/concepts/`
+   - `wiki/entities/`
+   - `wiki/skills/active/`
+   - `wiki/skills/feedback/`
+   - `wiki/skills/retired/`
+   - `wiki/comparisons/`
+   - `wiki/syntheses/`
+   - `wiki/sources/`
+   - `wiki/timelines/`
+   - `wiki/questions/`
+2. **Core files** — create stubs if missing:
+   - `wiki/index.md` — taxonomy with Quick Links, Concepts, Entities, Skills, Syntheses, Sources, Timelines, Questions, Comparisons
+   - `wiki/log.md` — `# Wiki Log\n\n`
+   - `wiki/skills/index.md` — `# Skill Index\n\n`
+3. **Config layer** — ensure `.llm-wiki/config.json` and `.llm-wiki/skills-registry.json` exist.
+4. **Canvas** — if `wiki/Wiki Canvas.canvas` is missing, regenerate it using the Canvas Maintenance workflow below.
+5. **Exit** — return JSON with `{"status": "bootstrapped", "pages": <count>, "canvas": <bool>}`.
+
+Prefer this routine over ad hoc scaffolding so that `g-kade` and `kade-hq` have a single, consistent Layer 0 entry point.
 
 ### Common CLI patterns
 
 Look up before starting work:
 ```
-python scripts/llm_wiki_skills.py lookup --goal "select airport from Google Flights dropdown"
+python scripts/llm_wiki_skill_mcp.py lookup --goal "select airport from Google Flights dropdown"
 ```
 
 Capture a reusable shortcut in one pass:
 ```
-python scripts/llm_wiki_skills.py pipeline-run \
+python scripts/llm_wiki_skill_mcp.py pipeline-run \
   --title "Google Flights airport row click" \
   --kind ui \
   --goal "Select the exact airport row from the Google Flights suggestion list" \
@@ -67,7 +93,7 @@ python scripts/llm_wiki_skills.py pipeline-run \
 
 Run an evolution cycle against an existing skill:
 ```
-python scripts/llm_wiki_skills.py evolve \
+python scripts/llm_wiki_skill_mcp.py evolve \
   --title "Google Flights airport row click" \
   --kind ui \
   --goal "Select the exact airport row from the Google Flights suggestion list" \
@@ -82,17 +108,17 @@ python scripts/llm_wiki_skills.py evolve \
 
 Check the current frontier:
 ```
-python scripts/llm_wiki_skills.py frontier --limit 5
+python scripts/llm_wiki_skill_mcp.py frontier --limit 5
 ```
 
 Inspect a skill record with full lineage:
 ```
-python scripts/llm_wiki_skills.py get --skill-id skill-google-flights-airport-row-click
+python scripts/llm_wiki_skill_mcp.py get --skill-id skill-google-flights-airport-row-click
 ```
 
 Record feedback after applying a skill:
 ```
-python scripts/llm_wiki_skills.py feedback \
+python scripts/llm_wiki_skill_mcp.py feedback \
   --skill-id skill-google-flights-airport-row-click \
   --verdict upvote \
   --reason "Saved approximately 8 steps in a repeated Google Flights booking flow"
@@ -100,7 +126,7 @@ python scripts/llm_wiki_skills.py feedback \
 
 Retire a stale skill:
 ```
-python scripts/llm_wiki_skills.py retire \
+python scripts/llm_wiki_skill_mcp.py retire \
   --skill-id skill-legacy-google-flights-enter \
   --reason "Superseded by the click-based airport selection skill"
 ```
@@ -145,7 +171,7 @@ Subjective pairwise flags (when `--verification-mode subjective_pairwise`):
 - `--judge-choice` — `A` or `B`
 - `--judge-summary`, `--judge-finding` (repeatable) — judge rationale
 
-Run `python scripts/llm_wiki_skills.py <subcommand> --help` for the full flag list.
+Run `python scripts/llm_wiki_skill_mcp.py <subcommand> --help` for the full flag list.
 
 ## What This Surface Is For
 
@@ -358,6 +384,88 @@ Modern packet default:
 - long workflow captures begin as **episodic** or **hybrid** memory
 - prompt/style skills often become **semantic** memory
 - the pipeline should promote raw episodes into hierarchical summaries before saving them as active procedural memory
+
+## Wiki Canvas Maintenance
+
+When the wiki grows beyond a handful of pages, maintain a visual canvas that maps concepts, entities, and relationships so agents can navigate the knowledge graph at a glance.
+
+### Creating a Canvas
+
+1. Scan all `wiki/**/*.md` files (excluding `log.md`).
+2. Create one node per markdown file using Obsidian canvas JSON format:
+   - `type: "file"` with `file` set to the relative path from wiki root
+   - Position nodes in a grid (~4 columns) with spacing of ~400×300
+   - Size: 320×240 per node
+3. Scan each file for markdown internal links `[text](path)`.
+4. Create edges (`fromNode` → `toNode`) for every resolved link.
+5. Write the result to `wiki/Wiki Canvas.canvas`.
+
+### Canvas JSON Structure
+
+```json
+{
+  "nodes": [
+    {
+      "id": "node0",
+      "type": "file",
+      "file": "concepts/exact-approval.md",
+      "x": 0,
+      "y": 0,
+      "width": 320,
+      "height": 240
+    },
+    {
+      "id": "node1",
+      "type": "text",
+      "text": "# Concepts\nCore ideas",
+      "x": -200,
+      "y": -100,
+      "width": 180,
+      "height": 60
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge0",
+      "fromNode": "node0",
+      "toNode": "node2",
+      "fromSide": "right",
+      "toSide": "left",
+      "color": "#6c6c6c"
+    }
+  ]
+}
+```
+
+### Group Nodes (Optional)
+
+Add labeled group nodes for each wiki subdirectory so the canvas shows taxonomy visually:
+
+| Group | Color | Contains |
+|-------|-------|----------|
+| Concepts | `#e3f2fd` | `concepts/*.md` |
+| Entities | `#f3e5f5` | `entities/*.md` |
+| Syntheses | `#e8f5e9` | `syntheses/*.md` |
+| Skills | `#fff3e0` | `skills/*.md` |
+| Sources | `#fce4ec` | `sources/*.md` |
+| Timelines | `#e0f2f1` | `timelines/*.md` |
+| Questions | `#fbe9e7` | `questions/*.md` |
+
+### When to Update
+
+- After adding 3+ new wiki pages
+- After moving or renaming pages
+- After a major restructure of `wiki/index.md`
+- When an agent reports the canvas is stale or missing links
+
+### Quick Check
+
+Before considering canvas work complete:
+- [ ] All `.md` files in `wiki/` (except `log.md`) appear as nodes
+- [ ] All internal markdown links appear as edges
+- [ ] No orphaned nodes that should be connected
+- [ ] Canvas opens in Obsidian without JSON parse errors
+- [ ] `wiki/index.md` links to the canvas
 
 ## Packet Integration
 
