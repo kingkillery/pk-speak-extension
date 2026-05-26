@@ -52,6 +52,7 @@ import com.example.ui.theme.MyApplicationTheme
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -374,8 +375,11 @@ fun StudioTabContent(
     var isProcessing by remember { mutableStateOf(false) }
     var transcription by remember { mutableStateOf("") }
     var latestReply by remember { mutableStateOf("") }
+    var progressText by remember { mutableStateOf("") }
     var currentRecordPath by remember { mutableStateOf<String?>(null) }
     var textInputState by remember { mutableStateOf("") }
+    var activeTurnJob by remember { mutableStateOf<Job?>(null) }
+    var turnGeneration by remember { mutableIntStateOf(0) }
 
     // Live decibels state for custom drawing
     val amplitudeList = remember { mutableStateListOf<Float>().apply { addAll(List(16) { 0.1f }) } }
@@ -385,6 +389,27 @@ fun StudioTabContent(
     var wordStreamJob by remember { mutableStateOf<Job?>(null) }
     var recordingStartedAtMs by remember { mutableLongStateOf(0L) }
     val minimumVoiceCaptureMs = 1200L
+
+    fun setProgress(message: String) {
+        if (prefs.showTurnProgress) {
+            progressText = message
+        }
+    }
+
+    fun stopCurrentTurn() {
+        turnGeneration += 1
+        activeTurnJob?.cancel()
+        activeTurnJob = null
+        setProgress("Stop requested. Asking gateway to cancel the current turn.")
+        ttsHelper.stop()
+        audioHelper.stopPlayback()
+        scope.launch {
+            val message = client.cancelTurn()
+            setProgress(message)
+            latestReply = message
+            isProcessing = false
+        }
+    }
 
     val startSimulatedTranscription = {
         wordStreamJob?.cancel()
@@ -430,9 +455,12 @@ fun StudioTabContent(
             isRecording = false
             liveAmplitudeJob?.cancel()
             wordStreamJob?.cancel()
+            turnGeneration += 1
+            val myTurnGeneration = turnGeneration
 
-            scope.launch {
+            val job = scope.launch {
                 isProcessing = true
+                var progressJob: Job? = null
                 try {
                     val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
                     if (elapsedMs in 0 until minimumVoiceCaptureMs) {
@@ -444,9 +472,33 @@ fun StudioTabContent(
                     if (stoppedCleanly && file.exists() && file.length() >= 12_000) {
                         // Deliver audio file turn to API
                         Log.d("MainActivity", "Sending voice recording to gateway: ${file.absolutePath}, bytes=${file.length()}")
-                        val result = client.sendVoiceTurn(file, transcription)
-                        transcription = result.first
-                        latestReply = result.second
+                        setProgress("Uploading voice to gateway.")
+                        progressJob = scope.launch {
+                            val updates = listOf(
+                                "Transcribing voice.",
+                                "Sending transcript to coding agent.",
+                                "Waiting for coding agent response.",
+                                "Preparing spoken reply."
+                            )
+                            var index = 0
+                            while (isProcessing) {
+                                delay(7000)
+                                if (myTurnGeneration != turnGeneration) break
+                                val message = updates[index.coerceAtMost(updates.lastIndex)]
+                                setProgress(message)
+                                if (prefs.speakTurnProgress) {
+                                    ttsHelper.speak(message)
+                                }
+                                if (index < updates.lastIndex) index += 1
+                            }
+                        }
+                        val result = client.sendVoiceTurnDetailed(file, transcription)
+                        if (myTurnGeneration != turnGeneration) return@launch
+                        progressJob?.cancel()
+                        ttsHelper.stop()
+                        transcription = result.transcript
+                        progressText = result.progress.joinToString("\n")
+                        latestReply = result.replyText
 
                         // Try to fetch audio synthesized voice if using ElevenLabs/Gemini Text
                         val replyVoiceFile = File(file.parentFile, "elevenlabs_reply.mp3")
@@ -458,8 +510,8 @@ fun StudioTabContent(
                             timestamp = System.currentTimeMillis(),
                             durationSeconds = 4, // Average voice turn
                             recordingPath = file.absolutePath,
-                            transcriptionText = result.first,
-                            replyText = result.second,
+                            transcriptionText = result.transcript,
+                            replyText = result.replyText,
                             replyAudioPath = path,
                             voiceAgent = prefs.activeAgent
                         )
@@ -472,15 +524,25 @@ fun StudioTabContent(
                             ttsHelper.speak(latestReply)
                         }
                     } else {
+                        if (myTurnGeneration != turnGeneration) return@launch
                         transcription = "Failed to record voice correctly."
                         latestReply = "The audio clip was too short or could not be finalized. Hold the voice button a little longer and try again."
                     }
+                } catch (_: CancellationException) {
+                    setProgress("Turn stopped.")
                 } catch (e: Exception) {
-                    latestReply = "System error contacting voice node: ${e.localizedMessage}"
+                    if (myTurnGeneration == turnGeneration) {
+                        latestReply = "System error contacting voice node: ${e.localizedMessage}"
+                    }
                 } finally {
-                    isProcessing = false
+                    progressJob?.cancel()
+                    if (myTurnGeneration == turnGeneration) {
+                        activeTurnJob = null
+                        isProcessing = false
+                    }
                 }
             }
+            activeTurnJob = job
         }
     }
 
@@ -563,17 +625,36 @@ fun StudioTabContent(
 
                     if (isProcessing) {
                         item {
-                            Box(
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 16.dp),
-                                contentAlignment = Alignment.Center
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 CircularProgressIndicator(
                                     color = Color(0xFFD0E4FF),
                                     strokeWidth = 2.dp,
                                     modifier = Modifier.size(24.dp)
                                 )
+                                if (prefs.showTurnProgress && progressText.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Text(
+                                        text = progressText,
+                                        color = Color(0xFFDCEAF3),
+                                        fontSize = 12.sp,
+                                        lineHeight = 17.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(12.dp))
+                                OutlinedButton(
+                                    onClick = { stopCurrentTurn() },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFFB4A8)),
+                                    border = BorderStroke(1.dp, Color(0xFFC95532)),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Stop turn", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
@@ -604,6 +685,15 @@ fun StudioTabContent(
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
+                                if (prefs.showTurnProgress && progressText.isNotBlank()) {
+                                    Text(
+                                        text = progressText,
+                                        color = Color(0xFF8E9199),
+                                        fontSize = 11.sp,
+                                        lineHeight = 16.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                }
                                 Text(
                                     text = "\"$latestReply\"",
                                     color = Color(0xFFDCEAF3),
@@ -675,13 +765,19 @@ fun StudioTabContent(
                     if (textInputState.trim().isNotEmpty() && !isProcessing) {
                         val promptText = textInputState.trim()
                         textInputState = ""
-                        scope.launch {
+                        turnGeneration += 1
+                        val myTurnGeneration = turnGeneration
+                        val job = scope.launch {
                             isProcessing = true
                             transcription = promptText
+                            setProgress("Sending text to gateway.")
                             try {
-                                val result = client.sendTextTurn(promptText)
-                                transcription = result.first
-                                latestReply = result.second
+                                val result = client.sendTextTurnDetailed(promptText)
+                                if (myTurnGeneration != turnGeneration) return@launch
+                                ttsHelper.stop()
+                                transcription = result.transcript
+                                progressText = result.progress.joinToString("\n")
+                                latestReply = result.replyText
 
                                 // Try to fetch audio synthesized voice if using ElevenLabs
                                 val replyVoiceFile = File(context.cacheDir, "elevenlabs_reply.mp3")
@@ -693,8 +789,8 @@ fun StudioTabContent(
                                     timestamp = System.currentTimeMillis(),
                                     durationSeconds = 1,
                                     recordingPath = "",
-                                    transcriptionText = result.first,
-                                    replyText = result.second,
+                                    transcriptionText = result.transcript,
+                                    replyText = result.replyText,
                                     replyAudioPath = path,
                                     voiceAgent = prefs.activeAgent
                                 )
@@ -705,12 +801,20 @@ fun StudioTabContent(
                                 } else if (prefs.autoSpeakEnabled && latestReply.isNotEmpty()) {
                                     ttsHelper.speak(latestReply)
                                 }
+                            } catch (_: CancellationException) {
+                                setProgress("Turn stopped.")
                             } catch (e: Exception) {
-                                latestReply = "System error contacting local node: ${e.localizedMessage}"
+                                if (myTurnGeneration == turnGeneration) {
+                                    latestReply = "System error contacting local node: ${e.localizedMessage}"
+                                }
                             } finally {
-                                isProcessing = false
+                                if (myTurnGeneration == turnGeneration) {
+                                    activeTurnJob = null
+                                    isProcessing = false
+                                }
                             }
                         }
+                        activeTurnJob = job
                     }
                 },
                 modifier = Modifier
@@ -1065,6 +1169,8 @@ fun SettingsTabContent(
     var targetIpAddress by remember(prefs.targetIpAddress) { mutableStateOf(prefs.targetIpAddress) }
     var remoteToken by remember(prefs.remoteToken) { mutableStateOf(prefs.remoteToken) }
     var connectionMode by remember(prefs.connectionMode) { mutableStateOf(prefs.connectionMode) }
+    var showTurnProgress by remember(prefs.showTurnProgress) { mutableStateOf(prefs.showTurnProgress) }
+    var speakTurnProgress by remember(prefs.speakTurnProgress) { mutableStateOf(prefs.speakTurnProgress) }
     var workspaceRoot by remember(prefs.workspaceRoot) { mutableStateOf(prefs.workspaceRoot) }
     var workspacePath by remember(prefs.workspacePath) { mutableStateOf(prefs.workspacePath) }
     var workspaceEntries by remember { mutableStateOf<List<com.example.api.WorkspaceEntry>>(emptyList()) }
@@ -1183,6 +1289,36 @@ fun SettingsTabContent(
                                 )
                             }
                         }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = showTurnProgress,
+                            onCheckedChange = {
+                                showTurnProgress = it
+                                prefs.showTurnProgress = it
+                                onConfigChanged()
+                            }
+                        )
+                        Text(text = "Show turn progress text", color = Color(0xFFE2E2E6), fontSize = 13.sp)
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = speakTurnProgress,
+                            onCheckedChange = {
+                                speakTurnProgress = it
+                                prefs.speakTurnProgress = it
+                                onConfigChanged()
+                            }
+                        )
+                        Text(text = "Speak periodic progress updates", color = Color(0xFFE2E2E6), fontSize = 13.sp)
                     }
                 }
             }
@@ -1684,14 +1820,14 @@ fun DiscoveryTabContent(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Tailscale Subnet Discovery",
+                            text = "Pi Speak Server Discovery",
                             color = Color(0xFFE2E2E6),
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = if (isScanning) "Probing 100.64.0.0/10 gateway space..." else "Probes idle. Local network mapped.",
+                            text = if (isScanning) "Broadcasting LAN and Tailscale discovery probes..." else "Discovery idle. Scan again or use QR setup.",
                             color = if (isScanning) Color(0xFF4FA0EC) else Color(0xFF8E9199),
                             fontSize = 11.sp,
                             fontWeight = if (isScanning) FontWeight.SemiBold else FontWeight.Normal
@@ -1717,7 +1853,7 @@ fun DiscoveryTabContent(
                             ),
                             shape = RoundedCornerShape(10.dp)
                         ) {
-                            Text("Scan Subnet", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("Scan", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -1732,7 +1868,7 @@ fun DiscoveryTabContent(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "DISCOVERED CODESPACE HOSTS",
+                    text = "DETECTED PI SPEAK SERVERS",
                     color = Color(0xFF8E9199),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,

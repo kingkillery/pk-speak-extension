@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
+import dgram from "node:dgram";
 
 process.env.PI_SPEAK_HTTP_AUDIO_TTL_MS = "50";
 process.env.PI_SPEAK_HTTP_AUDIO_CLEANUP_MS = "25";
@@ -81,34 +82,136 @@ async function withServer(overrides = {}, fn) {
 		onPhoneAction: async () => ({ ok: true, message: "phone" }),
 		onTextTurn: overrides.onTextTurn || (async (text, includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `${text}:${includeAudio}:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
 		onVoiceTurn: overrides.onVoiceTurn || (async (_buffer, _mimeType, _includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `voice:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
+		onTurnCancel: overrides.onTurnCancel,
 	});
 	const runtime = await server.start();
 	try {
-		await fn(runtime.port);
+		await fn(runtime.port, runtime);
 	} finally {
 		await server.stop();
 	}
 }
 
-test("remote server uses the temporary default token when no token is configured", async () => {
-	await withServer({ state: { authToken: undefined } }, async (port) => {
-		const unauthorized = await request({
+async function withTemporaryEnv(name, value, fn) {
+	const previous = process.env[name];
+	if (value === undefined) {
+		delete process.env[name];
+	} else {
+		process.env[name] = value;
+	}
+	try {
+		return await fn();
+	} finally {
+		if (previous === undefined) {
+			delete process.env[name];
+		} else {
+			process.env[name] = previous;
+		}
+	}
+}
+
+test("remote server generates an install token when no token is configured", async () => {
+	await withTemporaryEnv("PI_SPEAK_HTTP_TOKEN", undefined, async () => {
+		const configDir = mkdtempSync(join(tmpdir(), "pi-speak-config-"));
+		await withTemporaryEnv("PI_SPEAK_CONFIG_DIR", configDir, async () => withServer({ state: { authToken: undefined } }, async (port, runtime) => {
+			assert.notEqual(runtime.authToken, "P-K-Haxx1!");
+			assert.ok(runtime.authToken.length >= 24);
+			const unauthorized = await request({
+				port,
+				path: "/v1/status",
+				headers: { Host: "tailnet.example" },
+			});
+			assert.equal(unauthorized.statusCode, 401);
+
+			const authorized = await request({
+				port,
+				path: "/v1/status",
+				headers: {
+					Host: "tailnet.example",
+					Authorization: `Bearer ${runtime.authToken}`,
+				},
+			});
+			assert.equal(authorized.statusCode, 200);
+			assert.equal(authorized.json().ok, true);
+		}));
+	});
+});
+
+test("public health and discovery descriptor do not expose auth token", async () => {
+	await withServer({}, async (port) => {
+		const health = await request({
 			port,
-			path: "/v1/status",
+			path: "/health",
 			headers: { Host: "tailnet.example" },
 		});
-		assert.equal(unauthorized.statusCode, 401);
+		assert.equal(health.statusCode, 200);
+		assert.equal(health.json().app, "pi-speak");
 
-		const authorized = await request({
+		const discovery = await request({
 			port,
-			path: "/v1/status",
-			headers: {
-				Host: "tailnet.example",
-				Authorization: "Bearer P-K-Haxx1!",
-			},
+			path: "/.well-known/pi-speak",
+			headers: { Host: "tailnet.example" },
 		});
-		assert.equal(authorized.statusCode, 200);
-		assert.equal(authorized.json().ok, true);
+		assert.equal(discovery.statusCode, 200);
+		const descriptor = discovery.json();
+		assert.equal(descriptor.schema, "pi-speak.discovery.v1");
+		assert.equal(descriptor.authRequired, true);
+		assert.equal(descriptor.endpoints.cancelTurn, "/v1/turn/cancel");
+		assert.doesNotMatch(discovery.body, /secret-token|P-K-Haxx1!/);
+	});
+});
+
+test("udp discovery responder announces descriptor without token", async () => {
+	const discoveryPort = 19_000 + Math.floor(Math.random() * 1000);
+	await withTemporaryEnv("PI_SPEAK_DISCOVERY_PORT", String(discoveryPort), async () => {
+		await withServer({}, async (port) => {
+			const announcement = await new Promise((resolve, reject) => {
+				const socket = dgram.createSocket("udp4");
+				const timer = setTimeout(() => {
+					socket.close();
+					reject(new Error("timed out waiting for UDP discovery announcement"));
+				}, 1000);
+				socket.on("message", (message) => {
+					clearTimeout(timer);
+					socket.close();
+					resolve(JSON.parse(message.toString("utf8")));
+				});
+				socket.bind(0, "127.0.0.1", () => {
+					const payload = Buffer.from(JSON.stringify({
+						type: "pi-speak.discover",
+						version: 1,
+						nonce: "test-nonce",
+					}));
+					socket.send(payload, discoveryPort, "127.0.0.1");
+				});
+			});
+			assert.equal(announcement.type, "pi-speak.announce");
+			assert.equal(announcement.nonce, "test-nonce");
+			assert.equal(announcement.httpPort, port);
+			assert.equal(announcement.authRequired, true);
+			assert.equal(announcement.descriptorPath, "/.well-known/pi-speak");
+			assert.doesNotMatch(JSON.stringify(announcement), /secret-token|P-K-Haxx1!/);
+		});
+	});
+});
+
+test("turn cancellation route invokes the cancel handler", async () => {
+	let cancelled = false;
+	await withServer({
+		onTurnCancel: async () => {
+			cancelled = true;
+			return { ok: true, message: "cancelled" };
+		},
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/turn/cancel",
+			method: "POST",
+			headers: { Host: "tailnet.example", Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		assert.equal(response.json().message, "cancelled");
+		assert.equal(cancelled, true);
 	});
 });
 
@@ -214,6 +317,10 @@ test("diagnostics route includes a high-signal summary block", async () => {
 		assert.deepEqual(payload.diagnostics.summary.activeErrorSources, ["listener", "stt"]);
 		assert.equal(payload.diagnostics.summary.currentSession, "pi");
 		assert.equal(payload.diagnostics.summary.availableTargetCount, 4);
+		assert.equal(typeof payload.diagnostics.discovery.udpEnabled, "boolean");
+		assert.equal(typeof payload.diagnostics.discovery.udpPort, "number");
+		assert.equal(typeof payload.diagnostics.discovery.mdnsEnabled, "boolean");
+		assert.equal(payload.diagnostics.discovery.mdnsService, "_pispeak._tcp.local");
 	});
 });
 

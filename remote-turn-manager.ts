@@ -17,6 +17,13 @@ export type ProviderSummary = {
 	tts?: string;
 };
 
+export type TurnProgressEvent = {
+	ts: number;
+	phase: "queued" | "recording" | "upload" | "stt" | "agent" | "tts" | "complete" | "error";
+	message: string;
+	elapsedMs?: number;
+};
+
 export type ConversationReducerSummary = {
 	goal: string;
 	actionItems: string[];
@@ -51,6 +58,7 @@ export type RemoteTurnResult = {
 	reducer?: ConversationReducerSummary;
 	execution?: ConversationExecutionPlan;
 	warnings?: string[];
+	progress?: TurnProgressEvent[];
 };
 
 export class BusyError extends Error {

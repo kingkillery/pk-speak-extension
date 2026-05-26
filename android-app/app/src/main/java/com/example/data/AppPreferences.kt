@@ -71,8 +71,16 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean("auto_speak_enabled", true)
         set(value) = prefs.edit().putBoolean("auto_speak_enabled", value).apply()
 
+    var showTurnProgress: Boolean
+        get() = prefs.getBoolean("show_turn_progress", true)
+        set(value) = prefs.edit().putBoolean("show_turn_progress", value).apply()
+
+    var speakTurnProgress: Boolean
+        get() = prefs.getBoolean("speak_turn_progress", false)
+        set(value) = prefs.edit().putBoolean("speak_turn_progress", value).apply()
+
     var remoteToken: String
-        get() = prefs.getString("remote_token", "P-K-Haxx1!") ?: "P-K-Haxx1!"
+        get() = prefs.getString("remote_token", "") ?: ""
         set(value) = prefs.edit().putString("remote_token", value).apply()
 
     var connectionMode: String

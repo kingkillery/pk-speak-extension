@@ -1,11 +1,34 @@
 #!/usr/bin/env node
 import { networkInterfaces, platform } from "node:os";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import QRCode from "qrcode";
 
 const PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
-const TOKEN = process.env.PI_SPEAK_HTTP_TOKEN || "P-K-Haxx1!";
+const TOKEN = process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
 const TAILSCALE_APPSERVER_IP = "100.76.136.91";
 const TAILSCALE_MAC_IP = "100.76.176.119";
+
+function getOrCreateInstallAuthToken() {
+	const tokenFile = getInstallAuthTokenPath();
+	if (existsSync(tokenFile)) {
+		const existing = readFileSync(tokenFile, "utf8").trim();
+		if (existing.length >= 24) return existing;
+	}
+	const token = randomBytes(32).toString("base64url");
+	mkdirSync(dirname(tokenFile), { recursive: true });
+	writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
+	return token;
+}
+
+function getInstallAuthTokenPath() {
+	const base = process.env.PI_SPEAK_CONFIG_DIR
+		|| process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "pi-speak")
+		|| process.env.APPDATA && join(process.env.APPDATA, "pi-speak")
+		|| join(process.cwd(), ".pi-speak");
+	return join(base, "http-token");
+}
 
 function isPrivateLanIpv4(address) {
 	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
