@@ -24,6 +24,14 @@ export type ControlActionResult = {
 	[key: string]: unknown;
 };
 
+export type RemoteSlashCommand = {
+	name: string;
+	description?: string;
+	usage?: string;
+	examples?: string[];
+	source?: "extension" | "prompt" | "skill" | "builtin";
+};
+
 export type ControlServerStatus = {
 	agent?: {
 		provider: "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
@@ -110,6 +118,7 @@ export type ControlServerOptions = {
 	onPhoneAction: (
 		action: "on" | "off" | "status" | "code" | "unpair",
 	) => Promise<ControlActionResult> | ControlActionResult;
+	getSlashCommands?: () => RemoteSlashCommand[];
 	onTextTurn: (
 		text: string,
 		includeAudio: boolean,
@@ -219,6 +228,7 @@ export class ControlServer {
 	private readonly onMonoAction: ControlServerOptions["onMonoAction"];
 	private readonly onSpeakAction: ControlServerOptions["onSpeakAction"];
 	private readonly onPhoneAction: ControlServerOptions["onPhoneAction"];
+	private readonly getSlashCommands: NonNullable<ControlServerOptions["getSlashCommands"]>;
 	private readonly onTextTurn: ControlServerOptions["onTextTurn"];
 	private readonly onVoiceTurn: ControlServerOptions["onVoiceTurn"];
 	private readonly onTurnCancel?: ControlServerOptions["onTurnCancel"];
@@ -248,6 +258,7 @@ export class ControlServer {
 		this.onMonoAction = options.onMonoAction;
 		this.onSpeakAction = options.onSpeakAction;
 		this.onPhoneAction = options.onPhoneAction;
+		this.getSlashCommands = options.getSlashCommands || (() => []);
 		this.onTextTurn = options.onTextTurn;
 		this.onVoiceTurn = options.onVoiceTurn;
 		this.onTurnCancel = options.onTurnCancel;
@@ -430,6 +441,14 @@ export class ControlServer {
 			this.writeJson(res, 200, {
 				ok: true,
 				route: this.getRoutingStatus(),
+			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/commands") {
+			this.writeJson(res, 200, {
+				ok: true,
+				commands: this.getSlashCommands(),
 			});
 			return;
 		}
@@ -728,6 +747,7 @@ export class ControlServer {
 				"voice-turn",
 				"audio-reply",
 				"routing",
+				"slash-commands",
 				"workspace-browse",
 				"turn-cancel",
 				"progress-events",
@@ -741,6 +761,12 @@ export class ControlServer {
 					capabilities: status.agent.capabilities,
 				}
 				: undefined,
+			commands: this.getSlashCommands().map((command) => ({
+				name: command.name,
+				description: command.description,
+				usage: command.usage,
+				source: command.source,
+			})),
 		};
 	}
 

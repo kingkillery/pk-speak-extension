@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { networkInterfaces, platform, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
-import { ControlServer, type ControlActionResult, type ControlServerState } from "./control-server.js";
+import { ControlServer, type ControlActionResult, type ControlServerState, type RemoteSlashCommand } from "./control-server.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
@@ -139,6 +139,50 @@ const TAILSCALE_APPSERVER_IP = "100.76.136.91";
 const TAILSCALE_MAC_IP = "100.76.176.119";
 const DEFAULT_BLUETOOTH_IP = "192.168.44.1";
 const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim() || process.env.AGENT_WORKSPACE?.trim() || "";
+const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
+	{
+		name: "speak",
+		description: "Enable spoken assistant replies and choose the TTS provider",
+		usage: "/speak [on|off|stop|status|test|providers|provider <name>|rewrite on|rewrite off]",
+		examples: ["/speak on", "/speak status", "/speak provider edge"],
+		source: "extension",
+	},
+	{
+		name: "mono",
+		description: "Control the always-on PK wake listener",
+		usage: "/mono [on|off|status]",
+		examples: ["/mono on", "/mono status"],
+		source: "extension",
+	},
+	{
+		name: "sess",
+		description: "Manage named sessions, wake aliases, slot lanes, and routing summaries",
+		usage: "/sess [new|switch|rename|edit|alias|remove|list|name|wake|slots|ui|export] <args>",
+		examples: ["/sess", "/sess slots", "/sess wake one", "/sess switch one"],
+		source: "extension",
+	},
+	{
+		name: "phone",
+		description: "Configure the Telegram phone bridge",
+		usage: "/phone [on|off|status|setup|token <bot-token>|code|unpair]",
+		examples: ["/phone setup", "/phone status", "/phone code"],
+		source: "extension",
+	},
+	{
+		name: "remote",
+		description: "Control the local HTTP API used by phone remotes and automations",
+		usage: "/remote [on|off|status|token|setup|setup bluetooth|tray on|tray off|tray status]",
+		examples: ["/remote on", "/remote setup", "/remote status"],
+		source: "extension",
+	},
+	{
+		name: "pk-remote",
+		description: "Start the phone remote and show Android setup QR details",
+		usage: "/pk-remote [bluetooth]",
+		examples: ["/pk-remote", "/pk-remote bluetooth"],
+		source: "extension",
+	},
+];
 const PI_SPEAK_REDUCER_MIN_CONFIDENCE = Number.isFinite(
 	Number.parseFloat(process.env.PI_SPEAK_REDUCER_MIN_CONFIDENCE || "0.45"),
 )
@@ -2019,6 +2063,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				onMonoAction: (action) => handleMonoAction(action, lastCtx),
 				onSpeakAction: (action, value) => handleSpeakAction(action, value, lastCtx),
 				onPhoneAction: (action) => handlePhoneAction(action, lastCtx),
+				getSlashCommands: () => REMOTE_SLASH_COMMANDS,
 				onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider) => {
 					try {
 						return await enqueuePhoneTurn(

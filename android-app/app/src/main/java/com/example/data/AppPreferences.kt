@@ -17,11 +17,26 @@ data class RecordedSession(
     val voiceAgent: String = "Local Codex"
 )
 
+data class ChatMessage(
+    val id: String,
+    val role: String,
+    val text: String,
+    val timestampMs: Long,
+    val serverId: String? = null,
+    val baseUrl: String,
+    val workspacePath: String? = null,
+    val targetSession: String? = null,
+    val progress: List<String> = emptyList(),
+    val audioPath: String? = null
+)
+
 class AppPreferences(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("pi_speak_prefs", Context.MODE_PRIVATE)
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
     private val sessionListAdapterType = Types.newParameterizedType(List::class.java, RecordedSession::class.java)
     private val sessionListAdapter = moshi.adapter<List<RecordedSession>>(sessionListAdapterType)
+    private val chatMessageListAdapterType = Types.newParameterizedType(List::class.java, ChatMessage::class.java)
+    private val chatMessageListAdapter = moshi.adapter<List<ChatMessage>>(chatMessageListAdapterType)
 
     var activeAgent: String
         get() = prefs.getString("active_agent", "Local Codex (Pi)") ?: "Local Codex (Pi)"
@@ -110,5 +125,33 @@ class AppPreferences(context: Context) {
     fun deleteRecordedSession(sessionId: String) {
         val filtered = getRecordedSessions().filter { it.id != sessionId }
         saveRecordedSessions(filtered)
+    }
+
+    fun conversationKey(
+        baseUrl: String = targetIpAddress,
+        workspacePath: String = this.workspacePath,
+        targetSession: String = codexSessionName
+    ): String = listOf(
+        baseUrl.trim().trimEnd('/'),
+        workspacePath.trim(),
+        targetSession.trim()
+    ).joinToString("|")
+
+    fun getChatMessages(conversationKey: String = conversationKey()): List<ChatMessage> {
+        val json = prefs.getString("chat_history_json_$conversationKey", null) ?: return emptyList()
+        return try {
+            chatMessageListAdapter.fromJson(json) ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveChatMessages(conversationKey: String = conversationKey(), messages: List<ChatMessage>) {
+        val json = chatMessageListAdapter.toJson(messages.takeLast(50))
+        prefs.edit().putString("chat_history_json_$conversationKey", json).apply()
+    }
+
+    fun clearChatMessages(conversationKey: String = conversationKey()) {
+        prefs.edit().remove("chat_history_json_$conversationKey").apply()
     }
 }

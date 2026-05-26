@@ -44,9 +44,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.api.VoiceAgentClient
+import com.example.api.RemoteSlashCommand
 import com.example.audio.AudioHelper
 import com.example.audio.TtsHelper
 import com.example.data.AppPreferences
+import com.example.data.ChatMessage
 import com.example.data.RecordedSession
 import com.example.ui.theme.MyApplicationTheme
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
@@ -202,6 +204,10 @@ fun PiSpeakConsoleScreen(
                         ttsHelper = ttsHelper,
                         prefs = prefs
                     )
+                    "commands" -> CommandsTabContent(
+                        client = client,
+                        prefs = prefs
+                    )
                     "discovery" -> DiscoveryTabContent(
                         client = client,
                         prefs = prefs,
@@ -336,6 +342,7 @@ fun TabSelector(
         listOf(
             "studio" to "Studio",
             "discovery" to "Discover",
+            "commands" to "Commands",
             "sessions" to "Sessions",
             "settings" to "Configure"
         ).forEach { (id, label) ->
@@ -380,6 +387,8 @@ fun StudioTabContent(
     var textInputState by remember { mutableStateOf("") }
     var activeTurnJob by remember { mutableStateOf<Job?>(null) }
     var turnGeneration by remember { mutableIntStateOf(0) }
+    val conversationKey = prefs.conversationKey()
+    var chatMessages by remember(conversationKey) { mutableStateOf(prefs.getChatMessages(conversationKey)) }
 
     // Live decibels state for custom drawing
     val amplitudeList = remember { mutableStateListOf<Float>().apply { addAll(List(16) { 0.1f }) } }
@@ -396,6 +405,30 @@ fun StudioTabContent(
         }
     }
 
+    fun persistChat(messages: List<ChatMessage>) {
+        val capped = messages.takeLast(50)
+        chatMessages = capped
+        prefs.saveChatMessages(conversationKey, capped)
+    }
+
+    fun appendChat(role: String, text: String, progress: List<String> = emptyList(), audioPath: String? = null) {
+        val trimmed = text.trim()
+        if (trimmed.isBlank() && progress.isEmpty()) return
+        persistChat(
+            chatMessages + ChatMessage(
+                id = UUID.randomUUID().toString(),
+                role = role,
+                text = trimmed,
+                timestampMs = System.currentTimeMillis(),
+                baseUrl = prefs.targetIpAddress.trim().trimEnd('/'),
+                workspacePath = prefs.workspacePath,
+                targetSession = prefs.codexSessionName,
+                progress = progress,
+                audioPath = audioPath
+            )
+        )
+    }
+
     fun stopCurrentTurn() {
         turnGeneration += 1
         activeTurnJob?.cancel()
@@ -407,6 +440,7 @@ fun StudioTabContent(
             val message = client.cancelTurn()
             setProgress(message)
             latestReply = message
+            appendChat("system", message)
             isProcessing = false
         }
     }
@@ -497,12 +531,18 @@ fun StudioTabContent(
                         progressJob?.cancel()
                         ttsHelper.stop()
                         transcription = result.transcript
-                        progressText = result.progress.joinToString("\n")
+                        val finalProgressText = result.progress.joinToString("\n")
+                        progressText = finalProgressText
                         latestReply = result.replyText
 
                         // Try to fetch audio synthesized voice if using ElevenLabs/Gemini Text
                         val replyVoiceFile = File(file.parentFile, "elevenlabs_reply.mp3")
                         val path = if (replyVoiceFile.exists()) replyVoiceFile.absolutePath else null
+                        appendChat("user", result.transcript)
+                        if (result.progress.isNotEmpty()) {
+                            appendChat("progress", finalProgressText, result.progress)
+                        }
+                        appendChat("assistant", result.replyText, result.progress, path)
 
                         // Save session record
                         val sessionRecord = RecordedSession(
@@ -527,6 +567,7 @@ fun StudioTabContent(
                         if (myTurnGeneration != turnGeneration) return@launch
                         transcription = "Failed to record voice correctly."
                         latestReply = "The audio clip was too short or could not be finalized. Hold the voice button a little longer and try again."
+                        appendChat("system", latestReply)
                     }
                 } catch (_: CancellationException) {
                     setProgress("Turn stopped.")
@@ -602,6 +643,90 @@ fun StudioTabContent(
                         .padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    if (chatMessages.isNotEmpty()) {
+                        item {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "CONVERSATION LOG",
+                                    color = Color(0xFFD0E4FF),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp
+                                )
+                                TextButton(
+                                    onClick = {
+                                        prefs.clearChatMessages(conversationKey)
+                                        chatMessages = emptyList()
+                                        transcription = ""
+                                        latestReply = ""
+                                        progressText = ""
+                                    },
+                                    enabled = !isProcessing,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text("Clear", color = Color(0xFF8E9199), fontSize = 10.sp)
+                                }
+                            }
+                        }
+                        items(chatMessages, key = { it.id }) { message ->
+                            val isUser = message.role == "user"
+                            val isProgress = message.role == "progress"
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+                            ) {
+                                Text(
+                                    text = when (message.role) {
+                                        "user" -> "YOU"
+                                        "assistant" -> prefs.activeAgent.uppercase()
+                                        "progress" -> "PROGRESS"
+                                        else -> "SYSTEM"
+                                    },
+                                    color = when (message.role) {
+                                        "user" -> Color(0xFFD0E4FF)
+                                        "assistant" -> Color(0xFF22C55E)
+                                        "progress" -> Color(0xFF8E9199)
+                                        else -> Color(0xFFFFB4A8)
+                                    },
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 0.5.sp
+                                )
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(if (isUser) 0.86f else 1f)
+                                        .background(
+                                            when {
+                                                isUser -> Color(0xFF1F3442)
+                                                isProgress -> Color(0xFF202226)
+                                                else -> Color(0xFF1F2022)
+                                            },
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .border(
+                                            1.dp,
+                                            if (isProgress) Color(0xFF3A3D42) else Color(0xFF323438),
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .padding(10.dp)
+                                ) {
+                                    Text(
+                                        text = message.text,
+                                        color = if (isProgress) Color(0xFFB0B3BC) else Color(0xFFE2E2E6),
+                                        fontSize = if (isProgress) 11.sp else 13.sp,
+                                        lineHeight = if (isProgress) 16.sp else 19.sp,
+                                        fontFamily = if (message.role == "assistant") FontFamily.Monospace else FontFamily.Default
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     if (transcription.isNotEmpty()) {
                         item {
                             Column {
@@ -771,17 +896,23 @@ fun StudioTabContent(
                             isProcessing = true
                             transcription = promptText
                             setProgress("Sending text to gateway.")
+                            appendChat("user", promptText)
                             try {
                                 val result = client.sendTextTurnDetailed(promptText)
                                 if (myTurnGeneration != turnGeneration) return@launch
                                 ttsHelper.stop()
                                 transcription = result.transcript
-                                progressText = result.progress.joinToString("\n")
+                                val finalProgressText = result.progress.joinToString("\n")
+                                progressText = finalProgressText
                                 latestReply = result.replyText
 
                                 // Try to fetch audio synthesized voice if using ElevenLabs
                                 val replyVoiceFile = File(context.cacheDir, "elevenlabs_reply.mp3")
                                 val path = if (replyVoiceFile.exists()) replyVoiceFile.absolutePath else null
+                                if (result.progress.isNotEmpty()) {
+                                    appendChat("progress", finalProgressText, result.progress)
+                                }
+                                appendChat("assistant", result.replyText, result.progress, path)
 
                                 // Save session record
                                 val sessionRecord = RecordedSession(
@@ -953,6 +1084,203 @@ fun StudioTabContent(
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD0E4FF), contentColor = Color(0xFF003355))
                 ) {
                     Text("Grant Wireless Access")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CommandsTabContent(
+    client: VoiceAgentClient,
+    prefs: AppPreferences
+) {
+    val scope = rememberCoroutineScope()
+    var commands by remember { mutableStateOf<List<RemoteSlashCommand>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var isRunning by remember { mutableStateOf(false) }
+    var statusText by remember { mutableStateOf("") }
+    var customCommand by remember { mutableStateOf("") }
+
+    fun runCommand(commandText: String) {
+        val command = commandText.trim()
+        if (command.isBlank() || isRunning) return
+        scope.launch {
+            isRunning = true
+            statusText = "Running $command"
+            try {
+                val result = client.sendTextTurnDetailed(command)
+                statusText = result.replyText.ifBlank { "Command accepted." }
+            } catch (e: Exception) {
+                statusText = "Command failed: ${e.localizedMessage ?: e.javaClass.simpleName}"
+            } finally {
+                isRunning = false
+            }
+        }
+    }
+
+    LaunchedEffect(prefs.targetIpAddress, prefs.remoteToken) {
+        isLoading = true
+        commands = client.listSlashCommands()
+        statusText = if (commands.isEmpty()) "No commands reported by the gateway." else ""
+        isLoading = false
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF232529),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, Color(0xFF383A3E))
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "Slash Command Connector",
+                        color = Color(0xFFE2E2E6),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Gateway: ${prefs.machineProfileName}",
+                        color = Color(0xFF8E9199),
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = customCommand,
+                            onValueChange = { customCommand = it },
+                            placeholder = { Text("/sess status", color = Color(0xFF8E9199), fontSize = 12.sp) },
+                            singleLine = true,
+                            enabled = !isRunning,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFFD0E4FF),
+                                unfocusedBorderColor = Color(0xFF44474B),
+                                focusedTextColor = Color(0xFFE2E2E6),
+                                unfocusedTextColor = Color(0xFFE2E2E6),
+                                focusedContainerColor = Color(0xFF1E2022),
+                                unfocusedContainerColor = Color(0xFF1E2022)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { runCommand(customCommand) },
+                            enabled = customCommand.trim().isNotEmpty() && !isRunning,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFD0E4FF),
+                                contentColor = Color(0xFF003355)
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("Run", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    if (statusText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = statusText,
+                            color = if (statusText.startsWith("Command failed")) Color(0xFFFFB4AB) else Color(0xFFDCEAF3),
+                            fontSize = 12.sp,
+                            maxLines = 5,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+
+        if (isLoading) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = Color(0xFF4FA0EC))
+                }
+            }
+        }
+
+        items(commands, key = { it.name }) { command ->
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF2D2F33),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, Color(0xFF44474B))
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "/${command.name}",
+                        color = Color(0xFFD0E4FF),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    if (command.description.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = command.description,
+                            color = Color(0xFFE2E2E6),
+                            fontSize = 12.sp
+                        )
+                    }
+                    if (command.usage.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = command.usage,
+                            color = Color(0xFFB0B3BC),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    if (command.examples.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            command.examples.take(2).forEach { example ->
+                                OutlinedButton(
+                                    onClick = { runCommand(example) },
+                                    enabled = !isRunning,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, Color(0xFF50616F))
+                                ) {
+                                    Text(
+                                        text = example,
+                                        fontSize = 10.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Button(
+                            onClick = { runCommand("/${command.name}") },
+                            enabled = !isRunning,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF17578D),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Run /${command.name}", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
         }
