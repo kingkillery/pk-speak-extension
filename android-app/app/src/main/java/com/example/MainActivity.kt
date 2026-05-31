@@ -19,6 +19,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -84,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFF1A1C1E))
+                        .background(Color(0xFFF4F1E9))
                 ) { innerPadding ->
                     PiSpeakConsoleScreen(
                         audioHelper = audioHelper,
@@ -166,24 +168,51 @@ fun PiSpeakConsoleScreen(
         prefs.activeAgent = selectedAgent
     }
 
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+
+    val tabTitle = when (currentTab) {
+        "studio" -> "Studio"
+        "discovery" -> "Discover"
+        "commands" -> "Commands"
+        "sessions" -> "Sessions"
+        "settings" -> "Configure"
+        else -> "Pi Speak"
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        scrimColor = Color(0x66211C16),
+        drawerContent = {
+            PiSpeakDrawer(
+                activeTab = currentTab,
+                profileName = prefs.machineProfileName,
+                sessionName = codexSessionName,
+                recents = prefs.getRecordedSessions(),
+                onSelect = { tab ->
+                    currentTab = tab
+                    scope.launch { drawerState.close() }
+                },
+                onSettings = {
+                    currentTab = "settings"
+                    scope.launch { drawerState.close() }
+                }
+            )
+        }
+    ) {
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF1A1C1E))
+            .background(Color(0xFFF4F1E9))
     ) {
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Dynamic App Header (Professional Polish Design Guidelines)
+            // Top bar: menu / serif title / settings (Claude "paper" header)
             HeaderSection(
+                title = tabTitle,
                 sessionName = codexSessionName,
+                onMenuClick = { scope.launch { drawerState.open() } },
                 onSettingsClick = { currentTab = "settings" }
-            )
-
-            // Horizontal Tab Selector
-            TabSelector(
-                activeTab = currentTab,
-                onTabSelect = { currentTab = it }
             )
 
             // Content Container with smooth fade effects
@@ -259,131 +288,223 @@ fun PiSpeakConsoleScreen(
                     modifier = Modifier
                         .size(width = 120.dp, height = 4.dp)
                         .clip(RoundedCornerShape(2.dp))
-                        .background(Color(0xFF44474B))
+                        .background(Color(0xFFE3DCCC))
                 )
             }
         }
+    }
     }
 }
 
 @Composable
 fun HeaderSection(
+    title: String,
     sessionName: String,
+    onMenuClick: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 16.dp),
+            .padding(horizontal = 12.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.weight(1f)
-        ) {
-            // "π" Circular Branding Design
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFFD0E4FF)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "π",
-                    color = Color(0xFF003355),
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            Spacer(modifier = Modifier.width(12.dp))
-            Column {
-                Text(
-                    text = "Pi Speak",
-                    color = Color(0xFFE2E2E6),
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.5.sp
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF22C55E))
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Codex: $sessionName",
-                        color = Color(0xFF8E9199),
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-
-        // Configuration action setting icon
+        // Menu (opens the navigation drawer)
         Box(
             modifier = Modifier
                 .size(40.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF2D2F33))
+                .clickable { onMenuClick() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(text = "≡", color = Color(0xFF211C16), fontSize = 22.sp)
+        }
+
+        // Centered serif title with a small dropdown caret
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = title,
+                color = Color(0xFF211C16),
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(text = "⌄", color = Color(0xFF6E665A), fontSize = 16.sp)
+        }
+
+        // Settings
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
                 .clickable { onSettingsClick() },
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = "⚙",
-                color = Color(0xFFE2E2E6),
-                fontSize = 18.sp
-            )
+            Text(text = "⚙", color = Color(0xFF211C16), fontSize = 18.sp)
         }
     }
 }
 
 @Composable
-fun TabSelector(
+fun PiSpeakDrawer(
     activeTab: String,
-    onTabSelect: (String) -> Unit
+    profileName: String,
+    sessionName: String,
+    recents: List<RecordedSession>,
+    onSelect: (String) -> Unit,
+    onSettings: () -> Unit
 ) {
+    ModalDrawerSheet(
+        drawerContainerColor = Color(0xFFF4F1E9),
+        drawerContentColor = Color(0xFF211C16),
+        drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
+        modifier = Modifier.fillMaxWidth(0.84f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 14.dp)
+        ) {
+            Spacer(modifier = Modifier.height(18.dp))
+            Text(
+                text = "Pi Speak",
+                color = Color(0xFF211C16),
+                style = MaterialTheme.typography.headlineMedium,
+                modifier = Modifier.padding(horizontal = 6.dp)
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Accent "New session" action (mirrors Claude's "New chat")
+            DrawerRow(
+                glyph = "＋",
+                label = "New session",
+                selected = false,
+                accent = true,
+                onClick = { onSelect("studio") }
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+            DrawerRow(glyph = "◉", label = "Studio", selected = activeTab == "studio") { onSelect("studio") }
+            DrawerRow(glyph = "⊚", label = "Discover", selected = activeTab == "discovery") { onSelect("discovery") }
+            DrawerRow(glyph = "</>", label = "Commands", selected = activeTab == "commands", mono = true) { onSelect("commands") }
+            DrawerRow(glyph = "≣", label = "Sessions", selected = activeTab == "sessions") { onSelect("sessions") }
+            DrawerRow(glyph = "⚙", label = "Configure", selected = activeTab == "settings") { onSelect("settings") }
+
+            if (recents.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(18.dp))
+                Text(
+                    text = "Recents",
+                    color = Color(0xFF6E665A),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.5.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+                Column(modifier = Modifier.weight(1f, fill = false)) {
+                    recents.take(6).forEach { session ->
+                        val label = session.transcriptionText.ifBlank { "Untitled turn" }
+                        Text(
+                            text = label,
+                            color = Color(0xFF211C16),
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { onSelect("sessions") }
+                                .padding(horizontal = 12.dp, vertical = 11.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+            Divider(color = Color(0xFFE3DCCC))
+            // Profile footer with settings cog
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onSettings() }
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFC2542F)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = profileName.take(2).uppercase().ifBlank { "PI" },
+                        color = Color(0xFFFFFFFF),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = profileName.ifBlank { "Pi Speak" },
+                    color = Color(0xFF211C16),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(text = "⚙", color = Color(0xFF6E665A), fontSize = 18.sp)
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+    }
+}
+
+@Composable
+private fun DrawerRow(
+    glyph: String,
+    label: String,
+    selected: Boolean,
+    accent: Boolean = false,
+    mono: Boolean = false,
+    onClick: () -> Unit
+) {
+    val contentColor = when {
+        accent -> Color(0xFFC2542F)
+        else -> Color(0xFF211C16)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF2D2F33))
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly
+            .background(if (selected) Color(0xFFEDE7DB) else Color.Transparent)
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        listOf(
-            "studio" to "Studio",
-            "discovery" to "Discover",
-            "commands" to "Commands",
-            "sessions" to "Sessions",
-            "settings" to "Configure"
-        ).forEach { (id, label) ->
-            val isSelected = activeTab == id
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (isSelected) Color(0xFF1A1C1E) else Color.Transparent)
-                    .clickable { onTabSelect(id) }
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = label,
-                    color = if (isSelected) Color(0xFFD0E4FF) else Color(0xFF8E9199),
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                    fontSize = 13.sp
-                )
-            }
+        Box(modifier = Modifier.width(26.dp), contentAlignment = Alignment.CenterStart) {
+            Text(
+                text = glyph,
+                color = contentColor,
+                fontSize = if (mono) 14.sp else 17.sp,
+                fontWeight = if (mono) FontWeight.Bold else FontWeight.Normal,
+                fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default
+            )
         }
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = label,
+            color = contentColor,
+            fontSize = 16.sp,
+            fontWeight = if (accent || selected) FontWeight.SemiBold else FontWeight.Normal
+        )
     }
 }
 
@@ -652,7 +773,7 @@ fun StudioTabContent(
                     state.isProcessing -> "CODING AGENT WORKING"
                     else -> "TACTICAL CONSOLE IDLE"
                 },
-                color = if (state.isRecording) Color(0xFFC95532) else Color(0xFF8E9199),
+                color = if (state.isRecording) Color(0xFFC2542F) else Color(0xFF6E665A),
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 8.dp)
@@ -680,9 +801,9 @@ fun StudioTabContent(
         ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
-                color = Color(0xFF2D2F33),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, Color(0xFF44474B))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 LazyColumn(
                     modifier = Modifier
@@ -699,7 +820,7 @@ fun StudioTabContent(
                             ) {
                                 Text(
                                     text = "CONVERSATION LOG",
-                                    color = Color(0xFFD0E4FF),
+                                    color = Color(0xFFC2542F),
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     letterSpacing = 1.sp
@@ -715,7 +836,7 @@ fun StudioTabContent(
                                     enabled = !state.isProcessing,
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                                 ) {
-                                    Text("Clear", color = Color(0xFF8E9199), fontSize = 10.sp)
+                                    Text("Clear", color = Color(0xFF6E665A), fontSize = 10.sp)
                                 }
                             }
                         }
@@ -734,10 +855,10 @@ fun StudioTabContent(
                                         else -> "SYSTEM"
                                     },
                                     color = when (message.role) {
-                                        "user" -> Color(0xFFD0E4FF)
-                                        "assistant" -> Color(0xFF22C55E)
-                                        "progress" -> Color(0xFF8E9199)
-                                        else -> Color(0xFFFFB4A8)
+                                        "user" -> Color(0xFFC2542F)
+                                        "assistant" -> Color(0xFF2E7D52)
+                                        "progress" -> Color(0xFF6E665A)
+                                        else -> Color(0xFFB3261E)
                                     },
                                     fontSize = 9.sp,
                                     fontWeight = FontWeight.Bold,
@@ -749,22 +870,22 @@ fun StudioTabContent(
                                         .fillMaxWidth(if (isUser) 0.86f else 1f)
                                         .background(
                                             when {
-                                                isUser -> Color(0xFF1F3442)
-                                                isProgress -> Color(0xFF202226)
-                                                else -> Color(0xFF1F2022)
+                                                isUser -> Color(0xFFFBF1EC)
+                                                isProgress -> Color(0xFFF0ECE2)
+                                                else -> Color(0xFFF0ECE2)
                                             },
                                             RoundedCornerShape(8.dp)
                                         )
                                         .border(
                                             1.dp,
-                                            if (isProgress) Color(0xFF3A3D42) else Color(0xFF323438),
+                                            if (isProgress) Color(0xFFE3DCCC) else Color(0xFFE3DCCC),
                                             RoundedCornerShape(8.dp)
                                         )
                                         .padding(10.dp)
                                 ) {
                                     Text(
                                         text = message.text,
-                                        color = if (isProgress) Color(0xFFB0B3BC) else Color(0xFFE2E2E6),
+                                        color = if (isProgress) Color(0xFF6E665A) else Color(0xFF211C16),
                                         fontSize = if (isProgress) 11.sp else 13.sp,
                                         lineHeight = if (isProgress) 16.sp else 19.sp,
                                         fontFamily = if (message.role == "assistant") FontFamily.Monospace else FontFamily.Default
@@ -779,7 +900,7 @@ fun StudioTabContent(
                             Column {
                                 Text(
                                     text = "TRANSCRIPT STREAM",
-                                    color = Color(0xFFD0E4FF),
+                                    color = Color(0xFFC2542F),
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     letterSpacing = 1.sp
@@ -787,7 +908,7 @@ fun StudioTabContent(
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = "${state.transcription}...",
-                                    color = Color(0xFFE2E2E6),
+                                    color = Color(0xFF211C16),
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.Medium
                                 )
@@ -804,7 +925,7 @@ fun StudioTabContent(
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 CircularProgressIndicator(
-                                    color = Color(0xFFD0E4FF),
+                                    color = Color(0xFFC2542F),
                                     strokeWidth = 2.dp,
                                     modifier = Modifier.size(24.dp)
                                 )
@@ -812,7 +933,7 @@ fun StudioTabContent(
                                     Spacer(modifier = Modifier.height(10.dp))
                                     Text(
                                         text = state.progressText,
-                                        color = Color(0xFFDCEAF3),
+                                        color = Color(0xFF211C16),
                                         fontSize = 12.sp,
                                         lineHeight = 17.sp,
                                         textAlign = TextAlign.Center
@@ -822,8 +943,8 @@ fun StudioTabContent(
                                 OutlinedButton(
                                     onClick = { stopCurrentTurn() },
                                     enabled = state.stopStatusText != "Stopping...",
-                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFFB4A8)),
-                                    border = BorderStroke(1.dp, Color(0xFFC95532)),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB3261E)),
+                                    border = BorderStroke(1.dp, Color(0xFFC2542F)),
                                     shape = RoundedCornerShape(8.dp)
                                 ) {
                                     Text(
@@ -843,21 +964,21 @@ fun StudioTabContent(
                                     .fillMaxWidth()
                                     .padding(top = 8.dp)
                             ) {
-                                Divider(color = Color(0xFF44474B), modifier = Modifier.padding(vertical = 8.dp))
+                                Divider(color = Color(0xFFE3DCCC), modifier = Modifier.padding(vertical = 8.dp))
                                 Row(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(
                                         text = "CODEX DEPLOYER REPLY",
-                                        color = Color(0xFF22C55E),
+                                        color = Color(0xFF2E7D52),
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         letterSpacing = 1.sp
                                     )
                                     Text(
                                         text = prefs.activeAgent,
-                                        color = Color(0xFF8E9199),
+                                        color = Color(0xFF6E665A),
                                         fontSize = 10.sp
                                     )
                                 }
@@ -865,7 +986,7 @@ fun StudioTabContent(
                                 if (prefs.showTurnProgress && state.progressText.isNotBlank()) {
                                     Text(
                                         text = state.progressText,
-                                        color = Color(0xFF8E9199),
+                                        color = Color(0xFF6E665A),
                                         fontSize = 11.sp,
                                         lineHeight = 16.sp
                                     )
@@ -873,7 +994,7 @@ fun StudioTabContent(
                                 }
                                 Text(
                                     text = "\"${state.latestReply}\"",
-                                    color = Color(0xFFDCEAF3),
+                                    color = Color(0xFF211C16),
                                     fontSize = 15.sp,
                                     lineHeight = 22.sp,
                                     fontFamily = FontFamily.Monospace
@@ -894,14 +1015,14 @@ fun StudioTabContent(
                             ) {
                                 Text(
                                     text = "Ready for input transmission.",
-                                    color = Color(0xFF8E9199),
+                                    color = Color(0xFF6E665A),
                                     fontSize = 14.sp
                                 )
                                 Text(
                                     text = if (prefs.transmissionMode == "PTT") 
                                         "Long press the tactical pad below to talk." 
                                     else "Tap the tactical pad below to toggle mic.",
-                                    color = Color(0xFF8E9199),
+                                    color = Color(0xFF6E665A),
                                     fontSize = 12.sp,
                                     textAlign = TextAlign.Center
                                 )
@@ -911,133 +1032,172 @@ fun StudioTabContent(
                 }
             }
         }
-        // Text Input Fallback Shard / Console Keyboard Turn Input
+        // Claude-style composer: rounded paper card with prompt + action row.
         val context = androidx.compose.ui.platform.LocalContext.current
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = state.textInputState,
-                onValueChange = { state.textInputState = it },
-                placeholder = { Text("Enter manual codex instruction...", color = Color(0xFF8E9199), fontSize = 13.sp) },
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFFD0E4FF),
-                    unfocusedBorderColor = Color(0xFF44474B),
-                    focusedTextColor = Color(0xFFE2E2E6),
-                    unfocusedTextColor = Color(0xFFE2E2E6),
-                    focusedContainerColor = Color(0xFF2D2F33),
-                    unfocusedContainerColor = Color(0xFF2D2F33)
-                ),
-                textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace, color = Color(0xFFE2E2E6)),
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-                enabled = !state.isProcessing
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    if (state.textInputState.trim().isNotEmpty() && !state.isProcessing) {
-                        val promptText = state.textInputState.trim()
-                        state.textInputState = ""
-                        state.turnGeneration += 1
-                        val myTurnGeneration = state.turnGeneration
-                        state.stopStatusText = ""
-                        val job = scope.launch {
-                            state.isProcessing = true
-                            state.transcription = promptText
-                            setProgress("Sending text to gateway.")
-                            appendChat("user", promptText)
-                            try {
-                                val result = client.sendTextTurnDetailed(promptText)
-                                if (myTurnGeneration != state.turnGeneration) return@launch
-                                ttsHelper.stop()
-                                state.transcription = result.transcript
-                                val finalProgressText = result.progress.joinToString("\n")
-                                state.progressText = finalProgressText
-                                state.latestReply = result.replyText
+        val sendTextAction: () -> Unit = sendText@{
+            if (state.textInputState.trim().isEmpty() || state.isProcessing) return@sendText
+            val promptText = state.textInputState.trim()
+            state.textInputState = ""
+            state.turnGeneration += 1
+            val myTurnGeneration = state.turnGeneration
+            state.stopStatusText = ""
+            val job = scope.launch {
+                state.isProcessing = true
+                state.transcription = promptText
+                setProgress("Sending text to gateway.")
+                appendChat("user", promptText)
+                try {
+                    val result = client.sendTextTurnDetailed(promptText)
+                    if (myTurnGeneration != state.turnGeneration) return@launch
+                    ttsHelper.stop()
+                    state.transcription = result.transcript
+                    val finalProgressText = result.progress.joinToString("\n")
+                    state.progressText = finalProgressText
+                    state.latestReply = result.replyText
 
-                                // Try to fetch audio synthesized voice if using ElevenLabs
-                                val replyVoiceFile = File(context.cacheDir, "elevenlabs_reply.mp3")
-                                val path = if (replyVoiceFile.exists()) replyVoiceFile.absolutePath else null
-                                if (result.progress.isNotEmpty()) {
-                                    appendChat("progress", finalProgressText, result.progress)
-                                }
-                                appendChat("assistant", result.replyText, result.progress, path)
-
-                                // Save session record
-                                val sessionRecord = RecordedSession(
-                                    id = UUID.randomUUID().toString(),
-                                    timestamp = System.currentTimeMillis(),
-                                    durationSeconds = 1,
-                                    recordingPath = "",
-                                    transcriptionText = result.transcript,
-                                    replyText = result.replyText,
-                                    replyAudioPath = path,
-                                    voiceAgent = prefs.activeAgent
-                                )
-                                prefs.addRecordedSession(sessionRecord)
-
-                                if (path != null) {
-                                    audioHelper.startPlayback(path)
-                                } else if (prefs.autoSpeakEnabled && state.latestReply.isNotEmpty()) {
-                                    ttsHelper.speak(state.latestReply)
-                                }
-                            } catch (_: CancellationException) {
-                                if (myTurnGeneration == state.turnGeneration) {
-                                    state.stopStatusText = "Local request cancelled."
-                                    setProgress("Local request cancelled.")
-                                }
-                            } catch (e: Exception) {
-                                if (myTurnGeneration == state.turnGeneration) {
-                                    state.latestReply = "System error contacting local node: ${e.localizedMessage}"
-                                }
-                            } finally {
-                                if (myTurnGeneration == state.turnGeneration) {
-                                    state.activeTurnJob = null
-                                    state.isProcessing = false
-                                }
-                            }
-                        }
-                        state.activeTurnJob = job
+                    // Try to fetch audio synthesized voice if using ElevenLabs
+                    val replyVoiceFile = File(context.cacheDir, "elevenlabs_reply.mp3")
+                    val path = if (replyVoiceFile.exists()) replyVoiceFile.absolutePath else null
+                    if (result.progress.isNotEmpty()) {
+                        appendChat("progress", finalProgressText, result.progress)
                     }
-                },
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF2D2F33))
-                    .border(BorderStroke(1.dp, Color(0xFF44474B)), RoundedCornerShape(8.dp)),
-                enabled = state.textInputState.trim().isNotEmpty() && !state.isProcessing
-            ) {
-                Text("⚡", color = if (state.textInputState.trim().isNotEmpty()) Color(0xFFD0E4FF) else Color(0xFF8E9199))
+                    appendChat("assistant", result.replyText, result.progress, path)
+
+                    // Save session record
+                    val sessionRecord = RecordedSession(
+                        id = UUID.randomUUID().toString(),
+                        timestamp = System.currentTimeMillis(),
+                        durationSeconds = 1,
+                        recordingPath = "",
+                        transcriptionText = result.transcript,
+                        replyText = result.replyText,
+                        replyAudioPath = path,
+                        voiceAgent = prefs.activeAgent
+                    )
+                    prefs.addRecordedSession(sessionRecord)
+
+                    if (path != null) {
+                        audioHelper.startPlayback(path)
+                    } else if (prefs.autoSpeakEnabled && state.latestReply.isNotEmpty()) {
+                        ttsHelper.speak(state.latestReply)
+                    }
+                } catch (_: CancellationException) {
+                    if (myTurnGeneration == state.turnGeneration) {
+                        state.stopStatusText = "Local request cancelled."
+                        setProgress("Local request cancelled.")
+                    }
+                } catch (e: Exception) {
+                    if (myTurnGeneration == state.turnGeneration) {
+                        state.latestReply = "System error contacting local node: ${e.localizedMessage}"
+                    }
+                } finally {
+                    if (myTurnGeneration == state.turnGeneration) {
+                        state.activeTurnJob = null
+                        state.isProcessing = false
+                    }
+                }
             }
+            state.activeTurnJob = job
         }
 
-        // Active Voice Agent Target Indicator Strip
-        Row(
+        val canSend = state.textInputState.trim().isNotEmpty() && !state.isProcessing
+        Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 8.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFF2D2F33))
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(bottom = 10.dp),
+            color = Color(0xFFFFFFFF),
+            shape = RoundedCornerShape(26.dp),
+            border = BorderStroke(1.dp, Color(0xFFE3DCCC)),
+            shadowElevation = 2.dp
         ) {
-            Text(
-                text = "AGENT PREFERENCE:",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF8E9199)
-            )
-            Text(
-                text = prefs.activeAgent.uppercase(),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFFD0E4FF)
-            )
+            Column(
+                modifier = Modifier.padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 10.dp)
+            ) {
+                BasicTextField(
+                    value = state.textInputState,
+                    onValueChange = { state.textInputState = it },
+                    enabled = !state.isProcessing,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color(0xFF211C16)),
+                    cursorBrush = SolidColor(Color(0xFFC2542F)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 28.dp, max = 140.dp),
+                    decorationBox = { inner ->
+                        if (state.textInputState.isEmpty()) {
+                            Text(
+                                text = "Message Pi Speak…",
+                                color = Color(0xFF6E665A),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
+                        inner()
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    // "</> Code" affordance — primes a slash command in the field.
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), RoundedCornerShape(16.dp))
+                            .clickable(enabled = !state.isProcessing) {
+                                if (!state.textInputState.startsWith("/")) {
+                                    state.textInputState = "/" + state.textInputState
+                                }
+                            }
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("</>", color = Color(0xFF6E665A), fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Code", color = Color(0xFF211C16), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        // Attach = quick voice capture toggle.
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .clickable(enabled = !state.isProcessing) {
+                                    if (state.isRecording) stopAndSendAction() else recordTriggerAction()
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (state.isRecording) "■" else "📎",
+                                color = if (state.isRecording) Color(0xFFC2542F) else Color(0xFF6E665A),
+                                fontSize = 18.sp
+                            )
+                        }
+                        // Round terracotta send button.
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(if (canSend) Color(0xFFC2542F) else Color(0xFFE9E3D6))
+                                .clickable(enabled = canSend) { sendTextAction() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "↑",
+                                color = if (canSend) Color(0xFFFFFFFF) else Color(0xFF6E665A),
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // Tactical Record Pad Control Section
@@ -1063,7 +1223,7 @@ fun StudioTabContent(
                             .scale(scaleFactor)
                             .clip(CircleShape)
                             .background(
-                                color = if (state.isRecording) Color(0x33B3261E) else Color(0x1AD0E4FF)
+                                color = if (state.isRecording) Color(0x33B3261E) else Color(0x14C2542F)
                             )
                             .blur(if (state.isRecording) 16.dp else 4.dp)
                     )
@@ -1079,11 +1239,11 @@ fun StudioTabContent(
                                     colors = if (state.isRecording) {
                                         listOf(Color(0xFFE04F2A), Color(0xFFB3261E))
                                     } else {
-                                        listOf(Color(0xFFD0E4FF), Color(0xFF76A8FF))
+                                        listOf(Color(0xFFC2542F), Color(0xFFD98E66))
                                     }
                                 )
                             )
-                            .border(BorderStroke(6.dp, Color(0xFF1A1C1E)), CircleShape)
+                            .border(BorderStroke(6.dp, Color(0xFFF4F1E9)), CircleShape)
                             .pointerInput(prefs.transmissionMode) {
                                 detectTapGestures(
                                     onPress = {
@@ -1106,7 +1266,7 @@ fun StudioTabContent(
                         Text(
                             text = if (state.isRecording) "🎙" else "π",
                             fontSize = 32.sp,
-                            color = if (state.isRecording) Color.White else Color(0xFF003355),
+                            color = if (state.isRecording) Color.White else Color(0xFFFFFFFF),
                             fontWeight = FontWeight.Black
                         )
                     }
@@ -1117,7 +1277,7 @@ fun StudioTabContent(
                     text = if (prefs.transmissionMode == "PTT") "HOLD TACTICAL PAD TO TALK" else "TAP TO TOGGLE MICROPHONE",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (state.isRecording) Color(0xFFC95532) else Color(0xFF8E9199),
+                    color = if (state.isRecording) Color(0xFFC2542F) else Color(0xFF6E665A),
                     letterSpacing = 0.5.sp
                 )
             }
@@ -1130,14 +1290,14 @@ fun StudioTabContent(
             ) {
                 Text(
                     text = "Microphone Permission Required to Transmit",
-                    color = Color(0xFFE2E2E6),
+                    color = Color(0xFF211C16),
                     fontSize = 14.sp,
                     textAlign = TextAlign.Center
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Button(
                     onClick = { permissionState.launchPermissionRequest() },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD0E4FF), contentColor = Color(0xFF003355))
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC2542F), contentColor = Color(0xFFFFFFFF))
                 ) {
                     Text("Grant Wireless Access")
                 }
@@ -1190,21 +1350,21 @@ fun CommandsTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF232529),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, Color(0xFF383A3E))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text(
                         text = "Slash Command Connector",
-                        color = Color(0xFFE2E2E6),
+                        color = Color(0xFF211C16),
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Gateway: ${prefs.machineProfileName}",
-                        color = Color(0xFF8E9199),
+                        color = Color(0xFF6E665A),
                         fontSize = 11.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1214,16 +1374,16 @@ fun CommandsTabContent(
                         OutlinedTextField(
                             value = customCommand,
                             onValueChange = { customCommand = it },
-                            placeholder = { Text("/sess status", color = Color(0xFF8E9199), fontSize = 12.sp) },
+                            placeholder = { Text("/sess status", color = Color(0xFF6E665A), fontSize = 12.sp) },
                             singleLine = true,
                             enabled = !isRunning,
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = Color(0xFFD0E4FF),
-                                unfocusedBorderColor = Color(0xFF44474B),
-                                focusedTextColor = Color(0xFFE2E2E6),
-                                unfocusedTextColor = Color(0xFFE2E2E6),
-                                focusedContainerColor = Color(0xFF1E2022),
-                                unfocusedContainerColor = Color(0xFF1E2022)
+                                focusedBorderColor = Color(0xFFC2542F),
+                                unfocusedBorderColor = Color(0xFFE3DCCC),
+                                focusedTextColor = Color(0xFF211C16),
+                                unfocusedTextColor = Color(0xFF211C16),
+                                focusedContainerColor = Color(0xFFF0ECE2),
+                                unfocusedContainerColor = Color(0xFFF0ECE2)
                             ),
                             modifier = Modifier.weight(1f)
                         )
@@ -1232,8 +1392,8 @@ fun CommandsTabContent(
                             onClick = { runCommand(customCommand) },
                             enabled = customCommand.trim().isNotEmpty() && !isRunning,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFD0E4FF),
-                                contentColor = Color(0xFF003355)
+                                containerColor = Color(0xFFC2542F),
+                                contentColor = Color(0xFFFFFFFF)
                             ),
                             shape = RoundedCornerShape(10.dp)
                         ) {
@@ -1244,7 +1404,7 @@ fun CommandsTabContent(
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
                             text = statusText,
-                            color = if (statusText.startsWith("Command failed")) Color(0xFFFFB4AB) else Color(0xFFDCEAF3),
+                            color = if (statusText.startsWith("Command failed")) Color(0xFFB3261E) else Color(0xFF211C16),
                             fontSize = 12.sp,
                             maxLines = 5,
                             overflow = TextOverflow.Ellipsis
@@ -1262,7 +1422,7 @@ fun CommandsTabContent(
                         .height(120.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(color = Color(0xFF4FA0EC))
+                    CircularProgressIndicator(color = Color(0xFFC2542F))
                 }
             }
         }
@@ -1270,14 +1430,14 @@ fun CommandsTabContent(
         items(commands, key = { it.name }) { command ->
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF2D2F33),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, Color(0xFF44474B))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text(
                         text = "/${command.name}",
-                        color = Color(0xFFD0E4FF),
+                        color = Color(0xFFC2542F),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace
@@ -1286,7 +1446,7 @@ fun CommandsTabContent(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = command.description,
-                            color = Color(0xFFE2E2E6),
+                            color = Color(0xFF211C16),
                             fontSize = 12.sp
                         )
                     }
@@ -1294,7 +1454,7 @@ fun CommandsTabContent(
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = command.usage,
-                            color = Color(0xFFB0B3BC),
+                            color = Color(0xFF6E665A),
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace
                         )
@@ -1312,7 +1472,7 @@ fun CommandsTabContent(
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                     modifier = Modifier.weight(1f),
                                     shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(1.dp, Color(0xFF50616F))
+                                    border = BorderStroke(1.dp, Color(0xFFE3DCCC))
                                 ) {
                                     Text(
                                         text = example,
@@ -1329,7 +1489,7 @@ fun CommandsTabContent(
                             onClick = { runCommand("/${command.name}") },
                             enabled = !isRunning,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF17578D),
+                                containerColor = Color(0xFFC2542F),
                                 contentColor = Color.White
                             ),
                             shape = RoundedCornerShape(8.dp)
@@ -1364,14 +1524,14 @@ fun SessionsTabContent(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = "No saved sessions tape.",
-                    color = Color(0xFF8E9199),
+                    color = Color(0xFF6E665A),
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = "Transmit a voice or text turn to start logging sessions.",
-                    color = Color(0xFF8E9199),
+                    color = Color(0xFF6E665A),
                     fontSize = 12.sp
                 )
             }
@@ -1386,9 +1546,9 @@ fun SessionsTabContent(
                 val isPlaying = activePlaybackId == item.id
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    color = Color(0xFF2D2F33),
+                    color = Color(0xFFFFFFFF),
                     shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.dp, if (isPlaying) Color(0xFF22C55E) else Color(0xFF44474B))
+                    border = BorderStroke(1.dp, if (isPlaying) Color(0xFF2E7D52) else Color(0xFFE3DCCC))
                 ) {
                     Column(
                         modifier = Modifier.padding(16.dp)
@@ -1400,14 +1560,14 @@ fun SessionsTabContent(
                         ) {
                             Text(
                                 text = "SESSION TURN #${item.id.take(4).uppercase()}",
-                                color = Color(0xFFD0E4FF),
+                                color = Color(0xFFC2542F),
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 letterSpacing = 0.5.sp
                             )
                             Text(
                                 text = item.voiceAgent,
-                                color = Color(0xFF8E9199),
+                                color = Color(0xFF6E665A),
                                 fontSize = 10.sp
                             )
                         }
@@ -1415,7 +1575,7 @@ fun SessionsTabContent(
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = "Prompt: \"${item.transcriptionText}\"",
-                            color = Color(0xFFE2E2E6),
+                            color = Color(0xFF211C16),
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Medium
                         )
@@ -1424,12 +1584,12 @@ fun SessionsTabContent(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(Color(0xFF1E2022), RoundedCornerShape(8.dp))
+                                .background(Color(0xFFF0ECE2), RoundedCornerShape(8.dp))
                                 .padding(8.dp)
                         ) {
                             Text(
                                 text = item.replyText,
-                                color = Color(0xFFDCEAF3),
+                                color = Color(0xFF211C16),
                                 fontSize = 13.sp,
                                 fontFamily = FontFamily.Monospace,
                                 maxLines = 4,
@@ -1460,8 +1620,8 @@ fun SessionsTabContent(
                                         }
                                     },
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (isPlaying) Color(0xFFB3261E) else Color(0xFFD0E4FF),
-                                        contentColor = if (isPlaying) Color.White else Color(0xFF003355)
+                                        containerColor = if (isPlaying) Color(0xFFB3261E) else Color(0xFFC2542F),
+                                        contentColor = if (isPlaying) Color.White else Color(0xFFFFFFFF)
                                     ),
                                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
                                     modifier = Modifier.height(32.dp)
@@ -1487,7 +1647,7 @@ fun SessionsTabContent(
                                             }
                                         },
                                         colors = ButtonDefaults.buttonColors(
-                                            containerColor = Color(0xFF17765D),
+                                            containerColor = Color(0xFF1B7A5A),
                                             contentColor = Color.White
                                         ),
                                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
@@ -1505,7 +1665,7 @@ fun SessionsTabContent(
                                             ttsHelper.speak(item.replyText)
                                         },
                                         colors = ButtonDefaults.buttonColors(
-                                            containerColor = Color(0xFF17578D),
+                                            containerColor = Color(0xFFC2542F),
                                             contentColor = Color.White
                                         ),
                                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
@@ -1575,7 +1735,7 @@ fun SettingsTabContent(
         item {
             Text(
                 text = "VOICE ENGINE CONTROL MATRIX",
-                color = Color(0xFF8E9199),
+                color = Color(0xFF6E665A),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
@@ -1585,14 +1745,14 @@ fun SettingsTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF232529),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(16.dp),
                 border = BorderStroke(
                     1.dp,
                     when {
-                        connectionReport?.ok == true -> Color(0xFF22C55E)
-                        connectionReport != null -> Color(0xFFC95532)
-                        else -> Color(0xFF383A3E)
+                        connectionReport?.ok == true -> Color(0xFF2E7D52)
+                        connectionReport != null -> Color(0xFFC2542F)
+                        else -> Color(0xFFE3DCCC)
                     }
                 )
             ) {
@@ -1605,7 +1765,7 @@ fun SettingsTabContent(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "Connection Test",
-                                color = Color(0xFFE2E2E6),
+                                color = Color(0xFF211C16),
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -1613,9 +1773,9 @@ fun SettingsTabContent(
                             Text(
                                 text = connectionReport?.summary ?: "Check gateway reachability, setup token, workspace, and capabilities.",
                                 color = when {
-                                    connectionReport?.ok == true -> Color(0xFF4ADE80)
-                                    connectionReport != null -> Color(0xFFFFB4A8)
-                                    else -> Color(0xFF8E9199)
+                                    connectionReport?.ok == true -> Color(0xFF2E7D52)
+                                    connectionReport != null -> Color(0xFFB3261E)
+                                    else -> Color(0xFF6E665A)
                                 },
                                 fontSize = 11.sp,
                                 lineHeight = 15.sp
@@ -1631,8 +1791,8 @@ fun SettingsTabContent(
                             },
                             enabled = !connectionTesting,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFD0E4FF),
-                                contentColor = Color(0xFF003355)
+                                containerColor = Color(0xFFC2542F),
+                                contentColor = Color(0xFFFFFFFF)
                             ),
                             shape = RoundedCornerShape(10.dp)
                         ) {
@@ -1657,9 +1817,9 @@ fun SettingsTabContent(
                                         .clip(CircleShape)
                                         .background(
                                             when (check.status) {
-                                                "ok" -> Color(0xFF22C55E)
-                                                "warn" -> Color(0xFFF59E0B)
-                                                else -> Color(0xFFC95532)
+                                                "ok" -> Color(0xFF2E7D52)
+                                                "warn" -> Color(0xFFC97E1A)
+                                                else -> Color(0xFFC2542F)
                                             }
                                         )
                                 )
@@ -1667,13 +1827,13 @@ fun SettingsTabContent(
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = check.label,
-                                        color = Color(0xFFE2E2E6),
+                                        color = Color(0xFF211C16),
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
                                         text = check.detail,
-                                        color = Color(0xFFB0B3BC),
+                                        color = Color(0xFF6E665A),
                                         fontSize = 10.sp,
                                         lineHeight = 14.sp
                                     )
@@ -1689,14 +1849,14 @@ fun SettingsTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF2D2F33),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFF44474B))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
                         text = "Active Voice Agent",
-                        color = Color(0xFFE2E2E6),
+                        color = Color(0xFF211C16),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -1721,12 +1881,12 @@ fun SettingsTabContent(
                                     onConfigChanged()
                                 },
                                 colors = RadioButtonDefaults.colors(
-                                    selectedColor = Color(0xFFD0E4FF),
-                                    unselectedColor = Color(0xFF8E9199)
+                                    selectedColor = Color(0xFFC2542F),
+                                    unselectedColor = Color(0xFF6E665A)
                                 )
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = agent, color = Color(0xFFE2E2E6), fontSize = 14.sp)
+                            Text(text = agent, color = Color(0xFF211C16), fontSize = 14.sp)
                         }
                     }
                 }
@@ -1737,14 +1897,14 @@ fun SettingsTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF2D2F33),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFF44474B))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
                         text = "Microphone Action Strategy",
-                        color = Color(0xFFE2E2E6),
+                        color = Color(0xFF211C16),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -1761,7 +1921,7 @@ fun SettingsTabContent(
                                     .weight(1f)
                                     .padding(horizontal = 4.dp)
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) Color(0xFF1A1C1E) else Color(0x3344474B))
+                                    .background(if (isSelected) Color(0xFFF4F1E9) else Color(0x22B8AF9A))
                                     .clickable {
                                         transmissionMode = mode
                                         prefs.transmissionMode = mode
@@ -1772,7 +1932,7 @@ fun SettingsTabContent(
                             ) {
                                 Text(
                                     text = label,
-                                    color = if (isSelected) Color(0xFFD0E4FF) else Color(0xFF8E9199),
+                                    color = if (isSelected) Color(0xFFC2542F) else Color(0xFF6E665A),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -1793,7 +1953,7 @@ fun SettingsTabContent(
                                 onConfigChanged()
                             }
                         )
-                        Text(text = "Show turn progress text", color = Color(0xFFE2E2E6), fontSize = 13.sp)
+                        Text(text = "Show turn progress text", color = Color(0xFF211C16), fontSize = 13.sp)
                     }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1807,7 +1967,7 @@ fun SettingsTabContent(
                                 onConfigChanged()
                             }
                         )
-                        Text(text = "Speak periodic progress updates", color = Color(0xFFE2E2E6), fontSize = 13.sp)
+                        Text(text = "Speak periodic progress updates", color = Color(0xFF211C16), fontSize = 13.sp)
                     }
                 }
             }
@@ -1817,21 +1977,21 @@ fun SettingsTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF2D2F33),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFF44474B))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
                         text = "Remote Codex Matrix Profile",
-                        color = Color(0xFFE2E2E6),
+                        color = Color(0xFF211C16),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Machine profile label
-                    Text(text = "Machine Profile Name", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Text(text = "Machine Profile Name", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
                         value = machineProfileName,
@@ -1841,10 +2001,10 @@ fun SettingsTabContent(
                             onConfigChanged()
                         },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFD0E4FF),
-                            unfocusedBorderColor = Color(0xFF44474B),
-                            focusedTextColor = Color(0xFFE2E2E6),
-                            unfocusedTextColor = Color(0xFFE0E2E6)
+                            focusedBorderColor = Color(0xFFC2542F),
+                            unfocusedBorderColor = Color(0xFFE3DCCC),
+                            focusedTextColor = Color(0xFF211C16),
+                            unfocusedTextColor = Color(0xFF211C16)
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1852,7 +2012,7 @@ fun SettingsTabContent(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Session tag
-                    Text(text = "Target Session Name", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Text(text = "Target Session Name", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
                         value = codexSessionName,
@@ -1862,10 +2022,10 @@ fun SettingsTabContent(
                             onConfigChanged()
                         },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFD0E4FF),
-                            unfocusedBorderColor = Color(0xFF44474B),
-                            focusedTextColor = Color(0xFFE2E2E6),
-                            unfocusedTextColor = Color(0xFFE0E2E6)
+                            focusedBorderColor = Color(0xFFC2542F),
+                            unfocusedBorderColor = Color(0xFFE3DCCC),
+                            focusedTextColor = Color(0xFF211C16),
+                            unfocusedTextColor = Color(0xFF211C16)
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1873,7 +2033,7 @@ fun SettingsTabContent(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Gateway IP Address
-                    Text(text = "Local Gateway URL host", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Text(text = "Local Gateway URL host", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
                         value = targetIpAddress,
@@ -1883,17 +2043,17 @@ fun SettingsTabContent(
                             onConfigChanged()
                         },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFD0E4FF),
-                            unfocusedBorderColor = Color(0xFF44474B),
-                            focusedTextColor = Color(0xFFE2E2E6),
-                            unfocusedTextColor = Color(0xFFE2E2E6)
+                            focusedBorderColor = Color(0xFFC2542F),
+                            unfocusedBorderColor = Color(0xFFE3DCCC),
+                            focusedTextColor = Color(0xFF211C16),
+                            unfocusedTextColor = Color(0xFF211C16)
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Text(text = "Workspace Folder", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Text(text = "Workspace Folder", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
                         value = workspacePath,
@@ -1903,13 +2063,13 @@ fun SettingsTabContent(
                             onConfigChanged()
                         },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFD0E4FF),
-                            unfocusedBorderColor = Color(0xFF44474B),
-                            focusedTextColor = Color(0xFFE2E2E6),
-                            unfocusedTextColor = Color(0xFFE2E2E6)
+                            focusedBorderColor = Color(0xFFC2542F),
+                            unfocusedBorderColor = Color(0xFFE3DCCC),
+                            focusedTextColor = Color(0xFF211C16),
+                            unfocusedTextColor = Color(0xFF211C16)
                         ),
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text(workspaceRoot, color = Color(0xFF8E9199)) }
+                        placeholder = { Text(workspaceRoot, color = Color(0xFF6E665A)) }
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -1955,12 +2115,12 @@ fun SettingsTabContent(
                         ) { Text("Up") }
                     }
                     if (workspaceLoading) {
-                        Text(text = "Loading folders...", color = Color(0xFF8E9199), fontSize = 11.sp)
+                        Text(text = "Loading folders...", color = Color(0xFF6E665A), fontSize = 11.sp)
                     }
                     workspaceEntries.take(12).forEach { entry ->
                         Text(
                             text = entry.name,
-                            color = Color(0xFFD0E4FF),
+                            color = Color(0xFFC2542F),
                             fontSize = 12.sp,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1987,7 +2147,7 @@ fun SettingsTabContent(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Gateway Auth Token
-                    Text(text = "Gateway Authentication Token", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Text(text = "Gateway Authentication Token", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
                         value = remoteToken,
@@ -1998,10 +2158,10 @@ fun SettingsTabContent(
                         },
                         visualTransformation = PasswordVisualTransformation(),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFD0E4FF),
-                            unfocusedBorderColor = Color(0xFF44474B),
-                            focusedTextColor = Color(0xFFE2E2E6),
-                            unfocusedTextColor = Color(0xFFE2E2E6)
+                            focusedBorderColor = Color(0xFFC2542F),
+                            unfocusedBorderColor = Color(0xFFE3DCCC),
+                            focusedTextColor = Color(0xFF211C16),
+                            unfocusedTextColor = Color(0xFF211C16)
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -2009,7 +2169,7 @@ fun SettingsTabContent(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Default Gateway Network Interface
-                    Text(text = "Default Gateway Network Interface", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Text(text = "Default Gateway Network Interface", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -2022,7 +2182,7 @@ fun SettingsTabContent(
                                     .weight(1f)
                                     .padding(horizontal = 4.dp)
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) Color(0xFF1A1C1E) else Color(0x3344474B))
+                                    .background(if (isSelected) Color(0xFFF4F1E9) else Color(0x22B8AF9A))
                                     .clickable {
                                         connectionMode = mode
                                         prefs.connectionMode = mode
@@ -2033,7 +2193,7 @@ fun SettingsTabContent(
                             ) {
                                 Text(
                                     text = label,
-                                    color = if (isSelected) Color(0xFFD0E4FF) else Color(0xFF8E9199),
+                                    color = if (isSelected) Color(0xFFC2542F) else Color(0xFF6E665A),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -2048,21 +2208,21 @@ fun SettingsTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF2D2F33),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFF44474B))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
                         text = "ElevenLabs API Wiring Hub",
-                        color = Color(0xFFE2E2E6),
+                        color = Color(0xFF211C16),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // api key input fields (Must be masked unless requested)
-                    Text(text = "ElevenLabs API Key", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Text(text = "ElevenLabs API Key", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
                         value = elevenLabsApiKey,
@@ -2073,19 +2233,19 @@ fun SettingsTabContent(
                         },
                         visualTransformation = PasswordVisualTransformation(),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFD0E4FF),
-                            unfocusedBorderColor = Color(0xFF44474B),
-                            focusedTextColor = Color(0xFFE2E2E6),
-                            unfocusedTextColor = Color(0xFFE2E2E6)
+                            focusedBorderColor = Color(0xFFC2542F),
+                            unfocusedBorderColor = Color(0xFFE3DCCC),
+                            focusedTextColor = Color(0xFF211C16),
+                            unfocusedTextColor = Color(0xFF211C16)
                         ),
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("Unset / Local Built-In Only", color = Color(0xFF8E9199)) }
+                        placeholder = { Text("Unset / Local Built-In Only", color = Color(0xFF6E665A)) }
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // voice id selector input
-                    Text(text = "ElevenLabs Custom Voice ID", color = Color(0xFF8E9199), fontSize = 11.sp)
+                    Text(text = "ElevenLabs Custom Voice ID", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
                         value = elevenLabsVoiceId,
@@ -2095,10 +2255,10 @@ fun SettingsTabContent(
                             onConfigChanged()
                         },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFD0E4FF),
-                            unfocusedBorderColor = Color(0xFF44474B),
-                            focusedTextColor = Color(0xFFE2E2E6),
-                            unfocusedTextColor = Color(0xFFE2E2E6)
+                            focusedBorderColor = Color(0xFFC2542F),
+                            unfocusedBorderColor = Color(0xFFE3DCCC),
+                            focusedTextColor = Color(0xFF211C16),
+                            unfocusedTextColor = Color(0xFF211C16)
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -2111,14 +2271,14 @@ fun SettingsTabContent(
             var autoSpeak by remember(prefs.autoSpeakEnabled) { mutableStateOf(prefs.autoSpeakEnabled) }
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF2D2F33),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFF44474B))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
                         text = "System Voice Feedback Loop",
-                        color = Color(0xFFE2E2E6),
+                        color = Color(0xFF211C16),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -2131,14 +2291,14 @@ fun SettingsTabContent(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "Auto-Speak Audio Replies",
-                                color = Color(0xFFDCEAF3),
+                                color = Color(0xFF211C16),
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = "Instantly synthesize incoming responses out loud via phone speakers or active synthesizer node.",
-                                color = Color(0xFF8E9199),
+                                color = Color(0xFF6E665A),
                                 fontSize = 11.sp
                             )
                         }
@@ -2150,10 +2310,10 @@ fun SettingsTabContent(
                                 onConfigChanged()
                             },
                             colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color(0xFFD0E4FF),
-                                checkedTrackColor = Color(0xFF17578D),
-                                uncheckedThumbColor = Color(0xFF8E9199),
-                                uncheckedTrackColor = Color(0xFF1A1C1E)
+                                checkedThumbColor = Color(0xFFC2542F),
+                                checkedTrackColor = Color(0xFFC2542F),
+                                uncheckedThumbColor = Color(0xFF6E665A),
+                                uncheckedTrackColor = Color(0xFFF4F1E9)
                             )
                         )
                     }
@@ -2191,7 +2351,7 @@ fun WaveformBars(
             val topY = (height - barHeight) / 2f
             
             drawRoundRect(
-                color = if (active) Color(0xFF76A8FF) else Color(0x33D0E4FF),
+                color = if (active) Color(0xFFD98E66) else Color(0x33C2542F),
                 topLeft = androidx.compose.ui.geometry.Offset(offset, topY),
                 size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
                 cornerRadius = CornerRadius(barWidth / 2, barWidth / 2)
@@ -2228,19 +2388,19 @@ fun ScanningRadarGraphic(modifier: Modifier = Modifier) {
 
         // Draw background radar concentric circles
         drawCircle(
-            color = Color(0xFF17578D).copy(alpha = 0.15f),
+            color = Color(0xFFC2542F).copy(alpha = 0.15f),
             radius = maxRadius * 0.4f,
             center = center,
             style = Stroke(width = 1.dp.toPx())
         )
         drawCircle(
-            color = Color(0xFF17578D).copy(alpha = 0.15f),
+            color = Color(0xFFC2542F).copy(alpha = 0.15f),
             radius = maxRadius * 0.7f,
             center = center,
             style = Stroke(width = 1.dp.toPx())
         )
         drawCircle(
-            color = Color(0xFF17578D).copy(alpha = 0.15f),
+            color = Color(0xFFC2542F).copy(alpha = 0.15f),
             radius = maxRadius,
             center = center,
             style = Stroke(width = 1.dp.toPx())
@@ -2248,7 +2408,7 @@ fun ScanningRadarGraphic(modifier: Modifier = Modifier) {
 
         // Pulsating wave line
         drawCircle(
-            color = Color(0xFF4FA0EC).copy(alpha = opacity),
+            color = Color(0xFFC2542F).copy(alpha = opacity),
             radius = maxRadius * radiusRatio,
             center = center,
             style = Stroke(width = 2.dp.toPx())
@@ -2256,7 +2416,7 @@ fun ScanningRadarGraphic(modifier: Modifier = Modifier) {
 
         // Center beacon dot
         drawCircle(
-            color = Color(0xFF4FA0EC),
+            color = Color(0xFFC2542F),
             radius = 4.dp.toPx(),
             center = center
         )
@@ -2298,9 +2458,9 @@ fun DiscoveryTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF232529),
+                color = Color(0xFFFFFFFF),
                 shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFF383A3E))
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 Row(
                     modifier = Modifier.padding(16.dp),
@@ -2310,14 +2470,14 @@ fun DiscoveryTabContent(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "Pi Speak Server Discovery",
-                            color = Color(0xFFE2E2E6),
+                            color = Color(0xFF211C16),
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = if (isScanning) "Broadcasting LAN and Tailscale discovery probes..." else "Discovery idle. Scan again or use QR setup.",
-                            color = if (isScanning) Color(0xFF4FA0EC) else Color(0xFF8E9199),
+                            color = if (isScanning) Color(0xFFC2542F) else Color(0xFF6E665A),
                             fontSize = 11.sp,
                             fontWeight = if (isScanning) FontWeight.SemiBold else FontWeight.Normal
                         )
@@ -2337,7 +2497,7 @@ fun DiscoveryTabContent(
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF17578D),
+                                containerColor = Color(0xFFC2542F),
                                 contentColor = Color.White
                             ),
                             shape = RoundedCornerShape(10.dp)
@@ -2358,14 +2518,14 @@ fun DiscoveryTabContent(
             ) {
                 Text(
                     text = "DETECTED PI SPEAK SERVERS",
-                    color = Color(0xFF8E9199),
+                    color = Color(0xFF6E665A),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.8.sp
                 )
                 Text(
                     text = "Active Target: ${prefs.targetIpAddress}",
-                    color = Color(0xFF4FA0EC),
+                    color = Color(0xFFC2542F),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -2381,7 +2541,7 @@ fun DiscoveryTabContent(
                         .height(140.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(color = Color(0xFF4FA0EC))
+                    CircularProgressIndicator(color = Color(0xFFC2542F))
                 }
             }
         } else {
@@ -2401,11 +2561,11 @@ fun DiscoveryTabContent(
                                     onSessionSelected(prefs.codexSessionName, machine.ip)
                                 }
                             },
-                        color = if (isMachineSelected) Color(0xFF222B35) else Color(0xFF222326),
+                        color = if (isMachineSelected) Color(0xFFFBF1EC) else Color(0xFFFFFFFF),
                         shape = RoundedCornerShape(14.dp),
                         border = BorderStroke(
                             width = 1.dp,
-                            color = if (isMachineSelected) Color(0xFF17578D) else Color(0xFF323438)
+                            color = if (isMachineSelected) Color(0xFFC2542F) else Color(0xFFE3DCCC)
                         )
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
@@ -2419,12 +2579,12 @@ fun DiscoveryTabContent(
                                         modifier = Modifier
                                             .size(8.dp)
                                             .clip(CircleShape)
-                                            .background(if (isOnline) Color(0xFF22C55E) else Color(0xFF8E9199))
+                                            .background(if (isOnline) Color(0xFF2E7D52) else Color(0xFF6E665A))
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = machine.name,
-                                        color = if (isOnline) Color(0xFFE2E2E6) else Color(0xFF8E9199),
+                                        color = if (isOnline) Color(0xFF211C16) else Color(0xFF6E665A),
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -2432,12 +2592,12 @@ fun DiscoveryTabContent(
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isOnline) Color(0xFF1E3524) else Color(0xFF2C2D30))
+                                        .background(if (isOnline) Color(0xFFDCEEE0) else Color(0xFFE9E3D6))
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 ) {
                                     Text(
                                         text = if (isOnline) "${machine.latencyMs}ms" else "OFFLINE",
-                                        color = if (isOnline) Color(0xFF4ADE80) else Color(0xFF8E9199),
+                                        color = if (isOnline) Color(0xFF2E7D52) else Color(0xFF6E665A),
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -2447,7 +2607,7 @@ fun DiscoveryTabContent(
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = "IP Address: ${machine.ip}",
-                                color = Color(0xFF8E9199),
+                                color = Color(0xFF6E665A),
                                 fontSize = 11.sp
                             )
 
@@ -2459,7 +2619,7 @@ fun DiscoveryTabContent(
                             ) {
                                 Text(
                                     text = "${machine.activeSessions.size} AI sessions cached",
-                                    color = Color(0xFFB0B3BC),
+                                    color = Color(0xFF6E665A),
                                     fontSize = 11.sp
                                 )
 
@@ -2470,7 +2630,7 @@ fun DiscoveryTabContent(
                                                 modifier = Modifier
                                                     .size(12.dp)
                                                     .clip(CircleShape)
-                                                    .background(Color(0xFF22C55E)),
+                                                    .background(Color(0xFF2E7D52)),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 Text(
@@ -2483,7 +2643,7 @@ fun DiscoveryTabContent(
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Text(
                                                 text = "ACTIVE GATEWAY",
-                                                color = Color(0xFF4ADE80),
+                                                color = Color(0xFF2E7D52),
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold
                                             )
@@ -2491,7 +2651,7 @@ fun DiscoveryTabContent(
                                     } else {
                                         Text(
                                             text = "TAP TO ROTATE GATEWAY",
-                                            color = Color(0xFF17578D),
+                                            color = Color(0xFFC2542F),
                                             fontSize = 9.sp,
                                             fontWeight = FontWeight.Bold
                                         )
@@ -2499,7 +2659,7 @@ fun DiscoveryTabContent(
                                 } else {
                                     Text(
                                         text = "HOST UNREACHABLE",
-                                        color = Color(0xFFEF4444),
+                                        color = Color(0xFFB3261E),
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -2518,7 +2678,7 @@ fun DiscoveryTabContent(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "RUNNING SESSIONS ON ${currentMachine.name.uppercase()}",
-                    color = Color(0xFF8E9199),
+                    color = Color(0xFF6E665A),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.8.sp,
@@ -2530,11 +2690,11 @@ fun DiscoveryTabContent(
                 item {
                     val isSessionActive = prefs.codexSessionName == session.sessionId && prefs.targetIpAddress == currentMachine.ip
                     val badgeColor = when (session.engineType.uppercase()) {
-                        "CODEX" -> Color(0xFF22C55E)
-                        "AGY" -> Color(0xFFF97316)
+                        "CODEX" -> Color(0xFF2E7D52)
+                        "AGY" -> Color(0xFFC97E1A)
                         "CLAUDE" -> Color(0xFFA855F7)
                         "KIMI" -> Color(0xFF3B82F6)
-                        else -> Color(0xFF6B7280)
+                        else -> Color(0xFF6E665A)
                     }
 
                     Surface(
@@ -2548,11 +2708,11 @@ fun DiscoveryTabContent(
                                     android.widget.Toast.LENGTH_SHORT
                                 ).show()
                             },
-                        color = if (isSessionActive) Color(0xFF1D3227) else Color(0xFF1F2022),
+                        color = if (isSessionActive) Color(0xFFDCEEE0) else Color(0xFFF0ECE2),
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(
                             width = 1.dp,
-                            color = if (isSessionActive) Color(0xFF22C55E) else Color(0xFF2A2B2E)
+                            color = if (isSessionActive) Color(0xFF2E7D52) else Color(0xFFE3DCCC)
                         )
                     ) {
                         Row(
@@ -2579,7 +2739,7 @@ fun DiscoveryTabContent(
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = session.sessionId,
-                                        color = Color(0xFFE2E2E6),
+                                        color = Color(0xFF211C16),
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -2587,7 +2747,7 @@ fun DiscoveryTabContent(
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = session.description,
-                                    color = Color(0xFF8E9199),
+                                    color = Color(0xFF6E665A),
                                     fontSize = 11.sp
                                 )
                             }
@@ -2596,13 +2756,13 @@ fun DiscoveryTabContent(
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(6.dp))
-                                        .background(Color(0xFF1E3524))
-                                        .border(1.dp, Color(0xFF22C55E), RoundedCornerShape(6.dp))
+                                        .background(Color(0xFFDCEEE0))
+                                        .border(1.dp, Color(0xFF2E7D52), RoundedCornerShape(6.dp))
                                         .padding(horizontal = 8.dp, vertical = 4.dp)
                                 ) {
                                     Text(
                                         text = "✓ MOUNTED",
-                                        color = Color(0xFF22C55E),
+                                        color = Color(0xFF2E7D52),
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -2618,8 +2778,8 @@ fun DiscoveryTabContent(
                                         ).show()
                                     },
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFF2B2D31),
-                                        contentColor = Color(0xFFB0B3BC)
+                                        containerColor = Color(0xFFE9E3D6),
+                                        contentColor = Color(0xFF6E665A)
                                     ),
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                     shape = RoundedCornerShape(8.dp),
@@ -2642,7 +2802,7 @@ fun DiscoveryTabContent(
                 ) {
                     Text(
                         text = "Selected target is currently offline. Cannot mount active context tunnels.",
-                        color = Color(0xFFEF4444),
+                        color = Color(0xFFB3261E),
                         fontSize = 12.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         fontWeight = FontWeight.SemiBold
