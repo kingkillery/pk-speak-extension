@@ -6,31 +6,32 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
+// Serif for large headings (the Claude "paper" look); sans for everything else.
 val Typography =
   Typography(
     displaySmall = TextStyle(
-        fontFamily = FontFamily.Default,
+        fontFamily = FontFamily.Serif,
         fontSize = 40.sp,
-        fontWeight = FontWeight.Bold,
-        lineHeight = 43.2.sp, // 40 * 1.08
+        fontWeight = FontWeight.Normal,
+        lineHeight = 44.sp,
     ),
     headlineLarge = TextStyle(
-        fontFamily = FontFamily.Default,
+        fontFamily = FontFamily.Serif,
         fontSize = 30.sp,
-        fontWeight = FontWeight.Bold,
-        lineHeight = 34.8.sp, // 30 * 1.16
+        fontWeight = FontWeight.Normal,
+        lineHeight = 36.sp,
     ),
     headlineMedium = TextStyle(
-        fontFamily = FontFamily.Default,
+        fontFamily = FontFamily.Serif,
         fontSize = 24.sp,
-        fontWeight = FontWeight.Bold,
-        lineHeight = 28.8.sp, // 24 * 1.2
+        fontWeight = FontWeight.Normal,
+        lineHeight = 30.sp,
     ),
     titleLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontSize = 20.sp,
-        fontWeight = FontWeight.W600, // 650 is not standard, using W600
-        lineHeight = 25.sp, // 20 * 1.25
+        fontFamily = FontFamily.Serif,
+        fontSize = 22.sp,
+        fontWeight = FontWeight.Normal,
+        lineHeight = 28.sp,
     ),
     titleMedium = TextStyle(
         fontFamily = FontFamily.Default,
