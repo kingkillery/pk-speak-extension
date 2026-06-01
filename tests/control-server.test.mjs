@@ -89,6 +89,7 @@ async function withServer(overrides = {}, fn) {
 		onSessionRename: overrides.onSessionRename,
 		onSessionAlias: overrides.onSessionAlias,
 		onSessionRemove: overrides.onSessionRemove,
+		onSessionResume: overrides.onSessionResume,
 		getDiscoveredAgents: overrides.getDiscoveredAgents,
 		tailSessionEvents: overrides.tailSessionEvents,
 	});
@@ -857,6 +858,56 @@ test("session remove endpoint invokes callback and returns result", async () => 
 		const body = await response.json();
 		assert.equal(body.ok, true);
 		assert.equal(body.message, "removed:/tmp/pi.json");
+	});
+});
+
+test("session resume endpoint invokes callback and returns result", async () => {
+	await withServer({
+		onSessionResume: async (payload) => ({
+			ok: true,
+			message: `resume:${payload.provider}:${payload.sessionId}:${payload.sessionPath}:${payload.cwd}`,
+			command: ["codex", "resume", payload.sessionId],
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/resume",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				provider: "codex",
+				sessionId: "abc123",
+				sessionPath: "C:\\Users\\prest\\.codex\\sessions\\session.jsonl",
+				cwd: "C:\\dev\\project",
+			}),
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "resume:codex:abc123:C:\\Users\\prest\\.codex\\sessions\\session.jsonl:C:\\dev\\project");
+		assert.deepEqual(body.command, ["codex", "resume", "abc123"]);
+	});
+});
+
+test("session resume endpoint requires sessionPath or sessionId", async () => {
+	await withServer({
+		onSessionResume: async () => ({ ok: true, message: "unreachable" }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/resume",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ provider: "codex" }),
+		});
+		assert.equal(response.statusCode, 400);
+		assert.equal((await response.json()).ok, false);
 	});
 });
 

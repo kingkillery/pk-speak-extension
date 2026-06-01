@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env node
-import { ControlServer, type ControlActionResult, type ControlServerStatus } from "./control-server.js";
+import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
 import { isGeminiLiveConfigured, runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
@@ -325,6 +325,10 @@ function buildRecentSessionDashboard(): SessionDashboard {
 		name: session.title || session.cwdBasename || session.sessionId || session.path,
 		path: session.path,
 		sessionPath: session.path,
+		provider: session.provider,
+		sessionId: session.sessionId,
+		resumable: isResumableSession(session.provider, session.sessionId),
+		resumeCommand: buildResumeCommandPreview(session.provider, session.sessionId, session.cwd),
 		workingDirectory: session.cwd,
 		cwd: session.cwd,
 		current: false,
@@ -340,6 +344,98 @@ function buildRecentSessionDashboard(): SessionDashboard {
 		storePath: "recent CLI sessions",
 		sessions,
 	};
+}
+
+function isResumableSession(provider: string | undefined, sessionId: string | undefined) {
+	const normalized = (provider || "").trim().toLowerCase();
+	const id = (sessionId || "").trim();
+	if (!id) return false;
+	if (normalized === "codex") return true;
+	if (normalized === "claude") return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+	return false;
+}
+
+function resolveResumeExecutable(provider: string) {
+	const normalized = provider.trim().toLowerCase();
+	if (normalized === "codex") return agentConfig.codexBin;
+	if (normalized === "claude") return process.env.CLAUDE_BIN || resolveWindowsNpmShim("claude.cmd") || "claude";
+	return undefined;
+}
+
+function buildResumeArgs(provider: string, sessionId: string, cwd?: string) {
+	const normalized = provider.trim().toLowerCase();
+	if (normalized === "codex") {
+		const args = ["resume"];
+		if (cwd) args.push("-C", cwd);
+		args.push(sessionId);
+		return args;
+	}
+	if (normalized === "claude") return ["--resume", sessionId];
+	return undefined;
+}
+
+function buildResumeCommandPreview(provider: string | undefined, sessionId: string | undefined, cwd?: string) {
+	if (!provider || !sessionId || !isResumableSession(provider, sessionId)) return undefined;
+	const executable = resolveResumeExecutable(provider);
+	const args = buildResumeArgs(provider, sessionId, cwd);
+	return executable && args ? [executable, ...args] : undefined;
+}
+
+function findDiscoveredResumeSession(payload: SessionResumePayload) {
+	const inventory = discoverAgentInventoryCached(0);
+	const requestedPath = payload.sessionPath?.trim().toLowerCase();
+	const requestedId = payload.sessionId?.trim().toLowerCase();
+	const requestedProvider = payload.provider?.trim().toLowerCase();
+	return inventory.recent.find((session) => {
+		const sessionId = session.sessionId;
+		if (!isResumableSession(session.provider, sessionId) || !sessionId) return false;
+		if (requestedProvider && session.provider.toLowerCase() !== requestedProvider) return false;
+		if (requestedPath && session.path.toLowerCase() === requestedPath) return true;
+		if (requestedId && sessionId.toLowerCase() === requestedId) return true;
+		return false;
+	});
+}
+
+function resumeStoredSession(payload: SessionResumePayload): ControlActionResult {
+	const session = findDiscoveredResumeSession(payload);
+	if (!session) {
+		return { ok: false, message: "Session was not found in the discovered resumable session stores." };
+	}
+	const executable = resolveResumeExecutable(session.provider);
+	const args = buildResumeArgs(session.provider, session.sessionId || "", session.cwd);
+	if (!executable || !args) {
+		return { ok: false, message: `Provider ${session.provider} does not support resume from this gateway.` };
+	}
+	launchDetachedCli(executable, args, session.cwd || payload.cwd || process.cwd(), `${session.provider} resume`);
+	routing.defaultTarget = session.title || session.cwdBasename || session.sessionId || session.path;
+	refreshRoutingTargets();
+	return {
+		ok: true,
+		message: `Launching ${session.provider} resume for ${session.sessionId}.`,
+		provider: session.provider,
+		sessionId: session.sessionId,
+		sessionPath: session.path,
+		cwd: session.cwd,
+		command: [executable, ...args],
+	};
+}
+
+function launchDetachedCli(command: string, args: string[], cwd: string, title: string) {
+	if (process.platform === "win32") {
+		const child = spawn("cmd.exe", ["/c", "start", title, "/D", cwd, command, ...args], {
+			detached: true,
+			stdio: "ignore",
+			windowsHide: true,
+		});
+		child.unref();
+		return;
+	}
+	const child = spawn(command, args, {
+		cwd,
+		detached: true,
+		stdio: "ignore",
+	});
+	child.unref();
 }
 
 class PiCliProvider implements AgentProvider {
@@ -421,6 +517,7 @@ server = new ControlServer({
 	onTurnCancel: cancelCurrentTurn,
 	getSessionDashboard: buildRecentSessionDashboard,
 	getCompactRouteSlots: () => [],
+	onSessionResume: resumeStoredSession,
 	getDiscoveredAgents: () => discoverAgentInventoryCached(),
 });
 
