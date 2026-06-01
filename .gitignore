@@ -50,6 +50,9 @@ android-app/local.properties
 # Ralph local session scratch
 scripts/ralph/.last-branch
 
+# pi-speak local runtime state (http token, routing store, etc.)
+.pi-speak/
+
 # Transient screen/testing dumps and CLI runtimes
 screen*.png
 archive/
