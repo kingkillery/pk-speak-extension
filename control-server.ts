@@ -40,6 +40,13 @@ export type SessionRemovePayload = {
 	sessionPath: string;
 };
 
+export type SessionResumePayload = {
+	sessionPath?: string;
+	sessionId?: string;
+	provider?: string;
+	cwd?: string;
+};
+
 export type RemoteSlashCommand = {
 	name: string;
 	description?: string;
@@ -158,6 +165,7 @@ export type ControlServerOptions = {
 	onSessionRename?: (body: SessionRenamePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionAlias?: (body: SessionAliasPayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionRemove?: (body: SessionRemovePayload) => Promise<ControlActionResult> | ControlActionResult;
+	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 };
@@ -267,6 +275,7 @@ export class ControlServer {
 	private readonly onSessionRename?: ControlServerOptions["onSessionRename"];
 	private readonly onSessionAlias?: ControlServerOptions["onSessionAlias"];
 	private readonly onSessionRemove?: ControlServerOptions["onSessionRemove"];
+	private readonly onSessionResume?: ControlServerOptions["onSessionResume"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
 	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
 	private readonly state: ControlServerState;
@@ -304,6 +313,7 @@ export class ControlServer {
 		this.onSessionRename = options.onSessionRename;
 		this.onSessionAlias = options.onSessionAlias;
 		this.onSessionRemove = options.onSessionRemove;
+		this.onSessionResume = options.onSessionResume;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
 		this.tailSessionEvents = options.tailSessionEvents;
 	}
@@ -580,6 +590,25 @@ export class ControlServer {
 				return;
 			}
 			const result = await this.onSessionRemove({ sessionPath: payload.sessionPath });
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/sessions/resume") {
+			if (!this.onSessionResume) {
+				this.writeJson(res, 501, { ok: false, error: "Session resume is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const sessionPath = typeof payload?.sessionPath === "string" ? payload.sessionPath : undefined;
+			const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : undefined;
+			const provider = typeof payload?.provider === "string" ? payload.provider : undefined;
+			const cwd = typeof payload?.cwd === "string" ? payload.cwd : undefined;
+			if (!sessionPath && !sessionId) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: sessionPath or sessionId is required." });
+				return;
+			}
+			const result = await this.onSessionResume({ sessionPath, sessionId, provider, cwd });
 			this.writeJson(res, result.ok ? 200 : 400, result);
 			return;
 		}

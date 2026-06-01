@@ -1784,6 +1784,21 @@ fun GatewaySessionsPane(
                                 if (entry.isRouteCapableIn(currentState.dashboard)) "Gateway session target selected." else "Gateway workspace selected.",
                                 android.widget.Toast.LENGTH_SHORT
                             ).show()
+                        },
+                        onResume = if (entry.resumable) {
+                            {
+                                scope.launch {
+                                    val message = client.resumeGatewaySession(entry)
+                                    refresh()
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        message,
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        } else {
+                            null
                         }
                     )
                 }
@@ -1861,7 +1876,8 @@ fun GatewaySessionRow(
     entry: GatewaySessionEntry,
     dashboard: GatewaySessionDashboard,
     prefs: AppPreferences,
-    onUse: () -> Unit
+    onUse: () -> Unit,
+    onResume: (() -> Unit)? = null
 ) {
     val isRouteCapable = entry.isRouteCapableIn(dashboard)
     val isSelectedFile = prefs.selectedGatewaySessionPath.isNotBlank() && prefs.selectedGatewaySessionPath == entry.canonicalSessionPath
@@ -1917,8 +1933,11 @@ fun GatewaySessionRow(
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (entry.isCurrentIn(dashboard)) GatewaySessionBadge("current", Color(0xFF2E7D52))
                 if (entry.isReadyIn(dashboard)) GatewaySessionBadge("ready", Color(0xFFC97E1A))
+                entry.provider?.takeIf { it.isNotBlank() }?.let { GatewaySessionBadge(it, Color(0xFF3C6E71)) }
+                entry.sessionId?.takeIf { it.isNotBlank() }?.let { GatewaySessionBadge("resume id", Color(0xFF6E665A)) }
                 if (entry.aliases.isNotEmpty()) GatewaySessionBadge("aliases: ${entry.aliases.joinToString(", ")}", Color(0xFF6E665A))
                 if (!isRouteCapable) GatewaySessionBadge("workspace only", Color(0xFF6E665A))
+                if (entry.resumable) GatewaySessionBadge("resumable", Color(0xFF2E7D52))
             }
 
             val path = entry.canonicalSessionPath
@@ -1934,16 +1953,27 @@ fun GatewaySessionRow(
             }
 
             Spacer(modifier = Modifier.height(10.dp))
-            Button(
-                onClick = onUse,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isRouteCapable) Color(0xFF2E7D52) else Color(0xFFC2542F),
-                    contentColor = Color.White
-                ),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
-                modifier = Modifier.height(34.dp)
-            ) {
-                Text(if (isRouteCapable) "Use as target" else "Use workspace", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onUse,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isRouteCapable) Color(0xFF2E7D52) else Color(0xFFC2542F),
+                        contentColor = Color.White
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
+                    modifier = Modifier.height(34.dp)
+                ) {
+                    Text(if (isRouteCapable) "Use as target" else "Use workspace", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+                if (onResume != null) {
+                    OutlinedButton(
+                        onClick = onResume,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Text("Resume", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
     }

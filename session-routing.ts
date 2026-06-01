@@ -132,6 +132,10 @@ export type SessionDashboardEntry = {
 	name: string;
 	path?: string;
 	sessionPath?: string;
+	provider?: string;
+	sessionId?: string;
+	resumable?: boolean;
+	resumeCommand?: string[];
 	workingDirectory?: string;
 	cwd?: string;
 	current: boolean;

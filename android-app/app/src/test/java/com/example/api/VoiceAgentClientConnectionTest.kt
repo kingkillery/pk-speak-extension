@@ -94,6 +94,10 @@ class VoiceAgentClientConnectionTest {
                 "name": "Ready",
                 "path": "C:\\Users\\prest\\.codex\\ready.jsonl",
                 "sessionPath": "C:\\Users\\prest\\.codex\\ready.jsonl",
+                "provider": "codex",
+                "sessionId": "abc123",
+                "resumable": true,
+                "resumeCommand": ["codex", "resume", "abc123"],
                 "workingDirectory": "C:\\dev\\Ready",
                 "cwd": "C:\\dev\\Fallback",
                 "current": false,
@@ -124,6 +128,10 @@ class VoiceAgentClientConnectionTest {
     assertEquals("Ready", session.name)
     assertEquals("C:\\Users\\prest\\.codex\\ready.jsonl", session.path)
     assertEquals("C:\\Users\\prest\\.codex\\ready.jsonl", session.sessionPath)
+    assertEquals("codex", session.provider)
+    assertEquals("abc123", session.sessionId)
+    assertTrue(session.resumable)
+    assertEquals(listOf("codex", "resume", "abc123"), session.resumeCommand)
     assertEquals("C:\\dev\\Ready", session.workingDirectory)
     assertEquals("C:\\dev\\Fallback", session.cwd)
     assertTrue(session.ready)
@@ -179,6 +187,42 @@ class VoiceAgentClientConnectionTest {
     assertEquals("C:\\fallback", GatewaySessionEntry(cwd = "C:\\fallback").displayCwd)
     assertEquals("unknown", GatewaySessionEntry().displayCwd)
     assertNull(GatewaySessionEntry().canonicalSessionPath)
+  }
+
+  @Test
+  fun resumeGatewaySession_postsStoredSessionIdentity() = kotlinx.coroutines.runBlocking {
+    var seenBody = ""
+    var seenToken = ""
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/sessions/resume") { exchange ->
+      seenToken = exchange.requestHeaders.getFirst("X-Pi-Speak-Token") ?: ""
+      seenBody = exchange.requestBody.bufferedReader().use { it.readText() }
+      val body = """{"ok":true,"message":"Launching codex resume for abc123."}""".toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "secret-token"
+    val client = VoiceAgentClient(context, prefs)
+
+    val message = client.resumeGatewaySession(
+      GatewaySessionEntry(
+        provider = "codex",
+        sessionId = "abc123",
+        sessionPath = "C:\\Users\\prest\\.codex\\ready.jsonl",
+        workingDirectory = "C:\\dev\\Ready",
+        resumable = true
+      )
+    )
+
+    assertEquals("Launching codex resume for abc123.", message)
+    assertEquals("secret-token", seenToken)
+    assertTrue(seenBody.contains(""""provider":"codex""""))
+    assertTrue(seenBody.contains(""""sessionId":"abc123""""))
+    assertTrue(seenBody.contains(""""sessionPath":"C:\\Users\\prest\\.codex\\ready.jsonl""""))
+    assertTrue(seenBody.contains(""""cwd":"C:\\dev\\Ready""""))
   }
 
   private fun startGatewayServer(port: Int = 0): HttpServer {

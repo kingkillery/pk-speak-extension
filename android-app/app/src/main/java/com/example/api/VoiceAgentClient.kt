@@ -942,10 +942,22 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 if (value.isNotBlank()) aliases.add(value)
             }
         }
+        val resumeCommandJson = json.optJSONArray("resumeCommand")
+        val resumeCommand = mutableListOf<String>()
+        if (resumeCommandJson != null) {
+            for (i in 0 until resumeCommandJson.length()) {
+                val value = resumeCommandJson.optString(i)
+                if (value.isNotBlank()) resumeCommand.add(value)
+            }
+        }
         return GatewaySessionEntry(
             name = json.optString("name"),
             path = json.optString("path").ifBlank { null },
             sessionPath = json.optString("sessionPath").ifBlank { null },
+            provider = json.optString("provider").ifBlank { null },
+            sessionId = json.optString("sessionId").ifBlank { null },
+            resumable = json.optBoolean("resumable", false),
+            resumeCommand = resumeCommand,
             workingDirectory = json.optString("workingDirectory").ifBlank { null },
             cwd = json.optString("cwd").ifBlank { null },
             current = json.optBoolean("current", false),
@@ -955,6 +967,37 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             activity = json.optString("activity").ifBlank { null },
             aliases = aliases
         )
+    }
+
+    suspend fun resumeGatewaySession(entry: GatewaySessionEntry): String {
+        return withContext(Dispatchers.IO) {
+            val cwd = entry.workingDirectory?.takeIf { it.isNotBlank() }
+                ?: entry.cwd?.takeIf { it.isNotBlank() }
+            val requestBody = JSONObject().apply {
+                entry.provider?.takeIf { it.isNotBlank() }?.let { put("provider", it) }
+                entry.sessionId?.takeIf { it.isNotBlank() }?.let { put("sessionId", it) }
+                entry.canonicalSessionPath?.takeIf { it.isNotBlank() }?.let { put("sessionPath", it) }
+                cwd?.let { put("cwd", it) }
+            }.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("${gatewayBaseUrl()}/v1/sessions/resume")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(requestBody)
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                        return@withContext json.optString("error", json.optString("message", "Session resume failed: ${response.code}"))
+                    }
+                    json.optString("message", "Session resume launched.")
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "Session resume failed", e)
+                "Session resume failed: ${shortError(e)}"
+            }
+        }
     }
 
     suspend fun listSlashCommands(): List<RemoteSlashCommand> {
