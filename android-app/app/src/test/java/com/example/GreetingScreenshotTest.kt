@@ -20,9 +20,21 @@ class GreetingScreenshotTest {
   @get:Rule val composeTestRule = createComposeRule()
 
   @Test
-  fun greeting_screenshot() {
-    composeTestRule.setContent { MyApplicationTheme { Greeting("Robolectric") } }
+  fun header_screenshot() {
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        HeaderSection(
+          title = "Studio",
+          sessionName = "Main-Project-Alpha",
+          onMenuClick = {},
+          isGatewayConnected = true,
+          isReconnecting = false,
+          connectionStatusText = "Connected",
+          onSettingsClick = {}
+        )
+      }
+    }
 
-    composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/greeting.png")
+    composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/header.png")
   }
 }

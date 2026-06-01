@@ -9,6 +9,7 @@ class TtsHelper(context: Context) : TextToSpeech.OnInitListener {
     private var tts: TextToSpeech? = TextToSpeech(context, this)
     private var isInitialized = false
     private var pendingText: String? = null
+    private var onCompleteCallback: (() -> Unit)? = null
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
@@ -18,6 +19,18 @@ class TtsHelper(context: Context) : TextToSpeech.OnInitListener {
             } else {
                 isInitialized = true
                 Log.d("TTS", "TextToSpeech successfully initialized")
+                tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {}
+                    override fun onDone(utteranceId: String?) {
+                        onCompleteCallback?.invoke()
+                        onCompleteCallback = null
+                    }
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        onCompleteCallback?.invoke()
+                        onCompleteCallback = null
+                    }
+                })
                 pendingText?.let {
                     speak(it)
                     pendingText = null
@@ -28,20 +41,22 @@ class TtsHelper(context: Context) : TextToSpeech.OnInitListener {
         }
     }
 
-    fun speak(text: String) {
+    fun speak(text: String, onComplete: (() -> Unit)? = null) {
         if (!isInitialized) {
             pendingText = text
+            onCompleteCallback = onComplete
             Log.d("TTS", "TTS not ready yet, queuing text: $text")
             return
         }
         try {
-            // Stop any ongoing speech before starting a new one
             tts?.stop()
-            // QUEUE_FLUSH drops previous utterances
+            onCompleteCallback = onComplete
             tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "PiSpeakUtterance")
             Log.d("TTS", "Speaking text out loud: $text")
         } catch (e: Exception) {
             Log.e("TTS", "Error during speak", e)
+            onComplete?.invoke()
+            onCompleteCallback = null
         }
     }
 

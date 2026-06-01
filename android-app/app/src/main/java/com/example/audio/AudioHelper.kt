@@ -1,6 +1,8 @@
 package com.example.audio
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaPlayer
@@ -26,6 +28,10 @@ class AudioHelper(private val context: Context) {
     }
 
     fun startRecording(fileName: String): String? {
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.w("AudioHelper", "Cannot start recording; RECORD_AUDIO permission is not granted.")
+            return null
+        }
         val file = File(context.cacheDir, fileName)
         outputFile = file
         if (file.exists()) {

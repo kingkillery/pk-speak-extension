@@ -8,6 +8,8 @@ export type SessionRoutingState = {
 export type SessionRuntimeSnapshot = {
 	sessionPath?: string;
 	sessionName?: string;
+	workingDirectory?: string;
+	cwd?: string;
 	phase?: string;
 	waitingForAttention?: boolean;
 	aliases?: string[];
@@ -130,6 +132,8 @@ export type SessionDashboardEntry = {
 	name: string;
 	path?: string;
 	sessionPath?: string;
+	workingDirectory?: string;
+	cwd?: string;
 	current: boolean;
 	isCurrent: boolean;
 	ready: boolean;
@@ -153,6 +157,7 @@ export type BuildSessionDashboardOptions = {
 	currentSessionName?: string;
 	currentBusy?: boolean;
 	currentReady?: boolean;
+	workingDirectories?: Record<string, string>;
 	storePath?: string;
 };
 
@@ -179,10 +184,15 @@ export function buildSessionDashboard(options: BuildSessionDashboardOptions): Se
 		const isReady = isCurrent && typeof options.currentReady === "boolean"
 			? options.currentReady
 			: !!snapshot?.waitingForAttention;
+		const workingDirectory = sessionPath
+			? options.workingDirectories?.[sessionPath] || snapshot?.workingDirectory || snapshot?.cwd
+			: undefined;
 		entries.push({
 			name,
 			path: sessionPath,
 			sessionPath,
+			workingDirectory,
+			cwd: workingDirectory,
 			current: isCurrent,
 			isCurrent,
 			ready: isReady,

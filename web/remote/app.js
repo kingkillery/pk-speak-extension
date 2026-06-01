@@ -65,6 +65,15 @@ if (typeof document !== "undefined") {
 		timerId: null,
 		deferredPrompt: null,
 		lastStatus: null,
+		activeTab: "chat",
+		selectedSessionPath: "",
+		eventSource: null,
+		eventLog: [],
+		discoveredAgents: [],
+		runningAgents: [],
+		recentAgentSessions: [],
+		agentSnapshotAt: "",
+		workspacePath: "",
 	};
 
 	const els = {
@@ -77,7 +86,7 @@ if (typeof document !== "undefined") {
 		auth: document.getElementById("auth-pill"),
 		statusDot: document.getElementById("status-dot"),
 		statusNote: document.getElementById("status-note"),
-		audioNote: document.getElementById("audio-note"),
+		audioControlsWrapper: document.getElementById("audio-controls-wrapper"),
 		chatMessages: document.getElementById("chat-messages"),
 		transcript: document.getElementById("transcript-output"),
 		reply: document.getElementById("reply-output"),
@@ -121,6 +130,28 @@ if (typeof document !== "undefined") {
 		onboardingToken: document.getElementById("onboarding-token-input"),
 		onboardingRememberToken: document.getElementById("onboarding-remember-token-toggle"),
 		onboardingSave: document.getElementById("onboarding-save-button"),
+
+		tabBar: document.getElementById("tab-bar"),
+		chat: document.querySelector(".chat"),
+		sessionsPanel: document.getElementById("sessions-panel"),
+		cancelTurn: document.getElementById("cancel-turn-button"),
+		sessionCurrent: document.getElementById("session-current"),
+		sessionReady: document.getElementById("session-ready"),
+		sessionSlots: document.getElementById("session-slots"),
+		sessionList: document.getElementById("session-list"),
+		sessionActions: document.getElementById("session-actions"),
+		selectedSessionName: document.getElementById("selected-session-name"),
+		renameInput: document.getElementById("rename-input"),
+		renameButton: document.getElementById("rename-button"),
+		aliasButton: document.getElementById("alias-button"),
+		removeButton: document.getElementById("remove-button"),
+		eventLog: document.getElementById("event-log"),
+		eventStatus: document.getElementById("event-status"),
+		agentList: document.getElementById("agent-list"),
+		refreshAgents: document.getElementById("refresh-agents-button"),
+		workspaceEntries: document.getElementById("workspace-entries"),
+		workspaceBreadcrumb: document.getElementById("workspace-breadcrumb"),
+		workspaceRoot: document.getElementById("workspace-root"),
 	};
 
 	function hasToken() {
@@ -188,6 +219,7 @@ if (typeof document !== "undefined") {
 		state.turnInProgress = isBusy;
 		if (els.sendText) els.sendText.disabled = !!isBusy;
 		if (els.record) els.record.disabled = !!isBusy;
+		if (els.cancelTurn) els.cancelTurn.classList.toggle("hidden", !isBusy);
 		updateRecordingUi();
 	}
 
@@ -195,6 +227,381 @@ if (typeof document !== "undefined") {
 		if (!els.playReply) return;
 		els.playReply.classList.toggle("hidden", !isVisible);
 		els.playReply.disabled = !!disabled;
+	}
+
+	/* -------- Tabs -------- */
+	function switchTab(tab) {
+		state.activeTab = tab;
+		if (els.chat) els.chat.classList.toggle("hidden", tab !== "chat");
+		if (els.sessionsPanel) els.sessionsPanel.classList.toggle("open", tab === "sessions");
+		if (els.tabBar) {
+			for (const btn of els.tabBar.querySelectorAll(".tab")) {
+				btn.classList.toggle("active", btn.dataset.tab === tab);
+			}
+		}
+		if (tab === "sessions") {
+			loadSessions();
+			loadAgents();
+			renderWorkspace(state.workspacePath);
+			startEventStream();
+		}
+	}
+
+	/* -------- Sessions -------- */
+	async function loadSessions() {
+		try {
+			const [dash, slots] = await Promise.all([
+				apiFetch("/v1/sessions"),
+				apiFetch("/v1/sessions/slots"),
+			]);
+			renderDashboard(dash && dash.dashboard ? dash.dashboard : {});
+			renderSlots(slots && slots.slots ? slots.slots : []);
+		} catch (error) {
+			if (els.sessionCurrent) els.sessionCurrent.textContent = String(error.message || error);
+		}
+	}
+
+	function renderDashboard(dashboard) {
+		if (els.sessionCurrent) els.sessionCurrent.textContent = dashboard.current || "none";
+		if (els.sessionReady) els.sessionReady.textContent = `Ready: ${dashboard.ready && dashboard.ready.length ? dashboard.ready.join(", ") : "none"}`;
+		const list = els.sessionList;
+		if (!list) return;
+		list.innerHTML = "";
+		const sessions = Array.isArray(dashboard.sessions) ? dashboard.sessions : [];
+		if (sessions.length === 0) {
+			list.textContent = "No sessions.";
+			return;
+		}
+		for (const entry of sessions) {
+			const row = document.createElement("div");
+			row.className = "session-row";
+			if (entry.sessionPath && entry.sessionPath === state.selectedSessionPath) {
+				row.classList.add("selected");
+			}
+			const name = document.createElement("span");
+			name.className = "session-main";
+			const nameText = document.createElement("span");
+			nameText.className = "session-name";
+			nameText.textContent = entry.name || "(unnamed)";
+			const cwd = document.createElement("span");
+			cwd.className = "session-cwd";
+			cwd.textContent = `Working directory: ${entry.workingDirectory || entry.cwd || "unknown"}`;
+			name.appendChild(nameText);
+			name.appendChild(cwd);
+			const badges = document.createElement("div");
+			badges.style.display = "flex";
+			badges.style.gap = "4px";
+			if (entry.current) {
+				const b = document.createElement("span");
+				b.className = "status-badge current";
+				b.textContent = "current";
+				badges.appendChild(b);
+			}
+			if (entry.ready) {
+				const b = document.createElement("span");
+				b.className = "status-badge ready";
+				b.textContent = "ready";
+				badges.appendChild(b);
+			}
+			const activity = document.createElement("span");
+			activity.className = "status-badge";
+			activity.textContent = entry.activity || "saved";
+			if (entry.activity === "busy") activity.classList.add("busy");
+			badges.appendChild(activity);
+			const aliases = document.createElement("span");
+			aliases.className = "muted";
+			aliases.style.fontSize = "11px";
+			aliases.textContent = entry.aliases && entry.aliases.length ? entry.aliases.join(", ") : "";
+			row.appendChild(name);
+			row.appendChild(badges);
+			row.appendChild(aliases);
+			row.addEventListener("click", () => {
+				state.selectedSessionPath = entry.sessionPath || "";
+				renderDashboard(dashboard);
+				if (els.sessionActions) {
+					els.sessionActions.classList.remove("hidden");
+					if (els.selectedSessionName) els.selectedSessionName.textContent = entry.name || "(unnamed)";
+					if (els.renameInput) els.renameInput.value = "";
+				}
+			});
+			list.appendChild(row);
+		}
+	}
+
+	function renderSlots(slots) {
+		if (!els.sessionSlots) return;
+		if (!slots.length) {
+			els.sessionSlots.textContent = "No route slots.";
+			return;
+		}
+		els.sessionSlots.innerHTML = "";
+		for (const slot of slots) {
+			const line = document.createElement("div");
+			line.style.fontSize = "13px";
+			line.textContent = `PK${slot.family}: ${slot.status}${slot.sessionName ? ` → ${slot.sessionName}` : ""}${slot.labels && slot.labels.length ? ` (${slot.labels.join(", ")})` : ""}`;
+			els.sessionSlots.appendChild(line);
+		}
+	}
+
+	/* -------- Agents -------- */
+	async function loadAgents() {
+		try {
+			const payload = await apiFetch("/v1/agents");
+			state.discoveredAgents = payload && Array.isArray(payload.agents) ? payload.agents : [];
+			state.runningAgents = payload && Array.isArray(payload.running) ? payload.running : [];
+			state.recentAgentSessions = payload && Array.isArray(payload.recent) ? payload.recent : [];
+			state.agentSnapshotAt = payload && typeof payload.generatedAt === "string" ? payload.generatedAt : "";
+			renderAgents();
+		} catch (error) {
+			if (els.agentList) els.agentList.textContent = String(error.message || error);
+		}
+	}
+
+	function renderAgents() {
+		if (!els.agentList) return;
+		if (!state.discoveredAgents.length && !state.runningAgents.length && !state.recentAgentSessions.length) {
+			els.agentList.textContent = "No agents discovered.";
+			return;
+		}
+		els.agentList.innerHTML = "";
+		if (state.agentSnapshotAt) {
+			const stamp = document.createElement("div");
+			stamp.className = "muted";
+			stamp.style.fontSize = "11px";
+			stamp.textContent = `Updated ${new Date(state.agentSnapshotAt).toLocaleTimeString()}`;
+			els.agentList.appendChild(stamp);
+		}
+		const running = state.runningAgents.length
+			? state.runningAgents
+			: state.discoveredAgents.map((target) => ({ target, provider: target.split(":")[0] || "agent" }));
+		if (running.length) {
+			const title = document.createElement("div");
+			title.className = "agent-section-title";
+			title.textContent = "Running";
+			els.agentList.appendChild(title);
+			for (const agent of running) {
+				els.agentList.appendChild(renderAgentRow(agent));
+			}
+		}
+		if (state.recentAgentSessions.length) {
+			const title = document.createElement("div");
+			title.className = "agent-section-title";
+			title.textContent = "Recent session files";
+			els.agentList.appendChild(title);
+			for (const session of state.recentAgentSessions.slice(0, 12)) {
+				els.agentList.appendChild(renderRecentAgentRow(session));
+			}
+		}
+	}
+
+	function renderAgentRow(agent) {
+		const row = document.createElement("button");
+		row.type = "button";
+		row.className = "agent-row";
+		const title = document.createElement("span");
+		title.className = "agent-row-title";
+		title.textContent = agent.target || `${agent.provider || "agent"}:${agent.pid || "?"}`;
+		const meta = document.createElement("span");
+		meta.className = "agent-row-meta";
+		const details = [];
+		if (agent.cwd) details.push(agent.cwd);
+		else if (agent.cwdBasename) details.push(agent.cwdBasename);
+		if (agent.startedAt) details.push(`started ${new Date(agent.startedAt).toLocaleTimeString()}`);
+		meta.textContent = details.join(" | ") || "No working path reported.";
+		row.appendChild(title);
+		row.appendChild(meta);
+		row.addEventListener("click", () => {
+			if (agent.target) {
+				if (els.targetSelect) els.targetSelect.value = agent.target;
+				if (els.targetInput) els.targetInput.value = agent.target;
+				setStatus(`Route target selected: ${agent.target}`);
+			}
+			if (agent.cwd && els.launchPathInput) {
+				els.launchPathInput.value = agent.cwd;
+				state.launchPath = agent.cwd;
+				saveSettings();
+			}
+		});
+		return row;
+	}
+
+	function renderRecentAgentRow(session) {
+		const row = document.createElement(session.cwd ? "button" : "div");
+		if (session.cwd) row.type = "button";
+		row.className = `agent-row${session.cwd ? "" : " readonly"}`;
+		const title = document.createElement("span");
+		title.className = "agent-row-title";
+		title.textContent = session.cwdBasename
+			? `${session.provider || "agent"}: ${session.cwdBasename}`
+			: `${session.provider || "agent"}: ${session.title || session.sessionId || "(untitled)"}`;
+		const meta = document.createElement("span");
+		meta.className = "agent-row-meta";
+		const bits = [];
+		if (session.cwd) bits.push(session.cwd);
+		if (session.updatedAt) bits.push(new Date(session.updatedAt).toLocaleString());
+		if (session.path) bits.push(session.path);
+		meta.textContent = bits.join(" | ");
+		row.appendChild(title);
+		row.appendChild(meta);
+		if (session.cwd) {
+			row.addEventListener("click", () => {
+				if (els.launchPathInput) els.launchPathInput.value = session.cwd;
+				state.launchPath = session.cwd;
+				saveSettings();
+				setStatus(`Launch path selected: ${session.cwd}`);
+			});
+		}
+		return row;
+	}
+
+	/* -------- Event Stream (SSE) -------- */
+	function startEventStream() {
+		if (state.eventSource) return;
+		if (!els.eventLog || !els.eventStatus) return;
+		const url = `/v1/events?since=${state.eventLog.length}`;
+		const es = new EventSource(url);
+		state.eventSource = es;
+		es.onopen = () => {
+			if (els.eventStatus) els.eventStatus.className = "status-dot ready";
+		};
+		es.onmessage = (event) => {
+			try {
+				const data = JSON.parse(event.data);
+				state.eventLog.push(data);
+				if (state.eventLog.length > 50) state.eventLog.shift();
+				renderEvent(data);
+			} catch {}
+		};
+		es.onerror = () => {
+			if (els.eventStatus) els.eventStatus.className = "status-dot error";
+			stopEventStream();
+			setTimeout(startEventStream, 3000);
+		};
+	}
+
+	function stopEventStream() {
+		if (state.eventSource) {
+			state.eventSource.close();
+			state.eventSource = null;
+		}
+	}
+
+	function renderEvent(event) {
+		if (!els.eventLog) return;
+		const node = document.createElement("div");
+		node.className = "event-item";
+		const meta = document.createElement("div");
+		meta.className = "event-meta";
+		const ts = typeof event.ts === "number" ? new Date(event.ts).toLocaleTimeString() : "";
+		meta.textContent = `${ts} · ${event.source || "?"} · ${event.kind || "?"}`;
+		const body = document.createElement("div");
+		body.textContent = JSON.stringify(event.payload || {});
+		node.appendChild(meta);
+		node.appendChild(body);
+		els.eventLog.appendChild(node);
+		els.eventLog.scrollTop = els.eventLog.scrollHeight;
+	}
+
+	/* -------- Workspace Browser -------- */
+	async function renderWorkspace(path) {
+		if (!els.workspaceEntries) return;
+		state.workspacePath = path || "";
+		try {
+			const payload = await apiFetch(`/v1/workspace?path=${encodeURIComponent(state.workspacePath)}`);
+			const entries = payload && Array.isArray(payload.workspace) ? payload.workspace : [];
+			els.workspaceEntries.innerHTML = "";
+			for (const entry of entries) {
+				const div = document.createElement("div");
+				div.className = "workspace-entry";
+				div.textContent = `${entry.type === "directory" ? "📁" : "📄"} ${entry.name}`;
+				if (entry.type === "directory") {
+					div.addEventListener("click", () => renderWorkspace(entry.path));
+				}
+				els.workspaceEntries.appendChild(div);
+			}
+			renderBreadcrumb(state.workspacePath);
+		} catch (error) {
+			els.workspaceEntries.textContent = String(error.message || error);
+		}
+	}
+
+	function renderBreadcrumb(path) {
+		if (!els.workspaceBreadcrumb) return;
+		els.workspaceBreadcrumb.innerHTML = "";
+		const rootBtn = document.createElement("button");
+		rootBtn.className = "secondary";
+		rootBtn.type = "button";
+		rootBtn.textContent = "Root";
+		rootBtn.addEventListener("click", () => renderWorkspace(""));
+		els.workspaceBreadcrumb.appendChild(rootBtn);
+		if (!path) return;
+		const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
+		let acc = "";
+		for (const part of parts) {
+			acc += "/" + part;
+			const btn = document.createElement("button");
+			btn.className = "secondary";
+			btn.type = "button";
+			btn.textContent = part;
+			btn.addEventListener("click", (() => {
+				const p = acc;
+				return () => renderWorkspace(p);
+			})());
+			els.workspaceBreadcrumb.appendChild(btn);
+		}
+	}
+
+	/* -------- Session Mutations -------- */
+	async function doSessionRename() {
+		if (!els.renameInput || !state.selectedSessionPath) return;
+		const newName = els.renameInput.value.trim();
+		if (!newName) return;
+		try {
+			const result = await apiFetch("/v1/sessions/rename", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ sessionPath: state.selectedSessionPath, newName }),
+			});
+			setStatus(result.message || "Renamed.");
+			loadSessions();
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+		}
+	}
+
+	async function doSessionAlias() {
+		if (!els.renameInput || !state.selectedSessionPath) return;
+		const alias = els.renameInput.value.trim();
+		if (!alias) return;
+		try {
+			const result = await apiFetch("/v1/sessions/alias", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ sessionPath: state.selectedSessionPath, alias }),
+			});
+			setStatus(result.message || "Aliased.");
+			loadSessions();
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+		}
+	}
+
+	async function doSessionRemove() {
+		if (!state.selectedSessionPath) return;
+		if (!confirm("Remove routing for this session?")) return;
+		try {
+			const result = await apiFetch("/v1/sessions/remove", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ sessionPath: state.selectedSessionPath }),
+			});
+			setStatus(result.message || "Removed.");
+			state.selectedSessionPath = "";
+			if (els.sessionActions) els.sessionActions.classList.add("hidden");
+			loadSessions();
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+		}
 	}
 
 	function getSessionStorage() {
@@ -413,7 +820,7 @@ if (typeof document !== "undefined") {
 				els.audio.classList.add("hidden");
 			}
 			setPlayReplyButton(false);
-			if (els.audioNote) els.audioNote.textContent = "Reply audio not provided.";
+			if (els.audioControlsWrapper) els.audioControlsWrapper.classList.add("hidden");
 			onReady?.(undefined);
 			return;
 		}
@@ -421,7 +828,7 @@ if (typeof document !== "undefined") {
 		const audioUrl = new URL(url, window.location.origin);
 		const headers = new Headers();
 		if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
-		if (els.audioNote) els.audioNote.textContent = "Loading reply audio...";
+		if (els.audioControlsWrapper) els.audioControlsWrapper.classList.remove("hidden");
 		if (els.audio) els.audio.classList.add("hidden");
 		setPlayReplyButton(false);
 		fetch(audioUrl, { headers })
@@ -443,7 +850,7 @@ if (typeof document !== "undefined") {
 				const tts = payload && payload.providers && payload.providers.tts;
 				const source = tts ? ` (${tts})` : "";
 				if (!state.autoplay) {
-					if (els.audioNote) els.audioNote.textContent = `Reply audio ready${source}. Tap play to hear it.`;
+					if (els.statusNote) els.statusNote.textContent = `Reply audio ready${source}. Tap play to hear it.`;
 					onReady?.(undefined);
 					return;
 				}
@@ -453,10 +860,10 @@ if (typeof document !== "undefined") {
 					if (resolved) return;
 					resolved = true;
 					if (playbackWatchdog) window.clearTimeout(playbackWatchdog);
-					if (playbackMs !== undefined && els.audioNote) {
-						els.audioNote.textContent = `Playback started${source} (${Math.max(0, playbackMs).toFixed(0)}ms).`;
-					} else if (els.audioNote) {
-						els.audioNote.textContent = `Reply ready${source}.`;
+					if (playbackMs !== undefined && els.statusNote) {
+						els.statusNote.textContent = `Playback started${source} (${Math.max(0, playbackMs).toFixed(0)}ms).`;
+					} else if (els.statusNote) {
+						els.statusNote.textContent = `Reply ready${source}.`;
 					}
 					onPlaybackStarted?.(playbackMs);
 					onReady?.(playbackMs);
@@ -475,7 +882,7 @@ if (typeof document !== "undefined") {
 					}
 				}, 2000);
 				els.audio.play().catch((error) => {
-					if (els.audioNote) els.audioNote.textContent = "Reply ready. Tap play if autoplay is blocked.";
+					if (els.statusNote) els.statusNote.textContent = "Reply ready. Tap play if autoplay is blocked.";
 					onPlaybackFailed?.(String(error.message || error));
 					finalize();
 				});
@@ -485,7 +892,7 @@ if (typeof document !== "undefined") {
 					els.audio.classList.add("hidden");
 					els.audio.removeAttribute("src");
 				}
-				if (els.audioNote) els.audioNote.textContent = String(error.message || error);
+				if (els.statusNote) els.statusNote.textContent = String(error.message || error);
 				setPlayReplyButton(false);
 				onReady?.(undefined);
 			});
@@ -497,7 +904,7 @@ if (typeof document !== "undefined") {
 			return;
 		}
 		els.audio.play().catch((error) => {
-			if (els.audioNote) els.audioNote.textContent = "Unable to play reply audio.";
+			if (els.statusNote) els.statusNote.textContent = "Unable to play reply audio.";
 			setStatus(String(error.message || error), "error");
 		});
 	}
@@ -856,6 +1263,32 @@ if (typeof document !== "undefined") {
 		saveSettings();
 		updateRecordingUi();
 	});
+
+	/* Tabs */
+	if (els.tabBar) {
+		for (const btn of els.tabBar.querySelectorAll(".tab")) {
+			btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+		}
+	}
+
+	/* Cancel turn */
+	els.cancelTurn?.addEventListener("click", async () => {
+		try {
+			setStatus("Cancelling turn…");
+			await apiFetch("/v1/turn/cancel", { method: "POST" });
+			setStatus("Turn cancelled.");
+			setRecordingStateBusy(false);
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+		}
+	});
+
+	/* Sessions */
+	els.refreshAgents?.addEventListener("click", loadAgents);
+	els.renameButton?.addEventListener("click", doSessionRename);
+	els.aliasButton?.addEventListener("click", doSessionAlias);
+	els.removeButton?.addEventListener("click", doSessionRemove);
+	els.workspaceRoot?.addEventListener("click", () => renderWorkspace(""));
 
 	loadSettings();
 	updateRecordingUi();

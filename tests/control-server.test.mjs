@@ -84,6 +84,13 @@ async function withServer(overrides = {}, fn) {
 		onTextTurn: overrides.onTextTurn || (async (text, includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `${text}:${includeAudio}:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
 		onVoiceTurn: overrides.onVoiceTurn || (async (_buffer, _mimeType, _includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `voice:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
 		onTurnCancel: overrides.onTurnCancel,
+		getSessionDashboard: overrides.getSessionDashboard,
+		getCompactRouteSlots: overrides.getCompactRouteSlots,
+		onSessionRename: overrides.onSessionRename,
+		onSessionAlias: overrides.onSessionAlias,
+		onSessionRemove: overrides.onSessionRemove,
+		getDiscoveredAgents: overrides.getDiscoveredAgents,
+		tailSessionEvents: overrides.tailSessionEvents,
 	});
 	const runtime = await server.start();
 	try {
@@ -182,8 +189,32 @@ test("public health and discovery descriptor do not expose auth token", async ()
 		const descriptor = discovery.json();
 		assert.equal(descriptor.schema, "pi-speak.discovery.v1");
 		assert.equal(descriptor.authRequired, true);
+		assert.equal(descriptor.pairing.required, true);
+		assert.equal(descriptor.pairing.tokenDelivery, "setup-qr-only");
+		assert.equal(descriptor.security.publicDiscoveryIncludesToken, false);
 		assert.equal(descriptor.endpoints.cancelTurn, "/v1/turn/cancel");
 		assert.doesNotMatch(discovery.body, /secret-token|P-K-Haxx1!/);
+	});
+});
+
+test("setup page carries token only when launched from pairing URL", async () => {
+	await withServer({}, async (port) => {
+		const publicSetup = await request({
+			port,
+			path: "/setup",
+			headers: { Host: "tailnet.example" },
+		});
+		assert.equal(publicSetup.statusCode, 200);
+		assert.doesNotMatch(publicSetup.body, /[?&](amp;)?token=/);
+
+		const pairedSetup = await request({
+			port,
+			path: "/setup?token=secret-token&profile_name=Main",
+			headers: { Host: "tailnet.example" },
+		});
+		assert.equal(pairedSetup.statusCode, 200);
+		assert.match(pairedSetup.body, /token=secret-token/);
+		assert.match(pairedSetup.body, /no IP address or API key entry is needed/i);
 	});
 });
 
@@ -277,7 +308,8 @@ test("phone setup page is public and includes install plus connect links", async
 		});
 		assert.equal(response.statusCode, 200);
 		assert.match(response.headers["content-type"], /text\/html/);
-		assert.match(response.body, /Pi Speak phone setup/);
+		assert.match(response.body, /Pair Pi Speak/);
+		assert.match(response.body, /no IP address or API key entry is needed/i);
 		assert.match(response.body, /download\/pi-speak\.apk/);
 		assert.match(response.body, /pi-speak:\/\/setup/);
 		assert.match(response.body, /token=secret-token/);
@@ -711,5 +743,210 @@ test("turn routes accept an explicit agent provider override", async () => {
 		cwd: undefined,
 		mode: "auto",
 		agentProvider: "pi",
+	});
+});
+
+
+test("session dashboard endpoint returns dashboard when callback is provided", async () => {
+	await withServer({
+		getSessionDashboard: () => ({ current: "pi", ready: ["claude"], sessions: [{ name: "pi", current: true, ready: true, activity: "idle", aliases: [], workingDirectory: "C:\\dev\\pi" }] }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions",
+			method: "GET",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.dashboard.current, "pi");
+		assert.equal(body.dashboard.sessions[0].workingDirectory, "C:\\dev\\pi");
+	});
+});
+
+test("session dashboard endpoint returns 501 when callback is missing", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions",
+			method: "GET",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 501);
+		const body = await response.json();
+		assert.equal(body.ok, false);
+	});
+});
+
+test("route slots endpoint returns slots when callback is provided", async () => {
+	await withServer({
+		getCompactRouteSlots: () => [{ family: "1", sessionName: "pi", labels: ["one"], status: "mapped" }],
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/slots",
+			method: "GET",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.slots.length, 1);
+		assert.equal(body.slots[0].family, "1");
+	});
+});
+
+test("session rename endpoint invokes callback and returns result", async () => {
+	await withServer({
+		onSessionRename: async (payload) => ({ ok: true, message: `renamed:${payload.newName}` }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/rename",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ sessionPath: "/tmp/pi.json", newName: "alpha" }),
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "renamed:alpha");
+	});
+});
+
+test("session alias endpoint invokes callback and returns result", async () => {
+	await withServer({
+		onSessionAlias: async (payload) => ({ ok: true, message: `aliased:${payload.alias}` }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/alias",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ sessionPath: "/tmp/pi.json", alias: "one" }),
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "aliased:one");
+	});
+});
+
+test("session remove endpoint invokes callback and returns result", async () => {
+	await withServer({
+		onSessionRemove: async (payload) => ({ ok: true, message: `removed:${payload.sessionPath}` }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/remove",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ sessionPath: "/tmp/pi.json" }),
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "removed:/tmp/pi.json");
+	});
+});
+
+test("agents endpoint returns discovered agents when callback is provided", async () => {
+	await withServer({
+		getDiscoveredAgents: () => ["codex:1234/project"],
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/agents",
+			method: "GET",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.deepEqual(body.agents, ["codex:1234/project"]);
+		assert.deepEqual(body.running, []);
+		assert.deepEqual(body.recent, []);
+	});
+});
+
+test("agents endpoint returns structured running agents and recent session paths", async () => {
+	await withServer({
+		getDiscoveredAgents: () => ({
+			generatedAt: "2026-06-01T12:00:00.000Z",
+			targets: ["codex:1234 pi-speak-extension"],
+			running: [{
+				provider: "codex",
+				pid: 1234,
+				target: "codex:1234 pi-speak-extension",
+				cwd: "C:\\dev\\Desktop-Projects\\pi-speak-extension",
+				cwdBasename: "pi-speak-extension",
+				source: "process",
+			}],
+			recent: [{
+				provider: "codex",
+				path: "C:\\Users\\prest\\.codex\\sessions\\2026\\06\\01\\session.jsonl",
+				sessionId: "abc123",
+				title: "Recent session",
+				updatedAt: "2026-06-01T11:59:00.000Z",
+				sourceHint: "sm",
+			}],
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/agents",
+			method: "GET",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.generatedAt, "2026-06-01T12:00:00.000Z");
+		assert.deepEqual(body.agents, ["codex:1234 pi-speak-extension"]);
+		assert.equal(body.running[0].cwdBasename, "pi-speak-extension");
+		assert.equal(body.recent[0].sessionId, "abc123");
+	});
+});
+
+test("event stream endpoint returns SSE headers and initial data", async () => {
+	await withServer({
+		tailSessionEvents: (sinceOffset = 0) => ({
+			events: sinceOffset === 0 ? [{ ts: 1, kind: "test", source: "admin", payload: {} }] : [],
+			nextOffset: 1,
+		}),
+	}, async (port) => {
+		const result = await new Promise((resolve, reject) => {
+			const req = http.request({ host: "127.0.0.1", port, path: "/v1/events", method: "GET", headers: { Authorization: "Bearer secret-token" } }, (res) => {
+				let data = "";
+				res.setEncoding("utf8");
+				res.on("data", (chunk) => {
+					data += chunk;
+					if (data.includes("data:")) {
+						req.destroy();
+						resolve({ statusCode: res.statusCode, headers: res.headers, body: data });
+					}
+				});
+				res.on("error", reject);
+			});
+			req.on("error", reject);
+			req.setTimeout(3000, () => {
+				req.destroy();
+				reject(new Error("SSE test timeout"));
+			});
+			req.end();
+		});
+		assert.equal(result.statusCode, 200);
+		assert.equal(result.headers["content-type"], "text/event-stream");
+		assert.ok(result.body.includes("data:"));
 	});
 });

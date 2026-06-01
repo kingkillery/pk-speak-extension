@@ -27,7 +27,18 @@ export type ConversationExecutionPlan = {
 	rationale: string;
 	actionForSeed?: string;
 	signals?: string[];
+	routeClass?: "fast" | "fast-plus-tools" | "slow-think";
+	riskLevel?: "low" | "medium" | "high";
+	latencyBudgetMs?: number;
+	costTier?: "T0" | "T1" | "T2" | "T3";
+	userAck?: string;
+	userProgress?: string;
+	escalationReason?: string;
 };
+
+type RouteClass = NonNullable<ConversationExecutionPlan["routeClass"]>;
+type RouteRiskLevel = NonNullable<ConversationExecutionPlan["riskLevel"]>;
+type RouteCostTier = NonNullable<ConversationExecutionPlan["costTier"]>;
 
 type ExecutionRouterMode = "auto" | "pi" | "codex";
 
@@ -310,6 +321,45 @@ const CANDIDATE_PI_KEYWORDS = [
 	"route",
 ];
 
+const SLOW_THINK_KEYWORDS = [
+	"architecture",
+	"architectural",
+	"comprehensive",
+	"deep",
+	"difficult",
+	"expert",
+	"in depth",
+	"investigate",
+	"multi step",
+	"pristine",
+	"production",
+	"refactor",
+	"review",
+	"root cause",
+	"security",
+	"ship",
+	"thorough",
+	"wire",
+];
+
+const HIGH_RISK_KEYWORDS = [
+	"delete",
+	"remove",
+	"rm",
+	"del",
+	"destructive",
+	"credentials",
+	"secret",
+	"token",
+	"auth",
+	"production",
+	"deploy",
+	"publish",
+	"payment",
+	"legal",
+	"financial",
+];
+
 function normalizeText(value: string) {
 	return value
 		.toLowerCase()
@@ -472,6 +522,67 @@ function routeByKeywords(summary: ConversationReducerSummary): ExecutionBackend 
 	return "pi";
 }
 
+function classifyRoute(plan: Omit<ConversationExecutionPlan, "routeClass" | "riskLevel" | "latencyBudgetMs" | "costTier" | "userAck" | "userProgress" | "escalationReason">, summary: ConversationReducerSummary) {
+	const allText = normalizeText([
+		summary.goal,
+		...summary.actionItems,
+		...summary.constraints,
+		...summary.doNotDo,
+		plan.rationale,
+	].join(" "));
+	const slowSignals = findKeywordSignals(allText, SLOW_THINK_KEYWORDS);
+	const riskSignals = findKeywordSignals(allText, HIGH_RISK_KEYWORDS);
+	const multiAction = summary.actionItems.length >= 2;
+	const lowConfidence = summary.confidence < 0.62;
+	const routeClass: RouteClass = !plan.dispatch
+		? "fast"
+		: plan.backend === "codex" || slowSignals.length > 0 || multiAction || lowConfidence || riskSignals.length > 0
+			? "slow-think"
+			: plan.backend === "pi"
+				? "fast-plus-tools"
+				: "fast-plus-tools";
+	const riskLevel: RouteRiskLevel = riskSignals.length > 0
+		? "high"
+		: routeClass === "slow-think" || multiAction || lowConfidence
+			? "medium"
+			: "low";
+	const latencyBudgetMs = routeClass === "fast" ? 50 : routeClass === "fast-plus-tools" ? 200 : 1000;
+	const costTier: RouteCostTier = routeClass === "fast" ? "T0" : routeClass === "fast-plus-tools" ? "T1" : riskLevel === "high" ? "T3" : "T2";
+	const escalationReason = routeClass === "slow-think"
+		? [
+				plan.backend === "codex" ? "file-changing coding workflow" : "",
+				multiAction ? "multiple action items" : "",
+				lowConfidence ? "medium confidence route" : "",
+				slowSignals.length ? `complexity signal: ${slowSignals[0]}` : "",
+				riskSignals.length ? `risk signal: ${riskSignals[0]}` : "",
+			].filter(Boolean).join("; ")
+		: undefined;
+	const userAck = routeClass === "slow-think"
+		? "I'll need to think for a minute on this one. I'm starting the full coding workflow now."
+		: undefined;
+	const userProgress = routeClass === "slow-think"
+		? userAck
+		: routeClass === "fast-plus-tools"
+			? "I'm checking that now."
+			: undefined;
+	return {
+		routeClass,
+		riskLevel,
+		latencyBudgetMs,
+		costTier,
+		userAck,
+		userProgress,
+		escalationReason,
+	};
+}
+
+function withRouteMetadata(plan: Omit<ConversationExecutionPlan, "routeClass" | "riskLevel" | "latencyBudgetMs" | "costTier" | "userAck" | "userProgress" | "escalationReason">, summary: ConversationReducerSummary): ConversationExecutionPlan {
+	return {
+		...plan,
+		...classifyRoute(plan, summary),
+	};
+}
+
 export function planConversationExecution(
 	summary: ConversationReducerSummary,
 	options: {
@@ -483,7 +594,7 @@ export function planConversationExecution(
 	const mode = options.mode || readExecutionMode();
 	const signalRoute = detectSignalRoute(summary);
 	if (signalRoute) {
-		return {
+		return withRouteMetadata({
 			dispatch: false,
 			backend: signalRoute.backend,
 			reason: signalRoute.reason,
@@ -491,11 +602,11 @@ export function planConversationExecution(
 			rationale: signalRoute.rationale,
 			signals: signalRoute.signals,
 			actionForSeed: summary.actionItems[0] || summary.goal,
-		};
+		}, summary);
 	}
 
 	if (!summary.shouldDispatch || summary.actionItems.length === 0) {
-		return {
+		return withRouteMetadata({
 			dispatch: false,
 			backend: "pi",
 			reason: "clarify",
@@ -503,43 +614,43 @@ export function planConversationExecution(
 			rationale: summary.clarifyingQuestion
 				? summary.clarifyingQuestion
 				: "I need a concrete action to dispatch.",
-		};
+		}, summary);
 	}
 
 	const targetContext = options.targetName ? ` target ${options.targetName}` : "";
 	if (options.provider) {
-		return {
+		return withRouteMetadata({
 			dispatch: true,
 			backend: options.provider,
 			reason: options.provider === "codex" ? "dispatch-codex" : "dispatch-pi",
 			confidence: summary.confidence,
 			rationale: `Routing to ${options.provider === "codex" ? "Codex" : "Pi"} because the client selected that backend.${targetContext}`,
 			actionForSeed: summary.actionItems[0] || "execute task",
-		};
+		}, summary);
 	}
 	if (mode === "pi") {
-		return {
+		return withRouteMetadata({
 			dispatch: true,
 			backend: "pi",
 			reason: "dispatch-pi",
 			confidence: summary.confidence,
 			rationale: `Routing to Pi for ${summary.actionItems.length} action item(s)${targetContext}.`,
 			actionForSeed: summary.actionItems[0] || "execute task",
-		};
+		}, summary);
 	}
 	if (mode === "codex") {
-		return {
+		return withRouteMetadata({
 			dispatch: true,
 			backend: "codex",
 			reason: "dispatch-codex",
 			confidence: summary.confidence,
 			rationale: `Routing to Codex for ${summary.actionItems.length} action item(s)${targetContext}.`,
 			actionForSeed: summary.actionItems[0] || "execute task",
-		};
+		}, summary);
 	}
 
 	const backend = routeByKeywords(summary);
-	return {
+	return withRouteMetadata({
 		dispatch: true,
 		backend,
 		reason: backend === "codex" ? "dispatch-codex" : "dispatch-pi",
@@ -548,5 +659,5 @@ export function planConversationExecution(
 			? `Routing to Codex because the action likely touches files.${targetContext}`
 			: `Routing to Pi for planning/analysis on ${summary.actionItems.length} action item(s).${targetContext}`,
 		actionForSeed: summary.actionItems[0] || "execute task",
-	};
+	}, summary);
 }

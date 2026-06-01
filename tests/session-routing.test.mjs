@@ -167,6 +167,10 @@ test("buildSessionDashboard resolves busy/idle/saved activity and ready state pe
 			One: "/sessions/bugfix.jsonl",
 			Two: "/sessions/research.jsonl",
 		},
+		workingDirectories: {
+			"/sessions/bugfix.jsonl": "/work/bugfix",
+			"/sessions/research.jsonl": "/work/research",
+		},
 		runtimeSnapshots: [
 			{
 				sessionPath: "/sessions/research.jsonl",
@@ -203,11 +207,14 @@ test("buildSessionDashboard resolves busy/idle/saved activity and ready state pe
 	assert.equal(bugfix.ready, false);
 	assert.equal(bugfix.activity, "idle");
 	assert.equal(bugfix.path, "/sessions/bugfix.jsonl");
+	assert.equal(bugfix.workingDirectory, "/work/bugfix");
+	assert.equal(bugfix.cwd, "/work/bugfix");
 	assert.deepEqual(bugfix.aliases, ["One"]);
 
 	const research = byName.get("Research");
 	assert.ok(research, "Research entry present");
 	assert.equal(research.current, false);
+	assert.equal(research.workingDirectory, "/work/research");
 	assert.equal(research.ready, true);
 	assert.equal(research.activity, "busy");
 	assert.deepEqual(research.aliases, ["Two"]);
