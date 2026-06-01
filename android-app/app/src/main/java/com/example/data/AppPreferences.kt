@@ -62,13 +62,21 @@ class AppPreferences(context: Context) {
         get() = prefs.getString("codex_session_name", "Main-Project-Alpha") ?: "Main-Project-Alpha"
         set(value) = prefs.edit().putString("codex_session_name", value).apply()
 
+    var selectedGatewaySessionPath: String
+        get() = prefs.getString("selected_gateway_session_path", "") ?: ""
+        set(value) = prefs.edit().putString("selected_gateway_session_path", value).apply()
+
     var machineProfileName: String
         get() = prefs.getString("machine_profile_name", "MSI / appserver") ?: "MSI / appserver"
         set(value) = prefs.edit().putString("machine_profile_name", value).apply()
 
     var targetIpAddress: String
-        get() = prefs.getString("target_ip_address", "http://100.76.136.91:8767") ?: "http://100.76.136.91:8767"
+        get() = prefs.getString("target_ip_address", "") ?: ""
         set(value) = prefs.edit().putString("target_ip_address", value).apply()
+
+    var lastKnownAppVersionCode: Int
+        get() = prefs.getInt("last_known_app_version_code", 0)
+        set(value) = prefs.edit().putInt("last_known_app_version_code", value).apply()
 
     var workspaceRoot: String
         get() = prefs.getString("workspace_root", "C:\\") ?: "C:\\"
@@ -101,6 +109,16 @@ class AppPreferences(context: Context) {
     var connectionMode: String
         get() = prefs.getString("connection_mode", "Tailscale") ?: "Tailscale"
         set(value) = prefs.edit().putString("connection_mode", value).apply()
+
+    fun clearGatewayConfigIfAppUpgraded(currentVersionCode: Int) {
+        val previousVersionCode = lastKnownAppVersionCode
+        if (previousVersionCode != 0 && previousVersionCode != currentVersionCode) {
+            prefs.edit()
+                .remove("target_ip_address")
+                .apply()
+        }
+        lastKnownAppVersionCode = currentVersionCode
+    }
 
     fun getRecordedSessions(): List<RecordedSession> {
         val json = prefs.getString("recorded_sessions_json", null) ?: return emptyList()

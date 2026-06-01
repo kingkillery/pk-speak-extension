@@ -36,9 +36,9 @@ function getPythonExecutable() {
 }
 
 function getExtensionDir() {
-	const parentCandidate = join(__dirname, "..", "listener", "stt_worker.py");
-	if (existsSync(parentCandidate)) return join(__dirname, "..");
-	return __dirname;
+	const parentCandidate = join(import.meta.dirname, "..", "listener", "stt_worker.py");
+	if (existsSync(parentCandidate)) return join(import.meta.dirname, "..");
+	return import.meta.dirname;
 }
 
 function getLocalSttWorkerEnv(): NodeJS.ProcessEnv {

@@ -34,6 +34,11 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
+    private val healthClient = OkHttpClient.Builder()
+        .connectTimeout(1500, TimeUnit.MILLISECONDS)
+        .readTimeout(1500, TimeUnit.MILLISECONDS)
+        .writeTimeout(1500, TimeUnit.MILLISECONDS)
+        .build()
     @Volatile
     private var activeTurnCall: Call? = null
 
@@ -132,6 +137,27 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
 
     fun cancelActiveTurnCall() {
         activeTurnCall?.cancel()
+    }
+
+    suspend fun pingHealth(): Boolean {
+        return withContext(Dispatchers.IO) {
+            pingHealth(gatewayBaseUrl())
+        }
+    }
+
+    private fun pingHealth(baseUrl: String): Boolean {
+        if (baseUrl.isBlank()) return false
+        return try {
+            val request = Request.Builder().url("${baseUrl.trim().trimEnd('/')}/health").get().build()
+            healthClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return false
+                val body = response.body?.string() ?: ""
+                JSONObject(body).optString("app") == "pi-speak"
+            }
+        } catch (e: Exception) {
+            Log.d("VoiceAgent", "Health ping failed for $baseUrl: ${e.message}")
+            false
+        }
     }
 
     suspend fun testConnection(): ConnectionTestReport {
@@ -368,7 +394,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                     GatewayTurnResult(text, reply, parseProgress(json))
                 } else {
                     Log.e("VoiceAgent", "Gateway text turn failed: ${response.code} ${response.message}")
-                    GatewayTurnResult(text, "Local gateway returned operational status: ${response.code}")
+                    GatewayTurnResult(text, "Local gateway returned operational status: ${response.code}", statusCode = response.code)
                 }
             }
         } catch (e: CancellationException) {
@@ -378,7 +404,11 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 throw CancellationException("Local request cancelled")
             }
             Log.e("VoiceAgent", "Gateway text turn connection failed", e)
-            GatewayTurnResult(text, "Gateway connection error: Ensure you are connected to the Tailscale subnet or Bluetooth local link. Details:\n${e.localizedMessage}")
+            GatewayTurnResult(
+                transcript = text,
+                replyText = "Gateway connection error: Ensure you are connected to the Tailscale subnet or Bluetooth local link. Details:\n${e.localizedMessage}",
+                connectionError = true
+            )
         } finally {
             if (activeTurnCall === call) {
                 activeTurnCall = null
@@ -427,7 +457,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 } else {
                     val errorBody = response.body?.string()?.take(240) ?: ""
                     Log.e("VoiceAgent", "Gateway voice turn failed: ${response.code} ${response.message} $errorBody")
-                    GatewayTurnResult("Voice transmission completed.", "Operational status returned by remote: ${response.code}")
+                    GatewayTurnResult("Voice transmission completed.", "Operational status returned by remote: ${response.code}", statusCode = response.code)
                 }
             }
         } catch (e: CancellationException) {
@@ -439,8 +469,9 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             Log.e("VoiceAgent", "Gateway voice turn connection failed", e)
             val detail = e.localizedMessage ?: e.javaClass.simpleName
             GatewayTurnResult(
-                "Voice transmission offline.",
-                "Offline: Couldn't connect to target gateway IP (${gatewayBaseUrl()}). Verify Pi Speak machine service is hosting on port 8767. Details: $detail"
+                transcript = "Voice transmission offline.",
+                replyText = "Offline: Couldn't connect to target gateway IP (${gatewayBaseUrl()}). Verify Pi Speak machine service is hosting on port 8767. Details: $detail",
+                connectionError = true
             )
         } finally {
             if (activeTurnCall === call) {
@@ -562,7 +593,9 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                                     ip = targetIp,
                                     status = status,
                                     latencyMs = 15L,
-                                    activeSessions = sessions
+                                    activeSessions = sessions,
+                                    authRequired = true,
+                                    pairingRequired = prefs.remoteToken.isBlank()
                                 )
                             )
                         }
@@ -607,7 +640,10 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                                             ip = baseUrl,
                                             status = "online",
                                             latencyMs = 20L,
-                                            activeSessions = listOf(ActiveCodexSession("default", "CODEX", "Discovered Pi Speak gateway", "idle"))
+                                            activeSessions = listOf(ActiveCodexSession("default", "CODEX", "Discovered Pi Speak gateway", "idle")),
+                                            authRequired = true,
+                                            pairingRequired = prefs.remoteToken.isBlank(),
+                                            setupUrl = "$baseUrl/setup"
                                         )
                                     synchronized(results) {
                                         results[machine.ip] = machine
@@ -695,7 +731,10 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                                 ip = baseUrl.trimEnd('/'),
                                 status = "online",
                                 latencyMs = 20L,
-                                activeSessions = listOf(ActiveCodexSession("default", "CODEX", "Discovered Pi Speak gateway", "idle"))
+                                activeSessions = listOf(ActiveCodexSession("default", "CODEX", "Discovered Pi Speak gateway", "idle")),
+                                authRequired = json.optBoolean("authRequired", true),
+                                pairingRequired = json.optBoolean("authRequired", true) && prefs.remoteToken.isBlank(),
+                                setupUrl = "${baseUrl.trimEnd('/')}/setup"
                             )
                         results[machine.ip] = machine
                     } catch (_: SocketTimeoutException) {
@@ -733,6 +772,11 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 val json = JSONObject(body)
                 if (json.optString("app") != "pi-speak") return null
                 val endpoints = json.optJSONObject("endpoints")
+                val pairing = json.optJSONObject("pairing")
+                val authRequired = json.optBoolean("authRequired", false)
+                val pairingRequired = pairing?.optBoolean("required", json.optBoolean("pairingRequired", authRequired))
+                    ?: json.optBoolean("pairingRequired", authRequired)
+                val setupPath = endpoints?.optString("setup", "/setup")?.ifBlank { "/setup" } ?: "/setup"
                 val sessions = mutableListOf<ActiveCodexSession>()
                 val agent = json.optJSONObject("agent")
                 val provider = agent?.optString("provider", "CODEX")?.uppercase() ?: "CODEX"
@@ -742,7 +786,10 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                     ip = baseUrl,
                     status = if (endpoints != null) "online" else "unknown",
                     latencyMs = (System.currentTimeMillis() - started).coerceAtLeast(1),
-                    activeSessions = sessions
+                    activeSessions = sessions,
+                    authRequired = authRequired,
+                    pairingRequired = pairingRequired,
+                    setupUrl = setupUrl(baseUrl, setupPath)
                 )
             }
         } catch (e: Exception) {
@@ -791,6 +838,125 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
+    suspend fun getSessionDashboard(): GatewaySessionDashboard {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) {
+                throw GatewaySessionException(
+                    GatewaySessionErrorKind.Network,
+                    "Configure a gateway URL to load remote sessions."
+                )
+            }
+            val request = Request.Builder()
+                .url("$baseUrl/v1/sessions")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
+
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: ""
+                    when (response.code) {
+                        401 -> throw GatewaySessionException(
+                            GatewaySessionErrorKind.Unauthorized,
+                            "Gateway token required or invalid."
+                        )
+                        501 -> throw GatewaySessionException(
+                            GatewaySessionErrorKind.Unsupported,
+                            "This gateway does not expose the session dashboard."
+                        )
+                    }
+                    if (!response.isSuccessful) {
+                        throw GatewaySessionException(
+                            GatewaySessionErrorKind.Unknown,
+                            "Session dashboard request failed: ${response.code}"
+                        )
+                    }
+                    val json = try {
+                        JSONObject(body)
+                    } catch (e: Exception) {
+                        throw GatewaySessionException(
+                            GatewaySessionErrorKind.Malformed,
+                            "Gateway returned an unreadable sessions response.",
+                            e
+                        )
+                    }
+                    if (!json.optBoolean("ok", false)) {
+                        throw GatewaySessionException(
+                            GatewaySessionErrorKind.Unknown,
+                            json.optString("error", "Session dashboard request failed.")
+                        )
+                    }
+                    val dashboardJson = json.optJSONObject("dashboard")
+                        ?: throw GatewaySessionException(
+                            GatewaySessionErrorKind.Malformed,
+                            "Gateway sessions response did not include a dashboard."
+                        )
+                    parseGatewaySessionDashboard(dashboardJson)
+                }
+            } catch (e: GatewaySessionException) {
+                throw e
+            } catch (e: Exception) {
+                throw GatewaySessionException(
+                    GatewaySessionErrorKind.Network,
+                    "Could not reach gateway.",
+                    e
+                )
+            }
+        }
+    }
+
+    private fun parseGatewaySessionDashboard(json: JSONObject): GatewaySessionDashboard {
+        val readyJson = json.optJSONArray("ready")
+        val ready = mutableListOf<String>()
+        if (readyJson != null) {
+            for (i in 0 until readyJson.length()) {
+                val value = readyJson.optString(i)
+                if (value.isNotBlank()) ready.add(value)
+            }
+        }
+
+        val sessionsJson = json.optJSONArray("sessions")
+        val sessions = mutableListOf<GatewaySessionEntry>()
+        if (sessionsJson != null) {
+            for (i in 0 until sessionsJson.length()) {
+                val item = sessionsJson.optJSONObject(i) ?: continue
+                sessions.add(parseGatewaySessionEntry(item))
+            }
+        }
+
+        return GatewaySessionDashboard(
+            current = json.optString("current"),
+            ready = ready,
+            storePath = json.optString("storePath").ifBlank { null },
+            sessions = sessions
+        )
+    }
+
+    private fun parseGatewaySessionEntry(json: JSONObject): GatewaySessionEntry {
+        val aliasesJson = json.optJSONArray("aliases")
+        val aliases = mutableListOf<String>()
+        if (aliasesJson != null) {
+            for (i in 0 until aliasesJson.length()) {
+                val value = aliasesJson.optString(i)
+                if (value.isNotBlank()) aliases.add(value)
+            }
+        }
+        return GatewaySessionEntry(
+            name = json.optString("name"),
+            path = json.optString("path").ifBlank { null },
+            sessionPath = json.optString("sessionPath").ifBlank { null },
+            workingDirectory = json.optString("workingDirectory").ifBlank { null },
+            cwd = json.optString("cwd").ifBlank { null },
+            current = json.optBoolean("current", false),
+            isCurrent = json.optBoolean("isCurrent", false),
+            ready = json.optBoolean("ready", false),
+            isReady = json.optBoolean("isReady", false),
+            activity = json.optString("activity").ifBlank { null },
+            aliases = aliases
+        )
+    }
+
     suspend fun listSlashCommands(): List<RemoteSlashCommand> {
         return withContext(Dispatchers.IO) {
             val gatewayUrl = "${gatewayBaseUrl()}/v1/commands"
@@ -834,6 +1000,134 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
+    /**
+     * Unified Remote-style auto-connect.
+     * 1. Try localhost first (ADB reverse, same-machine).
+     * 2. Fall back to network discovery (LAN / Tailscale via mDNS + UDP).
+     * If anything is found, configures prefs silently and returns true.
+     */
+    fun tryAutoConnect(forceVerify: Boolean = false): AutoConnectResult {
+        val currentUrl = gatewayBaseUrl()
+        if (forceVerify && currentUrl.isNotBlank() && pingHealth(currentUrl)) {
+            val pairingState = getPairingState(currentUrl)
+            if (pairingState.requiresPairing && prefs.remoteToken.isBlank()) {
+                return AutoConnectResult(false, currentUrl, "Gateway found. Scan the setup QR from /pk-remote to pair this phone.", discovered = false)
+            }
+            if (prefs.remoteToken.isNotBlank() && pairingState.authRequired && !isAuthenticatedGateway(currentUrl)) {
+                return AutoConnectResult(false, currentUrl, "Gateway found, but the saved token was rejected. Scan the setup QR again.", discovered = false)
+            }
+            return AutoConnectResult(true, currentUrl, "Current gateway is reachable.", discovered = false)
+        }
+
+        // Phase 1: localhost probe (fast, no network needed)
+        val localhostUrl = "http://localhost:8767"
+        if (pingHealth(localhostUrl)) {
+            val pairingState = getPairingState(localhostUrl)
+            if (pairingState.requiresPairing && prefs.remoteToken.isBlank()) {
+                return AutoConnectResult(false, localhostUrl, "Local gateway found. Scan the setup QR from /pk-remote to pair this phone.", discovered = true)
+            }
+            if (prefs.remoteToken.isNotBlank() && pairingState.authRequired && !isAuthenticatedGateway(localhostUrl)) {
+                return AutoConnectResult(false, localhostUrl, "Local gateway found, but the saved token was rejected. Scan the setup QR again.", discovered = true)
+            }
+            prefs.targetIpAddress = localhostUrl
+            applyDescriptorSession(localhostUrl)
+            Log.d("VoiceAgent", "Auto-connected to localhost gateway: $localhostUrl")
+            return AutoConnectResult(true, localhostUrl, "Connected through local ADB reverse.", discovered = true)
+        }
+
+        // Phase 2: network discovery (LAN / Tailscale)
+        return try {
+            val machines = kotlinx.coroutines.runBlocking { discoverMachines() }
+            val onlineMachine = machines.firstOrNull { it.status == "online" }
+                ?: machines.firstOrNull()
+            if (onlineMachine != null) {
+                if (onlineMachine.requiresPairing && prefs.remoteToken.isBlank()) {
+                    return AutoConnectResult(false, onlineMachine.ip, "Gateway found. Run /pk-remote on the computer and scan the setup QR to pair.", discovered = true)
+                }
+                if (prefs.remoteToken.isNotBlank() && onlineMachine.authRequired && !isAuthenticatedGateway(onlineMachine.ip)) {
+                    return AutoConnectResult(false, onlineMachine.ip, "Discovered gateway rejected the saved token. Scan the setup QR again.", discovered = true)
+                }
+                prefs.targetIpAddress = onlineMachine.ip
+                val firstSession = onlineMachine.activeSessions.firstOrNull()
+                if (firstSession != null) {
+                    prefs.codexSessionName = firstSession.sessionId
+                }
+                Log.d("VoiceAgent", "Auto-connected to network gateway: ${onlineMachine.ip}")
+                AutoConnectResult(true, onlineMachine.ip, "Connected to discovered gateway.", discovered = true)
+            } else {
+                AutoConnectResult(false, currentUrl, "No reachable Pi Speak gateway found.")
+            }
+        } catch (e: Exception) {
+            Log.d("VoiceAgent", "Network auto-connect probe failed: ${e.message}")
+            AutoConnectResult(false, currentUrl, "Gateway discovery failed: ${shortError(e)}")
+        }
+    }
+
+    private fun getPairingState(baseUrl: String): PairingState {
+        val normalized = baseUrl.trim().trimEnd('/')
+        if (normalized.isBlank()) return PairingState(authRequired = true, pairingRequired = true)
+        return try {
+            val request = Request.Builder().url("$normalized/.well-known/pi-speak").get().build()
+            healthClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return PairingState(authRequired = true, pairingRequired = true)
+                val json = JSONObject(response.body?.string() ?: "{}")
+                val authRequired = json.optBoolean("authRequired", true)
+                val pairing = json.optJSONObject("pairing")
+                val pairingRequired = pairing?.optBoolean("required", json.optBoolean("pairingRequired", authRequired))
+                    ?: json.optBoolean("pairingRequired", authRequired)
+                PairingState(authRequired = authRequired, pairingRequired = pairingRequired)
+            }
+        } catch (e: Exception) {
+            Log.d("VoiceAgent", "Pairing descriptor check failed for $baseUrl: ${e.message}")
+            PairingState(authRequired = true, pairingRequired = true)
+        }
+    }
+
+    private fun isAuthenticatedGateway(baseUrl: String): Boolean {
+        val normalized = baseUrl.trim().trimEnd('/')
+        if (normalized.isBlank()) return false
+        return try {
+            val request = Request.Builder()
+                .url("$normalized/v1/status")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
+            healthClient.newCall(request).execute().use { response -> response.isSuccessful }
+        } catch (e: Exception) {
+            Log.d("VoiceAgent", "Authenticated gateway check failed for $baseUrl: ${e.message}")
+            false
+        }
+    }
+
+    private fun setupUrl(baseUrl: String, setupPath: String): String {
+        val normalizedBase = baseUrl.trim().trimEnd('/')
+        val normalizedPath = if (setupPath.startsWith("/")) setupPath else "/$setupPath"
+        return "$normalizedBase$normalizedPath"
+    }
+
+    private fun applyDescriptorSession(baseUrl: String) {
+        try {
+            val descRequest = Request.Builder().url("$baseUrl/.well-known/pi-speak").get().build()
+            client.newCall(descRequest).execute().use { descResponse ->
+                if (descResponse.isSuccessful) {
+                    val descBody = descResponse.body?.string() ?: ""
+                    val descJson = JSONObject(descBody)
+                    val routing = descJson.optJSONObject("routing")
+                    val currentSession = routing?.optString("currentSession", "")
+                    if (!currentSession.isNullOrBlank()) {
+                        prefs.codexSessionName = currentSession
+                    }
+                    val defaultTarget = routing?.optString("defaultTarget", "")
+                    if (!defaultTarget.isNullOrBlank() && prefs.codexSessionName.isBlank()) {
+                        prefs.codexSessionName = defaultTarget
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.d("VoiceAgent", "Descriptor fetch failed: ${e.message}")
+        }
+    }
+
     private fun gatewayBaseUrl(): String = prefs.targetIpAddress.trim().trimEnd('/')
 
     private fun shortError(error: Exception): String = error.localizedMessage ?: error.javaClass.simpleName
@@ -861,8 +1155,22 @@ data class DiscoveredMachine(
     val ip: String,
     val status: String,
     val latencyMs: Long,
-    val activeSessions: List<ActiveCodexSession>
-)
+    val activeSessions: List<ActiveCodexSession>,
+    val authRequired: Boolean = false,
+    val pairingRequired: Boolean = false,
+    val setupUrl: String? = null
+) {
+    val requiresPairing: Boolean
+        get() = authRequired || pairingRequired
+}
+
+private data class PairingState(
+    val authRequired: Boolean,
+    val pairingRequired: Boolean
+) {
+    val requiresPairing: Boolean
+        get() = authRequired || pairingRequired
+}
 
 data class ActiveCodexSession(
     val sessionId: String,
@@ -907,5 +1215,14 @@ data class ConnectionTestReport(
 data class GatewayTurnResult(
     val transcript: String,
     val replyText: String,
-    val progress: List<String> = emptyList()
+    val progress: List<String> = emptyList(),
+    val connectionError: Boolean = false,
+    val statusCode: Int? = null
+)
+
+data class AutoConnectResult(
+    val connected: Boolean,
+    val baseUrl: String = "",
+    val message: String = "",
+    val discovered: Boolean = false
 )

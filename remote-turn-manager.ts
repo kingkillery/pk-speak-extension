@@ -19,7 +19,7 @@ export type ProviderSummary = {
 
 export type TurnProgressEvent = {
 	ts: number;
-	phase: "queued" | "recording" | "upload" | "stt" | "agent" | "tts" | "complete" | "error";
+	phase: "queued" | "recording" | "upload" | "stt" | "route" | "agent" | "tts" | "complete" | "error";
 	message: string;
 	elapsedMs?: number;
 };
@@ -35,7 +35,7 @@ export type ConversationReducerSummary = {
 	confidence: number;
 	shouldDispatch: boolean;
 	clarifyingQuestion: string | undefined;
-	engine: "heuristic" | "gemini";
+	engine: "heuristic" | "gemini" | "openai";
 };
 
 export type ConversationExecutionPlan = {
@@ -45,6 +45,14 @@ export type ConversationExecutionPlan = {
 	confidence: number;
 	rationale: string;
 	actionForSeed?: string;
+	signals?: string[];
+	routeClass?: "fast" | "fast-plus-tools" | "slow-think";
+	riskLevel?: "low" | "medium" | "high";
+	latencyBudgetMs?: number;
+	costTier?: "T0" | "T1" | "T2" | "T3";
+	userAck?: string;
+	userProgress?: string;
+	escalationReason?: string;
 };
 
 export type RemoteTurnResult = {

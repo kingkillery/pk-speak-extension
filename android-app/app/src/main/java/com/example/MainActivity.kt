@@ -28,14 +28,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
 import com.google.accompanist.permissions.PermissionState
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
@@ -45,6 +42,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.api.GatewaySessionDashboard
+import com.example.api.GatewaySessionEntry
+import com.example.api.GatewaySessionErrorKind
+import com.example.api.GatewaySessionException
 import com.example.api.VoiceAgentClient
 import com.example.api.RemoteSlashCommand
 import com.example.audio.AudioHelper
@@ -58,9 +59,11 @@ import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -71,15 +74,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var voiceAgentClient: VoiceAgentClient
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         audioHelper = AudioHelper(this)
         ttsHelper = TtsHelper(this)
         appPreferences = AppPreferences(this)
+        appPreferences.clearGatewayConfigIfAppUpgraded(BuildConfig.VERSION_CODE)
         voiceAgentClient = VoiceAgentClient(this, appPreferences)
         
         handleDeepLink(intent)
-        
-        enableEdgeToEdge()
 
         setContent {
             MyApplicationTheme {
@@ -121,7 +124,7 @@ class MainActivity : ComponentActivity() {
                 val workspacePath = uri.getQueryParameter("workspace_path")
 
                 baseUrl?.let { appPreferences.targetIpAddress = it.trim().trimEnd('/') }
-                token?.let { appPreferences.remoteToken = it }
+                token?.takeIf { it.isNotBlank() }?.let { appPreferences.remoteToken = it }
                 profileName?.let { appPreferences.machineProfileName = it }
                 defaultTarget?.takeIf { it.isNotBlank() }?.let { appPreferences.codexSessionName = it }
                 workspaceRoot?.takeIf { it.isNotBlank() }?.let { appPreferences.workspaceRoot = it }
@@ -162,6 +165,13 @@ fun PiSpeakConsoleScreen(
     var selectedAgent by remember { mutableStateOf(prefs.activeAgent) }
     var codexSessionName by remember { mutableStateOf(prefs.codexSessionName) }
     var scaleAnimationActive by remember { mutableStateOf(false) }
+    val studioConversationKey = prefs.conversationKey()
+    val studioState = remember {
+        StudioRuntimeState(
+            conversationKey = studioConversationKey,
+            chatMessages = prefs.getChatMessages(studioConversationKey)
+        )
+    }
 
     // Synchronize agent state
     LaunchedEffect(selectedAgent) {
@@ -177,6 +187,59 @@ fun PiSpeakConsoleScreen(
         "sessions" -> "Sessions"
         "settings" -> "Configure"
         else -> "Pi Speak"
+    }
+
+    LaunchedEffect(studioConversationKey) {
+        if (studioState.conversationKey != studioConversationKey && !studioState.isProcessing && !studioState.isRecording) {
+            studioState.conversationKey = studioConversationKey
+            studioState.chatMessages = prefs.getChatMessages(studioConversationKey)
+            studioState.transcription = ""
+            studioState.latestReply = ""
+            studioState.progressText = ""
+            studioState.stopStatusText = ""
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        var unreachableSinceMs: Long? = null
+        var lastLoggedConnectionStatus = ""
+        while (true) {
+            val healthy = client.pingHealth()
+            if (healthy) {
+                unreachableSinceMs = null
+                studioState.isGatewayConnected = true
+                studioState.isReconnecting = false
+                studioState.connectionStatusText = "Connected"
+                studioState.connectionBannerText = ""
+            } else {
+                val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
+                unreachableSinceMs = firstFailureMs
+                studioState.isGatewayConnected = false
+                studioState.isReconnecting = true
+                studioState.connectionStatusText = "Reconnecting..."
+                val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+                codexSessionName = prefs.codexSessionName
+                if (result.connected) {
+                    unreachableSinceMs = null
+                    studioState.isGatewayConnected = true
+                    studioState.isReconnecting = false
+                    studioState.connectionStatusText = "Connected"
+                    studioState.connectionBannerText = ""
+                } else {
+                    val elapsedMs = System.currentTimeMillis() - firstFailureMs
+                    studioState.isReconnecting = elapsedMs <= 10_000L
+                    studioState.connectionStatusText = if (studioState.isReconnecting) "Searching for gateway..." else "Gateway unreachable"
+                    if (studioState.connectionBannerText.isBlank()) {
+                        studioState.connectionBannerText = result.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+                    }
+                }
+            }
+            if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
+                lastLoggedConnectionStatus = studioState.connectionStatusText
+                Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
+            }
+            delay(5_000)
+        }
     }
 
     ModalNavigationDrawer(
@@ -212,6 +275,9 @@ fun PiSpeakConsoleScreen(
                 title = tabTitle,
                 sessionName = codexSessionName,
                 onMenuClick = { scope.launch { drawerState.open() } },
+                isGatewayConnected = studioState.isGatewayConnected,
+                isReconnecting = studioState.isReconnecting,
+                connectionStatusText = studioState.connectionStatusText,
                 onSettingsClick = { currentTab = "settings" }
             )
 
@@ -222,23 +288,6 @@ fun PiSpeakConsoleScreen(
                     .weight(1f)
                     .padding(horizontal = 16.dp)
             ) {
-                val studioConversationKey = prefs.conversationKey()
-                val studioState = remember {
-                    StudioRuntimeState(
-                        conversationKey = studioConversationKey,
-                        chatMessages = prefs.getChatMessages(studioConversationKey)
-                    )
-                }
-                LaunchedEffect(studioConversationKey) {
-                    if (studioState.conversationKey != studioConversationKey && !studioState.isProcessing && !studioState.isRecording) {
-                        studioState.conversationKey = studioConversationKey
-                        studioState.chatMessages = prefs.getChatMessages(studioConversationKey)
-                        studioState.transcription = ""
-                        studioState.latestReply = ""
-                        studioState.progressText = ""
-                        studioState.stopStatusText = ""
-                    }
-                }
                 when (currentTab) {
                     "studio" -> StudioTabContent(
                         audioHelper = audioHelper,
@@ -249,9 +298,14 @@ fun PiSpeakConsoleScreen(
                         appScope = scope
                     )
                     "sessions" -> SessionsTabContent(
+                        client = client,
                         audioHelper = audioHelper,
                         ttsHelper = ttsHelper,
-                        prefs = prefs
+                        prefs = prefs,
+                        onRemoteSessionSelected = { entry, dashboard ->
+                            applyGatewaySessionSelection(entry, dashboard, prefs)
+                            codexSessionName = prefs.codexSessionName
+                        }
                     )
                     "commands" -> CommandsTabContent(
                         client = client,
@@ -264,6 +318,9 @@ fun PiSpeakConsoleScreen(
                             prefs.codexSessionName = newSession
                             prefs.targetIpAddress = machineIp
                             codexSessionName = newSession
+                            studioState.isGatewayConnected = false
+                            studioState.isReconnecting = true
+                            studioState.connectionStatusText = "Reconnecting..."
                         }
                     )
                     "settings" -> SettingsTabContent(
@@ -292,6 +349,13 @@ fun PiSpeakConsoleScreen(
                 )
             }
         }
+        ConnectionErrorBanner(
+            message = studioState.connectionBannerText,
+            onDismiss = { studioState.connectionBannerText = "" },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 76.dp, start = 16.dp, end = 16.dp)
+        )
     }
     }
 }
@@ -301,8 +365,12 @@ fun HeaderSection(
     title: String,
     sessionName: String,
     onMenuClick: () -> Unit,
+    isGatewayConnected: Boolean,
+    isReconnecting: Boolean,
+    connectionStatusText: String,
     onSettingsClick: () -> Unit
 ) {
+    val connectionColor = gatewayConnectionIndicatorColor(isGatewayConnected, isReconnecting)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -321,21 +389,44 @@ fun HeaderSection(
             Text(text = "≡", color = Color(0xFF211C16), fontSize = 22.sp)
         }
 
-        // Centered serif title with a small dropdown caret
-        Row(
+        Column(
             modifier = Modifier.weight(1f),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(
-                text = title,
-                color = Color(0xFF211C16),
-                style = MaterialTheme.typography.titleLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(text = "⌄", color = Color(0xFF6E665A), fontSize = 16.sp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = title,
+                    color = Color(0xFF211C16),
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(text = "⌄", color = Color(0xFF6E665A), fontSize = 16.sp)
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(connectionColor)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "$connectionStatusText | Codex: $sessionName",
+                    color = Color(0xFF6E665A),
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
 
         // Settings
@@ -347,6 +438,59 @@ fun HeaderSection(
             contentAlignment = Alignment.Center
         ) {
             Text(text = "⚙", color = Color(0xFF211C16), fontSize = 18.sp)
+        }
+    }
+}
+
+fun gatewayConnectionIndicatorColor(isGatewayConnected: Boolean, isReconnecting: Boolean): Color = when {
+    isGatewayConnected -> Color(0xFF22C55E)
+    isReconnecting -> Color(0xFFF59E0B)
+    else -> Color(0xFFEF4444)
+}
+
+@Composable
+fun ConnectionErrorBanner(
+    message: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = message.isNotBlank(),
+        enter = fadeIn() + slideInVertically(initialOffsetY = { -it / 2 }),
+        exit = fadeOut() + slideOutVertically(targetOffsetY = { -it / 2 }),
+        modifier = modifier
+    ) {
+        Surface(
+            color = Color(0xFF3A2424),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, Color(0xFF7F1D1D)),
+            shadowElevation = 4.dp
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFEF4444))
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = message,
+                    color = Color(0xFFFFD7D7),
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    onClick = onDismiss,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) {
+                    Text("Dismiss", color = Color(0xFFFFD7D7), fontSize = 11.sp)
+                }
+            }
         }
     }
 }
@@ -399,7 +543,7 @@ fun PiSpeakDrawer(
             if (recents.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(18.dp))
                 Text(
-                    text = "Recents",
+                    text = "Recent turns",
                     color = Color(0xFF6E665A),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -524,6 +668,11 @@ class StudioRuntimeState(
     var stopStatusText by mutableStateOf("")
     var conversationKey by mutableStateOf(conversationKey)
     var chatMessages by mutableStateOf(chatMessages)
+    var playingMessageId by mutableStateOf<String?>(null)
+    var isGatewayConnected by mutableStateOf(false)
+    var isReconnecting by mutableStateOf(true)
+    var connectionStatusText by mutableStateOf("Searching for gateway...")
+    var connectionBannerText by mutableStateOf("")
 }
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -579,6 +728,27 @@ fun StudioTabContent(
         )
     }
 
+    fun handleGatewayConnectionError(message: String) {
+        val cleanMessage = message.lineSequence().firstOrNull()?.ifBlank { null }
+            ?: "Gateway is unreachable. Searching for a Pi Speak server."
+        state.isGatewayConnected = false
+        state.isReconnecting = true
+        state.connectionStatusText = "Reconnecting..."
+        state.connectionBannerText = cleanMessage
+        setProgress("Gateway unreachable. Searching for a Pi Speak server.")
+        scope.launch {
+            val reconnect = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+            state.isGatewayConnected = reconnect.connected
+            state.isReconnecting = false
+            state.connectionStatusText = if (reconnect.connected) "Connected" else "Gateway unreachable"
+            if (reconnect.connected) {
+                state.connectionBannerText = ""
+            } else if (state.connectionBannerText.isBlank()) {
+                state.connectionBannerText = reconnect.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+            }
+        }
+    }
+
     fun stopCurrentTurn() {
         val stoppedTurnGeneration = state.turnGeneration + 1
         state.turnGeneration = stoppedTurnGeneration
@@ -591,6 +761,7 @@ fun StudioTabContent(
         state.latestReply = "Stopping..."
         ttsHelper.stop()
         audioHelper.stopPlayback()
+        state.playingMessageId = null
         scope.launch {
             val message = client.cancelTurn()
             if (state.turnGeneration == stoppedTurnGeneration) {
@@ -638,6 +809,7 @@ fun StudioTabContent(
         if (!state.isRecording && !state.isProcessing) {
             ttsHelper.stop()
             audioHelper.stopPlayback()
+            state.playingMessageId = null
             state.isRecording = true
             recordingStartedAtMs = System.currentTimeMillis()
             state.currentRecordPath = audioHelper.startRecording("turn.wav")
@@ -694,6 +866,12 @@ fun StudioTabContent(
                         if (myTurnGeneration != state.turnGeneration) return@launch
                         progressJob?.cancel()
                         ttsHelper.stop()
+                        if (result.connectionError) {
+                            state.transcription = result.transcript
+                            state.latestReply = ""
+                            handleGatewayConnectionError(result.replyText)
+                            return@launch
+                        }
                         state.transcription = result.transcript
                         val finalProgressText = result.progress.joinToString("\n")
                         state.progressText = finalProgressText
@@ -757,38 +935,44 @@ fun StudioTabContent(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
+        verticalArrangement = Arrangement.Top
     ) {
-        // Core Visual Equalizer Graph Structure (Professional Polish spec)
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxWidth()
+        // Minimal status pill at top
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = when {
-                    state.isRecording -> "MICROPHONE TRANSMITTING"
-                    state.stopStatusText == "Stopping..." -> "STOPPING CURRENT TURN"
-                    state.isProcessing -> "CODING AGENT WORKING"
-                    else -> "TACTICAL CONSOLE IDLE"
+                    state.isRecording -> "● Recording"
+                    state.stopStatusText == "Stopping..." -> "● Stopping..."
+                    state.isProcessing -> "● Agent working..."
+                    else -> "● Idle"
                 },
                 color = if (state.isRecording) Color(0xFFC2542F) else Color(0xFF6E665A),
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 8.dp)
             )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Adaptive spectrum canvas drawing
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(80.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                WaveformBars(amplitudes = amplitudeList, active = state.isRecording)
+            if (state.chatMessages.isNotEmpty()) {
+                TextButton(
+                    onClick = {
+                        prefs.clearChatMessages(state.conversationKey)
+                        state.chatMessages = emptyList()
+                        state.transcription = ""
+                        state.latestReply = ""
+                        state.progressText = ""
+                    },
+                    enabled = !state.isProcessing,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) {
+                    Text("Clear", color = Color(0xFF8E9199), fontSize = 11.sp)
+                }
             }
         }
 
@@ -797,7 +981,7 @@ fun StudioTabContent(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .padding(vertical = 12.dp)
+                .padding(top = 8.dp, bottom = 10.dp)
         ) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
@@ -843,6 +1027,7 @@ fun StudioTabContent(
                         items(state.chatMessages, key = { it.id }) { message ->
                             val isUser = message.role == "user"
                             val isProgress = message.role == "progress"
+                            val isPlayingThisMessage = state.playingMessageId == message.id
                             Column(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
@@ -883,13 +1068,55 @@ fun StudioTabContent(
                                         )
                                         .padding(10.dp)
                                 ) {
-                                    Text(
-                                        text = message.text,
-                                        color = if (isProgress) Color(0xFF6E665A) else Color(0xFF211C16),
-                                        fontSize = if (isProgress) 11.sp else 13.sp,
-                                        lineHeight = if (isProgress) 16.sp else 19.sp,
-                                        fontFamily = if (message.role == "assistant") FontFamily.Monospace else FontFamily.Default
-                                    )
+                                    Column {
+                                        Text(
+                                            text = message.text,
+                                            color = if (isProgress) Color(0xFF6E665A) else Color(0xFF211C16),
+                                            fontSize = if (isProgress) 11.sp else 13.sp,
+                                            lineHeight = if (isProgress) 16.sp else 19.sp,
+                                            fontFamily = if (message.role == "assistant") FontFamily.Monospace else FontFamily.Default
+                                        )
+                                        if (!isProgress) {
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.End,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = if (isPlayingThisMessage) "Stop" else "Play",
+                                                    color = if (isPlayingThisMessage) Color(0xFFC2542F) else Color(0xFF6E665A),
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    modifier = Modifier.clickable {
+                                                        if (isPlayingThisMessage) {
+                                                            audioHelper.stopPlayback()
+                                                            ttsHelper.stop()
+                                                            state.playingMessageId = null
+                                                        } else {
+                                                            audioHelper.stopPlayback()
+                                                            ttsHelper.stop()
+                                                            state.playingMessageId = message.id
+                                                            val audioPath = message.audioPath
+                                                            if (!audioPath.isNullOrBlank() && java.io.File(audioPath).exists()) {
+                                                                audioHelper.startPlayback(audioPath) {
+                                                                    if (state.playingMessageId == message.id) {
+                                                                        state.playingMessageId = null
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                ttsHelper.speak(message.text) {
+                                                                    if (state.playingMessageId == message.id) {
+                                                                        state.playingMessageId = null
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -966,8 +1193,9 @@ fun StudioTabContent(
                             ) {
                                 Divider(color = Color(0xFFE3DCCC), modifier = Modifier.padding(vertical = 8.dp))
                                 Row(
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
                                         text = "CODEX DEPLOYER REPLY",
@@ -1002,7 +1230,6 @@ fun StudioTabContent(
                             }
                         }
                     }
-
                     // Empty State Guidelines
                     if (state.transcription.isEmpty() && state.latestReply.isEmpty()) {
                         item {
@@ -1019,8 +1246,8 @@ fun StudioTabContent(
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = if (prefs.transmissionMode == "PTT") 
-                                        "Long press the tactical pad below to talk." 
+                                    text = if (prefs.transmissionMode == "PTT")
+                                        "Long press the tactical pad below to talk."
                                     else "Tap the tactical pad below to toggle mic.",
                                     color = Color(0xFF6E665A),
                                     fontSize = 12.sp,
@@ -1044,12 +1271,20 @@ fun StudioTabContent(
             val job = scope.launch {
                 state.isProcessing = true
                 state.transcription = promptText
+                ttsHelper.stop()
+                audioHelper.stopPlayback()
+                state.playingMessageId = null
                 setProgress("Sending text to gateway.")
                 appendChat("user", promptText)
                 try {
                     val result = client.sendTextTurnDetailed(promptText)
                     if (myTurnGeneration != state.turnGeneration) return@launch
                     ttsHelper.stop()
+                    if (result.connectionError) {
+                        state.latestReply = ""
+                        handleGatewayConnectionError(result.replyText)
+                        return@launch
+                    }
                     state.transcription = result.transcript
                     val finalProgressText = result.progress.joinToString("\n")
                     state.progressText = finalProgressText
@@ -1104,7 +1339,7 @@ fun StudioTabContent(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 10.dp),
+                .padding(bottom = 12.dp),
             color = Color(0xFFFFFFFF),
             shape = RoundedCornerShape(26.dp),
             border = BorderStroke(1.dp, Color(0xFFE3DCCC)),
@@ -1163,20 +1398,45 @@ fun StudioTabContent(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        // Attach = quick voice capture toggle.
+                        // Voice capture lives in the composer so the chat history keeps the screen.
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .height(44.dp)
+                                .widthIn(min = 72.dp)
                                 .clip(CircleShape)
-                                .clickable(enabled = !state.isProcessing) {
-                                    if (state.isRecording) stopAndSendAction() else recordTriggerAction()
+                                .background(if (state.isRecording) Color(0xFFC2542F) else Color(0xFFF4F1E9))
+                                .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
+                                .pointerInput(prefs.transmissionMode, permissionState.status.isGranted, state.isProcessing) {
+                                    detectTapGestures(
+                                        onPress = {
+                                            if (state.isProcessing) return@detectTapGestures
+                                            if (!permissionState.status.isGranted) {
+                                                permissionState.launchPermissionRequest()
+                                                return@detectTapGestures
+                                            }
+                                            if (prefs.transmissionMode == "PTT") {
+                                                recordTriggerAction()
+                                                tryAwaitRelease()
+                                                stopAndSendAction()
+                                            }
+                                        },
+                                        onTap = {
+                                            if (state.isProcessing) return@detectTapGestures
+                                            if (!permissionState.status.isGranted) {
+                                                permissionState.launchPermissionRequest()
+                                            } else if (prefs.transmissionMode == "TOGGLE") {
+                                                if (state.isRecording) stopAndSendAction() else recordTriggerAction()
+                                            }
+                                        }
+                                    )
                                 },
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = if (state.isRecording) "■" else "📎",
-                                color = if (state.isRecording) Color(0xFFC2542F) else Color(0xFF6E665A),
-                                fontSize = 18.sp
+                                text = if (state.isRecording) "Stop" else "Talk",
+                                color = if (state.isRecording) Color.White else Color(0xFF211C16),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                         // Round terracotta send button.
@@ -1196,110 +1456,6 @@ fun StudioTabContent(
                             )
                         }
                     }
-                }
-            }
-        }
-
-        // Tactical Record Pad Control Section
-        if (permissionState.status.isGranted) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(bottom = 16.dp)
-            ) {
-                // Large Tactical Round Button with Pulse Glow Backing
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier.size(140.dp)
-                ) {
-                    val scaleFactor by animateFloatAsState(
-                        targetValue = if (state.isRecording) 1.2f else 1.0f,
-                        animationSpec = spring(dampingRatio = 0.6f, stiffness = 80f)
-                    )
-
-                    // Glow background pulses visually
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .scale(scaleFactor)
-                            .clip(CircleShape)
-                            .background(
-                                color = if (state.isRecording) Color(0x33B3261E) else Color(0x14C2542F)
-                            )
-                            .blur(if (state.isRecording) 16.dp else 4.dp)
-                    )
-
-                    // Actual Button
-                    Box(
-                        modifier = Modifier
-                            .size(100.dp)
-                            .scale(scaleFactor)
-                            .clip(CircleShape)
-                            .background(
-                                brush = Brush.radialGradient(
-                                    colors = if (state.isRecording) {
-                                        listOf(Color(0xFFE04F2A), Color(0xFFB3261E))
-                                    } else {
-                                        listOf(Color(0xFFC2542F), Color(0xFFD98E66))
-                                    }
-                                )
-                            )
-                            .border(BorderStroke(6.dp, Color(0xFFF4F1E9)), CircleShape)
-                            .pointerInput(prefs.transmissionMode) {
-                                detectTapGestures(
-                                    onPress = {
-                                        if (prefs.transmissionMode == "PTT") {
-                                            recordTriggerAction()
-                                            tryAwaitRelease()
-                                            stopAndSendAction()
-                                        }
-                                    },
-                                    onTap = {
-                                        if (prefs.transmissionMode == "TOGGLE") {
-                                            if (state.isRecording) stopAndSendAction() else recordTriggerAction()
-                                        }
-                                    }
-                                )
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        // Tactical Mic Icon
-                        Text(
-                            text = if (state.isRecording) "🎙" else "π",
-                            fontSize = 32.sp,
-                            color = if (state.isRecording) Color.White else Color(0xFFFFFFFF),
-                            fontWeight = FontWeight.Black
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = if (prefs.transmissionMode == "PTT") "HOLD TACTICAL PAD TO TALK" else "TAP TO TOGGLE MICROPHONE",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (state.isRecording) Color(0xFFC2542F) else Color(0xFF6E665A),
-                    letterSpacing = 0.5.sp
-                )
-            }
-        } else {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "Microphone Permission Required to Transmit",
-                    color = Color(0xFF211C16),
-                    fontSize = 14.sp,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(
-                    onClick = { permissionState.launchPermissionRequest() },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC2542F), contentColor = Color(0xFFFFFFFF))
-                ) {
-                    Text("Grant Wireless Access")
                 }
             }
         }
@@ -1505,9 +1661,342 @@ fun CommandsTabContent(
 
 @Composable
 fun SessionsTabContent(
+    client: VoiceAgentClient,
     audioHelper: AudioHelper,
     ttsHelper: TtsHelper,
+    prefs: AppPreferences,
+    onRemoteSessionSelected: (GatewaySessionEntry, GatewaySessionDashboard) -> Unit
+) {
+    var selectedPane by remember { mutableStateOf("gateway") }
+
+    Column(
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = { selectedPane = "gateway" },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selectedPane == "gateway") Color(0xFF2E7D52) else Color(0xFFE9E3D6),
+                    contentColor = if (selectedPane == "gateway") Color.White else Color(0xFF211C16)
+                ),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Gateway Sessions", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            Button(
+                onClick = { selectedPane = "history" },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selectedPane == "history") Color(0xFF2E7D52) else Color(0xFFE9E3D6),
+                    contentColor = if (selectedPane == "history") Color.White else Color(0xFF211C16)
+                ),
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Local Turn History", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        if (selectedPane == "gateway") {
+            GatewaySessionsPane(
+                client = client,
+                prefs = prefs,
+                onRemoteSessionSelected = onRemoteSessionSelected,
+                modifier = Modifier.weight(1f)
+            )
+        } else {
+            LocalTurnHistoryPane(
+                audioHelper = audioHelper,
+                ttsHelper = ttsHelper,
+                prefs = prefs,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+fun GatewaySessionsPane(
+    client: VoiceAgentClient,
+    prefs: AppPreferences,
+    onRemoteSessionSelected: (GatewaySessionEntry, GatewaySessionDashboard) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var state by remember { mutableStateOf<GatewaySessionsUiState>(GatewaySessionsUiState.Idle) }
+    val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    fun refresh() {
+        state = GatewaySessionsUiState.Loading
+        scope.launch {
+            state = try {
+                val dashboard = client.getSessionDashboard()
+                if (dashboard.sessions.isEmpty()) GatewaySessionsUiState.Empty else GatewaySessionsUiState.Loaded(dashboard)
+            } catch (e: GatewaySessionException) {
+                when (e.kind) {
+                    GatewaySessionErrorKind.Unauthorized -> GatewaySessionsUiState.Unauthorized
+                    GatewaySessionErrorKind.Unsupported -> GatewaySessionsUiState.Unsupported
+                    else -> GatewaySessionsUiState.Error(e.message ?: "Could not load gateway sessions.")
+                }
+            } catch (e: Exception) {
+                GatewaySessionsUiState.Error(e.message ?: "Could not load gateway sessions.")
+            }
+        }
+    }
+
+    LaunchedEffect(prefs.targetIpAddress, prefs.remoteToken) {
+        refresh()
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        GatewaySessionsHeader(
+            prefs = prefs,
+            state = state,
+            onRefresh = { refresh() }
+        )
+
+        when (val currentState = state) {
+            GatewaySessionsUiState.Idle,
+            GatewaySessionsUiState.Loading -> GatewaySessionsStatus("Loading gateway sessions...")
+            GatewaySessionsUiState.Empty -> GatewaySessionsStatus("No gateway sessions found.")
+            GatewaySessionsUiState.Unauthorized -> GatewaySessionsStatus("Gateway token required or invalid. Check Configure.")
+            GatewaySessionsUiState.Unsupported -> GatewaySessionsStatus("This gateway does not expose the session dashboard.")
+            is GatewaySessionsUiState.Error -> GatewaySessionsStatus(currentState.message)
+            is GatewaySessionsUiState.Loaded -> LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(bottom = 12.dp)
+            ) {
+                items(currentState.dashboard.sessions, key = { it.canonicalSessionPath ?: it.name }) { entry ->
+                    GatewaySessionRow(
+                        entry = entry,
+                        dashboard = currentState.dashboard,
+                        prefs = prefs,
+                        onUse = {
+                            onRemoteSessionSelected(entry, currentState.dashboard)
+                            android.widget.Toast.makeText(
+                                context,
+                                if (entry.isRouteCapableIn(currentState.dashboard)) "Gateway session target selected." else "Gateway workspace selected.",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun GatewaySessionsHeader(
+    prefs: AppPreferences,
+    state: GatewaySessionsUiState,
+    onRefresh: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 10.dp),
+        color = Color(0xFFFFFFFF),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("GATEWAY SESSIONS", color = Color(0xFFC2542F), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text("Gateway: ${prefs.targetIpAddress.ifBlank { "not configured" }}", color = Color(0xFF211C16), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Target: ${prefs.codexSessionName}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Workspace: ${prefs.workspacePath}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (state is GatewaySessionsUiState.Loaded) {
+                    val dashboard = state.dashboard
+                    Text(
+                        "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | Store: ${dashboard.storePath ?: "unknown"}",
+                        color = Color(0xFF6E665A),
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            OutlinedButton(
+                onClick = onRefresh,
+                enabled = state !is GatewaySessionsUiState.Loading,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Text("Refresh", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+fun GatewaySessionsStatus(message: String) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = message,
+            color = Color(0xFF6E665A),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(24.dp)
+        )
+    }
+}
+
+@Composable
+fun GatewaySessionRow(
+    entry: GatewaySessionEntry,
+    dashboard: GatewaySessionDashboard,
+    prefs: AppPreferences,
+    onUse: () -> Unit
+) {
+    val isRouteCapable = entry.isRouteCapableIn(dashboard)
+    val isSelectedFile = prefs.selectedGatewaySessionPath.isNotBlank() && prefs.selectedGatewaySessionPath == entry.canonicalSessionPath
+    val isSelectedTarget = isRouteCapable && prefs.codexSessionName == entry.name
+    val borderColor = when {
+        isSelectedTarget -> Color(0xFF2E7D52)
+        isSelectedFile -> Color(0xFFC2542F)
+        else -> Color(0xFFE3DCCC)
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color.White,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, borderColor)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = entry.name.ifBlank { "Unnamed session" },
+                        color = Color(0xFF211C16),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = entry.displayCwd,
+                        color = Color(0xFF6E665A),
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    text = entry.activity ?: "saved",
+                    color = if (isRouteCapable) Color(0xFF2E7D52) else Color(0xFF6E665A),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .background(Color(0xFFF0ECE2), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (entry.isCurrentIn(dashboard)) GatewaySessionBadge("current", Color(0xFF2E7D52))
+                if (entry.isReadyIn(dashboard)) GatewaySessionBadge("ready", Color(0xFFC97E1A))
+                if (entry.aliases.isNotEmpty()) GatewaySessionBadge("aliases: ${entry.aliases.joinToString(", ")}", Color(0xFF6E665A))
+                if (!isRouteCapable) GatewaySessionBadge("workspace only", Color(0xFF6E665A))
+            }
+
+            val path = entry.canonicalSessionPath
+            if (!path.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "sessionPath: $path",
+                    color = Color(0xFF8A8174),
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = onUse,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isRouteCapable) Color(0xFF2E7D52) else Color(0xFFC2542F),
+                    contentColor = Color.White
+                ),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text(if (isRouteCapable) "Use as target" else "Use workspace", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+fun GatewaySessionBadge(text: String, color: Color) {
+    Text(
+        text = text,
+        color = color,
+        fontSize = 9.sp,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .background(color.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
+            .border(1.dp, color.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 6.dp, vertical = 3.dp)
+    )
+}
+
+sealed interface GatewaySessionsUiState {
+    data object Idle : GatewaySessionsUiState
+    data object Loading : GatewaySessionsUiState
+    data class Loaded(val dashboard: GatewaySessionDashboard) : GatewaySessionsUiState
+    data object Empty : GatewaySessionsUiState
+    data object Unauthorized : GatewaySessionsUiState
+    data object Unsupported : GatewaySessionsUiState
+    data class Error(val message: String) : GatewaySessionsUiState
+}
+
+fun applyGatewaySessionSelection(
+    entry: GatewaySessionEntry,
+    dashboard: GatewaySessionDashboard,
     prefs: AppPreferences
+) {
+    val cwd = entry.workingDirectory?.takeIf { it.isNotBlank() }
+        ?: entry.cwd?.takeIf { it.isNotBlank() }
+    prefs.selectedGatewaySessionPath = entry.canonicalSessionPath.orEmpty()
+    if (!cwd.isNullOrBlank()) {
+        prefs.workspacePath = cwd
+    }
+    if (entry.isRouteCapableIn(dashboard) && entry.name.isNotBlank()) {
+        prefs.codexSessionName = entry.name
+    }
+}
+
+@Composable
+fun LocalTurnHistoryPane(
+    audioHelper: AudioHelper,
+    ttsHelper: TtsHelper,
+    prefs: AppPreferences,
+    modifier: Modifier = Modifier
 ) {
     var sessionsList by remember { mutableStateOf(prefs.getRecordedSessions()) }
     var activePlaybackId by remember { mutableStateOf<String?>(null) }
@@ -1518,12 +2007,12 @@ fun SessionsTabContent(
 
     if (sessionsList.isEmpty()) {
         Box(
-            modifier = Modifier.fillMaxSize(),
+            modifier = modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
-                    text = "No saved sessions tape.",
+                    text = "No local turn history yet.",
                     color = Color(0xFF6E665A),
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold
@@ -1538,7 +2027,7 @@ fun SessionsTabContent(
         }
     } else {
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
@@ -2476,7 +2965,7 @@ fun DiscoveryTabContent(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = if (isScanning) "Broadcasting LAN and Tailscale discovery probes..." else "Discovery idle. Scan again or use QR setup.",
+                            text = if (isScanning) "Finding Pi Speak gateways on LAN and Tailscale..." else "Discovery finds machines. Scan the setup QR once to pair.",
                             color = if (isScanning) Color(0xFFC2542F) else Color(0xFF6E665A),
                             fontSize = 11.sp,
                             fontWeight = if (isScanning) FontWeight.SemiBold else FontWeight.Normal
@@ -2524,7 +3013,7 @@ fun DiscoveryTabContent(
                     letterSpacing = 0.8.sp
                 )
                 Text(
-                    text = "Active Target: ${prefs.targetIpAddress}",
+                    text = "Active Gateway: ${prefs.targetIpAddress}",
                     color = Color(0xFFC2542F),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold
@@ -2550,14 +3039,20 @@ fun DiscoveryTabContent(
                     val isMachineActive = prefs.targetIpAddress == machine.ip
                     val isMachineSelected = selectedMachine?.ip == machine.ip
                     val isOnline = machine.status == "online"
+                    val needsSetupQr = isOnline && machine.requiresPairing && prefs.remoteToken.isBlank()
 
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
                                 selectedMachine = machine
-                                // Instantly activate destination endpoint to router
-                                if (isOnline) {
+                                if (needsSetupQr) {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "Gateway found. Run /pk-remote on the computer and scan the setup QR to pair.",
+                                        android.widget.Toast.LENGTH_LONG
+                                    ).show()
+                                } else if (isOnline) {
                                     onSessionSelected(prefs.codexSessionName, machine.ip)
                                 }
                             },
@@ -2606,10 +3101,19 @@ fun DiscoveryTabContent(
 
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "IP Address: ${machine.ip}",
+                                text = "Endpoint: ${machine.ip}",
                                 color = Color(0xFF6E665A),
                                 fontSize = 11.sp
                             )
+                            if (needsSetupQr) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "Setup required: scan the QR from /pk-remote on this computer.",
+                                    color = Color(0xFFC2542F),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
 
                             Spacer(modifier = Modifier.height(8.dp))
                             Row(
@@ -2623,7 +3127,14 @@ fun DiscoveryTabContent(
                                     fontSize = 11.sp
                                 )
 
-                                if (isOnline) {
+                                if (needsSetupQr) {
+                                    Text(
+                                        text = "PAIR WITH QR",
+                                        color = Color(0xFFC2542F),
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                } else if (isOnline) {
                                     if (isMachineActive) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Box(
@@ -2673,7 +3184,7 @@ fun DiscoveryTabContent(
 
         // Selected Machine Session matrix
         val currentMachine = selectedMachine
-        if (currentMachine != null && currentMachine.status == "online") {
+        if (currentMachine != null && currentMachine.status == "online" && !(currentMachine.requiresPairing && prefs.remoteToken.isBlank())) {
             item {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(

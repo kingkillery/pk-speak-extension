@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 import { ControlServer, type ControlActionResult, type ControlServerStatus } from "./control-server.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
@@ -6,10 +6,11 @@ import { isGeminiLiveConfigured, runGeminiLiveTurn, runGeminiTextTurn } from "./
 import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
-import { spawn } from "node:child_process";
-import { execFileSync } from "node:child_process";
+import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim, resolveWindowsPiNodeCommand } from "./agent-discovery.js";
+import type { SessionDashboard, SessionDashboardEntry } from "./session-routing.js";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const state = {
@@ -318,6 +319,29 @@ async function renderReplyAudio(text: string, providerOverride?: TtsProvider): P
 const ok = (message: string): ControlActionResult => ({ ok: true, message });
 let server: ControlServer;
 
+function buildRecentSessionDashboard(): SessionDashboard {
+	const inventory = discoverAgentInventoryCached();
+	const sessions: SessionDashboardEntry[] = inventory.recent.map((session) => ({
+		name: session.title || session.cwdBasename || session.sessionId || session.path,
+		path: session.path,
+		sessionPath: session.path,
+		workingDirectory: session.cwd,
+		cwd: session.cwd,
+		current: false,
+		isCurrent: false,
+		ready: false,
+		isReady: false,
+		activity: "saved",
+		aliases: [],
+	}));
+	return {
+		current: "none",
+		ready: [],
+		storePath: "recent CLI sessions",
+		sessions,
+	};
+}
+
 class PiCliProvider implements AgentProvider {
 	readonly name = "pi" as const;
 	constructor(private readonly piBin: string, private readonly cwd: string) {}
@@ -395,6 +419,9 @@ server = new ControlServer({
 	onTextTurn: async (text, includeAudio, _target, cwd, _mode) => runTextTurn(text, includeAudio, cwd),
 	onVoiceTurn: async (buffer, mimeType, includeAudio, _target, cwd, _mode) => runVoiceTurn(buffer, mimeType, includeAudio, cwd),
 	onTurnCancel: cancelCurrentTurn,
+	getSessionDashboard: buildRecentSessionDashboard,
+	getCompactRouteSlots: () => [],
+	getDiscoveredAgents: () => discoverAgentInventoryCached(),
 });
 
 Promise.resolve(provider.start?.())
@@ -420,14 +447,6 @@ function shutdown() {
 		.finally(() => process.exit(0));
 }
 
-function resolveWindowsNpmShim(name: string): string | undefined {
-	if (process.platform !== "win32") return undefined;
-	const appData = process.env.APPDATA;
-	if (!appData) return undefined;
-	const candidate = join(appData, "npm", name);
-	return existsSync(candidate) ? candidate : undefined;
-}
-
 function buildAgentEnv(): NodeJS.ProcessEnv {
 	const env = { ...process.env };
 	if (!env.OPENAI_API_KEY && env.PI_SPEAK_OPENAI_KEY) {
@@ -442,7 +461,7 @@ function runCli(command: string, args: string[], options: { cwd: string; name: s
 			cwd: options.cwd,
 			env: buildAgentEnv(),
 			windowsHide: true,
-			shell: options.shell ?? process.platform === "win32",
+			shell: options.shell ?? (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command)),
 			stdio: [options.stdin ? "pipe" : "ignore", "pipe", "pipe"],
 		});
 		let stdout = "";
@@ -501,54 +520,6 @@ function killProcessTree(pid?: number) {
 	} catch {}
 }
 
-function resolveWindowsPiNodeCommand(piBin: string): { file: string; args: string[]; shell?: boolean } | undefined {
-	if (process.platform !== "win32") return undefined;
-	const appData = process.env.APPDATA;
-	if (!appData) return undefined;
-	const cli = join(appData, "npm", "node_modules", "@mariozechner", "pi-coding-agent", "dist", "cli.js");
-	if (!existsSync(cli)) return undefined;
-	const normalized = piBin.toLowerCase().replace(/\\/g, "/");
-	if (!normalized.endsWith("/pi.cmd") && !normalized.endsWith("/pi")) return undefined;
-	return { file: process.execPath, args: [cli], shell: false };
-}
-
-function discoverOpenAgentTargets(): string[] {
-	if (process.platform !== "win32") return [];
-	try {
-		const script = [
-			"$selfPid = " + process.pid,
-			"Get-CimInstance Win32_Process |",
-			"Where-Object { $_.ProcessId -ne $selfPid -and $_.Name -match '^(codex|pi)(\\.exe)?$' } |",
-			"ForEach-Object {",
-			"  $name = [IO.Path]::GetFileNameWithoutExtension($_.Name).ToLowerInvariant()",
-			"  $cwd = ''",
-			"  if ($_.CommandLine -match '-C\\s+([^\\s]+)') { $cwd = $Matches[1] }",
-			"  if (-not $cwd -and $_.CommandLine -match '--cwd\\s+([^\\s]+)') { $cwd = $Matches[1] }",
-			"  [PSCustomObject]@{ name = $name; pid = $_.ProcessId; cwd = $cwd }",
-			"} | ConvertTo-Json -Compress",
-		].join("\n");
-		const output = execFileSync("powershell.exe", ["-NoProfile", "-Command", script], {
-			encoding: "utf8",
-			windowsHide: true,
-			timeout: 5000,
-		}).trim();
-		if (!output) return [];
-		const parsed = JSON.parse(output);
-		const rows = Array.isArray(parsed) ? parsed : [parsed];
-		return rows
-			.map((row) => {
-				const name = typeof row.name === "string" ? row.name : "agent";
-				const pid = typeof row.pid === "number" || typeof row.pid === "string" ? String(row.pid) : "";
-				const cwd = typeof row.cwd === "string" ? row.cwd.trim() : "";
-				const suffix = cwd ? ` ${cwd.replace(/^.*[\\/]/, "")}` : "";
-				return pid ? `${name}:${pid}${suffix}` : "";
-			})
-			.filter(Boolean);
-	} catch {
-		return [];
-	}
-}
-
 function resolveDefaultAgentProvider(): "pi" | "codex" {
 	if (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY) return "codex";
 	const codexBin = process.env.CODEX_BIN || resolveWindowsNpmShim("codex.cmd") || "codex";
@@ -557,7 +528,7 @@ function resolveDefaultAgentProvider(): "pi" | "codex" {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 			windowsHide: true,
-			shell: process.platform === "win32",
+			shell: process.platform === "win32" && /\.(?:cmd|bat)$/i.test(codexBin),
 			timeout: 5000,
 		});
 		return /logged in|authenticated/i.test(output) && !/not logged in/i.test(output) ? "codex" : "pi";

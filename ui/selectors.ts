@@ -10,6 +10,7 @@ import {
 	loadPersistedSessionRouting,
 } from "../session-routing-store.js";
 import { readAttentionSnapshots } from "../attention-broker.js";
+import { buildSessionWorkingDirectoryMap } from "../session-working-directory.js";
 
 export type LoadSessionDashboardOptions = {
 	runtimeSnapshots?: SessionRuntimeSnapshot[];
@@ -17,12 +18,18 @@ export type LoadSessionDashboardOptions = {
 	currentSessionName?: string;
 	currentBusy?: boolean;
 	currentReady?: boolean;
+	workingDirectories?: Record<string, string>;
 	storePath?: string;
 };
 
 export function loadSessionDashboard(options: LoadSessionDashboardOptions = {}): SessionDashboard {
 	const persisted = loadPersistedSessionRouting();
 	const snapshots = options.runtimeSnapshots ?? readAttentionSnapshots();
+	const sessionPaths = [
+		...Object.values(persisted.sessions),
+		options.currentSessionPath,
+		...snapshots.map((snapshot) => snapshot.sessionPath),
+	];
 	const dashboardOptions: BuildSessionDashboardOptions = {
 		sessions: persisted.sessions,
 		aliases: persisted.aliases,
@@ -31,6 +38,10 @@ export function loadSessionDashboard(options: LoadSessionDashboardOptions = {}):
 		currentSessionName: options.currentSessionName,
 		currentBusy: options.currentBusy,
 		currentReady: options.currentReady,
+		workingDirectories: {
+			...buildSessionWorkingDirectoryMap(sessionPaths, options.workingDirectories),
+			...options.workingDirectories,
+		},
 		storePath: options.storePath ?? getSessionRoutingStorePath(),
 	};
 	return buildSessionDashboard(dashboardOptions);
@@ -44,6 +55,7 @@ export function projectDashboardRow(entry: SessionDashboardEntry) {
 	return {
 		name: entry.name,
 		path: entry.path,
+		workingDirectory: entry.workingDirectory,
 		marker: entry.current ? ">" : " ",
 		tags,
 		aliases: entry.aliases,

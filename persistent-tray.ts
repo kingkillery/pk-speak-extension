@@ -24,6 +24,7 @@ type TrayConfig = {
 	htmlPath: string;
 	logPath: string;
 	childLogPath: string;
+	iconPath: string;
 };
 
 const DEFAULT_BASE_URL = "http://100.76.136.91:8767/";
@@ -53,6 +54,7 @@ async function main() {
 			"  --cwd <path>           Repo/runtime directory. Defaults to current directory.",
 			"  --gateway <path>       Headless gateway entrypoint. Defaults to ./dist/headless-gateway.js.",
 			"  --profile-name <name>  Android profile name. Defaults to MSI / appserver.",
+			"  --icon <path>          Tray .ico path. Defaults to assets/pi-speak-tray.ico when present.",
 			"  --install-startup      Install a Windows startup shortcut for the tray.",
 		].join("\n"));
 		return;
@@ -63,9 +65,12 @@ async function main() {
 		throw new Error(`Pi Speak headless gateway build not found at ${gatewayEntry}. Run npm run build first or pass --gateway <path>.`);
 	}
 
-	const baseUrl = normalizeBaseUrl(args.baseUrl || process.env.PI_SPEAK_TRAY_BASE_URL || process.env.PI_SPEAK_PUBLIC_BASE_URL || getDefaultBaseUrl());
+	const baseUrlArg = args.baseUrl || args["base-url"];
+	const profileNameArg = args.profileName || args["profile-name"];
+	const baseUrl = normalizeBaseUrl(baseUrlArg || process.env.PI_SPEAK_TRAY_BASE_URL || process.env.PI_SPEAK_PUBLIC_BASE_URL || getDefaultBaseUrl());
 	const token = args.token || process.env.PI_SPEAK_HTTP_TOKEN || randomToken();
-	const profileName = args.profileName || DEFAULT_PROFILE_NAME;
+	const profileName = profileNameArg || DEFAULT_PROFILE_NAME;
+	const iconPath = resolveTrayIconPath(repoRoot, args.icon || process.env.PI_SPEAK_TRAY_ICON);
 	const appSetupUrl = buildAppSetupUrl(baseUrl, token, profileName);
 	const setupPageUrl = new URL(`setup?token=${encodeURIComponent(token)}&profile_name=${encodeURIComponent(profileName)}`, baseUrl).toString();
 	const downloadUrl = new URL("download/pi-speak.apk", baseUrl).toString();
@@ -100,11 +105,12 @@ async function main() {
 		args: [gatewayEntry],
 		trayCommand: process.execPath,
 		trayArgs: [
-			resolve(process.argv[1] || join(__dirname, "persistent-tray.js")),
+			resolve(process.argv[1] || join(import.meta.dirname, "persistent-tray.js")),
 			"--cwd",
 			repoRoot,
 			"--gateway",
 			gatewayEntry,
+			...(iconPath ? ["--icon", iconPath] : []),
 		],
 		env: {
 			PI_SPEAK_HTTP_TOKEN: token,
@@ -113,6 +119,7 @@ async function main() {
 		htmlPath,
 		logPath,
 		childLogPath,
+		iconPath,
 	};
 	writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
 	writeFileSync(scriptPath, renderTrayScript(), "utf8");
@@ -143,8 +150,8 @@ async function main() {
 	});
 	child.on("error", () => {});
 	console.log(`Pi Speak tray started for ${baseUrl}`);
-	if (args["install-startup"]) {
-		installStartupShortcut({ repoRoot, gatewayEntry, baseUrl, token, profileName });
+	if (args.installStartup || args["install-startup"]) {
+		installStartupShortcut({ repoRoot, gatewayEntry, baseUrl, token, profileName, iconPath });
 	}
 }
 
@@ -194,6 +201,16 @@ function getDefaultBaseUrl() {
 	}
 	const fallback = platform() === "darwin" ? TAILSCALE_MAC_IP : TAILSCALE_APPSERVER_IP;
 	return DEFAULT_BASE_URL.replace(TAILSCALE_APPSERVER_IP, fallback);
+}
+
+function resolveTrayIconPath(repoRoot: string, configured?: string): string {
+	if (configured?.trim()) return resolve(configured.trim());
+	const candidates = [
+		join(repoRoot, "assets", "pi-speak-tray.ico"),
+		join(dirname(resolve(process.argv[1] || ".")), "..", "assets", "pi-speak-tray.ico"),
+		join(dirname(resolve(process.argv[1] || ".")), "assets", "pi-speak-tray.ico"),
+	];
+	return candidates.find((candidate) => existsSync(candidate)) || "";
 }
 
 function randomToken(): string {
@@ -263,14 +280,16 @@ function installStartupShortcut({
 	baseUrl,
 	token,
 	profileName,
+	iconPath,
 }: {
 	repoRoot: string;
 	gatewayEntry: string;
 	baseUrl: string;
 	token: string;
 	profileName: string;
+	iconPath: string;
 }) {
-	const scriptPath = resolve(process.argv[1] || join(__dirname, "persistent-tray.js"));
+	const scriptPath = resolve(process.argv[1] || join(import.meta.dirname, "persistent-tray.js"));
 	const ps = `
 $startup = [Environment]::GetFolderPath("Startup")
 $shortcutPath = Join-Path $startup "Pi Speak Tray.lnk"
@@ -289,6 +308,7 @@ $shortcut.Arguments = ${psSingleQuote([
 	token,
 	"--profile-name",
 	profileName,
+	...(iconPath ? ["--icon", iconPath] : []),
 ].map((value) => `"${value.replace(/"/g, '\\"')}"`).join(" "))}
 $shortcut.WorkingDirectory = ${psSingleQuote(repoRoot)}
 $shortcut.Save()
@@ -316,7 +336,17 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
 $notify = New-Object System.Windows.Forms.NotifyIcon
 $notify.Text = $config.title
-$notify.Icon = [System.Drawing.SystemIcons]::Application
+if ($config.iconPath -and (Test-Path -LiteralPath $config.iconPath)) {
+	try {
+		$notify.Icon = New-Object System.Drawing.Icon($config.iconPath)
+		Write-TrayLog ("Loaded tray icon " + $config.iconPath)
+	} catch {
+		Write-TrayLog ("Failed to load tray icon: " + $_.Exception.Message)
+		$notify.Icon = [System.Drawing.SystemIcons]::Application
+	}
+} else {
+	$notify.Icon = [System.Drawing.SystemIcons]::Application
+}
 $notify.Visible = $true
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $remoteProcess = $null
@@ -398,6 +428,7 @@ function Restart-TrayWithSettings {
 	[void]$args.Add("--base-url"); [void]$args.Add($newBaseUrl)
 	[void]$args.Add("--profile-name"); [void]$args.Add($newProfile)
 	[void]$args.Add("--token"); [void]$args.Add($newToken)
+	if ($config.iconPath) { [void]$args.Add("--icon"); [void]$args.Add([string]$config.iconPath) }
 	Write-TrayLog "Restarting tray with updated settings"
 	Start-Process -FilePath $config.trayCommand -ArgumentList $args.ToArray() -WorkingDirectory $config.cwd -WindowStyle Hidden
 	Stop-Remote

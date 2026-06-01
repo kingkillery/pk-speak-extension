@@ -66,7 +66,7 @@ function getRunningPanePid(lockPath = getSessionManagerPaneLockPath()): number |
 
 export function resolveAdminScriptPath(override?: string): string {
 	if (override) return resolve(override);
-	return join(__dirname, "ui", "admin.js");
+	return join(import.meta.dirname, "ui", "admin.js");
 }
 
 function buildAdminCliArgs(options: LaunchSessionManagerPaneOptions, adminScriptPath: string): string[] {

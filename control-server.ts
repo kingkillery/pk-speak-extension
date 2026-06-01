@@ -10,6 +10,8 @@ import Bonjour from "bonjour-service";
 import { BusyError, type RemoteTurnSource, RemoteTurnResult } from "./remote-turn-manager.js";
 import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
 import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
+import type { SessionDashboard, CompactRouteSlot } from "./session-routing.js";
+import type { AgentDiscoverySnapshot } from "./agent-discovery.js";
 
 export type ControlServerState = {
 	enabled: boolean;
@@ -22,6 +24,20 @@ export type ControlActionResult = {
 	ok: boolean;
 	message: string;
 	[key: string]: unknown;
+};
+
+export type SessionRenamePayload = {
+	sessionPath: string;
+	newName: string;
+};
+
+export type SessionAliasPayload = {
+	sessionPath: string;
+	alias: string;
+};
+
+export type SessionRemovePayload = {
+	sessionPath: string;
 };
 
 export type RemoteSlashCommand = {
@@ -137,6 +153,13 @@ export type ControlServerOptions = {
 		agentProvider?: "pi" | "codex",
 	) => Promise<RemoteTurnResult>;
 	onTurnCancel?: () => Promise<ControlActionResult> | ControlActionResult;
+	getSessionDashboard?: () => SessionDashboard;
+	getCompactRouteSlots?: () => CompactRouteSlot[];
+	onSessionRename?: (body: SessionRenamePayload) => Promise<ControlActionResult> | ControlActionResult;
+	onSessionAlias?: (body: SessionAliasPayload) => Promise<ControlActionResult> | ControlActionResult;
+	onSessionRemove?: (body: SessionRemovePayload) => Promise<ControlActionResult> | ControlActionResult;
+	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
+	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 };
 
 type AudioArtifact = {
@@ -168,6 +191,13 @@ const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMI
 const RATE_LIMIT_CONTROL = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_CONTROL || "20", 10);
 const RATE_LIMIT_VOICE = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_VOICE || "6", 10);
 const ALLOW_QUERY_TOKEN_FOR_AUDIO = isTruthy(process.env.PI_SPEAK_HTTP_ALLOW_QUERY_TOKEN_FOR_AUDIO || "false");
+const TRUST_TAILSCALE_LOCAL = isTruthy(process.env.PI_SPEAK_TRUST_TAILSCALE_LOCAL || "false");
+const TRUSTED_TAILSCALE_IPS = new Set(
+	(process.env.PI_SPEAK_TRUSTED_TAILSCALE_IPS || "")
+		.split(",")
+		.map((value) => value.trim())
+		.filter(Boolean),
+);
 const REMOTE_APP_DIR = resolveRemoteAppDir();
 const ANDROID_APK_PATH = resolveAndroidApkPath();
 const ALLOWED_VOICE_CONTENT_TYPES = [
@@ -232,6 +262,13 @@ export class ControlServer {
 	private readonly onTextTurn: ControlServerOptions["onTextTurn"];
 	private readonly onVoiceTurn: ControlServerOptions["onVoiceTurn"];
 	private readonly onTurnCancel?: ControlServerOptions["onTurnCancel"];
+	private readonly getSessionDashboard?: ControlServerOptions["getSessionDashboard"];
+	private readonly getCompactRouteSlots?: ControlServerOptions["getCompactRouteSlots"];
+	private readonly onSessionRename?: ControlServerOptions["onSessionRename"];
+	private readonly onSessionAlias?: ControlServerOptions["onSessionAlias"];
+	private readonly onSessionRemove?: ControlServerOptions["onSessionRemove"];
+	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
+	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
@@ -262,6 +299,13 @@ export class ControlServer {
 		this.onTextTurn = options.onTextTurn;
 		this.onVoiceTurn = options.onVoiceTurn;
 		this.onTurnCancel = options.onTurnCancel;
+		this.getSessionDashboard = options.getSessionDashboard;
+		this.getCompactRouteSlots = options.getCompactRouteSlots;
+		this.onSessionRename = options.onSessionRename;
+		this.onSessionAlias = options.onSessionAlias;
+		this.onSessionRemove = options.onSessionRemove;
+		this.getDiscoveredAgents = options.getDiscoveredAgents;
+		this.tailSessionEvents = options.tailSessionEvents;
 	}
 
 	getRuntimeState() {
@@ -462,9 +506,8 @@ export class ControlServer {
 		}
 
 		if (req.method === "POST" && url.pathname === "/v1/route") {
-			const body = await this.readTextBody(req, TEXT_BODY_LIMIT_BYTES);
-			const payload = parseJson<Record<string, unknown>>(body);
-			if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload) {
 				this.writeJson(res, 400, { ok: false, error: "Invalid JSON body." });
 				return;
 			}
@@ -475,6 +518,102 @@ export class ControlServer {
 				message: result.message,
 				route: this.getRoutingStatus(),
 			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/sessions") {
+			if (!this.getSessionDashboard) {
+				this.writeJson(res, 501, { ok: false, error: "Session dashboard is not available on this gateway." });
+				return;
+			}
+			this.writeJson(res, 200, { ok: true, dashboard: this.getSessionDashboard() });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/sessions/slots") {
+			if (!this.getCompactRouteSlots) {
+				this.writeJson(res, 501, { ok: false, error: "Route slots are not available on this gateway." });
+				return;
+			}
+			this.writeJson(res, 200, { ok: true, slots: this.getCompactRouteSlots() });
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/sessions/rename") {
+			if (!this.onSessionRename) {
+				this.writeJson(res, 501, { ok: false, error: "Session rename is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload || typeof payload.sessionPath !== "string" || typeof payload.newName !== "string") {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: sessionPath and newName are required strings." });
+				return;
+			}
+			const result = await this.onSessionRename({ sessionPath: payload.sessionPath, newName: payload.newName });
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/sessions/alias") {
+			if (!this.onSessionAlias) {
+				this.writeJson(res, 501, { ok: false, error: "Session alias is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload || typeof payload.sessionPath !== "string" || typeof payload.alias !== "string") {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: sessionPath and alias are required strings." });
+				return;
+			}
+			const result = await this.onSessionAlias({ sessionPath: payload.sessionPath, alias: payload.alias });
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/sessions/remove") {
+			if (!this.onSessionRemove) {
+				this.writeJson(res, 501, { ok: false, error: "Session remove is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload || typeof payload.sessionPath !== "string") {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: sessionPath is a required string." });
+				return;
+			}
+			const result = await this.onSessionRemove({ sessionPath: payload.sessionPath });
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/agents") {
+			if (!this.getDiscoveredAgents) {
+				this.writeJson(res, 501, { ok: false, error: "Agent discovery is not available on this gateway." });
+				return;
+			}
+			const discovered = this.getDiscoveredAgents();
+			if (Array.isArray(discovered)) {
+				this.writeJson(res, 200, { ok: true, agents: discovered, running: [], recent: [] });
+				return;
+			}
+			this.writeJson(res, 200, {
+				ok: true,
+				agents: discovered.targets,
+				running: discovered.running,
+				recent: discovered.recent,
+				generatedAt: discovered.generatedAt,
+			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/events") {
+			if (!this.tailSessionEvents) {
+				this.writeJson(res, 501, { ok: false, error: "Event stream is not available on this gateway." });
+				return;
+			}
+			if (!this.isAuthorized(req, url, true)) {
+				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
+				return;
+			}
+			await this.handleEventStream(req, url, res);
 			return;
 		}
 
@@ -646,7 +785,7 @@ export class ControlServer {
 					auth: "required",
 					pairing: "setup-v1",
 					path: "/.well-known/pi-speak",
-					caps: "text,voice,audio,routing,pwa,android,progress,cancel",
+					caps: "text,voice,audio,routing,pwa,android,progress,cancel,session-dashboard,route-slots,session-mutations,agent-discovery,event-stream",
 				},
 			});
 			this.discoveryDiagnostics.mdnsEnabled = true;
@@ -729,6 +868,18 @@ export class ControlServer {
 			authRequired: !!this.state.authToken,
 			pairingRequired: true,
 			pairingMethods: ["setup-qr"],
+			pairing: {
+				required: true,
+				methods: ["setup-qr", "native-deep-link"],
+				setupPath: "/setup",
+				deepLinkScheme: "pi-speak://setup",
+				tokenDelivery: "setup-qr-only",
+				instructions: "Run /pk-remote on the computer and scan the setup QR. Discovery never exposes the token.",
+			},
+			security: {
+				publicDiscoveryIncludesToken: false,
+				tokenDelivery: "setup-qr-only",
+			},
 			baseUrls: [...new Set([baseUrl, ...getReachableBaseUrls(this.state.port ?? DEFAULT_PORT)])],
 			endpoints: {
 				app: "/app/",
@@ -741,6 +892,10 @@ export class ControlServer {
 				cancelTurn: "/v1/turn/cancel",
 				route: "/v1/route",
 				workspace: "/v1/workspace",
+				sessions: "/v1/sessions",
+				slots: "/v1/sessions/slots",
+				agents: "/v1/agents",
+				events: "/v1/events",
 			},
 			capabilities: [
 				"text-turn",
@@ -753,6 +908,11 @@ export class ControlServer {
 				"progress-events",
 				"pwa",
 				"android-apk",
+				"session-dashboard",
+				"route-slots",
+				"session-mutations",
+				"agent-discovery",
+				"event-stream",
 			],
 			agent: status.agent
 				? {
@@ -779,13 +939,15 @@ export class ControlServer {
 			|| "Pi Speak";
 		const setupParams = new URLSearchParams({
 			base_url: baseUrl,
-			token,
 			machine_id: url.hostname || "pi-speak",
 			profile_name: profileName,
 			connection_mode: isTailscaleHostname(url.hostname) ? "tailscale" : "manual",
 			workspace_root: getWorkspaceRoot(),
 			workspace_path: getDefaultWorkspacePath(),
 		});
+		if (token) {
+			setupParams.set("token", token);
+		}
 		const defaultTarget = status.remote.defaultTarget || status.remote.currentSession || "";
 		if (defaultTarget) {
 			setupParams.set("default_target", defaultTarget);
@@ -1026,6 +1188,13 @@ export class ControlServer {
 		return buffer.toString("utf8");
 	}
 
+	private async readJsonObject(req: IncomingMessage, limitBytes: number): Promise<Record<string, unknown> | undefined> {
+		const body = await this.readTextBody(req, limitBytes);
+		const payload = parseJson<Record<string, unknown>>(body);
+		if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+		return payload;
+	}
+
 	private async readBinaryBody(req: IncomingMessage, limitBytes: number) {
 		const chunks: Buffer[] = [];
 		let totalBytes = 0;
@@ -1093,6 +1262,45 @@ export class ControlServer {
 		});
 		return await Promise.race([promise, timeout]);
 	}
+
+	private async handleEventStream(req: IncomingMessage, url: URL, res: ServerResponse) {
+		const sinceOffset = parseNonNegativeInt(url.searchParams.get("since"), 0);
+		let offset = sinceOffset;
+
+		res.statusCode = 200;
+		res.setHeader("Content-Type", "text/event-stream");
+		res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+		res.setHeader("Pragma", "no-cache");
+		res.setHeader("Expires", "0");
+		res.setHeader("Connection", "keep-alive");
+		res.write(":ok\n\n");
+
+		const sendEvents = () => {
+			if (res.writableEnded || !this.tailSessionEvents) return;
+			try {
+				const batch = this.tailSessionEvents(offset);
+				if (batch.events.length > 0) {
+					for (const event of batch.events) {
+						res.write(`data: ${JSON.stringify(event)}\n\n`);
+					}
+					offset = batch.nextOffset;
+				}
+			} catch (error) {
+				res.write(`event: error\ndata: ${JSON.stringify({ message: getErrorMessage(error) })}\n\n`);
+			}
+		};
+
+		sendEvents();
+		const pollTimer = setInterval(sendEvents, 500);
+		const keepAliveTimer = setInterval(() => {
+			if (!res.writableEnded) res.write(":keep-alive\n\n");
+		}, 15000);
+
+		req.on("close", () => {
+			clearInterval(pollTimer);
+			clearInterval(keepAliveTimer);
+		});
+	}
 }
 
 class RequestLimitError extends Error {
@@ -1140,8 +1348,27 @@ function isLoopback(remoteAddress: string) {
 	return remoteAddress === "::1" || remoteAddress === "127.0.0.1" || remoteAddress === "::ffff:127.0.0.1";
 }
 
+function normalizeRemoteAddress(address: string) {
+	return address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
+}
+
+function isTailscaleIp(remoteAddress: string) {
+	// Tailscale uses the CGNAT range 100.64.0.0/10
+	const parts = remoteAddress.split(".");
+	if (parts.length !== 4) return false;
+	const first = parseInt(parts[0], 10);
+	const second = parseInt(parts[1], 10);
+	return first === 100 && second >= 64 && second <= 127;
+}
+
 function isLocalRequest(req: IncomingMessage, url: URL) {
-	return isLoopback(req.socket.remoteAddress || "") && isLoopbackHost(url.hostname);
+	const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress || "");
+	const hostname = url.hostname;
+	// Pure loopback — require both remote address and Host to be loopback
+	if (isLoopback(remoteAddress) && isLoopbackHost(hostname)) return true;
+	// Tailscale mesh — only if explicitly enabled and IP is in allowlist
+	if (TRUST_TAILSCALE_LOCAL && TRUSTED_TAILSCALE_IPS.has(remoteAddress)) return true;
+	return false;
 }
 
 function isLoopbackHost(hostname: string) {
@@ -1150,17 +1377,17 @@ function isLoopbackHost(hostname: string) {
 }
 
 function resolveRemoteAppDir() {
-	const parentCandidate = join(__dirname, "..", "web", "remote");
+	const parentCandidate = join(import.meta.dirname, "..", "web", "remote");
 	if (existsSync(join(parentCandidate, "index.html"))) return parentCandidate;
-	const localCandidate = join(__dirname, "web", "remote");
+	const localCandidate = join(import.meta.dirname, "web", "remote");
 	if (existsSync(join(localCandidate, "index.html"))) return localCandidate;
 	return parentCandidate;
 }
 
 function resolveAndroidApkPath() {
-	const parentCandidate = join(__dirname, "..", "android-app", ".build-outputs", "app-debug.apk");
+	const parentCandidate = join(import.meta.dirname, "..", "android-app", ".build-outputs", "app-debug.apk");
 	if (existsSync(parentCandidate)) return parentCandidate;
-	const localCandidate = join(__dirname, "android-app", ".build-outputs", "app-debug.apk");
+	const localCandidate = join(import.meta.dirname, "android-app", ".build-outputs", "app-debug.apk");
 	if (existsSync(localCandidate)) return localCandidate;
 	return parentCandidate;
 }
@@ -1224,8 +1451,8 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
 <body>
 <main>
 <section class="hero">
-<h1>Pi Speak phone setup</h1>
-<p>Use the Android phone on Tailscale. Install the APK first, then scan the connection QR to register this machine profile.</p>
+<h1>Pair Pi Speak</h1>
+<p>Install the Android app, then scan the setup QR from this computer. The phone saves the gateway, token, target session, and workspace; no IP address or API key entry is needed.</p>
 <div class="status">
 <span class="pill">Gateway: ${escapeHtml(queue)}</span>
 <span class="pill">Profile: ${escapeHtml(profileName)}</span>
@@ -1238,9 +1465,10 @@ code { background: #eef2f7; padding: 2px 5px; border-radius: 4px; }
 ${apkAvailable ? `<div class="qr">${apkQrSvg}</div><p class="meta"><a class="button" href="${escapeHtml(apkUrl)}">Download APK</a></p><p class="meta"><code>${escapeHtml(apkUrl)}</code></p>` : `<p class="meta">APK is not bundled in this install. Build it with the Android project, then publish the package again.</p>`}
 </article>
 <article class="panel">
-<h2>2. Connect this machine</h2>
+<h2>2. Pair this computer</h2>
 <div class="qr">${setupQrSvg}</div>
 <p class="meta"><a class="button" href="${escapeHtml(appSetupUrl)}">Open setup link</a></p>
+<p class="meta">This QR is the credential handoff. LAN and Tailscale discovery can find the gateway later, but public discovery never includes the token.</p>
 <p class="meta"><strong>Endpoint:</strong> <code>${escapeHtml(baseUrl)}</code></p>
 <p class="meta"><strong>Web fallback:</strong> <a href="${escapeHtml(browserUrl)}">${escapeHtml(browserUrl)}</a></p>
 </article>
@@ -1423,6 +1651,12 @@ function parsePositiveInt(value: string | null, defaultValue: number) {
 	if (parsed <= 0) return 1;
 	if (parsed > 200) return 200;
 	return parsed;
+}
+
+function parseNonNegativeInt(value: string | null, defaultValue = 0, max = Number.MAX_SAFE_INTEGER) {
+	const parsed = Number.parseInt(value || "", 10);
+	if (!Number.isFinite(parsed) || parsed < 0) return defaultValue;
+	return Math.min(parsed, max);
 }
 
 function normalizeRemoteTurnSource(value: string | null): RemoteTurnSource | undefined {

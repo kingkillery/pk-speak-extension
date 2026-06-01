@@ -1,6 +1,7 @@
 {
   "name": "pi-speak-pk",
   "version": "0.2.5",
+  "type": "module",
   "description": "Voice, wake-word, Telegram, and mobile web remote extensions for Pi.",
   "keywords": [
     "pi",
@@ -24,6 +25,7 @@
   "files": [
     "dist",
     "web",
+    "assets",
     "android-app/.build-outputs/app-debug.apk",
     "listener",
     "unified-remote",
@@ -34,7 +36,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:ui": "tsc -p tsconfig.ui.json && node scripts/sync-ui-package.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.ui.json --noEmit",
     "test": "npm run build && npm run build:ui && node --test tests/*.test.mjs",
+    "test:parallel": "npm run build && npm run build:ui && node --test --test-concurrency=4 tests/*.test.mjs",
+    "test:coverage": "npm run build && npm run build:ui && c8 --reporter=text --reporter=lcov --include='dist/**/*.js' node --test tests/*.test.mjs",
+    "test:stress": "npm run build && npm run build:ui && node --test tests/stress-adversarial.test.mjs",
     "prepublishOnly": "npm run build && npm run build:ui",
     "qr": "node scripts/qr-setup.mjs"
   },
@@ -46,6 +52,9 @@
     "qrcode": "^1.5.4",
     "react": "^19.2.5"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -54,6 +63,7 @@
     "@types/node": "^22.15.3",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.14",
+    "c8": "^10.1.3",
     "typescript": "^5.8.3"
   }
 }

@@ -6,9 +6,9 @@ import { dirname, join } from "node:path";
 import { networkInterfaces, platform, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
-import { ControlServer, type ControlActionResult, type ControlServerState, type RemoteSlashCommand } from "./control-server.js";
+import { ControlServer, type ControlActionResult, type ControlServerState, type RemoteSlashCommand, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
-import { BusyError, RemoteTurnManager, type RemoteTurnResult, type TurnTimingSummary } from "./remote-turn-manager.js";
+import { BusyError, RemoteTurnManager, type ConversationExecutionPlan, type ConversationReducerSummary, type RemoteTurnResult, type TurnProgressEvent, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { requestGracefulChildShutdown } from "./listener-control.js";
 import { findSessionRouteConflict, isSpeechInterruptCommand, listKnownTargets, resolveSessionRoute, resolveSessionTarget } from "./voice-routing.js";
@@ -16,6 +16,8 @@ import { isAffirmative, isNegative } from "./voice-confirmation.js";
 import { createApprovalRegistry } from "./voice-approval.js";
 import { extractDiff, extractErrors, parsePlaybackCommand } from "./voice-playback.js";
 import {
+	buildSessionDashboard,
+	buildCompactRouteSlots,
 	clearWakeAlias,
 	describeSessionRoutingStore,
 	findSessionNameByPath,
@@ -26,9 +28,11 @@ import {
 	setWakeAlias,
 } from "./session-routing.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
-import { appendSessionEvent, type SessionEventSource } from "./session-events.js";
+import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
+import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached } from "./agent-discovery.js";
+import { buildSessionWorkingDirectoryMap } from "./session-working-directory.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { PiAgentProvider } from "./pi-agent-provider.js";
@@ -51,6 +55,7 @@ import {
 	type SpeakRuntimeState,
 	type TtsProvider,
 } from "./tts.js";
+import { readAttentionSnapshots } from "./attention-broker.js";
 import { isGeminiLiveConfigured, runGeminiLiveTurn } from "./gemini-live-turn.js";
 
 type SpeakState = SpeakRuntimeState & {
@@ -417,10 +422,10 @@ function playMonoCue(kind: "listening" | "idle" = "listening") {
 function getExtensionDir(): string {
 	// When loaded from dist/, listener/ is a sibling of dist/ â†’ go up one level.
 	// When loaded directly (e.g. ~/.pi/agent/extensions/speak.ts), listener/ is a
-	// sibling of the .ts file â†’ __dirname is already correct.
-	const candidate = join(__dirname, "..", "listener", "listener.py");
-	if (existsSync(candidate)) return join(__dirname, "..");
-	return __dirname;
+	// sibling of the .ts file â†’ import.meta.dirname is already correct.
+	const candidate = join(import.meta.dirname, "..", "listener", "listener.py");
+	if (existsSync(candidate)) return join(import.meta.dirname, "..");
+	return import.meta.dirname;
 }
 
 function getPython(): string {
@@ -1175,19 +1180,70 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 
 		const desiredTarget = targetName?.trim() || remoteDefaultTarget;
-		const reducer = await reduceConversationTurn(trimmed, {
-			source,
-			targetName: desiredTarget,
-			minConfidence: PI_SPEAK_REDUCER_MIN_CONFIDENCE,
-		});
+		const isVoiceInput = source === "http-voice" || source === "telegram-voice";
+		const directBackend = agentProvider || (agentProviderConfig.provider === "codex" ? "codex" : "pi");
+		const directSummary: ConversationReducerSummary = {
+			goal: trimmed,
+			actionItems: [trimmed],
+			constraints: [],
+			deferredReminders: [],
+			doNotDo: [],
+			unknowns: [],
+			discarded: [],
+			confidence: 1,
+			shouldDispatch: true,
+			clarifyingQuestion: undefined,
+			engine: "heuristic",
+		};
+		const directExecutionPlan: ConversationExecutionPlan = {
+			dispatch: true,
+			backend: directBackend,
+			reason: directBackend === "codex" ? "dispatch-codex" : "dispatch-pi",
+			confidence: 1,
+			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : "Pi"}; voice-only router bypassed.`,
+			actionForSeed: trimmed,
+		};
+		const reducer = isVoiceInput
+			? await reduceConversationTurn(trimmed, {
+					source,
+					targetName: desiredTarget,
+					minConfidence: PI_SPEAK_REDUCER_MIN_CONFIDENCE,
+				})
+			: {
+					summary: directSummary,
+					promptForAgent: trimmed,
+					replyText: "",
+					dispatch: true,
+					reducerMs: 0,
+				};
 		const reducerMs = reducer.reducerMs;
 		const reducerTimings = {
 			reducerMs,
 		};
-		const executionPlan = planConversationExecution(reducer.summary, {
-			targetName: desiredTarget,
-			provider: agentProvider,
-		});
+		const executionPlan = isVoiceInput
+			? planConversationExecution(reducer.summary, {
+					targetName: desiredTarget,
+					provider: agentProvider,
+				})
+			: directExecutionPlan;
+		const routeProgress: TurnProgressEvent[] = isVoiceInput ? [
+			...(executionPlan.userProgress
+				? [{
+						ts: Date.now(),
+						phase: "route" as const,
+						message: executionPlan.userProgress,
+						elapsedMs: reducerMs,
+					}]
+				: []),
+			{
+				ts: Date.now(),
+				phase: "route",
+				message: executionPlan.escalationReason
+					? `Route: ${executionPlan.routeClass || "fast-plus-tools"} -> ${executionPlan.backend}. ${executionPlan.escalationReason}.`
+					: `Route: ${executionPlan.routeClass || "fast-plus-tools"} -> ${executionPlan.backend}.`,
+				elapsedMs: reducerMs,
+			},
+		] : [];
 		const makeActionPlan = (decisions: ExecutionDecision[]): ExecutionPlanReplay => ({
 			dispatch: executionPlan.dispatch,
 			backend: executionPlan.backend,
@@ -1254,6 +1310,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				},
 				reducer: reducer.summary,
 				warnings: [...(warnings || []), executionPlan.rationale || reducer.summary.clarifyingQuestion || "I need a cleaner action before I dispatch this."],
+				progress: routeProgress,
 			};
 		}
 
@@ -1290,6 +1347,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				reducer: reducer.summary,
 				execution: executionPlan,
 				warnings: [reason],
+				progress: routeProgress,
 			};
 		}
 		const currentSessionBusy = !(currentCtx.isIdle?.() ?? true) || (currentCtx.hasPendingMessages?.() ?? false);
@@ -1353,7 +1411,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					outcome: "dispatch-blocked",
 					warnings: [reason],
 				});
-				return { replyText: reason, transcript };
+				return { replyText: reason, transcript, execution: executionPlan, reducer: reducer.summary, warnings: [reason], progress: routeProgress };
 			}
 			const switched = await readiness.ctx.switchSession(sessionPath);
 			if (switched?.cancelled) {
@@ -1381,7 +1439,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				outcome: "dispatch-blocked",
 				warnings: [reason],
 			});
-				return { replyText: `Switch to target "${desiredTarget}" was cancelled.`, transcript };
+				return { replyText: `Switch to target "${desiredTarget}" was cancelled.`, transcript, execution: executionPlan, reducer: reducer.summary, warnings: [reason], progress: routeProgress };
 			}
 			readiness = await waitForReadyTurnContext();
 		}
@@ -1425,6 +1483,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				reducer: reducer.summary,
 				execution: executionPlan,
 				warnings: [...(warnings || []), reason],
+				progress: routeProgress,
 			};
 		}
 		let usedLiveMode = false;
@@ -1523,6 +1582,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					reducer: reducer.summary,
 					execution: executionPlan,
 					warnings: [...(warnings || []), ...liveFailureWarnings, reason],
+					progress: routeProgress,
 				};
 			}
 		}
@@ -1592,6 +1652,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			reducer: reducer.summary,
 			execution: executionPlan,
 			warnings: [...(warnings || []), ...liveFailureWarnings, ...(audioResult?.warnings || [])],
+			progress: routeProgress,
 		};
 	};
 
@@ -1793,7 +1854,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			queued: queue.queued,
 			defaultTarget: remoteDefaultTarget,
 			currentSession: pi.getSessionName() || undefined,
-			availableTargets: Object.keys(sessionRegistry).sort((a, b) => a.localeCompare(b)),
+			availableTargets: [...new Set([...Object.keys(sessionRegistry), ...discoverOpenAgentTargetsCached()])].sort((a, b) => a.localeCompare(b)),
 		};
 	};
 
@@ -1804,7 +1865,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			`Remote API ${status.enabled ? "running" : "stopped"}.`,
 			`Agent: ${getAgentStatus().provider}.`,
 			`Bind: ${status.host}:${status.port}.`,
-			token ? `Token: ${token}.` : "Token: not required.",
+			token ? "Pairing token: configured. Use /remote token only if you need to reveal it." : "Pairing token: not required.",
 			status.defaultTarget ? `Route target: ${status.defaultTarget}.` : "Route target: current session.",
 			"App: /app/.",
 			"Endpoints: /v1/status, /v1/route, /v1/turn/text, /v1/turn/voice.",
@@ -1827,7 +1888,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		return [
 			mode === "bluetooth" ? "Bluetooth remote setup is ready." : "PK remote setup is ready.",
 			`Route: ${route}.`,
-			qr ? "Scan this QR from the Android phone to download the app and save this machine:" : "",
+			qr ? "Scan this QR from the Android phone. It downloads the app and saves this computer, token, target session, and workspace:" : "",
 			qr,
 			`Phone setup page: ${phoneSetupUrl || "not available"}`,
 			`Android APK: ${downloadUrl || "not available"}`,
@@ -1835,8 +1896,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 			`Browser app: ${browserUrl}`,
 			urls.browserUrls.length > 1 ? `Other local URLs: ${urls.browserUrls.slice(1).join(" ")}` : "",
 			mode === "bluetooth"
-				? "Pair the phone over Bluetooth networking/PAN first; edit the base URL if your desktop Bluetooth adapter uses a different IP."
-				: "The QR prefers PI_SPEAK_PUBLIC_BASE_URL, then detected Tailscale, then the local LAN.",
+				? "Pair the phone over Bluetooth networking/PAN first; the QR still carries the gateway URL and token so no API key entry is needed."
+				: "No phone-side IP or API key entry is needed. Discovery uses the saved QR credentials after pairing.",
 			mode === "tailscale" && !PUBLIC_REMOTE_BASE_URL && browserUrl.startsWith("http://")
 				? "For browser microphone access on a phone, use HTTPS through Tailscale Serve or a tunnel and set PI_SPEAK_PUBLIC_BASE_URL."
 				: "",
@@ -2121,6 +2182,77 @@ export default function speakExtension(pi: ExtensionAPI) {
 					remoteTurnManager.cancelAll("Remote turn cancelled by phone.");
 					return { ok: true, message: "Remote turn cancellation requested." };
 				},
+				getSessionDashboard: () => {
+					const persisted = loadPersistedSessionRouting();
+					const currentSessionPath = lastCtx?.sessionManager?.getSessionFile?.();
+					const currentSessionName = pi.getSessionName?.() || undefined;
+					const snapshots = readAttentionSnapshots();
+					const sessionPaths = [
+						...Object.values(persisted.sessions),
+						currentSessionPath || undefined,
+						...snapshots.map((snapshot) => snapshot.sessionPath),
+					];
+					return buildSessionDashboard({
+						sessions: persisted.sessions,
+						aliases: persisted.aliases,
+						runtimeSnapshots: snapshots,
+						currentSessionPath: currentSessionPath || undefined,
+						currentSessionName: currentSessionName || undefined,
+						currentBusy: remoteTurnManager.getSnapshot().processing,
+						currentReady: !remoteTurnManager.getSnapshot().processing,
+						workingDirectories: buildSessionWorkingDirectoryMap(
+							sessionPaths,
+							currentSessionPath ? { [currentSessionPath]: process.cwd() } : {},
+						),
+						storePath: getSessionRoutingStorePath(),
+					});
+				},
+				getCompactRouteSlots: () => buildCompactRouteSlots({ sessions: sessionRegistry, aliases: sessionWakeAliases }),
+				onSessionRename: (payload) => {
+					const sessionPath = payload.sessionPath;
+					const newName = payload.newName.trim();
+					if (!sessionPath) return { ok: false, message: "Session path is required." };
+					if (!newName) return { ok: false, message: "New name is required." };
+					if (!Object.values(sessionRegistry).includes(sessionPath) && lastCtx?.sessionManager?.getSessionFile?.() !== sessionPath) {
+						return { ok: false, message: "Unknown session path." };
+					}
+					const previousName = findSessionNameByPath(sessionPath, sessionRegistry) ?? "(unnamed)";
+					const named = setNamedSession(sessionRegistry, newName, sessionPath);
+					if (!named.ok) return { ok: false, message: named.error };
+					sessionRegistry = named.sessions;
+					persistSessionRoutingState();
+					appendSessionEvent("sess.rename", "admin", { from: previousName, to: newName, path: sessionPath });
+					return { ok: true, message: `Renamed ${previousName} to ${newName}.`, route: getRoutingStatus() };
+				},
+				onSessionAlias: (payload) => {
+					const sessionPath = payload.sessionPath;
+					const alias = payload.alias.trim().replace(/\s+/g, " ");
+					if (!sessionPath) return { ok: false, message: "Session path is required." };
+					if (!alias) return { ok: false, message: "Alias is required." };
+					if (!Object.values(sessionRegistry).includes(sessionPath) && lastCtx?.sessionManager?.getSessionFile?.() !== sessionPath) {
+						return { ok: false, message: "Unknown session path." };
+					}
+					const next = setWakeAlias(sessionWakeAliases, alias, sessionPath);
+					sessionWakeAliases = next.aliases;
+					persistSessionRoutingState();
+					appendSessionEvent("alias.add", "admin", { alias: next.alias, name: findSessionNameByPath(sessionPath, sessionRegistry) ?? "(unnamed)", path: sessionPath });
+					return { ok: true, message: `Alias "${next.alias}" added.`, route: getRoutingStatus() };
+				},
+				onSessionRemove: (payload) => {
+					const sessionPath = payload.sessionPath;
+					if (!sessionPath) return { ok: false, message: "Session path is required." };
+					if (!Object.values(sessionRegistry).includes(sessionPath) && lastCtx?.sessionManager?.getSessionFile?.() !== sessionPath) {
+						return { ok: false, message: "Unknown session path." };
+					}
+					const removal = removeSessionRoutingForPath(sessionRegistry, sessionWakeAliases, sessionPath);
+					sessionRegistry = removal.sessions;
+					sessionWakeAliases = removal.aliases;
+					persistSessionRoutingState();
+					appendSessionEvent("sess.remove", "admin", { path: sessionPath, removedNames: removal.removedNames, removedAliases: removal.removedAliases });
+					return { ok: true, message: `Removed routing for session.`, route: getRoutingStatus() };
+				},
+				getDiscoveredAgents: () => discoverAgentInventoryCached(),
+				tailSessionEvents,
 			});
 		}
 
