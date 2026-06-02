@@ -6,6 +6,7 @@ Ongoing listener, remote-UX, and skill-aware speech-mode work.
 
 Added:
 
+- Vertex AI support for the Gemini Live realtime path via gcloud ADC (no API key): the backend auto-selects `vertex` from `GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION`, uses the Vertex-correct `v1beta1` Live API version (`PI_SPEAK_VERTEX_API_VERSION`), defaults the Live model to `gemini-live-2.5-flash` on Vertex (`PI_SPEAK_GEMINI_LIVE_MODEL` override), and routes the Live websocket through the `global` location (`PI_SPEAK_VERTEX_LIVE_LOCATION`) where Vertex serves Live publisher models — while text/`generateContent` keeps the configured region and the developer-API path is unchanged
 - `/sess ui` opens the interactive Ink-based session manager pane in a separate terminal (detached from pi-coding-agent), rendering the live dashboard with `[r] rename`, `[a] alias`, `[x] remove`, `[q] quit` keybindings and surfacing voice/admin mutations as 3-second toasts
 - an append-only voice/admin session-event log (`session-events.jsonl`) that the management pane tails, plus an extension-side routing-store watcher that reloads in-process session state when the pane writes externally
 - `/sess` default manager view that shows current session, ready sessions, aliases, saved store path, and inline `busy` / `idle` / `saved` state

@@ -5,8 +5,15 @@ import { join } from "node:path";
 import type { RemoteTurnResult } from "./remote-turn-manager.js";
 
 const DEFAULT_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025";
+// Vertex AI does not expose the developer-API native-audio preview name. The
+// half-cascade Live model below is the one that resolves over Vertex BidiGenerateContent.
+const DEFAULT_VERTEX_LIVE_MODEL = "gemini-live-2.5-flash";
 const DEFAULT_TEXT_MODEL = "gemini-2.5-flash";
 const DEFAULT_TIMEOUT_MS = 45000;
+// Vertex Live (BidiGenerateContent) wants v1beta1; the developer API wants v1beta.
+const DEFAULT_VERTEX_API_VERSION = "v1beta1";
+// Vertex serves Gemini Live publisher models from the `global` location, not regional ones.
+const DEFAULT_VERTEX_LIVE_LOCATION = "global";
 
 type GeminiBackend = "developer-api" | "vertex";
 
@@ -15,7 +22,19 @@ export function isGeminiLiveConfigured(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export function getGeminiLiveModel(env: NodeJS.ProcessEnv = process.env) {
-	return env.PI_SPEAK_GEMINI_LIVE_MODEL?.trim() || DEFAULT_LIVE_MODEL;
+	const override = env.PI_SPEAK_GEMINI_LIVE_MODEL?.trim();
+	if (override) return override;
+	return getGeminiBackend(env) === "vertex" ? DEFAULT_VERTEX_LIVE_MODEL : DEFAULT_LIVE_MODEL;
+}
+
+// Vertex Live requires apiVersion v1beta1; the generic PI_SPEAK_GEMINI_API_VERSION
+// (often v1beta or v1) is correct for the developer API but breaks the Vertex Live
+// websocket handshake. Resolve per-backend, honoring an explicit Vertex-only override.
+export function getGeminiApiVersion(backend: GeminiBackend, env: NodeJS.ProcessEnv = process.env) {
+	if (backend === "vertex") {
+		return env.PI_SPEAK_VERTEX_API_VERSION?.trim() || DEFAULT_VERTEX_API_VERSION;
+	}
+	return env.PI_SPEAK_GEMINI_API_VERSION?.trim() || "v1beta";
 }
 
 export function getGeminiBackend(env: NodeJS.ProcessEnv = process.env): GeminiBackend {
@@ -34,15 +53,25 @@ function getVertexConfig(env: NodeJS.ProcessEnv = process.env) {
 	return { project, location };
 }
 
-function createGeminiClient(env: NodeJS.ProcessEnv = process.env, apiVersion = env.PI_SPEAK_GEMINI_API_VERSION || "v1beta") {
-	if (getGeminiBackend(env) === "vertex") {
+function createGeminiClient(
+	env: NodeJS.ProcessEnv = process.env,
+	options: { live?: boolean } = {},
+) {
+	const backend = getGeminiBackend(env);
+	const apiVersion = getGeminiApiVersion(backend, env);
+	if (backend === "vertex") {
 		const vertex = getVertexConfig(env);
 		if (vertex) {
+			// Vertex Live publisher models are served from `global`; regional locations
+			// resolve fine for text/generateContent but reject the Live websocket.
+			const location = options.live
+				? env.PI_SPEAK_VERTEX_LIVE_LOCATION?.trim() || DEFAULT_VERTEX_LIVE_LOCATION
+				: vertex.location;
 			return {
 				ai: new GoogleGenAI({
 					vertexai: true,
 					project: vertex.project,
-					location: vertex.location,
+					location,
 					apiVersion,
 				}),
 				backend: "vertex" as const,
@@ -78,10 +107,9 @@ export async function runGeminiTextTurn(
 	prompt: string,
 	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
 ): Promise<RemoteTurnResult> {
-	const apiVersion = process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta";
 	const client = options.apiKey
-		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion }), backend: "developer-api" as const }
-		: createGeminiClient(process.env, apiVersion);
+		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion: getGeminiApiVersion("developer-api") }), backend: "developer-api" as const }
+		: createGeminiClient(process.env);
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), options.timeoutMs || DEFAULT_TIMEOUT_MS);
 	try {
@@ -107,10 +135,9 @@ export async function runGeminiLiveTurn(
 	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
 ): Promise<RemoteTurnResult> {
 	const model = options.model || getGeminiLiveModel();
-	const apiVersion = process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta";
 	const client = options.apiKey
-		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion }), backend: "developer-api" as const }
-		: createGeminiClient(process.env, apiVersion);
+		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion: getGeminiApiVersion("developer-api") }), backend: "developer-api" as const }
+		: createGeminiClient(process.env, { live: true });
 	const ai = client.ai;
 	const audioChunks: Buffer[] = [];
 	let audioMimeType = "audio/pcm;rate=24000";
