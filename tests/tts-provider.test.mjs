@@ -47,6 +47,53 @@ test("sag provider is available only with sag and ElevenLabs auth", async () => 
 	});
 });
 
+test("sanitizeForSpeech strips markdown, code, links, and emoji for every runtime", () => {
+	const input = [
+		"# Heading",
+		"",
+		"Here is **bold** and _italic_ and `inline code`.",
+		"",
+		"```js",
+		"const x = 1;",
+		"```",
+		"",
+		"- bullet one",
+		"- bullet two",
+		"",
+		"See [the docs](https://example.com/docs) or visit https://example.com now. 🚀",
+	].join("\n");
+	const output = tts.sanitizeForSpeech(input);
+	assert.equal(output.includes("#"), false);
+	assert.equal(output.includes("**"), false);
+	assert.equal(output.includes("`"), false);
+	assert.equal(output.includes("const x = 1;"), false);
+	assert.equal(output.includes("https://"), false);
+	assert.equal(output.includes("🚀"), false);
+	assert.equal(output.includes("- bullet"), false);
+	assert.match(output, /code snippet/);
+	assert.match(output, /the docs/);
+	assert.match(output, /bold/);
+	assert.match(output, /italic/);
+	assert.match(output, /inline code/);
+});
+
+test("sanitizeForSpeech is idempotent on already-clean text", () => {
+	const clean = "This is a plain spoken sentence with no markup.";
+	assert.equal(tts.sanitizeForSpeech(clean), clean);
+	assert.equal(tts.sanitizeForSpeech(tts.sanitizeForSpeech(clean)), clean);
+});
+
+test("sanitize can be disabled and is reflected in diagnostics", async () => {
+	await withEnv({ PI_SPEAK_SANITIZE: undefined }, async () => {
+		assert.equal(tts.isSanitizeEnabled(), true);
+		assert.equal(tts.getTtsDiagnostics().sanitizeEnabled, true);
+	});
+	await withEnv({ PI_SPEAK_SANITIZE: "off" }, async () => {
+		assert.equal(tts.isSanitizeEnabled(), false);
+		assert.equal(tts.getTtsDiagnostics().sanitizeEnabled, false);
+	});
+});
+
 test("sag diagnostics expose command and auth availability without secrets", async () => {
 	await withEnv({
 		PI_SPEAK_TTS_PROVIDER: "sag",
