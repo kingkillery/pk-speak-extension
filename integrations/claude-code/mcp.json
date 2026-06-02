@@ -1,0 +1,8 @@
+{
+	"mcpServers": {
+		"pk-speak": {
+			"command": "node",
+			"args": ["<abs path>/dist/pk-speak-mcp.js"]
+		}
+	}
+}

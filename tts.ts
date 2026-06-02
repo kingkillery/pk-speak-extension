@@ -421,7 +421,7 @@ async function synthesizeElevenLabs(text: string, outputPath: string, signal?: A
 	const voiceId = elevenLabsAliases[configuredVoice.toLowerCase()] || configuredVoice;
 	const response = await withAbortTimeout(
 		(requestSignal) =>
-			fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${encodeURIComponent(DEFAULT_ELEVENLABS_OUTPUT_FORMAT)}`, {
+			fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=${encodeURIComponent(DEFAULT_ELEVENLABS_OUTPUT_FORMAT)}`, {
 				method: "POST",
 				headers: {
 					"xi-api-key": apiKey,
@@ -541,7 +541,23 @@ function synthesizeSag(text: string, outputPath: string, signal?: AbortSignal) {
 		child.on("exit", (code) => {
 			signal?.removeEventListener("abort", abortHandler);
 			if (code === 0) resolve();
-			else reject(new Error(`sag exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
+			else {
+				const redactSecrets = (value: string): string => {
+					let redacted = value;
+					const secrets = [
+						process.env.ELEVENLABS_API_KEY,
+						process.env.OPENROUTER_API_KEY,
+						process.env.PI_SPEAK_OPENAI_KEY,
+						process.env.VOICE_TOOLS_OPENAI_KEY,
+					];
+					for (const secret of secrets) {
+						if (secret) redacted = redacted.split(secret).join("[REDACTED]");
+					}
+					return redacted;
+				};
+				const safeStderr = redactSecrets(stderr).trim();
+				reject(new Error(`sag exited with code ${code}${safeStderr ? `: ${safeStderr}` : ""}`));
+			}
 		});
 	});
 }

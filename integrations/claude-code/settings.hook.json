@@ -1,0 +1,14 @@
+{
+	"hooks": {
+		"SessionStart": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node <abs path>/integrations/claude-code/print-preamble.mjs"
+					}
+				]
+			}
+		]
+	}
+}

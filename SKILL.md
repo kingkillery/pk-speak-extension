@@ -1,6 +1,6 @@
 ---
 name: pi-speak
-description: "Pointer skill for pi-speak-pk. Use when the user wants spoken replies, wake-word listening, session-manager control, deterministic short voice routes like `PK one` / `PK1` vs `PK two` / `PK2`, Telegram control, QR-based Android setup via `/pk-remote`, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
+description: "Pointer skill for pi-speak-pk. Use when the user wants spoken replies, wake-word listening, session-manager control, deterministic short voice routes like `PK one` / `PK1` vs `PK two` / `PK2`, agent-driven speech via `pk-speak` or the `pk-speak-mcp` MCP server, Telegram control, QR-based Android setup via `/pk-remote`, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
 ---
 
 # pi-speak-pk
@@ -10,6 +10,10 @@ This is a pointer skill.
 Start here when the user wants to talk naturally about:
 - spoken replies
 - the `PK` wake phrase
+- agent-driven speech via `/speak agent` and the `pk-speak` CLI
+- wiring `pk-speak` into codex, oh-my-pi, or Claude Code via `PK_SPEAK_PREAMBLE`
+- the optional `pk-speak-mcp` MCP server for runtimes that prefer tool-call integration over shell invocation
+- integration configs in `integrations/` for Claude Code, Codex, and oh-my-pi
 - the `/sess` session manager
 - voice-driven session creation, switching, naming, aliasing, or removal
 - deterministic short voice routes like `PK one` / `PK1` and `PK two` / `PK2`
@@ -48,7 +52,9 @@ Examples of natural requests this skill should map cleanly:
 
 ## Main command families
 
-- `/speak` → spoken replies and TTS settings
+- `/speak` → spoken replies and TTS settings; `/speak agent` for agent-driven speech via `pk-speak`
+- `pk-speak` CLI → synthesize and play text from any shell; used by the agent in `/speak agent` mode
+- `pk-speak-mcp` → optional stdio MCP server (thin adapter over the CLI) for clients that prefer tool-call integration; one `speak` tool, input `{ text, voice? }`
 - `/mono` → local wake-word listener
 - `/sess` → session manager dashboard, session naming, switching, edit wrapper, aliases, removal, export, and `/sess ui` to open the interactive Ink pane in a new terminal
 - `/attn` → advanced multi-session ready-state broker controls
@@ -59,10 +65,16 @@ Examples of natural requests this skill should map cleanly:
 ## Deep references
 
 Use the bridge doc to find the right source quickly:
+- `docs/AGENT_SPEAK.md` — rationale, preamble text, and wiring instructions for pi / codex / oh-my-pi / claude code; also covers the `pk-speak-mcp` MCP server and `integrations/`
+- `integrations/` — ready-to-paste config snippets and `.mcp.json` / `config.toml` stanzas for Claude Code, Codex, and oh-my-pi
 - `docs/VOICE_SESSION_BRIDGE.md`
 - `docs/SESSION_OPERATIONS.md`
 - `docs/SESSION_MANAGER_SPEC.qmd`
 - `README.md`
+- `speech-preamble.ts` — `PK_SPEAK_PREAMBLE` constant
+- `pk-speak.ts` — CLI entry point; `parseArgs` is the testable pure function
+- `pk-speak-mcp.ts` — MCP server entry point; thin stdio adapter that shells out to `pk-speak.js`
+- `audio-playback.ts` — `getPlayerInvocation` (pure) and `playAudio` (cross-platform)
 - `index.ts`
 - `voice-session-command.ts`
 - `voice-routing.ts`
