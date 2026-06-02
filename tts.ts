@@ -201,6 +201,64 @@ export function resolveTtsProvider(state?: SpeakRuntimeState): Exclude<TtsProvid
 	return "edge";
 }
 
+export function isSanitizeEnabled() {
+	const envValue = (process.env.PI_SPEAK_SANITIZE || "").trim().toLowerCase();
+	if (!envValue) return true;
+	return !["0", "false", "off", "no"].includes(envValue);
+}
+
+/**
+ * Deterministic, offline cleanup of agent text for spoken delivery.
+ *
+ * This runs for every non-legacy provider regardless of which agent runtime
+ * produced the text (pi, codex, oh-my-pi, claude code). It is the last line of
+ * defense when the optional LLM rewrite is disabled or unavailable, so raw
+ * markdown, code fences, URLs, and emoji never get read aloud verbatim.
+ *
+ * It is intentionally idempotent and safe to run on already-rewritten text.
+ */
+export function sanitizeForSpeech(text: string): string {
+	if (!text) return "";
+	let out = text.replace(/\r\n/g, "\n");
+
+	// Fenced code blocks read terribly aloud — collapse them to a short phrase.
+	out = out.replace(/```[\s\S]*?```/g, " code snippet. ");
+	out = out.replace(/~~~[\s\S]*?~~~/g, " code snippet. ");
+
+	// Images and links: keep the human-facing label, drop the target.
+	out = out.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+	out = out.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+
+	// Bare URLs become a neutral spoken token.
+	out = out.replace(/\b(?:https?:\/\/|www\.)[^\s)>\]]+/gi, "link");
+
+	// Inline code and emphasis markers: keep the word, drop the markup.
+	out = out.replace(/`([^`]+)`/g, "$1");
+	out = out.replace(/(\*\*|__)(.*?)\1/g, "$2");
+	out = out.replace(/(\*|_)(?=\S)(.*?)(?<=\S)\1/g, "$2");
+	out = out.replace(/~~(.*?)~~/g, "$1");
+
+	// Line-leading structure: headings, blockquotes, and list bullets.
+	out = out.replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
+	out = out.replace(/^[ \t]*>[ \t]?/gm, "");
+	out = out.replace(/^[ \t]*[-*+][ \t]+/gm, "");
+	out = out.replace(/^[ \t]*\d+[.)][ \t]+/gm, "");
+
+	// Tables: pipes and separator rows are pure noise when spoken.
+	out = out.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)+\|?[ \t]*$/gm, " ");
+	out = out.replace(/\|/g, " ");
+
+	// Drop emoji and other pictographic symbols.
+	out = out.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}️]/gu, "");
+
+	// Collapse whitespace introduced by the substitutions above.
+	out = out.replace(/[ \t]+/g, " ");
+	out = out.replace(/ ?\n ?/g, "\n");
+	out = out.replace(/\n{3,}/g, "\n\n");
+
+	return out.trim();
+}
+
 export function isRewriteEnabled(state?: SpeakRuntimeState) {
 	if (typeof state?.rewriteEnabled === "boolean") return state.rewriteEnabled;
 	const envValue = (process.env.PI_SPEAK_REWRITE_ENABLED || "").trim().toLowerCase();
@@ -229,6 +287,7 @@ export function getTtsDiagnostics(state?: SpeakRuntimeState) {
 		configuredProvider: state?.provider || process.env.PI_SPEAK_TTS_PROVIDER || "auto",
 		resolvedProvider: resolveTtsProvider(state),
 		rewriteEnabled: isRewriteEnabled(state),
+		sanitizeEnabled: isSanitizeEnabled(),
 		providers: {
 			legacy: {
 				available: hasLegacySpeak11(),
@@ -511,18 +570,20 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 	throwIfAborted(options.signal);
 	options.onPhase?.("voice");
 
+	const spokenText = isSanitizeEnabled() ? sanitizeForSpeech(rewritten.text) : rewritten.text;
+
 	switch (provider) {
 		case "edge":
-			await synthesizeEdge(rewritten.text, options.outputPath, options.signal);
+			await synthesizeEdge(spokenText, options.outputPath, options.signal);
 			break;
 		case "openai":
-			await synthesizeOpenAI(rewritten.text, options.outputPath, options.signal);
+			await synthesizeOpenAI(spokenText, options.outputPath, options.signal);
 			break;
 		case "elevenlabs":
-			await synthesizeElevenLabs(rewritten.text, options.outputPath, options.signal);
+			await synthesizeElevenLabs(spokenText, options.outputPath, options.signal);
 			break;
 		case "sag":
-			await synthesizeSag(rewritten.text, options.outputPath, options.signal);
+			await synthesizeSag(spokenText, options.outputPath, options.signal);
 			break;
 		default:
 			throw new Error(`Unsupported TTS provider: ${provider satisfies never}`);

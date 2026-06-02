@@ -21,6 +21,7 @@ Added:
 - a voice-command bridge that converts spoken skill-routing phrases into explicit internal requests, so voice input can steer into a named skill or ask Pi to choose the best matching skill before acting
 - `PI_SPEAK_WAKE_SENSITIVITY=low|medium|high` as the main wake-activation sensitivity toggle, plus lower-level fuzzy and compact-prefix env overrides when needed
 - auto TTS provider fallback so a failing `legacy/speak11` attempt can fall through to the next available provider instead of aborting speech outright
+- a deterministic, offline `sanitizeForSpeech` pass (toggle via `PI_SPEAK_SANITIZE`, default on, exposed in `getTtsDiagnostics`) that runs at the shared synthesis chokepoint for every non-legacy provider, so text from any agent runtime (pi, codex, oh-my-pi, claude code) gets markdown, code fences, links, and emoji stripped before TTS even when the optional LLM rewrite is disabled or unavailable
 
 Improved:
 
