@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { withAbortTimeout } from "./request-timeout.js";
 
-export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs";
+export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs" | "sag";
 
 export type SpeakRuntimeState = {
 	enabled?: boolean;
@@ -38,6 +38,9 @@ export const DEFAULT_ELEVENLABS_MODEL_ID =
 	process.env.PI_SPEAK_ELEVENLABS_MODEL_ID || "eleven_flash_v2_5";
 export const DEFAULT_ELEVENLABS_OUTPUT_FORMAT =
 	process.env.PI_SPEAK_ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128";
+export const DEFAULT_SAG_MODEL_ID = process.env.PI_SPEAK_SAG_MODEL_ID || DEFAULT_ELEVENLABS_MODEL_ID;
+export const DEFAULT_SAG_VOICE =
+	process.env.PI_SPEAK_SAG_VOICE || process.env.ELEVENLABS_VOICE_ID || DEFAULT_ELEVENLABS_VOICE_ID;
 export const DEFAULT_REWRITE_MODEL =
 	process.env.PI_SPEAK_REWRITE_MODEL || "openai/gpt-oss-20b:nitro";
 
@@ -81,6 +84,37 @@ function throwIfAborted(signal?: AbortSignal) {
 function getOpenAiAudioKey() {
 	// Require a dedicated key for audio TTS — avoid consuming the general LLM key
 	return process.env.PI_SPEAK_OPENAI_KEY || process.env.VOICE_TOOLS_OPENAI_KEY || "";
+}
+
+function getSagCommand() {
+	const configured = process.env.PI_SPEAK_SAG_PATH?.trim();
+	if (configured) return configured;
+	const home = process.env.USERPROFILE || process.env.HOME || "";
+	const executable = process.platform === "win32" ? "sag.exe" : "sag";
+	const candidates = [
+		join(home, ".local", "bin", executable),
+		join(home, "bin", executable),
+	];
+	for (const candidate of candidates) {
+		if (existsSync(candidate)) return candidate;
+	}
+	return "sag";
+}
+
+function isCommandAvailable(command: string) {
+	if (command.includes("/") || command.includes("\\") || command.toLowerCase().endsWith(".exe")) {
+		return existsSync(command);
+	}
+	const executableNames = process.platform === "win32" && !/\.(?:exe|cmd|bat)$/i.test(command)
+		? [`${command}.exe`, `${command}.cmd`, `${command}.bat`, command]
+		: [command];
+	for (const dir of (process.env.PATH || "").split(delimiter)) {
+		if (!dir) continue;
+		for (const name of executableNames) {
+			if (existsSync(join(dir, name))) return true;
+		}
+	}
+	return false;
 }
 
 function getPythonExecutable() {
@@ -137,6 +171,10 @@ export function hasLegacySpeak11() {
 	);
 }
 
+export function hasSag() {
+	return isCommandAvailable(getSagCommand());
+}
+
 function isProviderAvailable(provider: Exclude<TtsProvider, "auto">) {
 	switch (provider) {
 		case "legacy":
@@ -145,6 +183,8 @@ function isProviderAvailable(provider: Exclude<TtsProvider, "auto">) {
 			return !!process.env.ELEVENLABS_API_KEY;
 		case "openai":
 			return !!getOpenAiAudioKey();
+		case "sag":
+			return hasSag() && !!process.env.ELEVENLABS_API_KEY;
 		case "edge":
 			return hasEdgeTts();
 	}
@@ -179,6 +219,8 @@ export function describeTtsProvider(state?: SpeakRuntimeState) {
 			return `openai (${DEFAULT_OPENAI_MODEL}/${DEFAULT_OPENAI_VOICE})`;
 		case "elevenlabs":
 			return `elevenlabs (${DEFAULT_ELEVENLABS_VOICE_ID})`;
+		case "sag":
+			return `sag (${DEFAULT_SAG_MODEL_ID}/${DEFAULT_SAG_VOICE})`;
 	}
 }
 
@@ -204,6 +246,14 @@ export function getTtsDiagnostics(state?: SpeakRuntimeState) {
 				available: !!process.env.ELEVENLABS_API_KEY,
 				model: DEFAULT_ELEVENLABS_MODEL_ID,
 				voiceId: DEFAULT_ELEVENLABS_VOICE_ID,
+				outputFormat: DEFAULT_ELEVENLABS_OUTPUT_FORMAT,
+			},
+			sag: {
+				available: hasSag(),
+				authAvailable: !!process.env.ELEVENLABS_API_KEY,
+				command: getSagCommand(),
+				model: DEFAULT_SAG_MODEL_ID,
+				voice: DEFAULT_SAG_VOICE,
 				outputFormat: DEFAULT_ELEVENLABS_OUTPUT_FORMAT,
 			},
 		},
@@ -389,6 +439,54 @@ function synthesizeLegacy(text: string, outputPath: string, signal?: AbortSignal
 	});
 }
 
+function synthesizeSag(text: string, outputPath: string, signal?: AbortSignal) {
+	return new Promise<void>((resolve, reject) => {
+		if (!process.env.ELEVENLABS_API_KEY) {
+			reject(new Error("ELEVENLABS_API_KEY is required for sag TTS"));
+			return;
+		}
+		const child = spawn(getSagCommand(), [
+			"speak",
+			"--no-play",
+			"--model-id",
+			DEFAULT_SAG_MODEL_ID,
+			"--voice",
+			DEFAULT_SAG_VOICE,
+			"--format",
+			DEFAULT_ELEVENLABS_OUTPUT_FORMAT,
+			"--output",
+			outputPath,
+			text,
+		], {
+			stdio: ["ignore", "pipe", "pipe"],
+			detached: false,
+			windowsHide: true,
+			shell: false,
+		});
+		const abortHandler = () => {
+			try {
+				child.kill();
+			} catch {}
+			reject(new Error("Speech synthesis aborted"));
+		};
+		signal?.addEventListener("abort", abortHandler, { once: true });
+		let stderr = "";
+		child.stderr?.setEncoding("utf8");
+		child.stderr?.on("data", (chunk) => {
+			stderr += String(chunk);
+		});
+		child.on("error", (error) => {
+			signal?.removeEventListener("abort", abortHandler);
+			reject(error);
+		});
+		child.on("exit", (code) => {
+			signal?.removeEventListener("abort", abortHandler);
+			if (code === 0) resolve();
+			else reject(new Error(`sag exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
+		});
+	});
+}
+
 export async function synthesizeToFile(options: SynthesisOptions): Promise<SynthesisResult> {
 	const provider = resolveTtsProvider(options.state);
 	if (provider === "legacy") {
@@ -422,6 +520,9 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 			break;
 		case "elevenlabs":
 			await synthesizeElevenLabs(rewritten.text, options.outputPath, options.signal);
+			break;
+		case "sag":
+			await synthesizeSag(rewritten.text, options.outputPath, options.signal);
 			break;
 		default:
 			throw new Error(`Unsupported TTS provider: ${provider satisfies never}`);
