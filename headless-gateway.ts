@@ -2,6 +2,8 @@
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
+import { planConversationExecution, type ExecutionBackend } from "./conversation-execution-router.js";
+import { reduceConversationTurn } from "./conversation-reducer.js";
 import { isGeminiLiveConfigured, runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
@@ -37,7 +39,7 @@ function createAgentProvider(): AgentProvider {
 		return new GeminiProvider(agentConfig.provider);
 	}
 	if (agentConfig.provider === "pi") {
-		return new PiCliProvider(agentConfig.piBin, process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
+		return createPiProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
 	}
 	return createCodexProvider();
 }
@@ -45,16 +47,25 @@ function createAgentProvider(): AgentProvider {
 function createCodingAgentProvider(): AgentProvider {
 	const backend = (process.env.PI_SPEAK_AGENT_BACKEND || process.env.PI_SPEAK_CODING_AGENT || "codex").trim().toLowerCase();
 	if (backend === "pi") {
-		return new PiCliProvider(agentConfig.piBin, process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
+		return createPiProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
 	}
 	return createCodexProvider();
 }
 
 function createCodexProvider(): AgentProvider {
-	fallbackProvider = new PiCliProvider(agentConfig.piBin, process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
+	const cwd = process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
+	fallbackProvider = createPiProvider(cwd);
+	return createCodexProviderForCwd(cwd);
+}
+
+function createPiProvider(cwd: string): AgentProvider {
+	return new PiCliProvider(agentConfig.piBin, cwd);
+}
+
+function createCodexProviderForCwd(cwd: string): AgentProvider {
 	return new CodexAgentProvider({
 		codexBin: agentConfig.codexBin,
-		cwd: process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd(),
+		cwd,
 		model: agentConfig.model,
 		approvalPolicy: agentConfig.approvalPolicy,
 		sandbox: agentConfig.sandbox,
@@ -141,14 +152,16 @@ async function runCodingAgentTurn(
 	transcript?: string,
 	audioProvider?: TtsProvider,
 	progress: TurnProgressEvent[] = [],
+	providerOverride?: AgentProvider,
 ): Promise<RemoteTurnResult> {
 	const options = {
 		model: agentConfig.model,
 		cwd: cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd(),
 	};
 	const startedAt = Date.now();
-	addProgress(progress, "agent", `Sending request to ${provider.name} in ${options.cwd}.`, startedAt);
-	let activeProvider = provider;
+	const initialProvider = providerOverride || provider;
+	addProgress(progress, "agent", `Sending request to ${initialProvider.name} in ${options.cwd}.`, startedAt);
+	let activeProvider = initialProvider;
 	let warnings: string[] | undefined;
 	let replyText: string;
 	try {
@@ -234,7 +247,7 @@ async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = fa
 			],
 		};
 	}
-	const result = await runTextTurnWithProgress(transcript, includeAudio, cwd, transcript, progress);
+	const result = await runRoutedVoiceTextTurn(transcript, includeAudio, cwd, transcript, progress);
 	return {
 		...result,
 		timings: {
@@ -247,6 +260,70 @@ async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = fa
 		},
 		progress: result.progress || progress,
 	};
+}
+
+async function runRoutedVoiceTextTurn(
+	text: string,
+	includeAudio = false,
+	cwd?: string,
+	transcript?: string,
+	progress: TurnProgressEvent[] = [],
+): Promise<RemoteTurnResult> {
+	const reduction = await reduceConversationTurn(text, { source: "http-voice" });
+	const plan = planConversationExecution(reduction.summary);
+	addProgress(progress, "route", plan.userProgress || `Voice route: ${plan.routeClass || "fast"} via ${plan.backend}.`);
+	if (!reduction.dispatch || !plan.dispatch || !isRunnableVoiceBackend(plan.backend)) {
+		return {
+			replyText: reduction.replyText || plan.userAck || plan.rationale || "I need a concrete action before I can route this.",
+			transcript,
+			reducer: reduction.summary,
+			execution: plan,
+			timings: { reducerMs: reduction.reducerMs },
+			progress: [
+				...progress,
+				makeProgress("complete", "Voice turn stopped before agent dispatch."),
+			],
+		};
+	}
+	const workingDirectory = cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
+	const routedProvider = selectVoiceExecutionProvider(plan.backend, workingDirectory);
+	const shouldStopProvider = routedProvider !== provider && routedProvider !== fallbackProvider;
+	try {
+		const result = await runCodingAgentTurn(
+			reduction.promptForAgent,
+			includeAudio,
+			workingDirectory,
+			transcript,
+			undefined,
+			progress,
+			routedProvider,
+		);
+		return {
+			...result,
+			reducer: reduction.summary,
+			execution: plan,
+			timings: {
+				...result.timings,
+				reducerMs: reduction.reducerMs,
+			},
+			progress: result.progress || progress,
+		};
+	} finally {
+		if (shouldStopProvider) {
+			await Promise.resolve(routedProvider.stop?.()).catch(() => {});
+		}
+	}
+}
+
+function isRunnableVoiceBackend(backend: ExecutionBackend): backend is "pi" | "codex" {
+	return backend === "pi" || backend === "codex";
+}
+
+function selectVoiceExecutionProvider(backend: "pi" | "codex", cwd: string): AgentProvider {
+	if (provider.name === backend) return provider;
+	if (fallbackProvider?.name === backend) return fallbackProvider;
+	if (backend === "pi") return createPiProvider(cwd);
+	return createCodexProviderForCwd(cwd);
 }
 
 async function runTextTurnWithProgress(
