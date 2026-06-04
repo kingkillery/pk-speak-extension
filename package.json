@@ -1,8 +1,8 @@
 {
-  "name": "pi-speak-pk",
-  "version": "0.2.8",
+  "name": "pk-speak",
+  "version": "0.2.9",
   "type": "module",
-  "description": "Voice, wake-word, Telegram, and mobile web remote extensions for Pi.",
+  "description": "Desktop setup and phone gateway CLI for conversational coding agents.",
   "keywords": [
     "pi",
     "pi-coding-agent",
@@ -14,7 +14,10 @@
     "remote-control",
     "pwa"
   ],
-  "main": "dist/index.js",
+  "main": "dist/pk-speak.js",
+  "workspaces": [
+    "packages/pi-pk-speak"
+  ],
   "bin": {
     "pi-speak-pk": "dist/pi-speak-pk.js",
     "pk-speak": "dist/pk-speak.js",
@@ -41,6 +44,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:ui": "tsc -p tsconfig.ui.json && node scripts/sync-ui-package.mjs",
+    "build:pi-extension": "npm run build && npm run build:ui && node scripts/sync-pi-extension-package.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.ui.json --noEmit",
     "test": "npm run build && npm run build:ui && node --test tests/*.test.mjs",
     "test:parallel": "npm run build && npm run build:ui && node --test --test-concurrency=4 tests/*.test.mjs",

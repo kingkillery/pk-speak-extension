@@ -1,9 +1,9 @@
 ---
 name: pi-speak
-description: "Pointer skill for pi-speak-pk. Use when the user wants spoken replies, wake-word listening, session-manager control, deterministic short voice routes like `PK one` / `PK1` vs `PK two` / `PK2`, Telegram control, QR-based Android setup via `/pk-remote`, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
+description: "Pointer skill for pk-speak / pi-pk-speak. Use when the user wants spoken replies, wake-word listening, session-manager control, deterministic short voice routes like `PK one` / `PK1` vs `PK two` / `PK2`, Telegram control, QR-based Android setup via `/pk-remote`, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
 ---
 
-# pi-speak-pk
+# pk-speak / pi-pk-speak
 
 This is a pointer skill.
 

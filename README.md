@@ -1,4 +1,4 @@
-# pi-speak-pk
+# pk-speak
 
 Voice, wake-word, and remote-control extensions for Pi / `pi-mono`.
 
@@ -23,15 +23,15 @@ If you just want the shortest path:
 
 ## Install
 
-Install the extension:
+Install the Pi extension package inside Pi:
 
 ```text
-pi npm i pi-speak-pk
+pi npm i pi-pk-speak
 ```
 
 Reload Pi after install.
 
-For a standalone desktop/phone setup after installing from npm, run:
+For the standalone desktop/phone bootstrap package, install or run `pk-speak` from this GitHub package surface, then run:
 
 ```text
 pi-speak-pk
@@ -46,6 +46,8 @@ pk-speak mobile
 ```
 
 `pk-speak tray` starts the Windows tray plus gateway. `pk-speak gateway` starts the headless gateway directly. `pk-speak mobile` prints the Android download/setup QR.
+
+Package split details are in [docs/PACKAGE_SPLIT.md](./docs/PACKAGE_SPLIT.md).
 
 ## Quick Start
 
@@ -148,7 +150,7 @@ Right-click the tray icon and choose `Show setup QR code`. Scanning the QR opens
 NPM-installed tray/service path:
 
 ```text
-npx -p pi-speak-pk pi-speak-tray
+npx -p pk-speak pi-speak-tray
 ```
 
 Or, after global install:
@@ -175,7 +177,7 @@ pi-speak-gemini-live-smoke --model gemini-2.5-flash-native-audio-preview-12-2025
 To run the tray/headless gateway through ElevenLabs voice, backed by Vertex AI Gemini text reasoning:
 
 ```text
-set REDACTED_ELEVENLABS_HISTORY_LINE<your-elevenlabs-key>
+REM Set ELEVENLABS_API_KEY in your shell before launch
 set PI_SPEAK_GEMINI_BACKEND=vertex
 set PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
 set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
@@ -651,7 +653,7 @@ PI_SPEAK_OPENAI_BASE_URL=https://api.openai.com/v1
 ### ElevenLabs
 
 ```text
-ELEVENLABS_API_KEY_REDACTED
+# ELEVENLABS_API_KEY is read from your environment
 REDACTED_ELEVENLABS_HISTORY_LINE
 REDACTED_ELEVENLABS_HISTORY_LINE
 ```

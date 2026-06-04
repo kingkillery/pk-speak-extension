@@ -1,0 +1,11 @@
+dist/
+android-app/.build-outputs/
+assets/
+listener/
+scripts/
+unified-remote/
+web/
+CHANGELOG.md
+SKILL.md
+listener/__pycache__/
+*.pyc
