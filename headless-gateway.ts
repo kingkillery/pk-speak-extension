@@ -1,5 +1,6 @@
 ﻿#!/usr/bin/env node
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
+import { applyPiSpeakSetupConfig } from "./setup-config.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { ClaudeAgentProvider, ClaudeResumeAgentProvider } from "./claude-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
@@ -22,6 +23,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+
+applyPiSpeakSetupConfig();
 
 const state = {
 	enabled: true,

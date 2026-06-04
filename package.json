@@ -1,6 +1,6 @@
 {
   "name": "pi-speak-pk",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "description": "Voice, wake-word, Telegram, and mobile web remote extensions for Pi.",
   "keywords": [
@@ -16,6 +16,8 @@
   ],
   "main": "dist/index.js",
   "bin": {
+    "pi-speak-pk": "dist/pi-speak-pk.js",
+    "pk-speak": "dist/pk-speak.js",
     "pi-speak-admin": "dist/ui/admin.js",
     "pi-speak-tray": "dist/persistent-tray.js",
     "pi-speak-gateway": "dist/headless-gateway.js",

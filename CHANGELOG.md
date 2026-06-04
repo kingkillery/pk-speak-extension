@@ -23,10 +23,13 @@ Added:
 - `PI_SPEAK_WAKE_SENSITIVITY=low|medium|high` as the main wake-activation sensitivity toggle, plus lower-level fuzzy and compact-prefix env overrides when needed
 - auto TTS provider fallback so a failing `legacy/speak11` attempt can fall through to the next available provider instead of aborting speech outright
 - a deterministic, offline `sanitizeForSpeech` pass (toggle via `PI_SPEAK_SANITIZE`, default on, exposed in `getTtsDiagnostics`) that runs at the shared synthesis chokepoint for every non-legacy provider, so text from any agent runtime (pi, codex, oh-my-pi, claude code) gets markdown, code fences, links, and emoji stripped before TTS even when the optional LLM rewrite is disabled or unavailable
+- `pi-speak-pk` as the first-time setup CLI for npm installs, writing a local setup profile for coding-agent backend, voice/TTS provider, gateway token, and Android setup preferences
+- `pk-speak` as the day-to-day launcher with `setup`, `doctor`, `gateway`, `tray`, `mobile`, `admin`, and `config` subcommands
 
 Improved:
 
-- remote execution routing now honors explicit `AGENT_PROVIDER=pi|codex` when `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, while keeping `PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex` as the higher-priority router override
+- remote execution routing now honors explicit `AGENT_PROVIDER=pi|codex|claude` when `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, while keeping `PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex|claude` as the higher-priority router override
+- `pi-speak-gateway`, `pi-speak-tray`, and `pk-speak` now load the saved setup profile so keys and voice/backend preferences apply without re-entering environment variables
 - the `pi-speak-admin` CLI now runs the real Ink session-manager app instead of a placeholder stub, seeds current-session context from the launching Pi window, supports keyboard focus movement plus inline rename/alias/remove prompts, shows compact PK1/PK2 route lanes and a focused-session footer, exposes `--snapshot` for deterministic Ink-frame rendering in tests and automation, and falls back to a read-only snapshot when launched without a live TTY
 - local Python/audio portability now honors `PI_SPEAK_PYTHON` and `PI_SPEAK_SPEAK11_PATH` first, scans user-site `Python*/Scripts` locations instead of pinning to `Python314`, and keeps safer fallbacks for PATH-based setups
 - listener shutdown now sends an explicit stdin `shutdown` command before ending stdin, while keeping a timed force-kill fallback so local audio resources are more likely to close cleanly on Windows

@@ -31,6 +31,22 @@ pi npm i pi-speak-pk
 
 Reload Pi after install.
 
+For a standalone desktop/phone setup after installing from npm, run:
+
+```text
+pi-speak-pk
+```
+
+That opens the first-time setup CLI. It chooses the coding backend (`codex`, `claude`, or `pi`), configures the voice/TTS provider, creates the gateway pairing token, and asks whether to include Android setup. After that, use:
+
+```text
+pk-speak doctor
+pk-speak tray
+pk-speak mobile
+```
+
+`pk-speak tray` starts the Windows tray plus gateway. `pk-speak gateway` starts the headless gateway directly. `pk-speak mobile` prints the Android download/setup QR.
+
 ## Quick Start
 
 ### 1. Make Pi Speak Locally
@@ -596,7 +612,7 @@ AGENT_PROVIDER=pi|codex|elevenlabs|gemini|gemini-live
 CODEX_BIN=codex
 PI_BIN=pi
 AGENT_MODEL=
-PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex
+PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex|claude
 AGENT_CWD=
 AGENT_WORKSPACE=
 PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
@@ -609,7 +625,7 @@ PI_SPEAK_WAKE_FUZZY_MAX_DISTANCE=0|1|2              # optional override
 PI_SPEAK_WAKE_COMPACT_PREFIX_ENABLED=true|false     # optional override
 ```
 
-If `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, explicit `AGENT_PROVIDER=pi` or `AGENT_PROVIDER=codex` controls which backend remote turns dispatch to. Set the router mode to `auto` when you want the conversation router to choose Pi or Codex from the reduced task.
+If `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, explicit `AGENT_PROVIDER=pi`, `AGENT_PROVIDER=codex`, or `AGENT_PROVIDER=claude` controls which backend remote turns dispatch to. Set the router mode to `auto` when you want the conversation router to choose from the reduced task, while phone/app-selected provider overrides still win for that turn.
 
 ### Rewrite
 

@@ -5,6 +5,9 @@ import { networkInterfaces, platform, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import QRCode from "qrcode";
+import { applyPiSpeakSetupConfig } from "./setup-config.js";
+
+applyPiSpeakSetupConfig();
 
 type TrayConfig = {
 	title: string;
