@@ -331,8 +331,8 @@ async function rewriteForSpeech(text: string, signal?: AbortSignal) {
 				headers: {
 					Authorization: `Bearer ${apiKey}`,
 					"Content-Type": "application/json",
-					"HTTP-Referer": process.env.PI_SPEAK_HTTP_REFERER || "https://github.com/prest/pi-speak-extension",
-					"X-Title": "pi-speak-extension",
+					"HTTP-Referer": process.env.PI_SPEAK_HTTP_REFERER || "https://github.com/kingkillery/pk-speak-extension",
+					"X-Title": process.env.PI_SPEAK_APP_TITLE || "pk-speak-extension",
 				},
 				body: JSON.stringify({
 					model: DEFAULT_REWRITE_MODEL,

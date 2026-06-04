@@ -1,11 +1,11 @@
 ---
-title: "pi-speak-extension Overview"
+title: "pk-speak-extension Overview"
 type: synthesis
-tags: [pi-speak-extension, voice-control, remote-control, typescript, android]
+tags: [pk-speak-extension, voice-control, remote-control, typescript, android]
 status: in-progress
 ---
 
-# pi-speak-extension
+# pk-speak-extension
 
 ## Purpose
 A cross-platform voice + remote-control extension for `pi-coding-agent` with three main surfaces:

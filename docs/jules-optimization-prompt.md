@@ -1,4 +1,4 @@
-Fix and optimize `kingkillery/pi-speak-extension` on the `main` branch.
+Fix and optimize `kingkillery/pk-speak-extension` on the `main` branch.
 
 Create a single PR that implements these 5 improvements together, with tests and docs updates where appropriate.
 
