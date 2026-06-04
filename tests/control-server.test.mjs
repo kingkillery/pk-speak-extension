@@ -720,6 +720,19 @@ test("turn routes accept an explicit agent provider override", async () => {
 			body: "fake-wav",
 		});
 		assert.equal(voiceResponse.statusCode, 200);
+
+		const claudeResponse = await request({
+			port,
+			path: "/v1/turn/text",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ text: "resume this in claude", audio: false, agentProvider: "claude" }),
+		});
+		assert.equal(claudeResponse.statusCode, 200);
 	});
 
 	assert.deepEqual(seen[0], {
@@ -744,6 +757,14 @@ test("turn routes accept an explicit agent provider override", async () => {
 		cwd: undefined,
 		mode: "auto",
 		agentProvider: "pi",
+	});
+	assert.deepEqual(seen[3], {
+		text: "resume this in claude",
+		includeAudio: false,
+		target: undefined,
+		cwd: undefined,
+		mode: "auto",
+		agentProvider: "claude",
 	});
 });
 

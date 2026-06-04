@@ -1,4 +1,4 @@
-export type AgentProviderName = "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
+export type AgentProviderName = "pi" | "codex" | "claude" | "gemini" | "gemini-live" | "elevenlabs";
 
 export type AgentPromptMode = "turn" | "steer" | "followUp";
 
@@ -25,6 +25,7 @@ export interface AgentProvider {
 export type AgentProviderConfig = {
 	provider: AgentProviderName;
 	codexBin: string;
+	claudeBin: string;
 	piBin: string;
 	model?: string;
 	approvalPolicy: string;
@@ -35,6 +36,8 @@ export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env)
 	const configuredProvider = (env.AGENT_PROVIDER || "pi").trim().toLowerCase();
 	const provider: AgentProviderName = configuredProvider === "codex"
 		? "codex"
+		: configuredProvider === "claude"
+			? "claude"
 		: configuredProvider === "gemini" || configuredProvider === "gemini-live"
 			? configuredProvider
 			: configuredProvider === "elevenlabs"
@@ -44,6 +47,7 @@ export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env)
 	return {
 		provider,
 		codexBin: env.CODEX_BIN?.trim() || "codex",
+		claudeBin: env.CLAUDE_BIN?.trim() || "claude",
 		piBin: env.PI_BIN?.trim() || "pi",
 		model,
 		approvalPolicy: env.AGENT_APPROVAL_POLICY?.trim() || env.CODEX_APPROVAL_POLICY?.trim() || "never",

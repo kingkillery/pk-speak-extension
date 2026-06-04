@@ -132,6 +132,7 @@ class MainActivity : ComponentActivity() {
                 connectionMode?.let { appPreferences.connectionMode = it }
                 when (agentProvider?.lowercase()) {
                     "codex", "pi" -> appPreferences.activeAgent = "Local Codex (Pi)"
+                    "claude" -> appPreferences.activeAgent = "Gateway Claude (Claude Code)"
                     "elevenlabs" -> appPreferences.activeAgent = "Gateway Voice (ElevenLabs)"
                     "gemini", "gemini-live", "vertex" -> appPreferences.activeAgent = "Gateway Gemini (Vertex AI)"
                 }
@@ -2244,7 +2245,7 @@ fun SettingsTabContent(
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    val agents = listOf("Local Codex (Pi)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
+    val agents = listOf("Local Codex (Pi)", "Gateway Claude (Claude Code)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),

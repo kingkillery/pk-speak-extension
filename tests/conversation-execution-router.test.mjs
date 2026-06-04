@@ -74,6 +74,18 @@ test("execution router honors an explicit provider override for dispatchable tur
 	});
 });
 
+test("execution router honors an explicit Claude provider override", async () => {
+	await withEnv({ AGENT_PROVIDER: "pi", PI_SPEAK_EXECUTION_ROUTER_MODE: "auto" }, async () => {
+		const plan = planConversationExecution(summary(["inspect the repo"]), {
+			provider: "claude",
+		});
+		assert.equal(plan.dispatch, true);
+		assert.equal(plan.backend, "claude");
+		assert.equal(plan.reason, "dispatch-claude");
+		assert.match(plan.rationale, /Claude/);
+	});
+});
+
 test("execution router marks routine Pi work as fast-plus-tools", async () => {
 	const plan = planConversationExecution(summary(["inspect current status"]));
 	assert.equal(plan.dispatch, true);

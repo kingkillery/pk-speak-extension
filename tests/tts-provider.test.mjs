@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const tts = await import("../dist/tts.js");
 
@@ -107,4 +110,49 @@ test("sag diagnostics expose command and auth availability without secrets", asy
 		assert.equal(diagnostics.providers.sag.command, process.execPath);
 		assert.equal(JSON.stringify(diagnostics).includes("test-key"), false);
 	});
+});
+
+test("sag writes spoken text to stdin without including it in argv", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-sag-"));
+	const previousCwd = process.cwd();
+	const outputPath = join(tempDir, "capture.json");
+	const spokenText = "spoken text sentinel that must only travel over stdin";
+	const speakScript = [
+		"import { writeFileSync } from 'node:fs';",
+		"let stdin = '';",
+		"process.stdin.setEncoding('utf8');",
+		"process.stdin.on('data', chunk => { stdin += chunk; });",
+		"process.stdin.on('end', () => {",
+		"  const outputIndex = process.argv.indexOf('--output');",
+		"  if (outputIndex < 0) throw new Error('missing --output');",
+		"  writeFileSync(process.argv[outputIndex + 1], JSON.stringify({ argv: process.argv.slice(2), stdin }));",
+		"});",
+	].join("\n");
+
+	try {
+		await writeFile(join(tempDir, "speak"), speakScript);
+		process.chdir(tempDir);
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "sag",
+			PI_SPEAK_SAG_PATH: process.execPath,
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+			ELEVENLABS_API_KEY: "test-key",
+		}, async () => {
+			await tts.synthesizeToFile({
+				text: spokenText,
+				outputPath,
+				state: { provider: "sag", rewriteEnabled: false },
+			});
+		});
+
+		const capture = JSON.parse(await readFile(outputPath, "utf8"));
+		assert.equal(capture.stdin, spokenText);
+		assert.equal(capture.argv.includes(spokenText), false);
+		assert.equal(JSON.stringify(capture.argv).includes(spokenText), false);
+		assert.deepEqual(capture.argv.slice(-2), ["--output", outputPath]);
+	} finally {
+		process.chdir(previousCwd);
+		await rm(tempDir, { recursive: true, force: true });
+	}
 });

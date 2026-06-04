@@ -55,10 +55,13 @@ export type RemoteSlashCommand = {
 	source?: "extension" | "prompt" | "skill" | "builtin";
 };
 
+export type GatewayAgentProvider = "pi" | "codex" | "claude";
+export type ControlAgentProvider = GatewayAgentProvider | "gemini" | "gemini-live" | "elevenlabs";
+
 export type ControlServerStatus = {
 	agent?: {
-		provider: "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
-		configuredProvider?: "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
+		provider: ControlAgentProvider;
+		configuredProvider?: ControlAgentProvider;
 		model?: string;
 		capabilities: {
 			textTurns: boolean;
@@ -148,7 +151,7 @@ export type ControlServerOptions = {
 		target?: string,
 		cwd?: string,
 		mode?: "auto" | "live",
-		agentProvider?: "pi" | "codex",
+		agentProvider?: GatewayAgentProvider,
 	) => Promise<RemoteTurnResult>;
 	onVoiceTurn: (
 		buffer: Buffer,
@@ -157,7 +160,7 @@ export type ControlServerOptions = {
 		target?: string,
 		cwd?: string,
 		mode?: "auto" | "live",
-		agentProvider?: "pi" | "codex",
+		agentProvider?: GatewayAgentProvider,
 	) => Promise<RemoteTurnResult>;
 	onTurnCancel?: () => Promise<ControlActionResult> | ControlActionResult;
 	getSessionDashboard?: () => SessionDashboard;
@@ -984,6 +987,7 @@ export class ControlServer {
 		const agentProvider = status.agent?.provider;
 		if (agentProvider === "pi"
 			|| agentProvider === "codex"
+			|| agentProvider === "claude"
 			|| agentProvider === "elevenlabs"
 			|| agentProvider === "gemini"
 			|| agentProvider === "gemini-live") {
@@ -1364,7 +1368,7 @@ function parseRemoteTurnMode(value: string | null | undefined) {
 
 function parseAgentProviderOverride(value: string | null | undefined) {
 	const normalized = (value || "").trim().toLowerCase();
-	if (normalized === "pi" || normalized === "codex") return normalized;
+	if (normalized === "pi" || normalized === "codex" || normalized === "claude") return normalized;
 	return undefined;
 }
 

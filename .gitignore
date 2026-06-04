@@ -77,3 +77,12 @@ artifacts/
 # Local code index and phone-turn capture scratch
 .codegraph/
 tmp-phone-turn.*
+
+# Local agent handoffs, planning scratch, and generated memory diagnostics
+.handoff.md
+handoff.md
+proprompt.md
+.prd/
+coverage/
+goals/
+.llm-wiki/skill-pipeline/failures/

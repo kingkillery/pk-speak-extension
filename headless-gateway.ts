@@ -1,9 +1,17 @@
 ﻿#!/usr/bin/env node
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
+import { ClaudeAgentProvider, ClaudeResumeAgentProvider } from "./claude-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
 import { planConversationExecution, type ExecutionBackend } from "./conversation-execution-router.js";
 import { reduceConversationTurn } from "./conversation-reducer.js";
+import {
+	buildResumeRouteTarget,
+	normalizeGatewayProviderOverride,
+	resolveRequestedRouteTarget,
+	type GatewayProviderOverride,
+	type ResumedGatewayTarget,
+} from "./headless-gateway-routing.js";
 import { isGeminiLiveConfigured, runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
@@ -26,10 +34,12 @@ const agentConfig = resolveAgentProviderConfig({
 	...process.env,
 	AGENT_PROVIDER: process.env.AGENT_PROVIDER || resolveDefaultAgentProvider(),
 	CODEX_BIN: process.env.CODEX_BIN || resolveWindowsNpmShim("codex.cmd") || "codex",
+	CLAUDE_BIN: process.env.CLAUDE_BIN || resolveWindowsNpmShim("claude.cmd") || "claude",
 	PI_BIN: process.env.PI_BIN || resolveWindowsNpmShim("pi.cmd") || "pi",
 });
 let provider: AgentProvider;
 let fallbackProvider: AgentProvider | undefined;
+const resumedTargets = new Map<string, ResumedGatewayTarget>();
 
 function createAgentProvider(): AgentProvider {
 	if (agentConfig.provider === "elevenlabs") {
@@ -37,6 +47,9 @@ function createAgentProvider(): AgentProvider {
 	}
 	if (agentConfig.provider === "gemini" || agentConfig.provider === "gemini-live") {
 		return new GeminiProvider(agentConfig.provider);
+	}
+	if (agentConfig.provider === "claude") {
+		return createClaudeProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
 	}
 	if (agentConfig.provider === "pi") {
 		return createPiProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
@@ -49,6 +62,9 @@ function createCodingAgentProvider(): AgentProvider {
 	if (backend === "pi") {
 		return createPiProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
 	}
+	if (backend === "claude") {
+		return createClaudeProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
+	}
 	return createCodexProvider();
 }
 
@@ -60,6 +76,15 @@ function createCodexProvider(): AgentProvider {
 
 function createPiProvider(cwd: string): AgentProvider {
 	return new PiCliProvider(agentConfig.piBin, cwd);
+}
+
+function createClaudeProvider(cwd: string): AgentProvider {
+	return new ClaudeAgentProvider({
+		claudeBin: agentConfig.claudeBin,
+		cwd,
+		model: agentConfig.model,
+		env: process.env,
+	});
 }
 
 function createCodexProviderForCwd(cwd: string): AgentProvider {
@@ -82,7 +107,8 @@ const routing = {
 function refreshRoutingTargets() {
 	const discovered = discoverOpenAgentTargets();
 	const explicit = routing.defaultTarget ? [routing.defaultTarget] : [];
-	routing.availableTargets = [...new Set([...explicit, ...discovered])].sort((left, right) => left.localeCompare(right));
+	const resumed = [...resumedTargets.keys()];
+	routing.availableTargets = [...new Set([...explicit, ...resumed, ...discovered])].sort((left, right) => left.localeCompare(right));
 	routing.currentSession = routing.defaultTarget || routing.availableTargets[0] || undefined;
 }
 
@@ -116,11 +142,103 @@ function status(): ControlServerStatus {
 	};
 }
 
-async function runTextTurn(text: string, includeAudio = false, cwd?: string, transcript?: string): Promise<RemoteTurnResult> {
+type TurnRoute = {
+	cwd: string;
+	target?: ResumedGatewayTarget;
+	providerName?: GatewayProviderOverride;
+	providerOverride?: AgentProvider;
+	stopProvider: boolean;
+};
+
+function resolveTurnRoute(target?: string, cwd?: string, agentProvider?: GatewayProviderOverride): TurnRoute {
+	const resumed = resolveRequestedRouteTarget({
+		requestedTarget: target,
+		defaultTarget: routing.defaultTarget,
+		resumedTargets,
+	});
+	const providerName = normalizeGatewayProviderOverride(agentProvider) || resumed?.provider;
+	const workingDirectory = cwd || resumed?.cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
+	if (!providerName) {
+		return { cwd: workingDirectory, target: resumed, stopProvider: false };
+	}
+	const providerOverride = createExecutionProvider(providerName, workingDirectory, false, resumed);
+	return {
+		cwd: workingDirectory,
+		target: resumed,
+		providerName,
+		providerOverride,
+		stopProvider: providerOverride !== provider && providerOverride !== fallbackProvider,
+	};
+}
+
+function createExecutionProvider(
+	backend: GatewayProviderOverride,
+	cwd: string,
+	preferShared = false,
+	target?: ResumedGatewayTarget,
+): AgentProvider {
+	if (target && backend === "codex") return new CodexResumeProvider(agentConfig.codexBin, cwd, target.sessionId, agentConfig.model);
+	if (target && backend === "claude") {
+		return new ClaudeResumeAgentProvider({
+			claudeBin: agentConfig.claudeBin,
+			cwd,
+			sessionId: target.sessionId,
+			model: agentConfig.model,
+			env: process.env,
+		});
+	}
+	if (preferShared && provider.name === backend) return provider;
+	if (preferShared && fallbackProvider?.name === backend) return fallbackProvider;
+	if (backend === "pi") return createPiProvider(cwd);
+	if (backend === "claude") return createClaudeProvider(cwd);
+	return createCodexProviderForCwd(cwd);
+}
+
+async function runWithTurnRoute(
+	prompt: string,
+	includeAudio: boolean,
+	route: TurnRoute,
+	transcript?: string,
+	audioProvider?: TtsProvider,
+	progress: TurnProgressEvent[] = [],
+): Promise<RemoteTurnResult> {
+	try {
+		if (route.target) {
+			addProgress(progress, "route", `Using target ${route.target.target} in ${route.cwd}.`);
+		}
+		if (route.providerName) {
+			addProgress(progress, "route", `Using ${route.providerName} provider for this turn.`);
+		}
+		return await runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript, audioProvider, progress, route.providerOverride);
+	} finally {
+		if (route.stopProvider) {
+			await Promise.resolve(route.providerOverride?.stop?.()).catch(() => {});
+		}
+	}
+}
+
+async function runTextTurn(
+	text: string,
+	includeAudio = false,
+	cwd?: string,
+	transcript?: string,
+	target?: string,
+	agentProvider?: GatewayProviderOverride,
+): Promise<RemoteTurnResult> {
 	const prompt = text.trim();
 	if (!prompt) return { replyText: "Send a message first." };
+	const route = resolveTurnRoute(target, cwd, agentProvider);
+	if (route.providerOverride) {
+		return runWithTurnRoute(
+			prompt,
+			includeAudio,
+			route,
+			transcript,
+			agentConfig.provider === "elevenlabs" ? "elevenlabs" : undefined,
+		);
+	}
 	if (agentConfig.provider === "elevenlabs") {
-		const result = await runCodingAgentTurn(prompt, includeAudio, cwd, transcript, "elevenlabs");
+		const result = await runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript, "elevenlabs");
 		return result;
 	}
 	if (agentConfig.provider === "gemini-live") {
@@ -142,7 +260,7 @@ async function runTextTurn(text: string, includeAudio = false, cwd?: string, tra
 			warnings: [...(result.warnings || []), ...(audio.warnings || [])],
 		};
 	}
-	return runCodingAgentTurn(prompt, includeAudio, cwd, transcript);
+	return runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript);
 }
 
 async function runCodingAgentTurn(
@@ -202,7 +320,14 @@ async function runCodingAgentTurn(
 	};
 }
 
-async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = false, cwd?: string): Promise<RemoteTurnResult> {
+async function runVoiceTurn(
+	buffer: Buffer,
+	mimeType?: string,
+	includeAudio = false,
+	cwd?: string,
+	target?: string,
+	agentProvider?: GatewayProviderOverride,
+): Promise<RemoteTurnResult> {
 	const startedAt = Date.now();
 	const progress: TurnProgressEvent[] = [];
 	addProgress(progress, "upload", `Received ${Math.round(buffer.length / 1024)} KB voice clip.`, startedAt);
@@ -247,7 +372,7 @@ async function runVoiceTurn(buffer: Buffer, mimeType?: string, includeAudio = fa
 			],
 		};
 	}
-	const result = await runRoutedVoiceTextTurn(transcript, includeAudio, cwd, transcript, progress);
+	const result = await runRoutedVoiceTextTurn(transcript, includeAudio, cwd, transcript, progress, target, agentProvider);
 	return {
 		...result,
 		timings: {
@@ -268,7 +393,10 @@ async function runRoutedVoiceTextTurn(
 	cwd?: string,
 	transcript?: string,
 	progress: TurnProgressEvent[] = [],
+	target?: string,
+	agentProvider?: GatewayProviderOverride,
 ): Promise<RemoteTurnResult> {
+	const route = resolveTurnRoute(target, cwd, agentProvider);
 	const reduction = await reduceConversationTurn(text, { source: "http-voice" });
 	const plan = planConversationExecution(reduction.summary);
 	addProgress(progress, "route", plan.userProgress || `Voice route: ${plan.routeClass || "fast"} via ${plan.backend}.`);
@@ -285,45 +413,51 @@ async function runRoutedVoiceTextTurn(
 			],
 		};
 	}
-	const workingDirectory = cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
-	const routedProvider = selectVoiceExecutionProvider(plan.backend, workingDirectory);
-	const shouldStopProvider = routedProvider !== provider && routedProvider !== fallbackProvider;
-	try {
-		const result = await runCodingAgentTurn(
-			reduction.promptForAgent,
-			includeAudio,
-			workingDirectory,
-			transcript,
-			undefined,
-			progress,
-			routedProvider,
-		);
+	const backend = route.providerName || plan.backend;
+	if (!isRunnableVoiceBackend(backend)) {
 		return {
-			...result,
+			replyText: plan.userAck || plan.rationale || "This voice turn needs a route I cannot run from the gateway.",
+			transcript,
 			reducer: reduction.summary,
 			execution: plan,
-			timings: {
-				...result.timings,
-				reducerMs: reduction.reducerMs,
-			},
-			progress: result.progress || progress,
+			timings: { reducerMs: reduction.reducerMs },
+			progress: [
+				...progress,
+				makeProgress("complete", "Voice turn stopped before agent dispatch."),
+			],
 		};
-	} finally {
-		if (shouldStopProvider) {
-			await Promise.resolve(routedProvider.stop?.()).catch(() => {});
-		}
 	}
+	const voiceRoute = route.providerOverride
+		? route
+		: {
+			...route,
+			providerName: backend,
+			providerOverride: createExecutionProvider(backend, route.cwd, !route.target && !route.providerName, route.target),
+			stopProvider: false,
+		};
+	voiceRoute.stopProvider = voiceRoute.providerOverride !== provider && voiceRoute.providerOverride !== fallbackProvider;
+	const result = await runWithTurnRoute(
+		reduction.promptForAgent,
+		includeAudio,
+		voiceRoute,
+		transcript,
+		undefined,
+		progress,
+	);
+	return {
+		...result,
+		reducer: reduction.summary,
+		execution: plan,
+		timings: {
+			...result.timings,
+			reducerMs: reduction.reducerMs,
+		},
+		progress: result.progress || progress,
+	};
 }
 
-function isRunnableVoiceBackend(backend: ExecutionBackend): backend is "pi" | "codex" {
-	return backend === "pi" || backend === "codex";
-}
-
-function selectVoiceExecutionProvider(backend: "pi" | "codex", cwd: string): AgentProvider {
-	if (provider.name === backend) return provider;
-	if (fallbackProvider?.name === backend) return fallbackProvider;
-	if (backend === "pi") return createPiProvider(cwd);
-	return createCodexProviderForCwd(cwd);
+function isRunnableVoiceBackend(backend: ExecutionBackend | GatewayProviderOverride): backend is GatewayProviderOverride {
+	return backend === "pi" || backend === "codex" || backend === "claude";
 }
 
 async function runTextTurnWithProgress(
@@ -398,26 +532,33 @@ let server: ControlServer;
 
 function buildRecentSessionDashboard(): SessionDashboard {
 	const inventory = discoverAgentInventoryCached();
-	const sessions: SessionDashboardEntry[] = inventory.recent.map((session) => ({
-		name: session.title || session.cwdBasename || session.sessionId || session.path,
-		path: session.path,
-		sessionPath: session.path,
-		provider: session.provider,
-		sessionId: session.sessionId,
-		resumable: isResumableSession(session.provider, session.sessionId),
-		resumeCommand: buildResumeCommandPreview(session.provider, session.sessionId, session.cwd),
-		workingDirectory: session.cwd,
-		cwd: session.cwd,
-		current: false,
-		isCurrent: false,
-		ready: false,
-		isReady: false,
-		activity: "saved",
-		aliases: [],
-	}));
+	const resumedByPath = new Map([...resumedTargets.values()].map((target) => [target.sessionPath.toLowerCase(), target]));
+	const sessions: SessionDashboardEntry[] = inventory.recent.map((session) => {
+		const displayName = session.title || session.cwdBasename || session.sessionId || session.path;
+		const resumed = resumedByPath.get(session.path.toLowerCase());
+		const name = resumed?.target || displayName;
+		const current = !!resumed && routing.defaultTarget === resumed.target;
+		return {
+			name,
+			path: session.path,
+			sessionPath: session.path,
+			provider: session.provider,
+			sessionId: session.sessionId,
+			resumable: isResumableSession(session.provider, session.sessionId),
+			resumeCommand: buildResumeCommandPreview(session.provider, session.sessionId, session.cwd),
+			workingDirectory: session.cwd,
+			cwd: session.cwd,
+			current,
+			isCurrent: current,
+			ready: !!resumed,
+			isReady: !!resumed,
+			activity: resumed ? "idle" : "saved",
+			aliases: resumed && displayName !== name ? [displayName] : [],
+		};
+	});
 	return {
-		current: "none",
-		ready: [],
+		current: routing.defaultTarget || "none",
+		ready: [...resumedTargets.keys()],
 		storePath: "recent CLI sessions",
 		sessions,
 	};
@@ -483,16 +624,29 @@ function resumeStoredSession(payload: SessionResumePayload): ControlActionResult
 	if (!executable || !args) {
 		return { ok: false, message: `Provider ${session.provider} does not support resume from this gateway.` };
 	}
+	const routeTarget = buildResumeRouteTarget({
+		provider: session.provider,
+		sessionId: session.sessionId,
+		sessionPath: session.path,
+		title: session.title,
+		cwd: session.cwd || payload.cwd,
+		cwdBasename: session.cwdBasename,
+	});
+	if (!routeTarget) {
+		return { ok: false, message: `Provider ${session.provider} can be launched but cannot be routed by this gateway.` };
+	}
 	launchDetachedCli(executable, args, session.cwd || payload.cwd || process.cwd(), `${session.provider} resume`);
-	routing.defaultTarget = session.title || session.cwdBasename || session.sessionId || session.path;
+	resumedTargets.set(routeTarget.target, routeTarget);
+	routing.defaultTarget = routeTarget.target;
 	refreshRoutingTargets();
 	return {
 		ok: true,
-		message: `Launching ${session.provider} resume for ${session.sessionId}.`,
+		message: `Launching ${session.provider} resume for ${session.sessionId}. Route target: ${routeTarget.target}.`,
 		provider: session.provider,
 		sessionId: session.sessionId,
 		sessionPath: session.path,
 		cwd: session.cwd,
+		target: routeTarget.target,
 		command: [executable, ...args],
 	};
 }
@@ -545,6 +699,21 @@ class CodexExecProvider implements AgentProvider {
 	}
 }
 
+class CodexResumeProvider implements AgentProvider {
+	readonly name = "codex" as const;
+	constructor(private readonly codexBin: string, private readonly cwd: string, private readonly sessionId: string, private readonly model?: string) {}
+
+	async *sendPrompt(prompt: string, options: { cwd?: string; model?: string } = {}) {
+		const cwd = options.cwd || this.cwd;
+		const args = ["exec", "resume", "--skip-git-repo-check"];
+		const model = options.model || this.model;
+		if (model) args.push("-m", model);
+		args.push(this.sessionId, "-");
+		const text = await runCli(this.codexBin, args, { cwd, name: "codex resume", stdin: prompt });
+		if (text) yield { type: "text" as const, text };
+	}
+}
+
 class GeminiProvider implements AgentProvider {
 	readonly name: "gemini" | "gemini-live" | "elevenlabs";
 	constructor(name: "gemini" | "gemini-live" | "elevenlabs") {
@@ -589,8 +758,8 @@ server = new ControlServer({
 	onMonoAction: (action) => ok(`Mono ${action} is unavailable in tray gateway mode.`),
 	onSpeakAction: (action) => ok(`Speak ${action} is unavailable in tray gateway mode.`),
 	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
-	onTextTurn: async (text, includeAudio, _target, cwd, _mode) => runTextTurn(text, includeAudio, cwd),
-	onVoiceTurn: async (buffer, mimeType, includeAudio, _target, cwd, _mode) => runVoiceTurn(buffer, mimeType, includeAudio, cwd),
+	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider) => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider),
+	onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, _mode, agentProvider) => runVoiceTurn(buffer, mimeType, includeAudio, cwd, target, agentProvider),
 	onTurnCancel: cancelCurrentTurn,
 	getSessionDashboard: buildRecentSessionDashboard,
 	getCompactRouteSlots: () => [],

@@ -515,18 +515,29 @@ function synthesizeSag(text: string, outputPath: string, signal?: AbortSignal) {
 			DEFAULT_ELEVENLABS_OUTPUT_FORMAT,
 			"--output",
 			outputPath,
-			text,
 		], {
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["pipe", "pipe", "pipe"],
 			detached: false,
 			windowsHide: true,
 			shell: false,
 		});
+		let settled = false;
+		const finish = (error?: Error) => {
+			if (settled) return;
+			settled = true;
+			signal?.removeEventListener("abort", abortHandler);
+			child.stdin?.removeListener("error", handleStdinError);
+			if (error) reject(error);
+			else resolve();
+		};
 		const abortHandler = () => {
 			try {
 				child.kill();
 			} catch {}
-			reject(new Error("Speech synthesis aborted"));
+			finish(new Error("Speech synthesis aborted"));
+		};
+		const handleStdinError = (error: Error) => {
+			finish(new Error(`Failed to write sag stdin: ${getErrorMessage(error)}`));
 		};
 		signal?.addEventListener("abort", abortHandler, { once: true });
 		let stderr = "";
@@ -535,14 +546,25 @@ function synthesizeSag(text: string, outputPath: string, signal?: AbortSignal) {
 			stderr += String(chunk);
 		});
 		child.on("error", (error) => {
-			signal?.removeEventListener("abort", abortHandler);
-			reject(error);
+			finish(error);
 		});
 		child.on("exit", (code) => {
-			signal?.removeEventListener("abort", abortHandler);
-			if (code === 0) resolve();
-			else reject(new Error(`sag exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
+			if (code === 0) finish();
+			else finish(new Error(`sag exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
 		});
+		if (!child.stdin) {
+			finish(new Error("Failed to write sag stdin: stdin is unavailable"));
+			return;
+		}
+		child.stdin.on("error", handleStdinError);
+		try {
+			child.stdin.write(text, (error) => {
+				if (error) handleStdinError(error);
+			});
+			child.stdin.end();
+		} catch (error) {
+			handleStdinError(error instanceof Error ? error : new Error(String(error)));
+		}
 	});
 }
 

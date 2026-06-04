@@ -1176,6 +1176,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     private fun shortError(error: Exception): String = error.localizedMessage ?: error.javaClass.simpleName
 
     private fun activeGatewayProvider(): String = when (prefs.activeAgent) {
+        "Gateway Claude (Claude Code)" -> "claude"
         "Gateway Voice (ElevenLabs)" -> "elevenlabs"
         "Gateway Gemini (Vertex AI)" -> "gemini"
         else -> "codex"

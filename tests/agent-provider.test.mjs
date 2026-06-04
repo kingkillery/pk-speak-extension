@@ -10,6 +10,7 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 	assert.deepEqual(resolveAgentProviderConfig({}), {
 		provider: "pi",
 		codexBin: "codex",
+		claudeBin: "claude",
 		piBin: "pi",
 		model: undefined,
 		approvalPolicy: "never",
@@ -18,11 +19,13 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 	assert.deepEqual(resolveAgentProviderConfig({
 		AGENT_PROVIDER: "codex",
 		CODEX_BIN: "C:/tools/codex.cmd",
+		CLAUDE_BIN: "C:/tools/claude.cmd",
 		PI_BIN: "C:/tools/pi.cmd",
 		AGENT_MODEL: "gpt-test",
 	}), {
 		provider: "codex",
 		codexBin: "C:/tools/codex.cmd",
+		claudeBin: "C:/tools/claude.cmd",
 		piBin: "C:/tools/pi.cmd",
 		model: "gpt-test",
 		approvalPolicy: "never",
@@ -31,6 +34,7 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "gemini" }).provider, "gemini");
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "gemini-live" }).provider, "gemini-live");
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "elevenlabs" }).provider, "elevenlabs");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "claude" }).provider, "claude");
 });
 
 test("pi provider streams message updates and completes on agent end", async () => {

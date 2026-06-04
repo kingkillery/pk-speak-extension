@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { networkInterfaces, platform, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
-import { ControlServer, type ControlActionResult, type ControlServerState, type RemoteSlashCommand, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
+import { ControlServer, type ControlActionResult, type ControlServerState, type GatewayAgentProvider, type RemoteSlashCommand, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type ConversationExecutionPlan, type ConversationReducerSummary, type RemoteTurnResult, type TurnProgressEvent, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
@@ -31,12 +31,13 @@ import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSession
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
-import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached } from "./agent-discovery.js";
+import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached, resolveWindowsNpmShim } from "./agent-discovery.js";
 import { buildSessionWorkingDirectoryMap } from "./session-working-directory.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { PiAgentProvider } from "./pi-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
+import { ClaudeAgentProvider } from "./claude-agent-provider.js";
 import {
 	appendExecutionTrace,
 	type ExecutionDecision,
@@ -574,8 +575,18 @@ export default function speakExtension(pi: ExtensionAPI) {
 			});
 		},
 	});
+	const claudeAgentProvider = new ClaudeAgentProvider({
+		claudeBin: process.env.CLAUDE_BIN?.trim() || resolveWindowsNpmShim("claude.cmd") || agentProviderConfig.claudeBin,
+		model: agentProviderConfig.model,
+		cwd: DEFAULT_AGENT_CWD || process.cwd(),
+		env: process.env,
+	});
 	const getAgentProvider = (): AgentProvider =>
-		agentProviderConfig.provider === "codex" ? codexAgentProvider : piAgentProvider;
+		agentProviderConfig.provider === "codex"
+			? codexAgentProvider
+			: agentProviderConfig.provider === "claude"
+				? claudeAgentProvider
+				: piAgentProvider;
 	let forceSpeechPromptNextTurn = false;
 	const diagnostics: RuntimeDiagnostics = {
 		lastErrors: {},
@@ -1163,7 +1174,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		targetName?: string,
 		cwd?: string,
 		mode: "auto" | "live" = "auto",
-		agentProvider?: "pi" | "codex",
+		agentProvider?: GatewayAgentProvider,
 	): Promise<RemoteTurnResult> => {
 		const trimmed = text.trim();
 		if (!trimmed) {
@@ -1181,7 +1192,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 		const desiredTarget = targetName?.trim() || remoteDefaultTarget;
 		const isVoiceInput = source === "http-voice" || source === "telegram-voice";
-		const directBackend = agentProvider || (agentProviderConfig.provider === "codex" ? "codex" : "pi");
+		const directBackend: GatewayAgentProvider = agentProvider || (
+			agentProviderConfig.provider === "codex" || agentProviderConfig.provider === "claude"
+				? agentProviderConfig.provider
+				: "pi"
+		);
 		const directSummary: ConversationReducerSummary = {
 			goal: trimmed,
 			actionItems: [trimmed],
@@ -1198,9 +1213,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const directExecutionPlan: ConversationExecutionPlan = {
 			dispatch: true,
 			backend: directBackend,
-			reason: directBackend === "codex" ? "dispatch-codex" : "dispatch-pi",
+			reason: directBackend === "codex"
+				? "dispatch-codex"
+				: directBackend === "claude"
+					? "dispatch-claude"
+					: "dispatch-pi",
 			confidence: 1,
-			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : "Pi"}; voice-only router bypassed.`,
+			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : directBackend === "claude" ? "Claude" : "Pi"}; voice-only router bypassed.`,
 			actionForSeed: trimmed,
 		};
 		const reducer = isVoiceInput
@@ -1450,6 +1469,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		let executionProvider: AgentProvider;
 		if (executionPlan.backend === "codex") {
 			executionProvider = codexAgentProvider;
+		} else if (executionPlan.backend === "claude") {
+			executionProvider = claudeAgentProvider;
 		} else if (executionPlan.backend === "pi") {
 			executionProvider = piAgentProvider;
 		} else {
@@ -1667,7 +1688,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		targetName?: string,
 		cwd?: string,
 		mode: "auto" | "live" = "auto",
-		agentProvider?: "pi" | "codex",
+		agentProvider?: GatewayAgentProvider,
 	) => {
 		diagnostics.recentTimings.lastRemoteSource = source;
 		return await remoteTurnManager.enqueue(source, async () =>
