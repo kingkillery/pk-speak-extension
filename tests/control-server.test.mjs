@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import http from "node:http";
 import dgram from "node:dgram";
 
@@ -292,7 +292,24 @@ test("non-local status requires auth while localhost bypass still works", async 
 	});
 });
 
+// The setup page only renders the APK download link when the Android build
+// artifact is present (existsSync on android-app/.build-outputs/app-debug.apk,
+// resolved relative to dist/ at import time). A fresh clone has no APK, so this
+// test materialises a placeholder to cover the "available" branch deterministically.
+// Any pre-existing real artifact is left untouched.
+function ensureApkFixture() {
+	const apkPath = join(process.cwd(), "android-app", ".build-outputs", "app-debug.apk");
+	if (existsSync(apkPath)) {
+		return () => {};
+	}
+	mkdirSync(dirname(apkPath), { recursive: true });
+	writeFileSync(apkPath, "placeholder-apk");
+	return () => rmSync(apkPath, { force: true });
+}
+
 test("phone setup page is public and includes install plus connect links", async () => {
+	const cleanupApk = ensureApkFixture();
+	try {
 	await withServer({
 		getStatus: () => ({
 			agent: { provider: "elevenlabs", configuredProvider: "elevenlabs", capabilities: { textTurns: true, voiceTurns: true, audioReplies: true, routing: true, steering: false } },
@@ -325,6 +342,9 @@ test("phone setup page is public and includes install plus connect links", async
 		assert.equal(downloadRedirect.statusCode, 302);
 		assert.equal(downloadRedirect.headers.location, "/download/pi-speak.apk");
 	});
+	} finally {
+		cleanupApk();
+	}
 });
 
 test("diagnostics route is authenticated for non-local requests", async () => {

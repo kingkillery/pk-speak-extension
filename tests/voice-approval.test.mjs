@@ -35,11 +35,27 @@ test("stacked request auto-declines without disturbing the in-flight one", async
 	assert.equal(await first, "accept");
 });
 
-test("request resolves to decline after timeout (default onTimeout)", async () => {
+test("request resolves to decline after timeout (default onTimeout)", async (t) => {
+	// The registry unref()s its timeout timer so it never keeps the event loop
+	// alive on its own. Relying on a real wall-clock timer here is flaky: the
+	// process can settle before the timer fires, leaving the promise pending
+	// (and cancelling sibling subtests). Drive it deterministically with the
+	// test runner's mock timers instead.
+	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const registry = createApprovalRegistry();
 	const promise = registry.request({ description: "stale", timeoutMs: 30 });
+	t.mock.timers.tick(30);
 	const decision = await promise;
 	assert.equal(decision, "decline");
+	assert.equal(registry.get(), undefined);
+});
+
+test("request resolves to a custom onTimeout decision", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const registry = createApprovalRegistry();
+	const promise = registry.request({ description: "auto-yes", timeoutMs: 50, onTimeout: "accept" });
+	t.mock.timers.tick(50);
+	assert.equal(await promise, "accept");
 	assert.equal(registry.get(), undefined);
 });
 
