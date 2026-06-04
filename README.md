@@ -42,11 +42,12 @@ That opens the first-time setup CLI. It chooses the coding backend (`codex`, `cl
 ```text
 pk-speak doctor
 pk-speak speak "Build finished"
+pk-speak wrap -- codex
 pk-speak tray
 pk-speak mobile
 ```
 
-`pk-speak speak` is the direct sag-like TTS command for hooks and CLI agents. `pk-speak tray` starts the Windows tray plus gateway. `pk-speak gateway` starts the headless gateway directly. `pk-speak mobile` prints the Android download/setup QR.
+`pk-speak speak` is the direct sag-like TTS command for hooks and CLI agents. `pk-speak wrap` runs any CLI command and speaks start/finish notices without requiring the phone gateway. `pk-speak tray` starts the Windows tray plus gateway. `pk-speak gateway` starts the headless gateway directly. `pk-speak mobile` prints the Android download/setup QR.
 
 Package split details are in [docs/PACKAGE_SPLIT.md](./docs/PACKAGE_SPLIT.md).
 
@@ -174,6 +175,19 @@ pk-speak speak --no-play --output reply.mp3 "Saved an audio artifact."
 ```
 
 It reads text from arguments or stdin, uses the saved setup profile, and supports `auto`, `edge`, `elevenlabs`, `openai`, `sag`, and `legacy` providers. Use `--dry-run` to inspect what would be spoken without synthesizing audio.
+
+### Wrap Any CLI Agent
+
+Use `pk-speak wrap` when you want lifecycle voice notices around an arbitrary coding-agent CLI:
+
+```text
+pk-speak wrap -- codex
+pk-speak wrap --label "Claude Code" -- claude
+pk-speak wrap --provider sag -- npm test
+pk-speak wrap --no-speak -- node -e "console.log('ok')"
+```
+
+The wrapper preserves the child command's terminal and exit code. It speaks the start and finish/failure notices around the command instead of capturing and parsing all output, so interactive CLIs keep their normal TTY behavior. Use `--shell` only when you intentionally need shell syntax or shell built-ins.
 
 ### Gemini Live Smoke Test
 

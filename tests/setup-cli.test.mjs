@@ -106,3 +106,45 @@ test("pk-speak speak dry-run reads text args and sanitizes spoken output", async
 	assert.match(stdout, /Text: Build finished with success/);
 	assert.doesNotMatch(stdout, /\*\*/);
 });
+
+test("pk-speak help includes wrap command", async () => {
+	const { stdout } = await execFileAsync(process.execPath, ["dist/pk-speak.js", "--help"], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /pk-speak wrap/);
+	assert.match(stdout, /Wrap examples:/);
+});
+
+test("pk-speak wrap dry-run reports command plan", async () => {
+	const { stdout } = await execFileAsync(process.execPath, [
+		"dist/pk-speak.js",
+		"wrap",
+		"--dry-run",
+		"--label",
+		"Test Agent",
+		"--",
+		process.execPath,
+		"-e",
+		"console.log('ok')",
+	], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /Command:/);
+	assert.match(stdout, /Start notice: Starting Test Agent\./);
+	assert.match(stdout, /Success notice: Test Agent finished successfully\./);
+});
+
+test("pk-speak wrap preserves command stdout and exit code when speech is disabled", async () => {
+	const { stdout } = await execFileAsync(process.execPath, [
+		"dist/pk-speak.js",
+		"wrap",
+		"--no-speak",
+		"--",
+		process.execPath,
+		"-e",
+		"console.log('wrapped-ok')",
+	], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /wrapped-ok/);
+});

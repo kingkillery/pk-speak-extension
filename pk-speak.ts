@@ -33,6 +33,10 @@ async function main() {
 		await runSpeakCommand(argv.slice(1));
 		return;
 	}
+	if (command === "wrap") {
+		await runWrapCommand(argv.slice(1));
+		return;
+	}
 	if (command === "gateway" || command === "serve") {
 		await runNodeScript(join(DIST_DIR, "headless-gateway.js"), argv.slice(1));
 		return;
@@ -66,6 +70,7 @@ function printHelp() {
 		"  setup       Run first-time setup",
 		"  doctor      Show configured backend, voice, APK, and gateway status inputs",
 		"  speak       Speak text from args or stdin using configured TTS",
+		"  wrap        Run a CLI command and speak start/finish notices",
 		"  gateway     Start the headless phone/control gateway",
 		"  tray        Start the Windows tray controller and gateway",
 		"  mobile      Print the Android setup/download QR",
@@ -81,6 +86,11 @@ function printHelp() {
 		"  pk-speak speak \"Build finished\"",
 		"  git status --short | pk-speak speak --provider edge",
 		"  pk-speak speak --no-play --output reply.mp3 \"Tests passed\"",
+		"",
+		"Wrap examples:",
+		"  pk-speak wrap -- codex",
+		"  pk-speak wrap --label \"Claude Code\" -- claude",
+		"  pk-speak wrap --provider sag -- npm test",
 	].join("\n"));
 }
 
@@ -127,6 +137,10 @@ async function runSpeakCommand(argv: string[]) {
 		return;
 	}
 
+	await speakText(text, options);
+}
+
+async function speakText(text: string, options: SpeakTextOptions) {
 	const state = {
 		provider: options.provider,
 		rewriteEnabled: options.rewrite,
@@ -139,7 +153,6 @@ async function runSpeakCommand(argv: string[]) {
 		console.log(`Text: ${spokenPreview}`);
 		return;
 	}
-
 	const tempDir = options.output ? undefined : await mkdtemp(join(tmpdir(), "pk-speak-"));
 	const outputPath = resolve(options.output || join(tempDir!, "speech.mp3"));
 	try {
@@ -148,7 +161,9 @@ async function runSpeakCommand(argv: string[]) {
 			outputPath,
 			state,
 		});
-		console.log(`Spoke with ${result.provider}${result.rewriteApplied ? " (rewritten)" : ""}: ${outputPath}`);
+		if (!options.quiet) {
+			console.log(`Spoke with ${result.provider}${result.rewriteApplied ? " (rewritten)" : ""}: ${outputPath}`);
+		}
 		if (!options.noPlay) {
 			await playAudioFile(outputPath);
 		}
@@ -157,6 +172,77 @@ async function runSpeakCommand(argv: string[]) {
 			await rm(tempDir, { recursive: true, force: true }).catch(() => {});
 		}
 	}
+}
+
+async function runWrapCommand(argv: string[]) {
+	const options = parseWrapArgs(argv);
+	if (options.help) {
+		printWrapHelp();
+		return;
+	}
+	if (!options.command.length) {
+		console.error("No command provided. Use: pk-speak wrap -- <command> [args...]");
+		printWrapHelp();
+		process.exitCode = 1;
+		return;
+	}
+
+	const command = options.command[0];
+	const args = options.command.slice(1);
+	const label = options.label || commandLabel(command);
+	const startMessage = options.startText || `Starting ${label}.`;
+	const successMessage = options.successText || `${label} finished successfully.`;
+	const failureMessage = options.failureText || `${label} exited with code`;
+
+	if (options.dryRun) {
+		console.log(`Command: ${options.command.join(" ")}`);
+		console.log(`Cwd: ${resolve(options.cwd || process.cwd())}`);
+		console.log(`Shell: ${options.shell ? "yes" : "no"}`);
+		if (!options.noSpeak) {
+			console.log(`Start notice: ${startMessage}`);
+			console.log(`Success notice: ${successMessage}`);
+			console.log(`Failure notice: ${failureMessage} <code>`);
+		}
+		return;
+	}
+
+	if (!options.noSpeak && !options.noStart) {
+		await speakTextSafely(startMessage, options);
+	}
+	const exit = await runWrappedProcess(command, args, options);
+	if (!options.noSpeak) {
+		const message = exit.code === 0
+			? successMessage
+			: `${failureMessage} ${exit.code ?? "unknown"}.`;
+		await speakTextSafely(message, options);
+	}
+	process.exitCode = exit.code ?? (exit.signal ? 1 : 0);
+}
+
+function printWrapHelp() {
+	console.log([
+		"Usage: pk-speak wrap [options] -- <command> [args...]",
+		"",
+		"Runs a CLI command and speaks lifecycle notices without capturing the command TTY.",
+		"",
+		"Options:",
+		"  --label <name>             Friendly name to say",
+		"  --provider <auto|edge|elevenlabs|openai|sag|legacy>",
+		"  --cwd <path>               Working directory for the command",
+		"  --shell                    Run through the platform shell",
+		"  --no-speak                 Run command without speaking notices",
+		"  --no-start                 Skip the start notice",
+		"  --start-text <text>        Override start notice",
+		"  --success-text <text>      Override success notice",
+		"  --failure-text <text>      Override failure prefix",
+		"  --dry-run                  Print the plan without running the command",
+		"",
+		"Examples:",
+		"  pk-speak wrap -- codex",
+		"  pk-speak wrap --label \"Claude Code\" -- claude",
+		"  pk-speak wrap --provider sag -- npm test",
+		"  pk-speak wrap --no-speak -- node -e \"console.log('ok')\"",
+	].join("\n"));
 }
 
 function printSpeakHelp() {
@@ -188,6 +274,31 @@ type SpeakCommandOptions = {
 	keep: boolean;
 	dryRun: boolean;
 	rewrite?: boolean;
+	help: boolean;
+};
+
+type SpeakTextOptions = {
+	provider?: TtsProvider;
+	output?: string;
+	noPlay: boolean;
+	keep: boolean;
+	dryRun: boolean;
+	rewrite?: boolean;
+	quiet?: boolean;
+};
+
+type WrapCommandOptions = {
+	command: string[];
+	provider?: TtsProvider;
+	cwd?: string;
+	label?: string;
+	shell: boolean;
+	noSpeak: boolean;
+	noStart: boolean;
+	dryRun: boolean;
+	startText?: string;
+	successText?: string;
+	failureText?: string;
 	help: boolean;
 };
 
@@ -227,6 +338,53 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 		}
 	}
 	if (options.output) options.noPlay = options.noPlay || false;
+	return options;
+}
+
+function parseWrapArgs(argv: string[]): WrapCommandOptions {
+	const options: WrapCommandOptions = {
+		command: [],
+		shell: false,
+		noSpeak: false,
+		noStart: false,
+		dryRun: false,
+		help: false,
+	};
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i];
+		if (arg === "--") {
+			options.command = argv.slice(i + 1);
+			break;
+		}
+		if (!arg.startsWith("-")) {
+			options.command = argv.slice(i);
+			break;
+		}
+		const key = arg.replace(/^-+/, "");
+		if (key === "help" || key === "h") {
+			options.help = true;
+		} else if (key === "provider") {
+			options.provider = normalizeTtsProvider(argv[++i]);
+		} else if (key === "cwd" || key === "C") {
+			options.cwd = argv[++i];
+		} else if (key === "label") {
+			options.label = argv[++i];
+		} else if (key === "shell") {
+			options.shell = true;
+		} else if (key === "no-speak") {
+			options.noSpeak = true;
+		} else if (key === "no-start") {
+			options.noStart = true;
+		} else if (key === "dry-run") {
+			options.dryRun = true;
+		} else if (key === "start-text") {
+			options.startText = argv[++i];
+		} else if (key === "success-text") {
+			options.successText = argv[++i];
+		} else if (key === "failure-text") {
+			options.failureText = argv[++i];
+		}
+	}
 	return options;
 }
 
@@ -318,6 +476,39 @@ function runProcess(command: string, args: string[]) {
 			else reject(new Error(`${command} exited with code ${code}`));
 		});
 	});
+}
+
+async function speakTextSafely(text: string, options: WrapCommandOptions) {
+	await speakText(text, {
+		provider: options.provider,
+		noPlay: false,
+		keep: false,
+		dryRun: false,
+		rewrite: false,
+		quiet: true,
+	}).catch((error) => {
+		console.error(`pk-speak notice failed: ${error instanceof Error ? error.message : String(error)}`);
+	});
+}
+
+function runWrappedProcess(command: string, args: string[], options: WrapCommandOptions) {
+	return new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+		const child = spawn(command, args, {
+			cwd: options.cwd || process.cwd(),
+			env: buildPiSpeakEnv(),
+			stdio: "inherit",
+			shell: options.shell,
+			windowsHide: false,
+		});
+		child.on("error", reject);
+		child.on("close", (code, signal) => resolve({ code, signal }));
+	});
+}
+
+function commandLabel(command: string) {
+	const cleaned = command.replace(/^["']|["']$/g, "");
+	const parts = cleaned.split(/[\\/]/);
+	return parts[parts.length - 1] || cleaned || "command";
 }
 
 async function runNodeScript(scriptPath: string, args: string[]) {
