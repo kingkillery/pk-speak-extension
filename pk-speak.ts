@@ -198,6 +198,7 @@ async function runWrapCommand(argv: string[]) {
 		console.log(`Command: ${options.command.join(" ")}`);
 		console.log(`Cwd: ${resolve(options.cwd || process.cwd())}`);
 		console.log(`Shell: ${options.shell ? "yes" : "no"}`);
+		console.log(`Capture: ${options.capture ? "yes" : "no"}`);
 		if (!options.noSpeak) {
 			console.log(`Start notice: ${startMessage}`);
 			console.log(`Success notice: ${successMessage}`);
@@ -210,10 +211,11 @@ async function runWrapCommand(argv: string[]) {
 		await speakTextSafely(startMessage, options);
 	}
 	const exit = await runWrappedProcess(command, args, options);
+	if (exit.capture && exit.capture.events.length) {
+		console.log(`pk-speak capture: ${exit.capture.events.join(", ")}`);
+	}
 	if (!options.noSpeak) {
-		const message = exit.code === 0
-			? successMessage
-			: `${failureMessage} ${exit.code ?? "unknown"}.`;
+		const message = buildWrapFinishMessage(exit, label, successMessage, failureMessage);
 		await speakTextSafely(message, options);
 	}
 	process.exitCode = exit.code ?? (exit.signal ? 1 : 0);
@@ -230,6 +232,8 @@ function printWrapHelp() {
 		"  --provider <auto|edge|elevenlabs|openai|sag|legacy>",
 		"  --cwd <path>               Working directory for the command",
 		"  --shell                    Run through the platform shell",
+		"  --capture                  Mirror and classify stdout/stderr",
+		"  --capture-bytes <n>        Max output bytes to classify, default 200000",
 		"  --no-speak                 Run command without speaking notices",
 		"  --no-start                 Skip the start notice",
 		"  --start-text <text>        Override start notice",
@@ -241,6 +245,7 @@ function printWrapHelp() {
 		"  pk-speak wrap -- codex",
 		"  pk-speak wrap --label \"Claude Code\" -- claude",
 		"  pk-speak wrap --provider sag -- npm test",
+		"  pk-speak wrap --capture -- npm test",
 		"  pk-speak wrap --no-speak -- node -e \"console.log('ok')\"",
 	].join("\n"));
 }
@@ -293,6 +298,8 @@ type WrapCommandOptions = {
 	cwd?: string;
 	label?: string;
 	shell: boolean;
+	capture: boolean;
+	captureBytes: number;
 	noSpeak: boolean;
 	noStart: boolean;
 	dryRun: boolean;
@@ -345,6 +352,8 @@ function parseWrapArgs(argv: string[]): WrapCommandOptions {
 	const options: WrapCommandOptions = {
 		command: [],
 		shell: false,
+		capture: false,
+		captureBytes: 200_000,
 		noSpeak: false,
 		noStart: false,
 		dryRun: false,
@@ -371,6 +380,10 @@ function parseWrapArgs(argv: string[]): WrapCommandOptions {
 			options.label = argv[++i];
 		} else if (key === "shell") {
 			options.shell = true;
+		} else if (key === "capture") {
+			options.capture = true;
+		} else if (key === "capture-bytes") {
+			options.captureBytes = normalizePositiveInt(argv[++i], options.captureBytes);
 		} else if (key === "no-speak") {
 			options.noSpeak = true;
 		} else if (key === "no-start") {
@@ -409,6 +422,11 @@ function boolArg(value: string | undefined) {
 	if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
 	if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
 	return undefined;
+}
+
+function normalizePositiveInt(value: string | undefined, fallback: number) {
+	const parsed = Number.parseInt(value || "", 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 async function readStdin() {
@@ -491,8 +509,21 @@ async function speakTextSafely(text: string, options: WrapCommandOptions) {
 	});
 }
 
+type CaptureEvent = "approval-needed" | "needs-input" | "tests-failed" | "error";
+
+type CaptureSummary = {
+	events: CaptureEvent[];
+};
+
+type WrappedProcessResult = {
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	capture?: CaptureSummary;
+};
+
 function runWrappedProcess(command: string, args: string[], options: WrapCommandOptions) {
-	return new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+	if (options.capture) return runCapturedProcess(command, args, options);
+	return new Promise<WrappedProcessResult>((resolve, reject) => {
 		const child = spawn(command, args, {
 			cwd: options.cwd || process.cwd(),
 			env: buildPiSpeakEnv(),
@@ -503,6 +534,85 @@ function runWrappedProcess(command: string, args: string[], options: WrapCommand
 		child.on("error", reject);
 		child.on("close", (code, signal) => resolve({ code, signal }));
 	});
+}
+
+function runCapturedProcess(command: string, args: string[], options: WrapCommandOptions) {
+	return new Promise<WrappedProcessResult>((resolve, reject) => {
+		let captured = "";
+		const appendCapture = (chunk: string) => {
+			captured += chunk;
+			if (captured.length > options.captureBytes) {
+				captured = captured.slice(captured.length - options.captureBytes);
+			}
+		};
+		const child = spawn(command, args, {
+			cwd: options.cwd || process.cwd(),
+			env: buildPiSpeakEnv(),
+			stdio: ["inherit", "pipe", "pipe"],
+			shell: options.shell,
+			windowsHide: false,
+		});
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk) => {
+			const text = String(chunk);
+			appendCapture(text);
+			process.stdout.write(text);
+		});
+		child.stderr?.on("data", (chunk) => {
+			const text = String(chunk);
+			appendCapture(text);
+			process.stderr.write(text);
+		});
+		child.on("error", reject);
+		child.on("close", (code, signal) => {
+			resolve({
+				code,
+				signal,
+				capture: classifyCapturedOutput(captured, code),
+			});
+		});
+	});
+}
+
+function classifyCapturedOutput(output: string, code: number | null): CaptureSummary {
+	const normalized = output.replace(/\u001b\[[0-9;]*m/g, "");
+	const events: CaptureEvent[] = [];
+	const add = (event: CaptureEvent) => {
+		if (!events.includes(event)) events.push(event);
+	};
+	if (/\b(approval|approve|permission|allow|deny|requires approval|confirm command)\b/i.test(normalized)) {
+		add("approval-needed");
+	}
+	if (/\b(enter|input|choose|select|press|continue|confirm|password|passphrase|waiting for)\b|y\/n|yes\/no/i.test(normalized)) {
+		add("needs-input");
+	}
+	if (
+		/\b(tests?\s+failed|failures?:|failed\s+\d+|not ok|AssertionError|ERR_ASSERTION|npm ERR!|command failed)\b/i
+			.test(normalized)
+		|| normalized.includes("✖")
+	) {
+		add("tests-failed");
+	}
+	if (/\b(error|exception|traceback|fatal|failed)\b/i.test(normalized) || (code !== null && code > 0)) {
+		add("error");
+	}
+	return { events };
+}
+
+function buildWrapFinishMessage(
+	exit: WrappedProcessResult,
+	label: string,
+	successMessage: string,
+	failureMessage: string,
+) {
+	const events = exit.capture?.events || [];
+	if (events.includes("approval-needed")) return `${label} appears to need approval.`;
+	if (events.includes("needs-input")) return `${label} appears to need input.`;
+	if (events.includes("tests-failed")) return `${label} reported test failures.`;
+	if (events.includes("error") && exit.code === 0) return `${label} reported errors but exited successfully.`;
+	if (exit.code === 0) return successMessage;
+	return `${failureMessage} ${exit.code ?? "unknown"}.`;
 }
 
 function commandLabel(command: string) {

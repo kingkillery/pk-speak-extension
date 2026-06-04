@@ -184,10 +184,13 @@ Use `pk-speak wrap` when you want lifecycle voice notices around an arbitrary co
 pk-speak wrap -- codex
 pk-speak wrap --label "Claude Code" -- claude
 pk-speak wrap --provider sag -- npm test
+pk-speak wrap --capture -- npm test
 pk-speak wrap --no-speak -- node -e "console.log('ok')"
 ```
 
 The wrapper preserves the child command's terminal and exit code. It speaks the start and finish/failure notices around the command instead of capturing and parsing all output, so interactive CLIs keep their normal TTY behavior. Use `--shell` only when you intentionally need shell syntax or shell built-ins.
+
+Use `--capture` for non-interactive commands when you want `pk-speak` to mirror output and classify important events. Capture mode prints and speaks compact notices for patterns such as approval prompts, input prompts, test failures, and errors. Keep capture off for fully interactive CLIs unless you are comfortable with stdout/stderr being piped instead of attached directly to the terminal.
 
 ### Gemini Live Smoke Test
 

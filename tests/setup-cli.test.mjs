@@ -148,3 +148,58 @@ test("pk-speak wrap preserves command stdout and exit code when speech is disabl
 	});
 	assert.match(stdout, /wrapped-ok/);
 });
+
+test("pk-speak wrap dry-run reports capture mode", async () => {
+	const { stdout } = await execFileAsync(process.execPath, [
+		"dist/pk-speak.js",
+		"wrap",
+		"--dry-run",
+		"--capture",
+		"--",
+		process.execPath,
+		"-e",
+		"console.log('ok')",
+	], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /Capture: yes/);
+});
+
+test("pk-speak wrap capture mirrors output and classifies test failures", async () => {
+	await assert.rejects(
+		execFileAsync(process.execPath, [
+			"dist/pk-speak.js",
+			"wrap",
+			"--capture",
+			"--no-speak",
+			"--",
+			process.execPath,
+			"-e",
+			"console.log('tests failed'); process.exit(2)",
+		], {
+			cwd: process.cwd(),
+		}),
+		(error) => {
+			assert.match(error.stdout, /tests failed/);
+			assert.match(error.stdout, /pk-speak capture: tests-failed, error/);
+			assert.equal(error.code, 2);
+			return true;
+		},
+	);
+});
+
+test("pk-speak wrap capture classifies approval prompts", async () => {
+	const { stdout } = await execFileAsync(process.execPath, [
+		"dist/pk-speak.js",
+		"wrap",
+		"--capture",
+		"--no-speak",
+		"--",
+		process.execPath,
+		"-e",
+		"console.log('Requires approval to continue')",
+	], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /pk-speak capture: approval-needed, needs-input/);
+});
