@@ -77,3 +77,32 @@ test("pk-speak doctor reads saved setup config", async () => {
 		await rm(configDir, { recursive: true, force: true });
 	}
 });
+
+test("pk-speak help includes speak command", async () => {
+	const { stdout } = await execFileAsync(process.execPath, ["dist/pk-speak.js", "--help"], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /pk-speak speak/);
+	assert.match(stdout, /Speak examples:/);
+});
+
+test("pk-speak speak dry-run reads text args and sanitizes spoken output", async () => {
+	const { stdout } = await execFileAsync(process.execPath, [
+		"dist/pk-speak.js",
+		"speak",
+		"--dry-run",
+		"--provider",
+		"edge",
+		"Build",
+		"finished",
+		"with",
+		"**success**",
+	], {
+		cwd: process.cwd(),
+		env: { ...process.env, OPENROUTER_API_KEY: "" },
+	});
+	assert.match(stdout, /Requested provider: edge/);
+	assert.match(stdout, /Provider: \w+/);
+	assert.match(stdout, /Text: Build finished with success/);
+	assert.doesNotMatch(stdout, /\*\*/);
+});

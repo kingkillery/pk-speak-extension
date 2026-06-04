@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret } from "./setup-config.js";
+import { resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -24,6 +27,10 @@ async function main() {
 	}
 	if (command === "doctor") {
 		printDoctor();
+		return;
+	}
+	if (command === "speak" || command === "say") {
+		await runSpeakCommand(argv.slice(1));
 		return;
 	}
 	if (command === "gateway" || command === "serve") {
@@ -58,6 +65,7 @@ function printHelp() {
 		"Commands:",
 		"  setup       Run first-time setup",
 		"  doctor      Show configured backend, voice, APK, and gateway status inputs",
+		"  speak       Speak text from args or stdin using configured TTS",
 		"  gateway     Start the headless phone/control gateway",
 		"  tray        Start the Windows tray controller and gateway",
 		"  mobile      Print the Android setup/download QR",
@@ -68,6 +76,11 @@ function printHelp() {
 		"  pi-speak-pk",
 		"  pk-speak tray",
 		"  pk-speak mobile",
+		"",
+		"Speak examples:",
+		"  pk-speak speak \"Build finished\"",
+		"  git status --short | pk-speak speak --provider edge",
+		"  pk-speak speak --no-play --output reply.mp3 \"Tests passed\"",
 	].join("\n"));
 }
 
@@ -97,6 +110,214 @@ function printConfig() {
 	console.log(`ElevenLabs key: ${maskSecret(config.elevenLabsApiKey)}`);
 	console.log(`OpenAI audio key: ${maskSecret(config.openAiKey)}`);
 	console.log(`Gateway token: ${maskSecret(config.httpToken)}`);
+}
+
+async function runSpeakCommand(argv: string[]) {
+	const options = parseSpeakArgs(argv);
+	if (options.help) {
+		printSpeakHelp();
+		return;
+	}
+
+	const text = (options.textParts.join(" ") || await readStdin()).trim();
+	if (!text) {
+		console.error("No text provided. Pass text as arguments or pipe it on stdin.");
+		printSpeakHelp();
+		process.exitCode = 1;
+		return;
+	}
+
+	const state = {
+		provider: options.provider,
+		rewriteEnabled: options.rewrite,
+	};
+	const resolvedProvider = resolveTtsProvider(state);
+	const spokenPreview = sanitizeForSpeech(text);
+	if (options.dryRun) {
+		if (options.provider) console.log(`Requested provider: ${options.provider}`);
+		console.log(`Provider: ${resolvedProvider}`);
+		console.log(`Text: ${spokenPreview}`);
+		return;
+	}
+
+	const tempDir = options.output ? undefined : await mkdtemp(join(tmpdir(), "pk-speak-"));
+	const outputPath = resolve(options.output || join(tempDir!, "speech.mp3"));
+	try {
+		const result = await synthesizeToFile({
+			text,
+			outputPath,
+			state,
+		});
+		console.log(`Spoke with ${result.provider}${result.rewriteApplied ? " (rewritten)" : ""}: ${outputPath}`);
+		if (!options.noPlay) {
+			await playAudioFile(outputPath);
+		}
+	} finally {
+		if (tempDir && !options.keep) {
+			await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+		}
+	}
+}
+
+function printSpeakHelp() {
+	console.log([
+		"Usage: pk-speak speak [options] [text...]",
+		"",
+		"Speaks text from command arguments or stdin using the saved pk-speak TTS setup.",
+		"",
+		"Options:",
+		"  --provider <auto|edge|elevenlabs|openai|sag|legacy>",
+		"  --output <path>       Write audio to a file",
+		"  --no-play             Synthesize only; do not play audio",
+		"  --keep                Keep the temp audio file when no --output is supplied",
+		"  --rewrite <true|false>",
+		"  --dry-run             Print provider and spoken text without synthesis",
+		"",
+		"Examples:",
+		"  pk-speak speak \"Tests passed\"",
+		"  codex exec \"run tests\" | pk-speak speak",
+		"  pk-speak speak --provider sag \"I need approval\"",
+	].join("\n"));
+}
+
+type SpeakCommandOptions = {
+	textParts: string[];
+	provider?: TtsProvider;
+	output?: string;
+	noPlay: boolean;
+	keep: boolean;
+	dryRun: boolean;
+	rewrite?: boolean;
+	help: boolean;
+};
+
+function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
+	const options: SpeakCommandOptions = {
+		textParts: [],
+		noPlay: false,
+		keep: false,
+		dryRun: false,
+		help: false,
+	};
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i];
+		if (arg === "--") {
+			options.textParts.push(...argv.slice(i + 1));
+			break;
+		}
+		if (!arg.startsWith("-")) {
+			options.textParts.push(arg);
+			continue;
+		}
+		const key = arg.replace(/^-+/, "");
+		if (key === "help" || key === "h") {
+			options.help = true;
+		} else if (key === "provider") {
+			options.provider = normalizeTtsProvider(argv[++i]);
+		} else if (key === "output" || key === "o") {
+			options.output = argv[++i];
+		} else if (key === "no-play") {
+			options.noPlay = true;
+		} else if (key === "keep") {
+			options.keep = true;
+		} else if (key === "dry-run") {
+			options.dryRun = true;
+		} else if (key === "rewrite") {
+			options.rewrite = boolArg(argv[++i]);
+		}
+	}
+	if (options.output) options.noPlay = options.noPlay || false;
+	return options;
+}
+
+function normalizeTtsProvider(value: string | undefined): TtsProvider | undefined {
+	const normalized = value?.trim().toLowerCase();
+	if (
+		normalized === "auto"
+		|| normalized === "legacy"
+		|| normalized === "edge"
+		|| normalized === "openai"
+		|| normalized === "elevenlabs"
+		|| normalized === "sag"
+	) {
+		return normalized;
+	}
+	return undefined;
+}
+
+function boolArg(value: string | undefined) {
+	if (value === undefined) return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+	if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+	return undefined;
+}
+
+async function readStdin() {
+	if (process.stdin.isTTY) return "";
+	let text = "";
+	process.stdin.setEncoding("utf8");
+	for await (const chunk of process.stdin) {
+		text += String(chunk);
+	}
+	return text;
+}
+
+async function playAudioFile(filePath: string) {
+	const command = process.platform === "win32" ? "powershell.exe" : getUnixAudioPlayer();
+	const args = process.platform === "win32"
+		? [
+			"-NoProfile",
+			"-Sta",
+			"-Command",
+			[
+				"$ErrorActionPreference = 'Stop'",
+				"Add-Type -AssemblyName PresentationCore",
+				"$path = (Resolve-Path -LiteralPath $args[0]).Path",
+				"$player = New-Object System.Windows.Media.MediaPlayer",
+				"$player.Open([Uri]::new($path))",
+				"$player.Play()",
+				"$limit = (Get-Date).AddSeconds(120)",
+				"while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $limit) { Start-Sleep -Milliseconds 50 }",
+				"if ($player.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 250) } else { Start-Sleep -Seconds 2 }",
+				"$player.Close()",
+			].join("; "),
+			filePath,
+		]
+		: getUnixAudioPlayerArgs(command, filePath);
+	await runProcess(command, args);
+}
+
+function getUnixAudioPlayer() {
+	if (process.platform === "darwin") return "afplay";
+	for (const command of ["paplay", "mpg123", "ffplay"]) {
+		if (existsOnPath(command)) return command;
+	}
+	return "xdg-open";
+}
+
+function getUnixAudioPlayerArgs(command: string, filePath: string) {
+	if (command === "ffplay") return ["-nodisp", "-autoexit", "-loglevel", "quiet", filePath];
+	return [filePath];
+}
+
+function existsOnPath(command: string) {
+	const pathDirs = (process.env.PATH || "").split(process.platform === "win32" ? ";" : ":");
+	return pathDirs.some((dir) => dir && existsSync(join(dir, command)));
+}
+
+function runProcess(command: string, args: string[]) {
+	return new Promise<void>((resolve, reject) => {
+		const child = spawn(command, args, {
+			stdio: "ignore",
+			windowsHide: true,
+		});
+		child.on("error", reject);
+		child.on("close", (code) => {
+			if (code === 0) resolve();
+			else reject(new Error(`${command} exited with code ${code}`));
+		});
+	});
 }
 
 async function runNodeScript(scriptPath: string, args: string[]) {

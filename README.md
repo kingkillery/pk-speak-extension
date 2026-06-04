@@ -41,11 +41,12 @@ That opens the first-time setup CLI. It chooses the coding backend (`codex`, `cl
 
 ```text
 pk-speak doctor
+pk-speak speak "Build finished"
 pk-speak tray
 pk-speak mobile
 ```
 
-`pk-speak tray` starts the Windows tray plus gateway. `pk-speak gateway` starts the headless gateway directly. `pk-speak mobile` prints the Android download/setup QR.
+`pk-speak speak` is the direct sag-like TTS command for hooks and CLI agents. `pk-speak tray` starts the Windows tray plus gateway. `pk-speak gateway` starts the headless gateway directly. `pk-speak mobile` prints the Android download/setup QR.
 
 Package split details are in [docs/PACKAGE_SPLIT.md](./docs/PACKAGE_SPLIT.md).
 
@@ -160,6 +161,19 @@ pi-speak-tray --install-startup
 ```
 
 The tray keeps the headless gateway running in the background, restarts it if it exits, and exposes setup, APK download, status, settings, restart, and web remote actions from the tray menu.
+
+### Speak From Any CLI
+
+Use `pk-speak speak` when you want any command, hook, or coding agent to talk without starting the full phone gateway:
+
+```text
+pk-speak speak "Tests passed"
+git status --short | pk-speak speak --provider edge
+pk-speak speak --provider sag "I need approval on this command."
+pk-speak speak --no-play --output reply.mp3 "Saved an audio artifact."
+```
+
+It reads text from arguments or stdin, uses the saved setup profile, and supports `auto`, `edge`, `elevenlabs`, `openai`, `sag`, and `legacy` providers. Use `--dry-run` to inspect what would be spoken without synthesizing audio.
 
 ### Gemini Live Smoke Test
 
@@ -654,8 +668,8 @@ PI_SPEAK_OPENAI_BASE_URL=https://api.openai.com/v1
 
 ```text
 # ELEVENLABS_API_KEY is read from your environment
-REDACTED_ELEVENLABS_HISTORY_LINE
-REDACTED_ELEVENLABS_HISTORY_LINE
+PI_SPEAK_ELEVENLABS_VOICE_ID=<voice-id>
+PI_SPEAK_ELEVENLABS_MODEL_ID=eleven_flash_v2_5
 ```
 
 ### Vertex AI Gemini
