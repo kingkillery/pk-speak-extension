@@ -15,8 +15,18 @@ export type AgentResponseChunk = {
 	text: string;
 };
 
+export type AgentProviderCapabilities = {
+	textTurns: boolean;
+	voiceTurns: boolean;
+	audioReplies: boolean;
+	routing: boolean;
+	steering: boolean;
+	resumableSessions: boolean;
+};
+
 export interface AgentProvider {
 	readonly name: AgentProviderName;
+	readonly capabilities?: Partial<AgentProviderCapabilities>;
 	start?(): Promise<void>;
 	stop?(): Promise<void>;
 	sendPrompt(prompt: string, options?: AgentPromptOptions): AsyncIterable<AgentResponseChunk>;

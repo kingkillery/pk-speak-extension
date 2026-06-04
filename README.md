@@ -641,8 +641,9 @@ What it is not good at:
 ### Core
 
 ```text
-AGENT_PROVIDER=pi|codex|elevenlabs|gemini|gemini-live
+AGENT_PROVIDER=pi|codex|claude|elevenlabs|gemini|gemini-live
 CODEX_BIN=codex
+CLAUDE_BIN=claude
 PI_BIN=pi
 AGENT_MODEL=
 PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex|claude
@@ -659,6 +660,8 @@ PI_SPEAK_WAKE_COMPACT_PREFIX_ENABLED=true|false     # optional override
 ```
 
 If `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, explicit `AGENT_PROVIDER=pi`, `AGENT_PROVIDER=codex`, or `AGENT_PROVIDER=claude` controls which backend remote turns dispatch to. Set the router mode to `auto` when you want the conversation router to choose from the reduced task, while phone/app-selected provider overrides still win for that turn.
+
+The gateway provider contract currently treats `codex` and `claude` as resumable CLI session providers. Recent Codex and Claude sessions can show resume commands in the mobile/session dashboard, while `pi` remains a direct turn provider without stored-session resume support.
 
 ### Rewrite
 

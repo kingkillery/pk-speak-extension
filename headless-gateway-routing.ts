@@ -1,4 +1,6 @@
-export type GatewayProviderOverride = "pi" | "codex" | "claude";
+import { normalizeRunnableAgentProviderName, type RunnableAgentProviderName } from "./agent-provider-registry.js";
+
+export type GatewayProviderOverride = RunnableAgentProviderName;
 
 export type ResumedGatewayTarget = {
 	target: string;
@@ -11,9 +13,7 @@ export type ResumedGatewayTarget = {
 };
 
 export function normalizeGatewayProviderOverride(value: string | undefined): GatewayProviderOverride | undefined {
-	const normalized = value?.trim().toLowerCase();
-	if (normalized === "pi" || normalized === "codex" || normalized === "claude") return normalized;
-	return undefined;
+	return normalizeRunnableAgentProviderName(value);
 }
 
 export function buildResumeRouteTarget(input: {

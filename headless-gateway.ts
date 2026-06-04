@@ -2,6 +2,12 @@
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
 import { applyPiSpeakSetupConfig } from "./setup-config.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
+import {
+	buildAgentResumeArgs,
+	buildAgentResumeCommandPreview,
+	getAgentProviderCapabilities,
+	isResumableAgentSession,
+} from "./agent-provider-registry.js";
 import { ClaudeAgentProvider, ClaudeResumeAgentProvider } from "./claude-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
 import { planConversationExecution, type ExecutionBackend } from "./conversation-execution-router.js";
@@ -122,13 +128,7 @@ function status(): ControlServerStatus {
 			provider: provider.name,
 			configuredProvider: agentConfig.provider,
 			model: agentConfig.model,
-			capabilities: {
-				textTurns: true,
-				voiceTurns: true,
-				audioReplies: true,
-				routing: true,
-				steering: provider.name === "codex",
-			},
+			capabilities: { ...getAgentProviderCapabilities(provider.name), ...provider.capabilities },
 		},
 		speak: { enabled: false, configuredProvider: "auto", provider: "tray", rewriteEnabled: false, phase: "standby" },
 		mono: { running: false, voiceInputActive: false, keepAliveSeconds: 0, status: "off" },
@@ -547,7 +547,7 @@ function buildRecentSessionDashboard(): SessionDashboard {
 			sessionPath: session.path,
 			provider: session.provider,
 			sessionId: session.sessionId,
-			resumable: isResumableSession(session.provider, session.sessionId),
+			resumable: isResumableAgentSession(session.provider, session.sessionId),
 			resumeCommand: buildResumeCommandPreview(session.provider, session.sessionId, session.cwd),
 			workingDirectory: session.cwd,
 			cwd: session.cwd,
@@ -567,39 +567,16 @@ function buildRecentSessionDashboard(): SessionDashboard {
 	};
 }
 
-function isResumableSession(provider: string | undefined, sessionId: string | undefined) {
-	const normalized = (provider || "").trim().toLowerCase();
-	const id = (sessionId || "").trim();
-	if (!id) return false;
-	if (normalized === "codex") return true;
-	if (normalized === "claude") return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-	return false;
-}
-
-function resolveResumeExecutable(provider: string) {
-	const normalized = provider.trim().toLowerCase();
+function resolveResumeExecutable(provider: string | undefined) {
+	const normalized = provider?.trim().toLowerCase();
 	if (normalized === "codex") return agentConfig.codexBin;
 	if (normalized === "claude") return process.env.CLAUDE_BIN || resolveWindowsNpmShim("claude.cmd") || "claude";
 	return undefined;
 }
 
-function buildResumeArgs(provider: string, sessionId: string, cwd?: string) {
-	const normalized = provider.trim().toLowerCase();
-	if (normalized === "codex") {
-		const args = ["resume"];
-		if (cwd) args.push("-C", cwd);
-		args.push(sessionId);
-		return args;
-	}
-	if (normalized === "claude") return ["--resume", sessionId];
-	return undefined;
-}
-
 function buildResumeCommandPreview(provider: string | undefined, sessionId: string | undefined, cwd?: string) {
-	if (!provider || !sessionId || !isResumableSession(provider, sessionId)) return undefined;
 	const executable = resolveResumeExecutable(provider);
-	const args = buildResumeArgs(provider, sessionId, cwd);
-	return executable && args ? [executable, ...args] : undefined;
+	return buildAgentResumeCommandPreview(provider, sessionId, executable, cwd);
 }
 
 function findDiscoveredResumeSession(payload: SessionResumePayload) {
@@ -609,7 +586,7 @@ function findDiscoveredResumeSession(payload: SessionResumePayload) {
 	const requestedProvider = payload.provider?.trim().toLowerCase();
 	return inventory.recent.find((session) => {
 		const sessionId = session.sessionId;
-		if (!isResumableSession(session.provider, sessionId) || !sessionId) return false;
+		if (!isResumableAgentSession(session.provider, sessionId) || !sessionId) return false;
 		if (requestedProvider && session.provider.toLowerCase() !== requestedProvider) return false;
 		if (requestedPath && session.path.toLowerCase() === requestedPath) return true;
 		if (requestedId && sessionId.toLowerCase() === requestedId) return true;
@@ -623,7 +600,7 @@ function resumeStoredSession(payload: SessionResumePayload): ControlActionResult
 		return { ok: false, message: "Session was not found in the discovered resumable session stores." };
 	}
 	const executable = resolveResumeExecutable(session.provider);
-	const args = buildResumeArgs(session.provider, session.sessionId || "", session.cwd);
+	const args = buildAgentResumeArgs(session.provider, session.sessionId || "", session.cwd);
 	if (!executable || !args) {
 		return { ok: false, message: `Provider ${session.provider} does not support resume from this gateway.` };
 	}
