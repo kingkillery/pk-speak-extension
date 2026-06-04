@@ -31,7 +31,7 @@ pi npm i pi-pk-speak
 
 Reload Pi after install.
 
-For the standalone desktop/phone bootstrap package, install or run `pk-speak` from this GitHub package surface, then run:
+For the standalone desktop/phone bootstrap package, install or run `pk-speak` from npm, then run:
 
 ```text
 pi-speak-pk

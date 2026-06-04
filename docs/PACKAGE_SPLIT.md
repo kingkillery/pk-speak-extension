@@ -6,7 +6,7 @@ This repo now separates the user-facing bootstrap CLI from the Pi extension pack
 
 ### `pk-speak`
 
-Root package. This is the desktop/bootstrap package and the right GitHub package surface for users who want:
+Root package. This is the desktop/bootstrap npm package for users who want:
 
 - first-time setup with `pi-speak-pk`
 - day-to-day commands with `pk-speak`
@@ -52,9 +52,9 @@ That command:
 
 Generated payload directories under `packages/pi-pk-speak` are ignored in the main repo. They can be published from that package directory or copied into a separate `pi-pk-speak` repository.
 
-## GitHub/Subrepo Strategy
+## npm/Subrepo Strategy
 
-Keep `pk-speak` as the primary GitHub package option in this repo.
+Keep `pk-speak` as the primary desktop/bootstrap npm package in this repo. It owns the `pi-speak-pk` setup command as a bin alias; `pi-speak-pk` does not need to remain a separate npm package.
 
 For the Pi extension subrepo, use one of these flows:
 
