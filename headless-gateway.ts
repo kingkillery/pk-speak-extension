@@ -2,14 +2,13 @@
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
 import { applyPiSpeakSetupConfig } from "./setup-config.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
+import { createInitialAgentProviders, createTurnAgentProvider } from "./agent-provider-factory.js";
 import {
 	buildAgentResumeArgs,
 	buildAgentResumeCommandPreview,
 	getAgentProviderCapabilities,
 	isResumableAgentSession,
 } from "./agent-provider-registry.js";
-import { ClaudeAgentProvider, ClaudeResumeAgentProvider } from "./claude-agent-provider.js";
-import { CodexAgentProvider } from "./codex-agent-provider.js";
 import { planConversationExecution, type ExecutionBackend } from "./conversation-execution-router.js";
 import { reduceConversationTurn } from "./conversation-reducer.js";
 import {
@@ -19,15 +18,15 @@ import {
 	type GatewayProviderOverride,
 	type ResumedGatewayTarget,
 } from "./headless-gateway-routing.js";
-import { isGeminiLiveConfigured, runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
+import { runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
-import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim, resolveWindowsPiNodeCommand } from "./agent-discovery.js";
+import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
 import type { SessionDashboard, SessionDashboardEntry } from "./session-routing.js";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 applyPiSpeakSetupConfig();
@@ -51,60 +50,12 @@ let fallbackProvider: AgentProvider | undefined;
 const resumedTargets = new Map<string, ResumedGatewayTarget>();
 
 function createAgentProvider(): AgentProvider {
-	if (agentConfig.provider === "elevenlabs") {
-		return createCodingAgentProvider();
-	}
-	if (agentConfig.provider === "gemini" || agentConfig.provider === "gemini-live") {
-		return new GeminiProvider(agentConfig.provider);
-	}
-	if (agentConfig.provider === "claude") {
-		return createClaudeProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
-	}
-	if (agentConfig.provider === "pi") {
-		return createPiProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
-	}
-	return createCodexProvider();
-}
-
-function createCodingAgentProvider(): AgentProvider {
-	const backend = (process.env.PI_SPEAK_AGENT_BACKEND || process.env.PI_SPEAK_CODING_AGENT || "codex").trim().toLowerCase();
-	if (backend === "pi") {
-		return createPiProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
-	}
-	if (backend === "claude") {
-		return createClaudeProvider(process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd());
-	}
-	return createCodexProvider();
-}
-
-function createCodexProvider(): AgentProvider {
-	const cwd = process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
-	fallbackProvider = createPiProvider(cwd);
-	return createCodexProviderForCwd(cwd);
-}
-
-function createPiProvider(cwd: string): AgentProvider {
-	return new PiCliProvider(agentConfig.piBin, cwd);
-}
-
-function createClaudeProvider(cwd: string): AgentProvider {
-	return new ClaudeAgentProvider({
-		claudeBin: agentConfig.claudeBin,
-		cwd,
-		model: agentConfig.model,
+	const created = createInitialAgentProviders({
+		config: agentConfig,
 		env: process.env,
 	});
-}
-
-function createCodexProviderForCwd(cwd: string): AgentProvider {
-	return new CodexAgentProvider({
-		codexBin: agentConfig.codexBin,
-		cwd,
-		model: agentConfig.model,
-		approvalPolicy: agentConfig.approvalPolicy,
-		sandbox: agentConfig.sandbox,
-		env: process.env,
-	});
+	fallbackProvider = created.fallbackProvider;
+	return created.provider;
 }
 
 const routing = {
@@ -164,37 +115,32 @@ function resolveTurnRoute(target?: string, cwd?: string, agentProvider?: Gateway
 	if (!providerName) {
 		return { cwd: workingDirectory, target: resumed, stopProvider: false };
 	}
-	const providerOverride = createExecutionProvider(providerName, workingDirectory, false, resumed);
+	const decision = createExecutionProviderDecision(providerName, workingDirectory, false, resumed);
 	return {
 		cwd: workingDirectory,
 		target: resumed,
 		providerName,
-		providerOverride,
-		stopProvider: providerOverride !== provider && providerOverride !== fallbackProvider,
+		providerOverride: decision.provider,
+		stopProvider: decision.stopAfterTurn,
 	};
 }
 
-function createExecutionProvider(
+function createExecutionProviderDecision(
 	backend: GatewayProviderOverride,
 	cwd: string,
 	preferShared = false,
 	target?: ResumedGatewayTarget,
-): AgentProvider {
-	if (target && backend === "codex") return new CodexResumeProvider(agentConfig.codexBin, cwd, target.sessionId, agentConfig.model);
-	if (target && backend === "claude") {
-		return new ClaudeResumeAgentProvider({
-			claudeBin: agentConfig.claudeBin,
-			cwd,
-			sessionId: target.sessionId,
-			model: agentConfig.model,
-			env: process.env,
-		});
-	}
-	if (preferShared && provider.name === backend) return provider;
-	if (preferShared && fallbackProvider?.name === backend) return fallbackProvider;
-	if (backend === "pi") return createPiProvider(cwd);
-	if (backend === "claude") return createClaudeProvider(cwd);
-	return createCodexProviderForCwd(cwd);
+): ReturnType<typeof createTurnAgentProvider> {
+	return createTurnAgentProvider({
+		config: agentConfig,
+		env: process.env,
+		backend,
+		cwd,
+		target,
+		preferShared,
+		sharedProvider: provider,
+		fallbackProvider,
+	});
 }
 
 async function runWithTurnRoute(
@@ -432,13 +378,15 @@ async function runRoutedVoiceTextTurn(
 	}
 	const voiceRoute = route.providerOverride
 		? route
-		: {
-			...route,
-			providerName: backend,
-			providerOverride: createExecutionProvider(backend, route.cwd, !route.target && !route.providerName, route.target),
-			stopProvider: false,
-		};
-	voiceRoute.stopProvider = voiceRoute.providerOverride !== provider && voiceRoute.providerOverride !== fallbackProvider;
+		: (() => {
+			const decision = createExecutionProviderDecision(backend, route.cwd, !route.target && !route.providerName, route.target);
+			return {
+				...route,
+				providerName: backend,
+				providerOverride: decision.provider,
+				stopProvider: decision.stopAfterTurn,
+			};
+		})();
 	const result = await runWithTurnRoute(
 		reduction.promptForAgent,
 		includeAudio,
@@ -649,65 +597,6 @@ function launchDetachedCli(command: string, args: string[], cwd: string, title: 
 	child.unref();
 }
 
-class PiCliProvider implements AgentProvider {
-	readonly name = "pi" as const;
-	constructor(private readonly piBin: string, private readonly cwd: string) {}
-
-	async *sendPrompt(prompt: string, options: { cwd?: string } = {}) {
-		const command = resolveWindowsPiNodeCommand(this.piBin) || { file: this.piBin, args: [] };
-		const text = await runCli(command.file, [...command.args, "-p", "--no-tools", "--no-context-files", "--no-skills", "--no-extensions", "--no-session", prompt], {
-			cwd: options.cwd || this.cwd,
-			name: "pi",
-			shell: command.shell,
-		});
-		if (text) yield { type: "text" as const, text };
-	}
-}
-
-class CodexExecProvider implements AgentProvider {
-	readonly name = "codex" as const;
-	constructor(private readonly codexBin: string, private readonly cwd: string, private readonly model?: string) {}
-
-	async *sendPrompt(prompt: string, options: { cwd?: string; model?: string } = {}) {
-		const cwd = options.cwd || this.cwd;
-		const args = ["exec", "--skip-git-repo-check", "-C", cwd, "--color", "never"];
-		const model = options.model || this.model;
-		if (model) args.push("-m", model);
-		args.push("-");
-		const text = await runCli(this.codexBin, args, { cwd, name: "codex exec", stdin: prompt });
-		if (text) yield { type: "text" as const, text };
-	}
-}
-
-class CodexResumeProvider implements AgentProvider {
-	readonly name = "codex" as const;
-	constructor(private readonly codexBin: string, private readonly cwd: string, private readonly sessionId: string, private readonly model?: string) {}
-
-	async *sendPrompt(prompt: string, options: { cwd?: string; model?: string } = {}) {
-		const cwd = options.cwd || this.cwd;
-		const args = ["exec", "resume", "--skip-git-repo-check"];
-		const model = options.model || this.model;
-		if (model) args.push("-m", model);
-		args.push(this.sessionId, "-");
-		const text = await runCli(this.codexBin, args, { cwd, name: "codex resume", stdin: prompt });
-		if (text) yield { type: "text" as const, text };
-	}
-}
-
-class GeminiProvider implements AgentProvider {
-	readonly name: "gemini" | "gemini-live" | "elevenlabs";
-	constructor(name: "gemini" | "gemini-live" | "elevenlabs") {
-		this.name = name;
-	}
-
-	async *sendPrompt(prompt: string) {
-		const result = this.name === "gemini-live"
-			? await runGeminiLiveTurn(prompt)
-			: await runGeminiTextTurn(prompt);
-		if (result.replyText) yield { type: "text" as const, text: result.replyText };
-	}
-}
-
 provider = createAgentProvider();
 
 server = new ControlServer({
@@ -768,79 +657,6 @@ function shutdown() {
 		.then(() => server.stop())
 		.catch(() => {})
 		.finally(() => process.exit(0));
-}
-
-function buildAgentEnv(): NodeJS.ProcessEnv {
-	const env = { ...process.env };
-	if (!env.OPENAI_API_KEY && env.PI_SPEAK_OPENAI_KEY) {
-		env.OPENAI_API_KEY = env.PI_SPEAK_OPENAI_KEY;
-	}
-	return env;
-}
-
-function runCli(command: string, args: string[], options: { cwd: string; name: string; stdin?: string; shell?: boolean }): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, {
-			cwd: options.cwd,
-			env: buildAgentEnv(),
-			windowsHide: true,
-			shell: options.shell ?? (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command)),
-			stdio: [options.stdin ? "pipe" : "ignore", "pipe", "pipe"],
-		});
-		let stdout = "";
-		let stderr = "";
-		let settled = false;
-		const timeoutMs = Number.parseInt(process.env.AGENT_TURN_TIMEOUT_MS || "45000", 10);
-		const timeout = setTimeout(() => {
-			if (settled) return;
-			settled = true;
-			killProcessTree(child.pid);
-			reject(new Error(`${options.name} timed out after ${timeoutMs}ms`));
-		}, timeoutMs);
-		if (!child.stdout || !child.stderr) {
-			clearTimeout(timeout);
-			reject(new Error(`${options.name} did not expose output streams`));
-			return;
-		}
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-		child.stdout.on("data", (chunk: string) => {
-			stdout += chunk;
-		});
-		child.stderr.on("data", (chunk: string) => {
-			stderr += chunk;
-		});
-		child.on("error", (error) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			reject(error);
-		});
-		child.on("close", (code) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			if (code === 0) {
-				resolve(stdout);
-				return;
-			}
-			reject(new Error(stderr.trim() || `${options.name} exited with code ${code ?? "unknown"}`));
-		});
-		if (options.stdin && child.stdin) {
-			child.stdin.end(options.stdin);
-		}
-	});
-}
-
-function killProcessTree(pid?: number) {
-	if (!pid) return;
-	if (process.platform === "win32") {
-		spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-		return;
-	}
-	try {
-		process.kill(pid, "SIGTERM");
-	} catch {}
 }
 
 function resolveDefaultAgentProvider(): "pi" | "codex" {
