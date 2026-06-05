@@ -52,6 +52,8 @@ import com.example.api.GatewaySessionErrorKind
 import com.example.api.GatewaySessionException
 import com.example.api.VoiceAgentClient
 import com.example.api.RemoteSlashCommand
+import com.example.api.RealtimeVoiceClient
+import com.example.api.RealtimeListener
 import com.example.audio.AudioHelper
 import com.example.audio.TtsHelper
 import com.example.data.AppPreferences
@@ -177,6 +179,8 @@ fun PiSpeakConsoleScreen(
             chatMessages = prefs.getChatMessages(studioConversationKey)
         )
     }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val realtimeClient = remember { com.example.api.RealtimeVoiceClient(context, prefs) }
 
     // Synchronize agent state
     LaunchedEffect(selectedAgent) {
@@ -307,7 +311,8 @@ fun PiSpeakConsoleScreen(
                         prefs = prefs,
                         client = client,
                         runtimeState = studioState,
-                        appScope = scope
+                        appScope = scope,
+                        realtimeClient = realtimeClient
                     )
                     "sessions" -> SessionsTabContent(
                         client = client,
@@ -713,6 +718,8 @@ class StudioRuntimeState(
     var connectionStatusText by mutableStateOf("Searching for gateway...")
     var connectionBannerText by mutableStateOf("")
     var connectionLatencyMs by mutableLongStateOf(-1L)
+    var isRealtimeActive by mutableStateOf(false)
+    var isRealtimeConnected by mutableStateOf(false)
 }
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -723,12 +730,47 @@ fun StudioTabContent(
     prefs: AppPreferences,
     client: VoiceAgentClient,
     runtimeState: StudioRuntimeState,
-    appScope: CoroutineScope
+    appScope: CoroutineScope,
+    realtimeClient: com.example.api.RealtimeVoiceClient
 ) {
     val permissionState = rememberPermissionState(permission = Manifest.permission.RECORD_AUDIO)
     val scope = appScope
     val state = runtimeState
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+
+    LaunchedEffect(realtimeClient) {
+        realtimeClient.listener = object : com.example.api.RealtimeListener {
+            override fun onTranscript(text: String) {
+                state.transcription = text
+            }
+
+            override fun onTextReply(text: String) {
+                state.latestReply = text
+            }
+
+            override fun onInterrupt() {
+                state.latestReply = "Interrupted"
+            }
+
+            override fun onError(message: String) {
+                state.latestReply = "Realtime error: $message"
+            }
+
+            override fun onStatusChanged(connected: Boolean) {
+                state.isRealtimeConnected = connected
+            }
+        }
+    }
+
+    DisposableEffect(realtimeClient) {
+        onDispose {
+            if (state.isRealtimeActive) {
+                state.isRealtimeActive = false
+                realtimeClient.stop()
+            }
+        }
+    }
+
     val infiniteTransition = rememberInfiniteTransition(label = "recordingPulse")
     val recordingScale by infiniteTransition.animateFloat(
         initialValue = 1f,
@@ -1011,12 +1053,19 @@ fun StudioTabContent(
         ) {
             Text(
                 text = when {
+                    state.isRealtimeActive -> {
+                        if (state.isRealtimeConnected) "● Live Connected" else "● Live Connecting..."
+                    }
                     state.isRecording -> "● Recording"
                     state.stopStatusText == "Stopping..." -> "● Stopping..."
                     state.isProcessing -> "● Agent working..."
                     else -> "● Idle"
                 },
-                color = if (state.isRecording) Color(0xFFC2542F) else Color(0xFF6E665A),
+                color = when {
+                    state.isRealtimeActive -> if (state.isRealtimeConnected) Color(0xFF2E7D52) else Color(0xFFC97E1A)
+                    state.isRecording -> Color(0xFFC2542F)
+                    else -> Color(0xFF6E665A)
+                },
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 8.dp)
@@ -1503,46 +1552,115 @@ fun StudioTabContent(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         // Voice capture lives in the composer so the chat history keeps the screen.
-                        Box(
-                            modifier = Modifier
-                                .height(44.dp)
-                                .widthIn(min = 72.dp)
-                                .scale(if (state.isRecording) recordingScale else 1f)
-                                .clip(CircleShape)
-                                .background(if (state.isRecording) Color(0xFFC2542F) else Color(0xFFF4F1E9))
-                                .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
-                                .pointerInput(prefs.transmissionMode, permissionState.status.isGranted, state.isProcessing) {
-                                    detectTapGestures(
-                                        onPress = {
-                                            if (state.isProcessing) return@detectTapGestures
-                                            if (!permissionState.status.isGranted) {
-                                                permissionState.launchPermissionRequest()
-                                                return@detectTapGestures
-                                            }
-                                            if (prefs.transmissionMode == "PTT") {
-                                                recordTriggerAction()
-                                                tryAwaitRelease()
-                                                stopAndSendAction()
-                                            }
-                                        },
-                                        onTap = {
-                                            if (state.isProcessing) return@detectTapGestures
-                                            if (!permissionState.status.isGranted) {
-                                                permissionState.launchPermissionRequest()
-                                            } else if (prefs.transmissionMode == "TOGGLE") {
-                                                if (state.isRecording) stopAndSendAction() else recordTriggerAction()
-                                            }
+                        if (state.isRealtimeActive) {
+                            Box(
+                                modifier = Modifier
+                                    .height(44.dp)
+                                    .widthIn(min = 72.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFC2542F))
+                                    .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
+                                    .clickable {
+                                        realtimeClient.interrupt()
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Interrupt",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 8.dp)
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .height(44.dp)
+                                    .widthIn(min = 72.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF2E7D52))
+                                    .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
+                                    .clickable {
+                                        state.isRealtimeActive = false
+                                        realtimeClient.stop()
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Live On",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 8.dp)
+                                )
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .height(44.dp)
+                                    .widthIn(min = 72.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFF4F1E9))
+                                    .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
+                                    .clickable {
+                                        if (!permissionState.status.isGranted) {
+                                            permissionState.launchPermissionRequest()
+                                        } else {
+                                            state.isRealtimeActive = true
+                                            realtimeClient.start()
                                         }
-                                    )
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = if (state.isRecording) "Stop" else "Talk",
-                                color = if (state.isRecording) Color.White else Color(0xFF211C16),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Live Off",
+                                    color = Color(0xFF211C16),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 8.dp)
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .height(44.dp)
+                                    .widthIn(min = 72.dp)
+                                    .scale(if (state.isRecording) recordingScale else 1f)
+                                    .clip(CircleShape)
+                                    .background(if (state.isRecording) Color(0xFFC2542F) else Color(0xFFF4F1E9))
+                                    .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
+                                    .pointerInput(prefs.transmissionMode, permissionState.status.isGranted, state.isProcessing) {
+                                        detectTapGestures(
+                                            onPress = {
+                                                if (state.isProcessing) return@detectTapGestures
+                                                if (!permissionState.status.isGranted) {
+                                                    permissionState.launchPermissionRequest()
+                                                    return@detectTapGestures
+                                                }
+                                                if (prefs.transmissionMode == "PTT") {
+                                                    recordTriggerAction()
+                                                    tryAwaitRelease()
+                                                    stopAndSendAction()
+                                                }
+                                            },
+                                            onTap = {
+                                                if (state.isProcessing) return@detectTapGestures
+                                                if (!permissionState.status.isGranted) {
+                                                    permissionState.launchPermissionRequest()
+                                                } else if (prefs.transmissionMode == "TOGGLE") {
+                                                    if (state.isRecording) stopAndSendAction() else recordTriggerAction()
+                                                }
+                                            }
+                                        )
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (state.isRecording) "Stop" else "Talk",
+                                    color = if (state.isRecording) Color.White else Color(0xFF211C16),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                         // Round terracotta send button.
                         Box(
