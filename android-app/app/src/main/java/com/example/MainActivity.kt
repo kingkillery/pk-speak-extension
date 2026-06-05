@@ -10,6 +10,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -18,7 +20,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.shape.CircleShape
@@ -205,11 +209,14 @@ fun PiSpeakConsoleScreen(
         var unreachableSinceMs: Long? = null
         var lastLoggedConnectionStatus = ""
         while (true) {
+            val startTime = System.currentTimeMillis()
             val healthy = client.pingHealth()
+            val latency = System.currentTimeMillis() - startTime
             if (healthy) {
                 unreachableSinceMs = null
                 studioState.isGatewayConnected = true
                 studioState.isReconnecting = false
+                studioState.connectionLatencyMs = latency
                 studioState.connectionStatusText = "Connected"
                 studioState.connectionBannerText = ""
             } else {
@@ -218,12 +225,15 @@ fun PiSpeakConsoleScreen(
                 studioState.isGatewayConnected = false
                 studioState.isReconnecting = true
                 studioState.connectionStatusText = "Reconnecting..."
+                val reconnectStartTime = System.currentTimeMillis()
                 val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+                val reconnectLatency = System.currentTimeMillis() - reconnectStartTime
                 codexSessionName = prefs.codexSessionName
                 if (result.connected) {
                     unreachableSinceMs = null
                     studioState.isGatewayConnected = true
                     studioState.isReconnecting = false
+                    studioState.connectionLatencyMs = reconnectLatency
                     studioState.connectionStatusText = "Connected"
                     studioState.connectionBannerText = ""
                 } else {
@@ -279,6 +289,7 @@ fun PiSpeakConsoleScreen(
                 isGatewayConnected = studioState.isGatewayConnected,
                 isReconnecting = studioState.isReconnecting,
                 connectionStatusText = studioState.connectionStatusText,
+                connectionLatencyMs = studioState.connectionLatencyMs,
                 onSettingsClick = { currentTab = "settings" }
             )
 
@@ -369,6 +380,7 @@ fun HeaderSection(
     isGatewayConnected: Boolean,
     isReconnecting: Boolean,
     connectionStatusText: String,
+    connectionLatencyMs: Long = -1L,
     onSettingsClick: () -> Unit
 ) {
     val connectionColor = gatewayConnectionIndicatorColor(isGatewayConnected, isReconnecting)
@@ -427,6 +439,32 @@ fun HeaderSection(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (isGatewayConnected && connectionLatencyMs >= 0L) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    val badgeBg = when {
+                        connectionLatencyMs < 100L -> Color(0xFFDCFCE7)
+                        connectionLatencyMs < 300L -> Color(0xFFFEF3C7)
+                        else -> Color(0xFFFEE2E2)
+                    }
+                    val badgeFg = when {
+                        connectionLatencyMs < 100L -> Color(0xFF156534)
+                        connectionLatencyMs < 300L -> Color(0xFF92400E)
+                        else -> Color(0xFF991B1B)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(badgeBg)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "${connectionLatencyMs}ms",
+                            color = badgeFg,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             }
         }
 
@@ -674,6 +712,7 @@ class StudioRuntimeState(
     var isReconnecting by mutableStateOf(true)
     var connectionStatusText by mutableStateOf("Searching for gateway...")
     var connectionBannerText by mutableStateOf("")
+    var connectionLatencyMs by mutableLongStateOf(-1L)
 }
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -689,10 +728,30 @@ fun StudioTabContent(
     val permissionState = rememberPermissionState(permission = Manifest.permission.RECORD_AUDIO)
     val scope = appScope
     val state = runtimeState
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val infiniteTransition = rememberInfiniteTransition(label = "recordingPulse")
+    val recordingScale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.08f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
 
     // Live decibels state for custom drawing
     val amplitudeList = remember { mutableStateListOf<Float>().apply { addAll(List(16) { 0.1f }) } }
     var liveAmplitudeJob by remember { mutableStateOf<Job?>(null) }
+
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(state.chatMessages.size, state.transcription, state.isProcessing, state.isRecording, state.latestReply) {
+        val totalCount = state.chatMessages.size + 10
+        if (totalCount > 10) {
+            listState.animateScrollToItem(totalCount)
+        }
+    }
 
     // Real-time synchronized simulated transcription stream
     var wordStreamJob by remember { mutableStateOf<Job?>(null) }
@@ -808,6 +867,7 @@ fun StudioTabContent(
 
     val recordTriggerAction = {
         if (!state.isRecording && !state.isProcessing) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
             ttsHelper.stop()
             audioHelper.stopPlayback()
             state.playingMessageId = null
@@ -822,6 +882,7 @@ fun StudioTabContent(
 
     val stopAndSendAction = {
         if (state.isRecording) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
             state.isRecording = false
             liveAmplitudeJob?.cancel()
             wordStreamJob?.cancel()
@@ -991,6 +1052,7 @@ fun StudioTabContent(
                 border = BorderStroke(1.dp, Color(0xFFE3DCCC))
             ) {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(20.dp),
@@ -1084,6 +1146,20 @@ fun StudioTabContent(
                                                 horizontalArrangement = Arrangement.End,
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
+                                                val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                                                val context = androidx.compose.ui.platform.LocalContext.current
+                                                Text(
+                                                    text = "Copy",
+                                                    color = Color(0xFF6E665A),
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    modifier = Modifier.clickable {
+                                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(message.text))
+                                                        android.widget.Toast.makeText(context, "Copied to clipboard", android.widget.Toast.LENGTH_SHORT).show()
+                                                    }
+                                                )
+                                                Spacer(modifier = Modifier.width(16.dp))
                                                 Text(
                                                     text = if (isPlayingThisMessage) "Stop" else "Play",
                                                     color = if (isPlayingThisMessage) Color(0xFFC2542F) else Color(0xFF6E665A),
@@ -1337,6 +1413,33 @@ fun StudioTabContent(
         }
 
         val canSend = state.textInputState.trim().isNotEmpty() && !state.isProcessing
+        val quickCommands = listOf("/sess status", "/sess slots", "/sess ui", "/remote status", "/speak status")
+        LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items(quickCommands) { cmd ->
+                Surface(
+                    color = Color(0xFFEDE7DB),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.clickable {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        state.textInputState = cmd
+                    }
+                ) {
+                    Text(
+                        text = cmd,
+                        color = Color(0xFF211C16),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+        }
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1404,6 +1507,7 @@ fun StudioTabContent(
                             modifier = Modifier
                                 .height(44.dp)
                                 .widthIn(min = 72.dp)
+                                .scale(if (state.isRecording) recordingScale else 1f)
                                 .clip(CircleShape)
                                 .background(if (state.isRecording) Color(0xFFC2542F) else Color(0xFFF4F1E9))
                                 .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
@@ -2029,6 +2133,8 @@ fun LocalTurnHistoryPane(
     prefs: AppPreferences,
     modifier: Modifier = Modifier
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     var sessionsList by remember { mutableStateOf(prefs.getRecordedSessions()) }
     var activePlaybackId by remember { mutableStateOf<String?>(null) }
 
@@ -2199,6 +2305,21 @@ fun LocalTurnHistoryPane(
                                     }
                                 }
                             }
+
+                            // Copy Action
+                            val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                            IconButton(
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    val textToCopy = "Prompt: ${item.transcriptionText}\nReply: ${item.replyText}"
+                                    clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(textToCopy))
+                                    android.widget.Toast.makeText(context, "Turn copied to clipboard", android.widget.Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Text("📋", color = Color(0xFF6E665A), fontSize = 16.sp)
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
 
                             // Delete Action
                             IconButton(
@@ -2870,8 +2991,20 @@ fun WaveformBars(
             val offset = startX + (i * (barWidth + spacing))
             val topY = (height - barHeight) / 2f
             
+            val colorBrush = if (active) {
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    colors = listOf(Color(0xFFC2542F), Color(0xFFFF9E74)),
+                    startY = topY,
+                    endY = topY + barHeight
+                )
+            } else {
+                androidx.compose.ui.graphics.Brush.linearGradient(
+                    colors = listOf(Color(0x33C2542F), Color(0x1AC2542F))
+                )
+            }
+            
             drawRoundRect(
-                color = if (active) Color(0xFFD98E66) else Color(0x33C2542F),
+                brush = colorBrush,
                 topLeft = androidx.compose.ui.geometry.Offset(offset, topY),
                 size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
                 cornerRadius = CornerRadius(barWidth / 2, barWidth / 2)

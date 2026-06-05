@@ -28,7 +28,7 @@ function Resolve-Adb {
 $adb = Resolve-Adb
 
 function Get-AttachedDevice {
-    $devices = & $adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\tdevice$' }
+    $devices = @(& $adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\tdevice$' })
     if (-not $devices) {
         return $null
     }

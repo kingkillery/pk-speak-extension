@@ -1,6 +1,6 @@
 param(
     [int]$Port = 8767,
-    [string]$PackageName = 'com.example',
+    [string]$PackageName = 'com.pkkidking.pispeak.dev',
     [string]$ActivityName = 'com.example.MainActivity',
     [string]$DeviceId,
     [int]$TimeoutSeconds = 25,
@@ -34,7 +34,7 @@ function Get-DeviceId {
     param([string]$PreferredDeviceId)
 
     $adbDeviceLines = & $adb devices | Select-Object -Skip 1 | Where-Object { $_.Trim() }
-    $devices = $adbDeviceLines | Where-Object { $_ -match '\tdevice$' }
+    $devices = @($adbDeviceLines | Where-Object { $_ -match '\tdevice$' })
     if (-not $devices) {
         if (-not $adbDeviceLines) {
             throw "No attached Android device or running emulator found. Connect a device with USB debugging enabled and rerun this script."
@@ -63,7 +63,7 @@ function Get-DeviceId {
 }
 
 function Get-AttachedDeviceId {
-    $devices = & $adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\tdevice$' }
+    $devices = @(& $adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\tdevice$' })
     if (-not $devices) {
         return $null
     }
@@ -71,7 +71,7 @@ function Get-AttachedDeviceId {
 }
 
 function Get-AttachedDeviceIds {
-    $devices = & $adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\tdevice$' }
+    $devices = @(& $adb devices | Select-Object -Skip 1 | Where-Object { $_ -match '\tdevice$' })
     if (-not $devices) {
         return @()
     }
