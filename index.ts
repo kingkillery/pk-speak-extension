@@ -1,4 +1,4 @@
-﻿import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
@@ -32,6 +32,7 @@ import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "
 import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached, resolveWindowsNpmShim } from "./agent-discovery.js";
+import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { buildSessionWorkingDirectoryMap } from "./session-working-directory.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
@@ -2274,6 +2275,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				},
 				getDiscoveredAgents: () => discoverAgentInventoryCached(),
 				tailSessionEvents,
+				onRealtimeConnection: handleRealtimeGateway,
 			});
 		}
 

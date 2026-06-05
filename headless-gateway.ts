@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
 import { applyPiSpeakSetupConfig } from "./setup-config.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
@@ -23,6 +23,7 @@ import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
+import { handleRealtimeGateway } from "./realtime-gateway.js";
 import type { SessionDashboard, SessionDashboardEntry } from "./session-routing.js";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -634,6 +635,7 @@ server = new ControlServer({
 	getCompactRouteSlots: () => [],
 	onSessionResume: resumeStoredSession,
 	getDiscoveredAgents: () => discoverAgentInventoryCached(),
+	onRealtimeConnection: handleRealtimeGateway,
 });
 
 Promise.resolve(provider.start?.())

@@ -3,6 +3,11 @@ declare module "ws" {
 	import { EventEmitter } from "node:events";
 
 	export class WebSocket extends EventEmitter {
+		static readonly CONNECTING: number;
+		static readonly OPEN: number;
+		static readonly CLOSING: number;
+		static readonly CLOSED: number;
+		readonly readyState: number;
 		send(data: any, cb?: (err?: Error) => void): void;
 		close(code?: number, data?: string): void;
 		on(event: "message", listener: (data: any, isBinary: boolean) => void): this;

@@ -53,7 +53,7 @@ function getVertexConfig(env: NodeJS.ProcessEnv = process.env) {
 	return { project, location };
 }
 
-function createGeminiClient(
+export function createGeminiClient(
 	env: NodeJS.ProcessEnv = process.env,
 	options: { live?: boolean } = {},
 ) {
