@@ -570,53 +570,107 @@ function synthesizeSag(text: string, outputPath: string, signal?: AbortSignal) {
 	});
 }
 
+export const activeAbortControllers = new Set<AbortController>();
+
+export function abortAllActiveTTS() {
+	for (const controller of activeAbortControllers) {
+		controller.abort();
+	}
+	activeAbortControllers.clear();
+}
+
+export const testOverrides = {
+	synthesizeElevenLabs: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
+	synthesizeEdge: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
+};
+
 export async function synthesizeToFile(options: SynthesisOptions): Promise<SynthesisResult> {
 	const provider = resolveTtsProvider(options.state);
-	if (provider === "legacy") {
-		await synthesizeLegacy(
-			options.text,
-			options.outputPath,
-			options.signal,
-			options.onPhase,
-			options.onLegacyProcess,
-		);
-		return {
-			provider,
-			rewriteApplied: true,
-		};
-	}
+	const localController = new AbortController();
+	activeAbortControllers.add(localController);
 
-	options.onPhase?.("rewrite");
-	const rewritten = isRewriteEnabled(options.state)
-		? await rewriteForSpeech(options.text, options.signal).catch(() => ({ text: options.text, applied: false }))
-		: { text: options.text, applied: false };
-
-	throwIfAborted(options.signal);
-	options.onPhase?.("voice");
-
-	const spokenText = isSanitizeEnabled() ? sanitizeForSpeech(rewritten.text) : rewritten.text;
-
-	switch (provider) {
-		case "edge":
-			await synthesizeEdge(spokenText, options.outputPath, options.signal);
-			break;
-		case "openai":
-			await synthesizeOpenAI(spokenText, options.outputPath, options.signal);
-			break;
-		case "elevenlabs":
-			await synthesizeElevenLabs(spokenText, options.outputPath, options.signal);
-			break;
-		case "sag":
-			await synthesizeSag(spokenText, options.outputPath, options.signal);
-			break;
-		default:
-			throw new Error(`Unsupported TTS provider: ${provider satisfies never}`);
-	}
-
-	return {
-		provider,
-		rewriteApplied: rewritten.applied,
+	const onAbort = () => {
+		localController.abort();
 	};
+	if (options.signal) {
+		options.signal.addEventListener("abort", onAbort);
+	}
+
+	try {
+		if (provider === "legacy") {
+			await synthesizeLegacy(
+				options.text,
+				options.outputPath,
+				localController.signal,
+				options.onPhase,
+				options.onLegacyProcess,
+			);
+			return {
+				provider,
+				rewriteApplied: true,
+			};
+		}
+
+		options.onPhase?.("rewrite");
+		const rewritten = isRewriteEnabled(options.state)
+			? await rewriteForSpeech(options.text, localController.signal).catch(() => ({ text: options.text, applied: false }))
+			: { text: options.text, applied: false };
+
+		throwIfAborted(localController.signal);
+		options.onPhase?.("voice");
+
+		const spokenText = isSanitizeEnabled() ? sanitizeForSpeech(rewritten.text) : rewritten.text;
+
+		let finalProvider = provider;
+		try {
+			switch (provider) {
+				case "edge":
+					if (testOverrides.synthesizeEdge) {
+						await testOverrides.synthesizeEdge(spokenText, options.outputPath, localController.signal);
+					} else {
+						await synthesizeEdge(spokenText, options.outputPath, localController.signal);
+					}
+					break;
+				case "openai":
+					await synthesizeOpenAI(spokenText, options.outputPath, localController.signal);
+					break;
+				case "elevenlabs":
+					if (testOverrides.synthesizeElevenLabs) {
+						await testOverrides.synthesizeElevenLabs(spokenText, options.outputPath, localController.signal);
+					} else {
+						await synthesizeElevenLabs(spokenText, options.outputPath, localController.signal);
+					}
+					break;
+				case "sag":
+					await synthesizeSag(spokenText, options.outputPath, localController.signal);
+					break;
+				default:
+					throw new Error(`Unsupported TTS provider: ${provider satisfies never}`);
+			}
+		} catch (error) {
+			if (provider === "openai" || provider === "elevenlabs" || provider === "sag") {
+				console.warn(`[TTS Fallback] Primary provider '${provider}' failed: ${getErrorMessage(error)}. Falling back to 'edge' TTS. Metrics: { timestamp: ${Date.now()}, originalProvider: "${provider}", targetProvider: "edge", error: "${getErrorMessage(error)}" }`);
+				if (testOverrides.synthesizeEdge) {
+					await testOverrides.synthesizeEdge(spokenText, options.outputPath, localController.signal);
+				} else {
+					await synthesizeEdge(spokenText, options.outputPath, localController.signal);
+				}
+				finalProvider = "edge";
+			} else {
+				throw error;
+			}
+		}
+
+		return {
+			provider: finalProvider,
+			rewriteApplied: rewritten.applied,
+		};
+	} finally {
+		activeAbortControllers.delete(localController);
+		if (options.signal) {
+			options.signal.removeEventListener("abort", onAbort);
+		}
+	}
 }
 
 export function getAudioMimeType(filePath: string) {

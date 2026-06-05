@@ -9,6 +9,7 @@ import QRCode from "qrcode";
 import Bonjour from "bonjour-service";
 import { WebSocketServer, WebSocket } from "ws";
 import "./realtime-types.js";
+import { abortAllActiveTTS } from "./tts.js";
 import { BusyError, type RemoteTurnSource, RemoteTurnResult } from "./remote-turn-manager.js";
 import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
 import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
@@ -364,6 +365,26 @@ export class ControlServer {
 
 		this.wss = new WebSocketServer({ noServer: true });
 		this.wss.on("connection", (ws) => {
+			ws.on("message", async (data, isBinary) => {
+				if (!isBinary) {
+					try {
+						const msg = JSON.parse(data.toString());
+						if (msg.type === "interrupt") {
+							console.log("[Barge-in] Intercepted interrupt signal from client. Aborting synthesis and agent turns.");
+							if (this.onTurnCancel) {
+								await this.onTurnCancel();
+							}
+							abortAllActiveTTS();
+							if (ws.readyState === WebSocket.OPEN) {
+								ws.send(JSON.stringify({ type: "interrupt" }));
+							}
+						}
+					} catch (e) {
+						// ignore
+					}
+				}
+			});
+
 			if (this.onRealtimeConnection) {
 				this.onRealtimeConnection(ws);
 			} else {

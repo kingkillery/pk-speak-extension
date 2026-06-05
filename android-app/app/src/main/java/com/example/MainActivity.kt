@@ -72,6 +72,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import android.media.AudioRecord
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
+import okhttp3.WebSocket
+import okio.ByteString
 
 class MainActivity : ComponentActivity() {
     private lateinit var audioHelper: AudioHelper
@@ -342,6 +347,7 @@ fun PiSpeakConsoleScreen(
                     )
                     "settings" -> SettingsTabContent(
                         prefs = prefs,
+                        realtimeClient = realtimeClient,
                         onConfigChanged = {
                             codexSessionName = prefs.codexSessionName
                             selectedAgent = prefs.activeAgent
@@ -733,6 +739,7 @@ fun StudioTabContent(
     appScope: CoroutineScope,
     realtimeClient: com.example.api.RealtimeVoiceClient
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val permissionState = rememberPermissionState(permission = Manifest.permission.RECORD_AUDIO)
     val scope = appScope
     val state = runtimeState
@@ -1607,7 +1614,7 @@ fun StudioTabContent(
                                             permissionState.launchPermissionRequest()
                                         } else {
                                             state.isRealtimeActive = true
-                                            realtimeClient.start()
+                                            startRealtimeClientWithVadAndResilience(realtimeClient, context, audioHelper)
                                         }
                                     },
                                 contentAlignment = Alignment.Center
@@ -2461,6 +2468,7 @@ fun LocalTurnHistoryPane(
 @Composable
 fun SettingsTabContent(
     prefs: AppPreferences,
+    realtimeClient: com.example.api.RealtimeVoiceClient,
     onConfigChanged: () -> Unit
 ) {
     var agentType by remember(prefs.activeAgent) { mutableStateOf(prefs.activeAgent) }
@@ -2958,6 +2966,127 @@ fun SettingsTabContent(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Hardware Audio & VAD Settings
+        item {
+            val aecVal = remember { mutableStateOf(context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE).getBoolean("aec_enabled", true)) }
+            val nsVal = remember { mutableStateOf(context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE).getBoolean("ns_enabled", true)) }
+            val vadVal = remember { mutableStateOf(context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE).getBoolean("vad_enabled", true)) }
+            val thresholdVal = remember { mutableStateOf(context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE).getFloat("vad_threshold", 1500f)) }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFFFFFFFF),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Hardware Audio & VAD Strategy",
+                        color = Color(0xFF211C16),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Switch(
+                            checked = aecVal.value,
+                            onCheckedChange = {
+                                aecVal.value = it
+                                context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+                                    .edit().putBoolean("aec_enabled", it).apply()
+                                setupAecNs(realtimeClient, aecVal.value, nsVal.value)
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFFC2542F),
+                                checkedTrackColor = Color(0xFFF4F1E9)
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(text = "Acoustic Echo Cancellation (AEC)", color = Color(0xFF211C16), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(text = "Prevents speaker audio from leaking back into the mic", color = Color(0xFF6E665A), fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Switch(
+                            checked = nsVal.value,
+                            onCheckedChange = {
+                                nsVal.value = it
+                                context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+                                    .edit().putBoolean("ns_enabled", it).apply()
+                                setupAecNs(realtimeClient, aecVal.value, nsVal.value)
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFFC2542F),
+                                checkedTrackColor = Color(0xFFF4F1E9)
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(text = "Noise Suppression (NS)", color = Color(0xFF211C16), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(text = "Reduces ambient background noise", color = Color(0xFF6E665A), fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(1.dp).fillMaxWidth().background(Color(0xFFE3DCCC)))
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Switch(
+                            checked = vadVal.value,
+                            onCheckedChange = {
+                                vadVal.value = it
+                                context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+                                    .edit().putBoolean("vad_enabled", it).apply()
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFFC2542F),
+                                checkedTrackColor = Color(0xFFF4F1E9)
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(text = "Voice Activity Detection (VAD) Barge-in", color = Color(0xFF211C16), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(text = "Interrupts assistant speech when you start speaking", color = Color(0xFF6E665A), fontSize = 11.sp)
+                        }
+                    }
+
+                    if (vadVal.value) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(text = "VAD Threshold: ${thresholdVal.value.toInt()}", color = Color(0xFF6E665A), fontSize = 11.sp)
+                        Slider(
+                            value = thresholdVal.value,
+                            onValueChange = {
+                                thresholdVal.value = it
+                                context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+                                    .edit().putFloat("vad_threshold", it).apply()
+                            },
+                            valueRange = 0f..5000f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color(0xFFC2542F),
+                                activeTrackColor = Color(0xFFC2542F),
+                                inactiveTrackColor = Color(0xFFE3DCCC)
+                            )
+                        )
                     }
                 }
             }
@@ -3604,4 +3733,151 @@ fun DiscoveryTabContent(
             }
         }
     }
+}
+
+// Custom WebSocket implementation to intercept outgoing client audio bytes for VAD triggers
+class VadWebSocketWrapper(
+    private val delegate: okhttp3.WebSocket,
+    private val onSendBytes: (okio.ByteString) -> Unit
+) : okhttp3.WebSocket {
+    override fun request(): okhttp3.Request = delegate.request()
+    override fun queueSize(): Long = delegate.queueSize()
+    override fun cancel() = delegate.cancel()
+    
+    override fun close(code: Int, reason: String?): Boolean {
+        return delegate.close(code, reason)
+    }
+    
+    override fun send(text: String): Boolean {
+        return delegate.send(text)
+    }
+    
+    override fun send(bytes: okio.ByteString): Boolean {
+        onSendBytes(bytes)
+        return delegate.send(bytes)
+    }
+}
+
+fun setupAecNs(realtimeClient: com.example.api.RealtimeVoiceClient, aecEnabled: Boolean, nsEnabled: Boolean) {
+    try {
+        val audioRecordField = com.example.api.RealtimeVoiceClient::class.java.getDeclaredField("audioRecord")
+        audioRecordField.isAccessible = true
+        val audioRecord = audioRecordField.get(realtimeClient) as? android.media.AudioRecord
+        if (audioRecord != null) {
+            val sessionId = audioRecord.audioSessionId
+            android.util.Log.i("AecNsSetup", "Applying AEC=$aecEnabled, NS=$nsEnabled on sessionId=$sessionId")
+            
+            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                val aec = android.media.audiofx.AcousticEchoCanceler.create(sessionId)
+                if (aec != null) {
+                    aec.enabled = aecEnabled
+                    android.util.Log.i("AecNsSetup", "AcousticEchoCanceler set enabled to $aecEnabled")
+                } else {
+                    android.util.Log.w("AecNsSetup", "Failed to create AcousticEchoCanceler")
+                }
+            } else {
+                android.util.Log.w("AecNsSetup", "AcousticEchoCanceler is not available on this device")
+            }
+
+            if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                val ns = android.media.audiofx.NoiseSuppressor.create(sessionId)
+                if (ns != null) {
+                    ns.enabled = nsEnabled
+                    android.util.Log.i("AecNsSetup", "NoiseSuppressor set enabled to $nsEnabled")
+                } else {
+                    android.util.Log.w("AecNsSetup", "Failed to create NoiseSuppressor")
+                }
+            } else {
+                android.util.Log.w("AecNsSetup", "NoiseSuppressor is not available on this device")
+            }
+        } else {
+            android.util.Log.d("AecNsSetup", "audioRecord is null, AEC/NS setup deferred")
+        }
+    } catch (e: Exception) {
+        android.util.Log.e("AecNsSetup", "Error setting up AEC/NS via reflection", e)
+    }
+}
+
+fun startRealtimeClientWithVadAndResilience(
+    realtimeClient: com.example.api.RealtimeVoiceClient,
+    context: android.content.Context,
+    audioHelper: AudioHelper
+) {
+    realtimeClient.start()
+    
+    // Wrap WebSocket to intercept outgoing audio bytes for VAD
+    try {
+        val wsField = com.example.api.RealtimeVoiceClient::class.java.getDeclaredField("webSocket")
+        wsField.isAccessible = true
+        val originalWs = wsField.get(realtimeClient) as? okhttp3.WebSocket
+        if (originalWs != null && originalWs !is VadWebSocketWrapper) {
+            val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+            val wrapper = VadWebSocketWrapper(originalWs) { bytes ->
+                val vadEnabled = sharedPrefs.getBoolean("vad_enabled", true)
+                if (vadEnabled) {
+                    val threshold = sharedPrefs.getFloat("vad_threshold", 1500f).toDouble()
+                    val byteArray = bytes.toByteArray()
+                    
+                    // Calculate peak amplitude
+                    var peak = 0.0
+                    val numSamples = byteArray.size / 2
+                    for (i in 0 until numSamples) {
+                        val sample = ((byteArray[2 * i + 1].toInt() and 0xFF) shl 8) or (byteArray[2 * i].toInt() and 0xFF)
+                        val shortSample = Math.abs(sample.toShort().toInt())
+                        if (shortSample > peak) {
+                            peak = shortSample.toDouble()
+                        }
+                    }
+                    
+                    val now = System.currentTimeMillis()
+                    if (peak > threshold) {
+                        VadState.lastSpeechTime = now
+                        if (!VadState.isUserSpeaking) {
+                            VadState.isUserSpeaking = true
+                            android.util.Log.i("VAD", "Speech detected! Peak=$peak > Threshold=$threshold. Triggering barge-in.")
+                            realtimeClient.interrupt()
+                            audioHelper.stopPlayback()
+                        }
+                    } else {
+                        if (VadState.isUserSpeaking && (now - VadState.lastSpeechTime > VadState.silenceDebounceMs)) {
+                            VadState.isUserSpeaking = false
+                            android.util.Log.i("VAD", "Silence detected. Resetting speech state.")
+                        }
+                    }
+                }
+            }
+            wsField.set(realtimeClient, wrapper)
+            android.util.Log.i("VAD", "Successfully wrapped RealtimeVoiceClient WebSocket with VAD wrapper")
+        }
+    } catch (e: Exception) {
+        android.util.Log.e("VAD", "Failed to wrap webSocket for VAD", e)
+    }
+
+    // Trigger AEC/NS setup asynchronously when audioRecord is initialized
+    val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
+    scope.launch {
+        for (i in 1..40) { // 40 * 50ms = 2s max wait
+            try {
+                val audioRecordField = com.example.api.RealtimeVoiceClient::class.java.getDeclaredField("audioRecord")
+                audioRecordField.isAccessible = true
+                val audioRecord = audioRecordField.get(realtimeClient) as? android.media.AudioRecord
+                if (audioRecord != null) {
+                    val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+                    val aec = sharedPrefs.getBoolean("aec_enabled", true)
+                    val ns = sharedPrefs.getBoolean("ns_enabled", true)
+                    setupAecNs(realtimeClient, aec, ns)
+                    break
+                }
+            } catch (e: Exception) {
+                // ignore
+            }
+            delay(50)
+        }
+    }
+}
+
+object VadState {
+    var isUserSpeaking = false
+    var lastSpeechTime = 0L
+    const val silenceDebounceMs = 800L
 }

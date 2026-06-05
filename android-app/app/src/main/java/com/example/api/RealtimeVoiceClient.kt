@@ -19,6 +19,8 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -51,12 +53,41 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
     private val audioQueue = LinkedBlockingQueue<ByteArray>()
     private var playbackThread: Thread? = null
 
+    // Resilience and sequence tracking state
+    private val isStarted = AtomicBoolean(false)
+    private val isWebSocketConnected = AtomicBoolean(false)
+    private val isReconnecting = AtomicBoolean(false)
+    @Volatile private var retryAttempt = 0
+    @Volatile private var nextClientSequenceId = 1
+    @Volatile private var lastReceivedServerSequenceId = 0
+    @Volatile private var currentSessionId: String? = null
+
+    // Stateful FIFO retry queue for offline audio buffering (capped at 10 seconds of raw recording data)
+    data class PendingFrame(val seqId: Int, val data: ByteArray)
+    private val retryQueue = java.util.Collections.synchronizedList(ArrayList<PendingFrame>())
+    private var queueBytes = 0
+    private val MAX_QUEUE_BYTES = 320000 // 10 seconds of 16kHz 16-bit mono PCM (16000 * 2 * 10)
+
     private val wsListener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             Log.i("RealtimeVoiceClient", "WebSocket Connection opened successfully")
+            isWebSocketConnected.set(true)
+            retryAttempt = 0
             listener?.onStatusChanged(true)
-            startRecordingThread()
-            startPlaybackThread()
+
+            // Send reconnect handshake if we have prior sequence history
+            val sessId = currentSessionId
+            if (nextClientSequenceId > 1 || lastReceivedServerSequenceId > 0) {
+                val reconnectMsg = RealtimeControlMessage(
+                    type = "reconnect",
+                    clientSequenceId = nextClientSequenceId - 1,
+                    serverSequenceId = lastReceivedServerSequenceId,
+                    session = sessId
+                )
+                sendControlMessage(reconnectMsg)
+            }
+
+            flushRetryQueue()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -64,6 +95,16 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
             try {
                 val json = JSONObject(text)
                 val type = json.optString("type")
+                
+                if (json.has("serverSequenceId")) {
+                    val seqId = json.getInt("serverSequenceId")
+                    lastReceivedServerSequenceId = maxOf(lastReceivedServerSequenceId, seqId)
+                }
+
+                if (json.has("session")) {
+                    currentSessionId = json.getString("session")
+                }
+
                 val messageText = json.optString("text") ?: json.optString("message") ?: ""
                 when (type) {
                     "transcript" -> {
@@ -86,7 +127,17 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
         }
 
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            audioQueue.offer(bytes.toByteArray())
+            val byteArray = bytes.toByteArray()
+            if (byteArray.size >= 4) {
+                val buffer = ByteBuffer.wrap(byteArray).order(ByteOrder.BIG_ENDIAN)
+                val seqId = buffer.int
+                lastReceivedServerSequenceId = maxOf(lastReceivedServerSequenceId, seqId)
+                val audioData = ByteArray(byteArray.size - 4)
+                buffer.get(audioData)
+                audioQueue.offer(audioData)
+            } else {
+                audioQueue.offer(byteArray)
+            }
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -96,30 +147,78 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.i("RealtimeVoiceClient", "WebSocket closed: $code / $reason")
+            isWebSocketConnected.set(false)
+            this@RealtimeVoiceClient.webSocket = null
             listener?.onStatusChanged(false)
-            stopInternal()
+            
+            if (isStarted.get()) {
+                scheduleReconnect()
+            } else {
+                stopInternal()
+            }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e("RealtimeVoiceClient", "WebSocket failure", t)
-            listener?.onError(t.localizedMessage ?: "WebSocket failure")
+            isWebSocketConnected.set(false)
+            this@RealtimeVoiceClient.webSocket = null
             listener?.onStatusChanged(false)
-            stopInternal()
+            listener?.onError(t.localizedMessage ?: "WebSocket failure")
+            
+            if (isStarted.get()) {
+                scheduleReconnect()
+            } else {
+                stopInternal()
+            }
         }
     }
 
     fun start() {
-        if (webSocket != null) {
-            Log.w("RealtimeVoiceClient", "Already started/connected.")
+        if (isStarted.get()) {
+            Log.w("RealtimeVoiceClient", "Already started.")
             return
+        }
+        isStarted.set(true)
+        retryAttempt = 0
+        isWebSocketConnected.set(false)
+        nextClientSequenceId = 1
+        lastReceivedServerSequenceId = 0
+        currentSessionId = null
+        synchronized(retryQueue) {
+            retryQueue.clear()
+            queueBytes = 0
         }
 
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             listener?.onError("Record Audio permission not granted.")
+            isStarted.set(false)
             return
         }
 
         initAudioTrack()
+        
+        // Start recording and playback immediately so they continue during offline drops
+        startRecordingThread()
+        startPlaybackThread()
+
+        connectWebSocket()
+    }
+
+    fun stop() {
+        isStarted.set(false)
+        stopInternal()
+    }
+
+    fun interrupt() {
+        clearPlaybackQueueAndFlush()
+        sendControlMessage(RealtimeControlMessage(type = "interrupt"))
+    }
+
+    private fun connectWebSocket() {
+        if (webSocket != null) {
+            Log.w("RealtimeVoiceClient", "WebSocket connection already exists.")
+            return
+        }
 
         val rawTarget = prefs.targetIpAddress.trim().trimEnd('/')
         if (rawTarget.isEmpty()) {
@@ -160,20 +259,119 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
         webSocket = client.newWebSocket(request, wsListener)
     }
 
-    fun stop() {
-        stopInternal()
+    private fun scheduleReconnect() {
+        if (!isStarted.get()) return
+        if (isReconnecting.get()) {
+            Log.d("RealtimeVoiceClient", "Reconnection already scheduled.")
+            return
+        }
+        isReconnecting.set(true)
+
+        val attempt = retryAttempt++
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s limit
+        val backoffMs = minOf(1000L * (1 shl attempt), 32000L)
+        // Jitter modifier: add random duration up to 1000ms
+        val jitter = (Math.random() * 1000).toLong()
+        val delay = backoffMs + jitter
+
+        Log.i("RealtimeVoiceClient", "Scheduling reconnect attempt $attempt in $delay ms (backoff: $backoffMs ms, jitter: $jitter ms)")
+
+        thread(start = true, name = "realtime-reconnect") {
+            try {
+                Thread.sleep(delay)
+            } catch (e: InterruptedException) {
+                isReconnecting.set(false)
+                return@thread
+            }
+            isReconnecting.set(false)
+            if (isStarted.get() && !isWebSocketConnected.get()) {
+                Log.i("RealtimeVoiceClient", "Executing reconnect attempt...")
+                connectWebSocket()
+            }
+        }
     }
 
-    fun interrupt() {
-        clearPlaybackQueueAndFlush()
+    private fun sendControlMessage(message: RealtimeControlMessage) {
+        val seqId = nextClientSequenceId++
+        val messageWithSeq = message.copy(clientSequenceId = seqId)
         try {
-            webSocket?.send("{\"type\":\"interrupt\"}")
+            webSocket?.send(messageWithSeq.toJsonString())
         } catch (e: Exception) {
-            Log.e("RealtimeVoiceClient", "Failed to send interrupt control signal", e)
+            Log.e("RealtimeVoiceClient", "Failed to send control message: ${message.type}", e)
+        }
+    }
+
+    private fun sendAudioFrame(data: ByteArray) {
+        val seq = nextClientSequenceId++
+        // Prepare binary frame with 4-byte clientSequenceId header followed by raw PCM bytes
+        val buffer = ByteBuffer.allocate(4 + data.size)
+            .order(ByteOrder.BIG_ENDIAN)
+            .putInt(seq)
+            .put(data)
+            .array()
+        val byteString = buffer.toByteString()
+
+        if (isWebSocketConnected.get()) {
+            try {
+                val sent = webSocket?.send(byteString) ?: false
+                if (!sent) {
+                    queueFrame(seq, data)
+                }
+            } catch (e: Exception) {
+                Log.e("RealtimeVoiceClient", "Error sending audio frame, queuing instead", e)
+                queueFrame(seq, data)
+            }
+        } else {
+            queueFrame(seq, data)
+        }
+    }
+
+    private fun queueFrame(seqId: Int, data: ByteArray) {
+        synchronized(retryQueue) {
+            retryQueue.add(PendingFrame(seqId, data))
+            queueBytes += data.size
+            while (queueBytes > MAX_QUEUE_BYTES && retryQueue.isNotEmpty()) {
+                val removed = retryQueue.removeAt(0)
+                queueBytes -= removed.data.size
+            }
+        }
+    }
+
+    private fun flushRetryQueue() {
+        synchronized(retryQueue) {
+            if (retryQueue.isEmpty()) return
+            Log.i("RealtimeVoiceClient", "Flushing retry queue: ${retryQueue.size} frames")
+            val iterator = retryQueue.iterator()
+            while (iterator.hasNext()) {
+                val frame = iterator.next()
+                val buffer = ByteBuffer.allocate(4 + frame.data.size)
+                    .order(ByteOrder.BIG_ENDIAN)
+                    .putInt(frame.seqId)
+                    .put(frame.data)
+                    .array()
+                try {
+                    val sent = webSocket?.send(buffer.toByteString()) ?: false
+                    if (sent) {
+                        iterator.remove()
+                        queueBytes -= frame.data.size
+                    } else {
+                        Log.w("RealtimeVoiceClient", "Failed to send frame during flush, stopping flush")
+                        break
+                    }
+                } catch (e: Exception) {
+                    Log.e("RealtimeVoiceClient", "Error flushing frame, stopping flush", e)
+                    break
+                }
+            }
         }
     }
 
     private fun startRecordingThread() {
+        if (isRecording.get()) {
+            Log.d("RealtimeVoiceClient", "Recording thread already running.")
+            return
+        }
+
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             Log.w("RealtimeVoiceClient", "Record Audio permission not granted.")
             return
@@ -209,8 +407,8 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
                 while (isRecording.get()) {
                     val read = record.read(buffer, 0, buffer.size)
                     if (read > 0) {
-                        val byteString = buffer.toByteString(0, read)
-                        webSocket?.send(byteString)
+                        val data = buffer.copyOfRange(0, read)
+                        sendAudioFrame(data)
                     } else if (read < 0) {
                         Log.e("RealtimeVoiceClient", "AudioRecord read error: $read")
                         break
@@ -258,6 +456,10 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
     }
 
     private fun startPlaybackThread() {
+        if (isPlaying.get()) {
+            Log.d("RealtimeVoiceClient", "Playback thread already running.")
+            return
+        }
         isPlaying.set(true)
         audioQueue.clear()
         playbackThread = thread(start = true, name = "realtime-audio-playback") {
@@ -348,5 +550,10 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
 
         stopPlaybackThread()
         releaseAudioTrack()
+
+        synchronized(retryQueue) {
+            retryQueue.clear()
+            queueBytes = 0
+        }
     }
 }

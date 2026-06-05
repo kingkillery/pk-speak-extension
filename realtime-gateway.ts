@@ -59,16 +59,162 @@ function launchDetachedCli(command: string, args: string[], cwd: string, title: 
 	}
 }
 
-export async function handleRealtimeGateway(this: any, ws: WebSocket) {
-	const server = this;
+interface ActiveSession {
+	sessionId: string;
+	ws: WebSocket;
+	session: any; // Gemini Live session
+	clientSequenceId: number; // last processed client sequence ID
+	serverSequenceId: number; // last assigned server sequence ID
+	disconnectTimeout?: NodeJS.Timeout;
+	pendingServerMessages: { seqId: number; isBinary: boolean; data: any }[];
+	server: any; // store server reference
+}
+
+export const activeSessions = new Map<string, ActiveSession>();
+
+export function sendToClient(activeSession: ActiveSession, message: any, isBinary: boolean) {
+	const seqId = ++activeSession.serverSequenceId;
+	let payload: any;
+	if (isBinary) {
+		// message is a Buffer containing raw audio.
+		// prefix with 4-byte big-endian serverSequenceId.
+		payload = Buffer.alloc(4 + message.length);
+		payload.writeInt32BE(seqId, 0);
+		message.copy(payload, 4);
+	} else {
+		// message is a JSON object.
+		// add serverSequenceId to the object.
+		payload = JSON.stringify({
+			...message,
+			serverSequenceId: seqId
+		});
+	}
+
+	try {
+		if (activeSession.ws.readyState === WebSocket.OPEN) {
+			activeSession.ws.send(payload);
+		} else {
+			activeSession.pendingServerMessages.push({ seqId, isBinary, data: payload });
+			if (activeSession.pendingServerMessages.length > 500) {
+				activeSession.pendingServerMessages.shift();
+			}
+		}
+	} catch (err) {
+		activeSession.pendingServerMessages.push({ seqId, isBinary, data: payload });
+		if (activeSession.pendingServerMessages.length > 500) {
+			activeSession.pendingServerMessages.shift();
+		}
+	}
+}
+
+function flushPendingServerMessages(activeSession: ActiveSession, lastReceivedServerSequenceId: number) {
+	const toSend = activeSession.pendingServerMessages.filter(m => m.seqId > lastReceivedServerSequenceId);
+	toSend.sort((a, b) => a.seqId - b.seqId);
+	for (const msg of toSend) {
+		try {
+			if (activeSession.ws.readyState === WebSocket.OPEN) {
+				activeSession.ws.send(msg.data);
+			}
+		} catch (err) {
+			// Stop flushing if websocket has issues again
+			break;
+		}
+	}
+	activeSession.pendingServerMessages = activeSession.pendingServerMessages.filter(m => m.seqId > lastReceivedServerSequenceId);
+}
+
+function setupSocketHandlers(activeSession: ActiveSession) {
+	const ws = activeSession.ws;
 	
-	// 1. Initialize Gemini Live connection
-	let session: any = null;
+	ws.on("message", (rawMsg, isBinary) => {
+		try {
+			if (isBinary) {
+				// Binary message is [4 bytes sequence ID] [raw PCM audio frame] from client
+				if (rawMsg.length >= 4) {
+					const seqId = rawMsg.readInt32BE(0);
+					if (seqId <= activeSession.clientSequenceId) {
+						// Deduplicate / Discard
+						return;
+					}
+					activeSession.clientSequenceId = seqId;
+					const audioBuf = rawMsg.subarray(4);
+					if (activeSession.session) {
+						activeSession.session.sendRealtimeInput({
+							media: {
+								mimeType: "audio/pcm;rate=16000",
+								data: audioBuf.toString("base64"),
+							}
+						});
+					}
+				}
+			} else {
+				// Text message is JSON stringified control event
+				const textMsg = rawMsg.toString("utf8");
+				const ctrl = JSON.parse(textMsg) as RealtimeControlMessage;
+				
+				if (ctrl.clientSequenceId !== undefined) {
+					activeSession.clientSequenceId = Math.max(activeSession.clientSequenceId, ctrl.clientSequenceId);
+				}
+
+				if (ctrl.type === "interrupt") {
+					// Barge-in / Interrupt from client
+					if (activeSession.session) {
+						activeSession.session.sendRealtimeInput({ activityStart: {} });
+					}
+					// Echo interrupt back to client to clear buffers immediately
+					sendToClient(activeSession, { type: "interrupt" }, false);
+				} else if (ctrl.type === "text" && ctrl.text) {
+					// Text turn from client
+					if (activeSession.session) {
+						activeSession.session.sendClientContent({
+							turns: [{ role: "user", parts: [{ text: ctrl.text }] }],
+							turnComplete: true,
+						});
+					}
+				}
+			}
+		} catch (err: any) {
+			sendToClient(activeSession, {
+				type: "error",
+				message: `Error processing message: ${err.message}`,
+			}, false);
+		}
+	});
+
+	ws.on("close", () => {
+		activeSession.disconnectTimeout = setTimeout(() => {
+			try {
+				activeSession.session?.close();
+			} catch {}
+			activeSessions.delete(activeSession.sessionId);
+		}, 60000); // 60 seconds timeout
+	});
+}
+
+async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, firstMsgIsBinary?: boolean) {
+	const sessionId = "sess_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
+	
+	const activeSession: ActiveSession = {
+		sessionId,
+		ws,
+		session: null,
+		clientSequenceId: 0,
+		serverSequenceId: 0,
+		pendingServerMessages: [],
+		server
+	};
+	activeSessions.set(sessionId, activeSession);
+
+	// Send start message with sessionId. We want this to be serverSequenceId = 1.
+	sendToClient(activeSession, {
+		type: "start",
+		session: sessionId
+	}, false);
+
 	const model = getGeminiLiveModel();
-	
 	const clientConfig = createGeminiClient(process.env, { live: true });
 	const ai = clientConfig.ai;
-	
+
 	// Tool definitions
 	const tools = [
 		{
@@ -113,9 +259,8 @@ export async function handleRealtimeGateway(this: any, ws: WebSocket) {
 		}
 	];
 
-	// Establish bidirectional WebSocket pipeline
 	try {
-		session = await ai.live.connect({
+		const geminiSession = await ai.live.connect({
 			model,
 			config: {
 				responseModalities: [Modality.AUDIO],
@@ -132,28 +277,24 @@ export async function handleRealtimeGateway(this: any, ws: WebSocket) {
 					for (const part of message.serverContent?.modelTurn?.parts || []) {
 						if (part.inlineData?.data) {
 							const audioBuf = Buffer.from(part.inlineData.data, "base64");
-							if (ws.readyState === WebSocket.OPEN) {
-								ws.send(audioBuf);
-							}
+							sendToClient(activeSession, audioBuf, true);
 						}
 					}
 
 					// 2. Forward transcript text updates
 					const text = extractText(message);
-					if (text && ws.readyState === WebSocket.OPEN) {
-						ws.send(JSON.stringify({
+					if (text) {
+						sendToClient(activeSession, {
 							type: "transcript",
 							text,
-						} satisfies RealtimeControlMessage));
+						}, false);
 					}
 
 					// 3. Handle model interruption/barge-in signal from server
 					if (message.serverContent?.interrupted) {
-						if (ws.readyState === WebSocket.OPEN) {
-							ws.send(JSON.stringify({
-								type: "interrupt"
-							} satisfies RealtimeControlMessage));
-						}
+						sendToClient(activeSession, {
+							type: "interrupt"
+						}, false);
 					}
 
 					// 4. Handle Tool calls
@@ -162,13 +303,11 @@ export async function handleRealtimeGateway(this: any, ws: WebSocket) {
 							if (!call.name || !call.id) continue;
 							
 							// Send tool_start event
-							if (ws.readyState === WebSocket.OPEN) {
-								ws.send(JSON.stringify({
-									type: "tool_start",
-									name: call.name,
-									command: call.args?.command as string || undefined,
-								} satisfies RealtimeControlMessage));
-							}
+							sendToClient(activeSession, {
+								type: "tool_start",
+								name: call.name,
+								command: call.args?.command as string || undefined,
+							}, false);
 
 							let outputText = "";
 							try {
@@ -245,8 +384,8 @@ export async function handleRealtimeGateway(this: any, ws: WebSocket) {
 												// Already running, claim leader lease
 												claimAttentionLeader(runningSession.sessionId);
 												// Update routing target
-												if (server && typeof server.setRoutingTarget === "function") {
-													await server.setRoutingTarget(matchedName || matchedPath);
+												if (activeSession.server && typeof activeSession.server.setRoutingTarget === "function") {
+													await activeSession.server.setRoutingTarget(matchedName || matchedPath);
 												}
 												outputText = JSON.stringify({
 													ok: true,
@@ -257,8 +396,8 @@ export async function handleRealtimeGateway(this: any, ws: WebSocket) {
 												});
 											} else {
 												// Not running, resume it
-												if (server && typeof server.onSessionResume === "function") {
-													const resumeRes = await server.onSessionResume({ sessionPath: matchedPath });
+												if (activeSession.server && typeof activeSession.server.onSessionResume === "function") {
+													const resumeRes = await activeSession.server.onSessionResume({ sessionPath: matchedPath });
 													outputText = JSON.stringify({
 														ok: resumeRes.ok,
 														message: resumeRes.message,
@@ -324,98 +463,106 @@ export async function handleRealtimeGateway(this: any, ws: WebSocket) {
 							}
 
 							// Send tool_complete event
-							if (ws.readyState === WebSocket.OPEN) {
-								ws.send(JSON.stringify({
-									type: "tool_complete",
-									name: call.name,
-									output: outputText,
-								} satisfies RealtimeControlMessage));
-							}
+							sendToClient(activeSession, {
+								type: "tool_complete",
+								name: call.name,
+								output: outputText,
+							}, false);
 
 							// Send function response back to Gemini Live
-							session.sendToolResponse({
-								functionResponses: [
-									{
-										id: call.id,
-										name: call.name,
-										response: {
-											output: outputText,
+							if (activeSession.session) {
+								activeSession.session.sendToolResponse({
+									functionResponses: [
+										{
+											id: call.id,
+											name: call.name,
+											response: {
+												output: outputText,
+											}
 										}
-									}
-								]
-							});
+									]
+								});
+							}
 						}
 					}
 				},
 				onerror: (event) => {
-					if (ws.readyState === WebSocket.OPEN) {
-						ws.send(JSON.stringify({
-							type: "error",
-							message: event.error?.message || event.message || "Gemini Live error",
-						} satisfies RealtimeControlMessage));
-					}
+					sendToClient(activeSession, {
+						type: "error",
+						message: event.error?.message || event.message || "Gemini Live error",
+					}, false);
 				},
 				onclose: (event) => {
-					ws.close(event.code || 1000, event.reason || "Gemini Live closed connection");
+					activeSessions.delete(activeSession.sessionId);
+					if (activeSession.ws.readyState === WebSocket.OPEN) {
+						activeSession.ws.close(event.code || 1000, event.reason || "Gemini Live closed connection");
+					}
 				}
 			}
 		});
+		activeSession.session = geminiSession;
+
+		setupSocketHandlers(activeSession);
+
+		if (firstMsg !== undefined) {
+			ws.emit("message", firstMsg, firstMsgIsBinary);
+		}
 	} catch (error: any) {
+		activeSessions.delete(sessionId);
 		ws.close(1011, `Failed to connect to Gemini Live: ${error.message}`);
-		return;
+	}
+}
+
+function resumeSession(ws: WebSocket, reconnectMsg: RealtimeControlMessage) {
+	const sessionId = reconnectMsg.session!;
+	const activeSession = activeSessions.get(sessionId)!;
+
+	if (activeSession.disconnectTimeout) {
+		clearTimeout(activeSession.disconnectTimeout);
+		activeSession.disconnectTimeout = undefined;
 	}
 
-	// 2. Inbound socket handlers (Client to Server)
-	ws.on("message", (rawMsg, isBinary) => {
-		try {
-			if (isBinary) {
-				// Binary message is raw PCM audio frame from client
-				if (session) {
-					session.sendRealtimeInput({
-						media: {
-							mimeType: "audio/pcm;rate=16000",
-							data: rawMsg.toString("base64"),
-						}
-					});
+	activeSession.ws = ws;
+	setupSocketHandlers(activeSession);
+
+	// Flush pending/buffered server messages that client has not yet received
+	const lastClientReceived = reconnectMsg.serverSequenceId || 0;
+	flushPendingServerMessages(activeSession, lastClientReceived);
+}
+
+export async function handleRealtimeGateway(this: any, ws: WebSocket) {
+	const server = this;
+
+	let initialized = false;
+	const initTimeout = setTimeout(() => {
+		if (!initialized) {
+			initialized = true;
+			startNewSession(ws, server).catch(err => {
+				ws.close(1011, `Failed to start session: ${err.message}`);
+			});
+		}
+	}, 500);
+
+	ws.once("message", (rawMsg, isBinary) => {
+		if (initialized) return;
+		clearTimeout(initTimeout);
+		initialized = true;
+
+		if (!isBinary) {
+			try {
+				const ctrl = JSON.parse(rawMsg.toString("utf8")) as RealtimeControlMessage;
+				if (ctrl.type === "reconnect" && ctrl.session && activeSessions.has(ctrl.session)) {
+					resumeSession(ws, ctrl);
+					return;
 				}
-			} else {
-				// Text message is JSON stringified control event
-				const textMsg = rawMsg.toString("utf8");
-				const ctrl = JSON.parse(textMsg) as RealtimeControlMessage;
-				
-				if (ctrl.type === "interrupt") {
-					// Barge-in / Interrupt from client
-					if (session) {
-						session.sendRealtimeInput({ activityStart: {} });
-					}
-					// Echo interrupt back to client to clear buffers immediately
-					if (ws.readyState === WebSocket.OPEN) {
-						ws.send(JSON.stringify({ type: "interrupt" } satisfies RealtimeControlMessage));
-					}
-				} else if (ctrl.type === "text" && ctrl.text) {
-					// Text turn from client
-					if (session) {
-						session.sendClientContent({
-							turns: [{ role: "user", parts: [{ text: ctrl.text }] }],
-							turnComplete: true,
-						});
-					}
-				}
-			}
-		} catch (err: any) {
-			if (ws.readyState === WebSocket.OPEN) {
-				ws.send(JSON.stringify({
-					type: "error",
-					message: `Error processing message: ${err.message}`,
-				} satisfies RealtimeControlMessage));
+			} catch (err) {
+				// Ignore
 			}
 		}
-	});
 
-	ws.on("close", () => {
-		try {
-			session?.close();
-		} catch {}
+		startNewSession(ws, server, rawMsg, isBinary).catch(err => {
+			ws.close(1011, `Failed to start session: ${err.message}`);
+		});
 	});
 }
 
@@ -435,3 +582,4 @@ function findSessionNameByPath(sessionPath: string, sessions: Record<string, str
 	}
 	return undefined;
 }
+
