@@ -372,7 +372,7 @@ export class ControlServer {
 		});
 
 		this.server.on("upgrade", (req, socket, head) => {
-			const url = new URL(req.url || "", `http://${host}:${port}`);
+			const url = new URL(req.url || "", `http://${req.headers.host || "127.0.0.1"}`);
 			if (url.pathname === "/v1/live") {
 				if (!this.isAuthorized(req, url, true)) {
 					socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
