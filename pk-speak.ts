@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -97,12 +97,15 @@ function printHelp() {
 function printDoctor() {
 	const config = loadPiSpeakSetupConfig();
 	const configPath = getPiSpeakSetupConfigPath();
+	const elevenLabsEnv = describeSecretSource("ELEVENLABS_API_KEY", config.elevenLabsApiKey);
 	console.log("pk-speak doctor");
 	console.log(`Config: ${existsSync(configPath) ? configPath : "not found; run pi-speak-pk"}`);
 	console.log(`Package root: ${ROOT}`);
 	console.log(`Agent provider: ${config.agentProvider || process.env.AGENT_PROVIDER || "codex"}`);
 	console.log(`Voice router: ${config.executionRouterMode || process.env.PI_SPEAK_EXECUTION_ROUTER_MODE || "auto"}`);
 	console.log(`TTS provider: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "edge"}`);
+	console.log(`ElevenLabs key: ${elevenLabsEnv.summary}`);
+	if (elevenLabsEnv.warning) console.log(`Warning: ${elevenLabsEnv.warning}`);
 	console.log(`Gateway port: ${config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767"}`);
 	console.log(`Gateway token: ${maskSecret(config.httpToken || process.env.PI_SPEAK_HTTP_TOKEN) || "not configured"}`);
 	console.log(`Android APK: ${existsSync(join(ROOT, "android-app", ".build-outputs", "app-debug.apk")) ? "bundled" : "not bundled"}`);
@@ -120,6 +123,48 @@ function printConfig() {
 	console.log(`ElevenLabs key: ${maskSecret(config.elevenLabsApiKey)}`);
 	console.log(`OpenAI audio key: ${maskSecret(config.openAiKey)}`);
 	console.log(`Gateway token: ${maskSecret(config.httpToken)}`);
+}
+
+function describeSecretSource(envName: string, configValue?: string) {
+	const processValue = process.env[envName]?.trim() || "";
+	const userValue = readUserEnvValue(envName);
+	const hasConfig = !!configValue?.trim();
+	const sources = [
+		processValue ? "process env" : "",
+		userValue ? "user env" : "",
+		hasConfig ? "setup config" : "",
+	].filter(Boolean);
+	const summary = sources.length ? `configured (${sources.join(", ")})` : "not configured";
+	const warning = processValue && userValue && processValue !== userValue
+		? `${envName} differs between this shell and the persisted user environment; new terminals may use a different key.`
+		: undefined;
+	return { summary, warning };
+}
+
+function readUserEnvValue(name: string) {
+	const testOverride = process.env[`PI_SPEAK_TEST_USER_ENV_${name}`];
+	if (testOverride !== undefined) return testOverride.trim();
+	if (process.platform !== "win32") return "";
+	const result = spawnSync("powershell.exe", [
+		"-NoProfile",
+		"-Command",
+		`[string][Environment]::GetEnvironmentVariable('${name.replace(/'/g, "''")}','User')`,
+	], {
+		encoding: "utf8",
+		windowsHide: true,
+		stdio: ["ignore", "pipe", "ignore"],
+		timeout: 3000,
+	});
+	if (result.status !== 0 || result.error) return "";
+	return (result.stdout || "").trim();
+}
+
+function applyUserEnvSecretWhenDifferent(name: string) {
+	const userValue = readUserEnvValue(name);
+	if (!userValue) return false;
+	if (process.env[name]?.trim() === userValue) return false;
+	process.env[name] = userValue;
+	return true;
 }
 
 async function runSpeakCommand(argv: string[]) {
@@ -141,6 +186,9 @@ async function runSpeakCommand(argv: string[]) {
 }
 
 async function speakText(text: string, options: SpeakTextOptions) {
+	if (options.provider === "elevenlabs" || options.provider === "sag") {
+		applyUserEnvSecretWhenDifferent("ELEVENLABS_API_KEY");
+	}
 	const state = {
 		provider: options.provider,
 		rewriteEnabled: options.rewrite,
@@ -154,6 +202,7 @@ async function speakText(text: string, options: SpeakTextOptions) {
 		return;
 	}
 	const tempDir = options.output ? undefined : await mkdtemp(join(tmpdir(), "pk-speak-"));
+	let removeTempDir = !!tempDir && !options.keep;
 	const outputPath = resolve(options.output || join(tempDir!, "speech.mp3"));
 	try {
 		const result = await synthesizeToFile({
@@ -165,10 +214,11 @@ async function speakText(text: string, options: SpeakTextOptions) {
 			console.log(`Spoke with ${result.provider}${result.rewriteApplied ? " (rewritten)" : ""}: ${outputPath}`);
 		}
 		if (!options.noPlay) {
-			await playAudioFile(outputPath);
+			const playback = await playAudioFile(outputPath);
+			if (playback === "opened") removeTempDir = false;
 		}
 	} finally {
-		if (tempDir && !options.keep) {
+		if (tempDir && removeTempDir) {
 			await rm(tempDir, { recursive: true, force: true }).catch(() => {});
 		}
 	}
@@ -439,29 +489,36 @@ async function readStdin() {
 	return text;
 }
 
-async function playAudioFile(filePath: string) {
-	const command = process.platform === "win32" ? "powershell.exe" : getUnixAudioPlayer();
-	const args = process.platform === "win32"
-		? [
-			"-NoProfile",
-			"-Sta",
-			"-Command",
-			[
-				"$ErrorActionPreference = 'Stop'",
-				"Add-Type -AssemblyName PresentationCore",
-				"$path = (Resolve-Path -LiteralPath $args[0]).Path",
-				"$player = New-Object System.Windows.Media.MediaPlayer",
-				"$player.Open([Uri]::new($path))",
-				"$player.Play()",
-				"$limit = (Get-Date).AddSeconds(120)",
-				"while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $limit) { Start-Sleep -Milliseconds 50 }",
-				"if ($player.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 250) } else { Start-Sleep -Seconds 2 }",
-				"$player.Close()",
-			].join("; "),
-			filePath,
-		]
-		: getUnixAudioPlayerArgs(command, filePath);
-	await runProcess(command, args);
+async function playAudioFile(filePath: string): Promise<"played" | "opened"> {
+	if (process.platform === "win32") {
+		try {
+			await runProcess("powershell.exe", [
+				"-NoProfile",
+				"-Sta",
+				"-Command",
+				[
+					"$ErrorActionPreference = 'Stop'",
+					"$path = (Resolve-Path -LiteralPath $args[0]).Path",
+					"Add-Type -AssemblyName PresentationCore",
+					"$player = New-Object System.Windows.Media.MediaPlayer",
+					"$player.Open([Uri]::new($path))",
+					"$player.Play()",
+					"$limit = (Get-Date).AddSeconds(120)",
+					"while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $limit) { Start-Sleep -Milliseconds 50 }",
+					"if ($player.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 250) } else { Start-Sleep -Seconds 2 }",
+					"$player.Close()",
+				].join("; "),
+				filePath,
+			]);
+			return "played";
+		} catch {
+			await runProcess("cmd.exe", ["/c", "start", "", filePath]);
+			return "opened";
+		}
+	}
+	const command = getUnixAudioPlayer();
+	await runProcess(command, getUnixAudioPlayerArgs(command, filePath));
+	return command === "xdg-open" ? "opened" : "played";
 }
 
 function getUnixAudioPlayer() {

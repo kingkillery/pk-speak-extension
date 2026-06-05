@@ -1,6 +1,6 @@
 {
   "name": "pi-pk-speak",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "type": "module",
   "description": "Pi extension for conversational PK Speak voice, wake-word, mobile, and session routing.",
   "keywords": [

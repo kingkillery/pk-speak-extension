@@ -78,6 +78,27 @@ test("pk-speak doctor reads saved setup config", async () => {
 	}
 });
 
+test("pk-speak doctor warns when process and user ElevenLabs keys differ", async () => {
+	const configDir = await mkdtemp(join(tmpdir(), "pk-speak-doctor-env-test-"));
+	try {
+		const { stdout } = await execFileAsync(process.execPath, ["dist/pk-speak.js", "doctor"], {
+			cwd: process.cwd(),
+			env: {
+				...process.env,
+				PI_SPEAK_CONFIG_DIR: configDir,
+				ELEVENLABS_API_KEY: "process-key",
+				PI_SPEAK_TEST_USER_ENV_ELEVENLABS_API_KEY: "user-key",
+			},
+		});
+		assert.match(stdout, /ElevenLabs key: configured \(process env, user env\)/);
+		assert.match(stdout, /Warning: ELEVENLABS_API_KEY differs between this shell and the persisted user environment/);
+		assert.doesNotMatch(stdout, /process-key/);
+		assert.doesNotMatch(stdout, /user-key/);
+	} finally {
+		await rm(configDir, { recursive: true, force: true });
+	}
+});
+
 test("pk-speak help includes speak command", async () => {
 	const { stdout } = await execFileAsync(process.execPath, ["dist/pk-speak.js", "--help"], {
 		cwd: process.cwd(),

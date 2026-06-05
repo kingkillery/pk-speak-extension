@@ -50,6 +50,14 @@ test("sag provider is available only with sag and ElevenLabs auth", async () => 
 	});
 });
 
+test("edge provider can be selected from the bundled dependency", async () => {
+	await withEnv({
+		PI_SPEAK_TTS_PROVIDER: "edge",
+	}, async () => {
+		assert.equal(tts.resolveTtsProvider(), "edge");
+	});
+});
+
 test("sanitizeForSpeech strips markdown, code, links, and emoji for every runtime", () => {
 	const input = [
 		"# Heading",

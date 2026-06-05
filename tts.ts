@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { basename, delimiter, join } from "node:path";
 import { withAbortTimeout } from "./request-timeout.js";
 
@@ -45,6 +46,7 @@ export const DEFAULT_REWRITE_MODEL =
 	process.env.PI_SPEAK_REWRITE_MODEL || "openai/gpt-oss-20b:nitro";
 
 const OPENROUTER_URL = process.env.PI_SPEAK_OPENROUTER_URL || "https://openrouter.ai/api/v1/chat/completions";
+const require = createRequire(import.meta.url);
 
 const elevenLabsAliases: Record<string, string> = {
 	adam: "pNInz6obpgDQGcFmaJgB",
