@@ -7,6 +7,8 @@ import { dirname, join, parse, resolve } from "node:path";
 import { hostname, networkInterfaces, platform } from "node:os";
 import QRCode from "qrcode";
 import Bonjour from "bonjour-service";
+import { WebSocketServer, WebSocket } from "ws";
+import "./realtime-types.js";
 import { BusyError, type RemoteTurnSource, RemoteTurnResult } from "./remote-turn-manager.js";
 import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
 import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
@@ -14,6 +16,7 @@ import type { SessionDashboard, CompactRouteSlot } from "./session-routing.js";
 import type { AgentDiscoverySnapshot } from "./agent-discovery.js";
 
 export type ControlServerState = {
+
 	enabled: boolean;
 	host?: string;
 	port?: number;
@@ -171,6 +174,7 @@ export type ControlServerOptions = {
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
+	onRealtimeConnection?: (ws: WebSocket) => void;
 };
 
 type AudioArtifact = {
@@ -281,6 +285,8 @@ export class ControlServer {
 	private readonly onSessionResume?: ControlServerOptions["onSessionResume"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
 	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
+	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
+	private wss?: WebSocketServer;
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
@@ -319,6 +325,7 @@ export class ControlServer {
 		this.onSessionResume = options.onSessionResume;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
 		this.tailSessionEvents = options.tailSessionEvents;
+		this.onRealtimeConnection = options.onRealtimeConnection;
 	}
 
 	getRuntimeState() {
@@ -353,6 +360,31 @@ export class ControlServer {
 				}
 				this.writeJson(res, 502, { ok: false, error: getErrorMessage(error) });
 			});
+		});
+
+		this.wss = new WebSocketServer({ noServer: true });
+		this.wss.on("connection", (ws) => {
+			if (this.onRealtimeConnection) {
+				this.onRealtimeConnection(ws);
+			} else {
+				ws.close(1011, "Realtime voice gateway is not active.");
+			}
+		});
+
+		this.server.on("upgrade", (req, socket, head) => {
+			const url = new URL(req.url || "", `http://${host}:${port}`);
+			if (url.pathname === "/v1/live") {
+				if (!this.isAuthorized(req, url, true)) {
+					socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+					socket.destroy();
+					return;
+				}
+				this.wss!.handleUpgrade(req, socket, head, (ws) => {
+					this.wss!.emit("connection", ws, req);
+				});
+			} else {
+				socket.destroy();
+			}
 		});
 
 		await new Promise<void>((resolve, reject) => {
@@ -390,6 +422,10 @@ export class ControlServer {
 			this.discoverySocket = undefined;
 		}
 		await this.stopMdnsAdvertisement();
+		if (this.wss) {
+			this.wss.close();
+			this.wss = undefined;
+		}
 		const server = this.server;
 		this.server = undefined;
 		await new Promise<void>((resolve) => {
