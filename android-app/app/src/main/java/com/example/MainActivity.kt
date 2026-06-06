@@ -52,6 +52,7 @@ import com.example.api.GatewaySessionErrorKind
 import com.example.api.GatewaySessionException
 import com.example.api.VoiceAgentClient
 import com.example.api.RemoteSlashCommand
+import com.example.api.RealtimeControlMessage
 import com.example.api.RealtimeVoiceClient
 import com.example.api.RealtimeListener
 import com.example.audio.AudioHelper
@@ -726,6 +727,87 @@ class StudioRuntimeState(
     var connectionLatencyMs by mutableLongStateOf(-1L)
     var isRealtimeActive by mutableStateOf(false)
     var isRealtimeConnected by mutableStateOf(false)
+    val pendingTerminalApprovals = mutableStateListOf<TerminalApprovalPrompt>()
+}
+
+data class TerminalApprovalPrompt(
+    val approvalId: String,
+    val command: String,
+    val cwd: String,
+    val reason: String,
+    val timeoutMs: Int
+)
+
+@Composable
+private fun TerminalApprovalCard(
+    approval: TerminalApprovalPrompt,
+    onApprove: () -> Unit,
+    onReject: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFFFFF7ED),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, Color(0xFFE8B56B))
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "TERMINAL APPROVAL",
+                color = Color(0xFFC2542F),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Text(
+                text = approval.command.ifBlank { "(unknown command)" },
+                color = Color(0xFF211C16),
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontFamily = FontFamily.Monospace
+            )
+            val details = listOfNotNull(
+                approval.reason.takeIf { it.isNotBlank() }?.let { "Reason: $it" },
+                approval.cwd.takeIf { it.isNotBlank() }?.let { "CWD: $it" },
+                approval.timeoutMs.takeIf { it > 0 }?.let { "Timeout: ${it}ms" }
+            )
+            if (details.isNotEmpty()) {
+                Text(
+                    text = details.joinToString("\n"),
+                    color = Color(0xFF6E665A),
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onReject,
+                    border = BorderStroke(1.dp, Color(0xFFC2542F)),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text("Reject", color = Color(0xFFC2542F), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = onApprove,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D52)),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text("Approve", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -757,6 +839,25 @@ fun StudioTabContent(
 
             override fun onInterrupt() {
                 state.latestReply = "Interrupted"
+            }
+
+            override fun onTerminalApprovalRequired(message: RealtimeControlMessage) {
+                val approvalId = message.approvalId ?: return
+                state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
+                state.pendingTerminalApprovals.add(
+                    TerminalApprovalPrompt(
+                        approvalId = approvalId,
+                        command = message.command.orEmpty(),
+                        cwd = message.cwd.orEmpty(),
+                        reason = message.reason.orEmpty(),
+                        timeoutMs = message.timeoutMs ?: 0
+                    )
+                )
+                state.latestReply = "Terminal approval needed."
+            }
+
+            override fun onTerminalApprovalResolved(approvalId: String) {
+                state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
             }
 
             override fun onError(message: String) {
@@ -1114,6 +1215,20 @@ fun StudioTabContent(
                         .padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    if (state.pendingTerminalApprovals.isNotEmpty()) {
+                        items(state.pendingTerminalApprovals, key = { it.approvalId }) { approval ->
+                            TerminalApprovalCard(
+                                approval = approval,
+                                onApprove = {
+                                    realtimeClient.approveTerminalCommand(approval.approvalId)
+                                },
+                                onReject = {
+                                    realtimeClient.rejectTerminalCommand(approval.approvalId)
+                                }
+                            )
+                        }
+                    }
+
                     if (state.chatMessages.isNotEmpty()) {
                         item {
                             Row(

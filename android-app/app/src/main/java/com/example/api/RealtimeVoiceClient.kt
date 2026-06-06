@@ -30,6 +30,8 @@ interface RealtimeListener {
     fun onTranscript(text: String)
     fun onTextReply(text: String)
     fun onInterrupt()
+    fun onTerminalApprovalRequired(message: RealtimeControlMessage)
+    fun onTerminalApprovalResolved(approvalId: String)
     fun onError(message: String)
     fun onStatusChanged(connected: Boolean)
 }
@@ -112,6 +114,19 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
                     }
                     "text_reply" -> {
                         listener?.onTextReply(messageText)
+                    }
+                    "tool_approval_required" -> {
+                        listener?.onTerminalApprovalRequired(RealtimeControlMessage.fromJsonString(text))
+                    }
+                    "tool_approval_resolved" -> {
+                        json.optString("approvalId").takeIf { it.isNotBlank() }?.let {
+                            listener?.onTerminalApprovalResolved(it)
+                        }
+                    }
+                    "tool_complete" -> {
+                        json.optString("approvalId").takeIf { it.isNotBlank() }?.let {
+                            listener?.onTerminalApprovalResolved(it)
+                        }
                     }
                     "interrupt" -> {
                         clearPlaybackQueueAndFlush()
@@ -212,6 +227,16 @@ class RealtimeVoiceClient(private val context: Context, private val prefs: AppPr
     fun interrupt() {
         clearPlaybackQueueAndFlush()
         sendControlMessage(RealtimeControlMessage(type = "interrupt"))
+    }
+
+    fun approveTerminalCommand(approvalId: String) {
+        if (approvalId.isBlank()) return
+        sendControlMessage(RealtimeControlMessage(type = "terminal_approve", approvalId = approvalId))
+    }
+
+    fun rejectTerminalCommand(approvalId: String) {
+        if (approvalId.isBlank()) return
+        sendControlMessage(RealtimeControlMessage(type = "terminal_reject", approvalId = approvalId))
     }
 
     private fun connectWebSocket() {
