@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret } from "./setup-config.js";
 import { resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
+import { getRealtimeTerminalAuditPath } from "./realtime-terminal-audit.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -17,7 +18,7 @@ async function main() {
 	const argv = process.argv.slice(2);
 	const args = parseArgs(argv);
 	const command = String(args._ || "help").toLowerCase();
-	if (args.help || args.h || command === "help") {
+	if (command === "help" || ((args.help || args.h) && !args._)) {
 		printHelp();
 		return;
 	}
@@ -108,6 +109,8 @@ function printDoctor() {
 	if (elevenLabsEnv.warning) console.log(`Warning: ${elevenLabsEnv.warning}`);
 	console.log(`Gateway port: ${config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767"}`);
 	console.log(`Gateway token: ${maskSecret(config.httpToken || process.env.PI_SPEAK_HTTP_TOKEN) || "not configured"}`);
+	const realtimeAuditPath = getRealtimeTerminalAuditPath();
+	console.log(`Realtime terminal audit: ${existsSync(realtimeAuditPath) ? realtimeAuditPath : `${realtimeAuditPath} (no entries yet)`}`);
 	console.log(`Android APK: ${existsSync(join(ROOT, "android-app", ".build-outputs", "app-debug.apk")) ? "bundled" : "not bundled"}`);
 	console.log(`Headless gateway: ${existsSync(join(DIST_DIR, "headless-gateway.js")) ? "built" : "missing"}`);
 	console.log(`Tray controller: ${existsSync(join(DIST_DIR, "persistent-tray.js")) ? "built" : "missing"}`);
@@ -214,7 +217,7 @@ async function speakText(text: string, options: SpeakTextOptions) {
 			console.log(`Spoke with ${result.provider}${result.rewriteApplied ? " (rewritten)" : ""}: ${outputPath}`);
 		}
 		if (!options.noPlay) {
-			const playback = await playAudioFile(outputPath);
+			const playback = await playAudioFile(outputPath, { allowOpenFallback: options.allowOpenFallback });
 			if (playback === "opened") removeTempDir = false;
 		}
 	} finally {
@@ -286,6 +289,7 @@ function printWrapHelp() {
 		"  --capture-bytes <n>        Max output bytes to classify, default 200000",
 		"  --no-speak                 Run command without speaking notices",
 		"  --no-start                 Skip the start notice",
+		"  --allow-open-fallback      If hidden playback fails, open audio with the OS default app",
 		"  --start-text <text>        Override start notice",
 		"  --success-text <text>      Override success notice",
 		"  --failure-text <text>      Override failure prefix",
@@ -310,6 +314,7 @@ function printSpeakHelp() {
 		"  --provider <auto|edge|elevenlabs|openai|sag|legacy>",
 		"  --output <path>       Write audio to a file",
 		"  --no-play             Synthesize only; do not play audio",
+		"  --allow-open-fallback  If hidden playback fails, open the file with the OS default app",
 		"  --keep                Keep the temp audio file when no --output is supplied",
 		"  --rewrite <true|false>",
 		"  --dry-run             Print provider and spoken text without synthesis",
@@ -326,6 +331,7 @@ type SpeakCommandOptions = {
 	provider?: TtsProvider;
 	output?: string;
 	noPlay: boolean;
+	allowOpenFallback: boolean;
 	keep: boolean;
 	dryRun: boolean;
 	rewrite?: boolean;
@@ -336,6 +342,7 @@ type SpeakTextOptions = {
 	provider?: TtsProvider;
 	output?: string;
 	noPlay: boolean;
+	allowOpenFallback?: boolean;
 	keep: boolean;
 	dryRun: boolean;
 	rewrite?: boolean;
@@ -352,6 +359,7 @@ type WrapCommandOptions = {
 	captureBytes: number;
 	noSpeak: boolean;
 	noStart: boolean;
+	allowOpenFallback: boolean;
 	dryRun: boolean;
 	startText?: string;
 	successText?: string;
@@ -363,6 +371,7 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 	const options: SpeakCommandOptions = {
 		textParts: [],
 		noPlay: false,
+		allowOpenFallback: false,
 		keep: false,
 		dryRun: false,
 		help: false,
@@ -386,6 +395,8 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 			options.output = argv[++i];
 		} else if (key === "no-play") {
 			options.noPlay = true;
+		} else if (key === "allow-open-fallback") {
+			options.allowOpenFallback = true;
 		} else if (key === "keep") {
 			options.keep = true;
 		} else if (key === "dry-run") {
@@ -406,6 +417,7 @@ function parseWrapArgs(argv: string[]): WrapCommandOptions {
 		captureBytes: 200_000,
 		noSpeak: false,
 		noStart: false,
+		allowOpenFallback: false,
 		dryRun: false,
 		help: false,
 	};
@@ -438,6 +450,8 @@ function parseWrapArgs(argv: string[]): WrapCommandOptions {
 			options.noSpeak = true;
 		} else if (key === "no-start") {
 			options.noStart = true;
+		} else if (key === "allow-open-fallback") {
+			options.allowOpenFallback = true;
 		} else if (key === "dry-run") {
 			options.dryRun = true;
 		} else if (key === "start-text") {
@@ -491,7 +505,7 @@ async function readStdin() {
 	return text;
 }
 
-async function playAudioFile(filePath: string): Promise<"played" | "opened"> {
+async function playAudioFile(filePath: string, options: { allowOpenFallback?: boolean } = {}): Promise<"played" | "opened" | "skipped"> {
 	if (process.platform === "win32") {
 		try {
 			await runProcess("powershell.exe", [
@@ -513,22 +527,30 @@ async function playAudioFile(filePath: string): Promise<"played" | "opened"> {
 				filePath,
 			]);
 			return "played";
-		} catch {
-			await runProcess("cmd.exe", ["/c", "start", "", filePath]);
-			return "opened";
+		} catch (error) {
+			if (options.allowOpenFallback) {
+				await runProcess("cmd.exe", ["/c", "start", "", filePath]);
+				return "opened";
+			}
+			console.warn(`pk-speak playback skipped: hidden Windows audio failed (${error instanceof Error ? error.message : String(error)}).`);
+			return "skipped";
 		}
 	}
-	const command = getUnixAudioPlayer();
+	const command = getUnixAudioPlayer(options.allowOpenFallback);
+	if (!command) {
+		console.warn("pk-speak playback skipped: no headless audio player found. Use --allow-open-fallback to open the audio file with the OS default app.");
+		return "skipped";
+	}
 	await runProcess(command, getUnixAudioPlayerArgs(command, filePath));
 	return command === "xdg-open" ? "opened" : "played";
 }
 
-function getUnixAudioPlayer() {
+function getUnixAudioPlayer(allowOpenFallback?: boolean) {
 	if (process.platform === "darwin") return "afplay";
 	for (const command of ["paplay", "mpg123", "ffplay"]) {
 		if (existsOnPath(command)) return command;
 	}
-	return "xdg-open";
+	return allowOpenFallback ? "xdg-open" : undefined;
 }
 
 function getUnixAudioPlayerArgs(command: string, filePath: string) {
@@ -559,6 +581,7 @@ async function speakTextSafely(text: string, options: WrapCommandOptions) {
 	await speakText(text, {
 		provider: options.provider,
 		noPlay: false,
+		allowOpenFallback: options.allowOpenFallback,
 		keep: false,
 		dryRun: false,
 		rewrite: false,

@@ -5,6 +5,13 @@ export const STORAGE_REMEMBER = "piSpeakRemoteRememberToken";
 export const STORAGE_LAUNCH_PATH = "piSpeakRemoteLaunchPath";
 export const STORAGE_LIVE_MODE = "piSpeakRemoteLiveMode";
 
+export function buildRealtimeWebSocketUrl(origin, token = "") {
+	const url = new URL("/v1/live", origin);
+	url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+	if (token) url.searchParams.set("token", token);
+	return url.toString();
+}
+
 export function loadPersistedSettings({
 	queryToken = "",
 	queryLaunchPath = "",
@@ -74,6 +81,12 @@ if (typeof document !== "undefined") {
 		recentAgentSessions: [],
 		agentSnapshotAt: "",
 		workspacePath: "",
+		liveSocket: null,
+		liveClientSequenceId: 0,
+		liveReplyBuffer: "",
+		liveAgentMessage: null,
+		liveSettleTimer: null,
+		pendingTerminalApprovals: {},
 	};
 
 	const els = {
@@ -86,6 +99,7 @@ if (typeof document !== "undefined") {
 		auth: document.getElementById("auth-pill"),
 		statusDot: document.getElementById("status-dot"),
 		statusNote: document.getElementById("status-note"),
+		terminalApprovals: document.getElementById("terminal-approvals"),
 		audioControlsWrapper: document.getElementById("audio-controls-wrapper"),
 		chatMessages: document.getElementById("chat-messages"),
 		transcript: document.getElementById("transcript-output"),
@@ -213,6 +227,76 @@ if (typeof document !== "undefined") {
 		if (!text) return;
 		if (els.reply) els.reply.textContent = text.trim() ? text.trim() : "No reply yet.";
 		if (text && text.trim()) appendMessage("agent", text);
+	}
+
+	function renderTerminalApprovals() {
+		if (!els.terminalApprovals) return;
+		const approvals = Object.values(state.pendingTerminalApprovals);
+		els.terminalApprovals.innerHTML = "";
+		els.terminalApprovals.classList.toggle("hidden", approvals.length === 0);
+		for (const approval of approvals) {
+			const card = document.createElement("div");
+			card.className = "approval-card";
+			const body = document.createElement("div");
+			body.className = "approval-body";
+			const title = document.createElement("strong");
+			title.textContent = "Terminal approval";
+			const command = document.createElement("code");
+			command.textContent = approval.command || "(unknown command)";
+			const reason = document.createElement("span");
+			reason.className = "muted";
+			reason.textContent = approval.reason ? `Reason: ${approval.reason}` : "This command needs confirmation.";
+			const context = document.createElement("span");
+			context.className = "muted";
+			context.textContent = [
+				approval.cwd ? `CWD: ${approval.cwd}` : "",
+				approval.timeoutMs ? `Timeout: ${approval.timeoutMs}ms` : "",
+			].filter(Boolean).join(" - ");
+			body.appendChild(title);
+			body.appendChild(command);
+			body.appendChild(reason);
+			if (context.textContent) body.appendChild(context);
+			const actions = document.createElement("div");
+			actions.className = "approval-actions";
+			const approve = document.createElement("button");
+			approve.type = "button";
+			approve.textContent = "Approve";
+			approve.addEventListener("click", () => sendTerminalApproval(approval.approvalId, true));
+			const reject = document.createElement("button");
+			reject.type = "button";
+			reject.className = "secondary";
+			reject.textContent = "Reject";
+			reject.addEventListener("click", () => sendTerminalApproval(approval.approvalId, false));
+			actions.appendChild(approve);
+			actions.appendChild(reject);
+			card.appendChild(body);
+			card.appendChild(actions);
+			els.terminalApprovals.appendChild(card);
+		}
+	}
+
+	function rememberTerminalApproval(message) {
+		if (!message || !message.approvalId) return;
+		let parsed = {};
+		if (message.output) {
+			try { parsed = JSON.parse(message.output); } catch {}
+		}
+		state.pendingTerminalApprovals[message.approvalId] = {
+			approvalId: message.approvalId,
+			command: message.command || parsed.command || "",
+			reason: message.reason || parsed.reason || "",
+			cwd: message.cwd || parsed.cwd || "",
+			timeoutMs: message.timeoutMs || parsed.timeoutMs || 0,
+		};
+		renderTerminalApprovals();
+		appendMessage("system", `Approval needed: ${message.command || parsed.command || "terminal command"}`);
+		setStatus("Terminal approval needed.");
+	}
+
+	function clearTerminalApproval(approvalId) {
+		if (!approvalId) return;
+		delete state.pendingTerminalApprovals[approvalId];
+		renderTerminalApprovals();
 	}
 
 	function setRecordingStateBusy(isBusy) {
@@ -355,6 +439,28 @@ if (typeof document !== "undefined") {
 		} catch (error) {
 			if (els.agentList) els.agentList.textContent = String(error.message || error);
 		}
+	}
+
+	function appendOrUpdateLiveReply(text) {
+		if (!els.chatMessages || !text) return;
+		state.liveReplyBuffer += text;
+		if (!state.liveAgentMessage || !els.chatMessages.contains(state.liveAgentMessage)) {
+			state.liveAgentMessage = document.createElement("div");
+			state.liveAgentMessage.className = "message agent";
+			els.chatMessages.appendChild(state.liveAgentMessage);
+		}
+		state.liveAgentMessage.textContent = state.liveReplyBuffer.trim();
+		els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+		if (els.reply) els.reply.textContent = state.liveReplyBuffer.trim() || "No reply yet.";
+	}
+
+	function scheduleLiveTurnSettled() {
+		if (state.liveSettleTimer) window.clearTimeout(state.liveSettleTimer);
+		state.liveSettleTimer = window.setTimeout(() => {
+			state.liveSettleTimer = null;
+			setRecordingStateBusy(false);
+			setStatus("Live turn complete.");
+		}, 1500);
 	}
 
 	function renderAgents() {
@@ -909,6 +1015,125 @@ if (typeof document !== "undefined") {
 		});
 	}
 
+	function closeLiveSocket() {
+		if (!state.liveSocket) return;
+		try { state.liveSocket.close(); } catch {}
+		state.liveSocket = null;
+	}
+
+	function handleLiveSocketMessage(event) {
+		if (typeof event.data !== "string") return;
+		let message;
+		try {
+			message = JSON.parse(event.data);
+		} catch {
+			return;
+		}
+		if (message.type === "start") {
+			setStatus("Live session connected.");
+			return;
+		}
+		if (message.type === "transcript" && message.text) {
+			appendOrUpdateLiveReply(message.text);
+			scheduleLiveTurnSettled();
+			return;
+		}
+		if (message.type === "tool_start") {
+			setStatus(message.command ? `Tool requested: ${message.command}` : "Tool requested.");
+			return;
+		}
+		if (message.type === "tool_approval_required") {
+			rememberTerminalApproval(message);
+			return;
+		}
+		if (message.type === "tool_approval_resolved") {
+			clearTerminalApproval(message.approvalId);
+			appendMessage("system", message.message || "Terminal approval resolved.");
+			setStatus(message.message || "Terminal approval resolved.");
+			return;
+		}
+		if (message.type === "tool_complete") {
+			setStatus("Tool completed.");
+			scheduleLiveTurnSettled();
+			return;
+		}
+		if (message.type === "error") {
+			setStatus(message.message || "Live session error.", "error");
+			setRecordingStateBusy(false);
+		}
+	}
+
+	function ensureLiveSocket() {
+		if (state.liveSocket && (state.liveSocket.readyState === WebSocket.OPEN || state.liveSocket.readyState === WebSocket.CONNECTING)) {
+			return state.liveSocket;
+		}
+		const socket = new WebSocket(buildRealtimeWebSocketUrl(window.location.origin, state.token));
+		state.liveSocket = socket;
+		socket.addEventListener("message", handleLiveSocketMessage);
+		socket.addEventListener("close", () => {
+			if (state.liveSocket === socket) state.liveSocket = null;
+		});
+		socket.addEventListener("error", () => {
+			setStatus("Live socket connection failed.", "error");
+		});
+		return socket;
+	}
+
+	function sendLiveControl(payload) {
+		const socket = ensureLiveSocket();
+		const send = () => {
+			state.liveClientSequenceId += 1;
+			socket.send(JSON.stringify({ ...payload, clientSequenceId: state.liveClientSequenceId }));
+		};
+		if (socket.readyState === WebSocket.OPEN) {
+			send();
+			return Promise.resolve();
+		}
+		return new Promise((resolve, reject) => {
+			const onOpen = () => {
+				cleanup();
+				send();
+				resolve();
+			};
+			const onError = () => {
+				cleanup();
+				reject(new Error("Live socket connection failed."));
+			};
+			const cleanup = () => {
+				socket.removeEventListener("open", onOpen);
+				socket.removeEventListener("error", onError);
+			};
+			socket.addEventListener("open", onOpen);
+			socket.addEventListener("error", onError);
+		});
+	}
+
+	function sendTerminalApproval(approvalId, approved) {
+		if (!approvalId) return;
+		void sendLiveControl({
+			type: approved ? "terminal_approve" : "terminal_reject",
+			approvalId,
+		}).catch((error) => {
+			setStatus(String(error.message || error), "error");
+		});
+	}
+
+	async function submitLiveText(text) {
+		setStatus("Sending live text turn...");
+		setRecordingStateBusy(true);
+		appendMessage("user", text);
+		state.liveReplyBuffer = "";
+		state.liveAgentMessage = null;
+		try {
+			await sendLiveControl({ type: "text", text });
+			if (els.textInput) els.textInput.value = "";
+			setStatus("Live turn sent.");
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+			setRecordingStateBusy(false);
+		}
+	}
+
 	function ensureTimerState() {
 		const active = state.recording;
 		if (state.turnInProgress) {
@@ -942,6 +1167,10 @@ if (typeof document !== "undefined") {
 		const text = els.textInput.value.trim();
 		if (!text) {
 			setStatus("Enter text before sending.", "error");
+			return;
+		}
+		if (state.liveMode) {
+			await submitLiveText(text);
 			return;
 		}
 		setStatus("Sending text turn...");
@@ -1206,6 +1435,7 @@ if (typeof document !== "undefined") {
 	});
 	els.clearToken?.addEventListener("click", () => {
 		state.token = "";
+		closeLiveSocket();
 		if (els.tokenInput) els.tokenInput.value = "";
 		if (els.onboardingToken) els.onboardingToken.value = "";
 		saveSettings();
@@ -1260,6 +1490,7 @@ if (typeof document !== "undefined") {
 	});
 	els.liveModeToggle?.addEventListener("change", () => {
 		captureSettings();
+		if (!state.liveMode) closeLiveSocket();
 		saveSettings();
 		updateRecordingUi();
 	});

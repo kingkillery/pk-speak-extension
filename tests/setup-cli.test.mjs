@@ -73,6 +73,7 @@ test("pk-speak doctor reads saved setup config", async () => {
 		assert.match(stdout, /pk-speak doctor/);
 		assert.match(stdout, /Agent provider: codex/);
 		assert.match(stdout, /Gateway token: doct\.\.\.7890/);
+		assert.match(stdout, /Realtime terminal audit:/);
 	} finally {
 		await rm(configDir, { recursive: true, force: true });
 	}
@@ -128,12 +129,36 @@ test("pk-speak speak dry-run reads text args and sanitizes spoken output", async
 	assert.doesNotMatch(stdout, /\*\*/);
 });
 
+test("pk-speak speak help makes OS media-player fallback explicit", async () => {
+	const { stdout } = await execFileAsync(process.execPath, [
+		"dist/pk-speak.js",
+		"speak",
+		"--help",
+	], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /--allow-open-fallback/);
+	assert.match(stdout, /OS default app/);
+});
+
 test("pk-speak help includes wrap command", async () => {
 	const { stdout } = await execFileAsync(process.execPath, ["dist/pk-speak.js", "--help"], {
 		cwd: process.cwd(),
 	});
 	assert.match(stdout, /pk-speak wrap/);
 	assert.match(stdout, /Wrap examples:/);
+});
+
+test("pk-speak wrap help makes OS media-player fallback explicit", async () => {
+	const { stdout } = await execFileAsync(process.execPath, [
+		"dist/pk-speak.js",
+		"wrap",
+		"--help",
+	], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /--allow-open-fallback/);
+	assert.match(stdout, /OS default app/);
 });
 
 test("pk-speak wrap dry-run reports command plan", async () => {

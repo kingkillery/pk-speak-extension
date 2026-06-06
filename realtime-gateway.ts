@@ -9,8 +9,24 @@ import { discoverAgentInventoryCached } from "./agent-discovery.js";
 import { buildAgentResumeArgs, isResumableAgentSession } from "./agent-provider-registry.js";
 import { resolveAgentProviderConfig } from "./agent-provider.js";
 import { resolveWindowsNpmShim } from "./agent-discovery.js";
-import { exec, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { RealtimeControlMessage } from "./realtime-types.js";
+import {
+	createRealtimeTerminalApprovalRegistry,
+	type RealtimeTerminalApprovalRegistry,
+} from "./realtime-terminal-approval.js";
+import {
+	buildRealtimeTerminalCommandPlan,
+	classifyRealtimeTerminalCommand,
+	executeRealtimeTerminalCommandPlan,
+	type RealtimeTerminalCommandPlan,
+	type RealtimeTerminalCommandSafety,
+} from "./realtime-terminal-command.js";
+import {
+	appendRealtimeTerminalAuditEvent,
+	buildRealtimeTerminalAuditResult,
+	buildRealtimeTerminalPlanAuditFields,
+} from "./realtime-terminal-audit.js";
 
 // Helper to resolve current cwd of the active session
 function getCurrentCwd(): string {
@@ -67,10 +83,22 @@ interface ActiveSession {
 	serverSequenceId: number; // last assigned server sequence ID
 	disconnectTimeout?: NodeJS.Timeout;
 	pendingServerMessages: { seqId: number; isBinary: boolean; data: any }[];
+	terminalApprovals: RealtimeTerminalApprovalRegistry;
+	pendingTerminalCalls: Map<string, PendingTerminalCall>;
+	provider: string;
+	model: string;
 	server: any; // store server reference
 }
 
+type PendingTerminalCall = {
+	call: { id: string; name: string; args?: unknown };
+	plan: RealtimeTerminalCommandPlan;
+	timer?: ReturnType<typeof setTimeout>;
+};
+
 export const activeSessions = new Map<string, ActiveSession>();
+
+export { classifyRealtimeTerminalCommand, type RealtimeTerminalCommandSafety };
 
 export function sendToClient(activeSession: ActiveSession, message: any, isBinary: boolean) {
 	const seqId = ++activeSession.serverSequenceId;
@@ -107,6 +135,19 @@ export function sendToClient(activeSession: ActiveSession, message: any, isBinar
 	}
 }
 
+function appendTerminalAudit(activeSession: ActiveSession, event: Parameters<typeof appendRealtimeTerminalAuditEvent>[0]) {
+	try {
+		appendRealtimeTerminalAuditEvent({
+			sessionId: activeSession.sessionId,
+			provider: activeSession.provider,
+			model: activeSession.model,
+			...event,
+		});
+	} catch {
+		// Audit logging must never break realtime control flow.
+	}
+}
+
 function flushPendingServerMessages(activeSession: ActiveSession, lastReceivedServerSequenceId: number) {
 	const toSend = activeSession.pendingServerMessages.filter(m => m.seqId > lastReceivedServerSequenceId);
 	toSend.sort((a, b) => a.seqId - b.seqId);
@@ -121,6 +162,133 @@ function flushPendingServerMessages(activeSession: ActiveSession, lastReceivedSe
 		}
 	}
 	activeSession.pendingServerMessages = activeSession.pendingServerMessages.filter(m => m.seqId > lastReceivedServerSequenceId);
+}
+
+async function executeRealtimeTerminalCommand(
+	activeSession: ActiveSession,
+	plan: RealtimeTerminalCommandPlan,
+	toolCallId?: string,
+	approvalId?: string,
+) {
+	const cwd = getCurrentCwd();
+	const result = await executeRealtimeTerminalCommandPlan(plan, cwd);
+	appendTerminalAudit(activeSession, {
+		kind: "terminal.execution_result",
+		toolCallId,
+		approvalId,
+		...buildRealtimeTerminalPlanAuditFields(plan),
+		cwd,
+		result: buildRealtimeTerminalAuditResult(result),
+	});
+	return JSON.stringify({
+		ok: result.ok,
+		code: result.code,
+		command: plan.command,
+		cwd,
+		timeoutMs: plan.timeoutMs,
+		riskReason: plan.reason,
+		commandFamily: plan.family || "unregistered",
+		stdout: result.stdout,
+		stderr: result.stderr,
+	});
+}
+
+function sendRealtimeToolResponse(
+	activeSession: ActiveSession,
+	call: { id: string; name: string },
+	outputText: string,
+	approvalId?: string,
+) {
+	sendToClient(activeSession, {
+		type: "tool_complete",
+		name: call.name,
+		approvalId,
+		output: outputText,
+	}, false);
+
+	if (activeSession.session) {
+		activeSession.session.sendToolResponse({
+			functionResponses: [
+				{
+					id: call.id,
+					name: call.name,
+					response: {
+						output: outputText,
+					}
+				}
+			]
+		});
+	}
+}
+
+async function resolveTerminalApproval(
+	activeSession: ActiveSession,
+	approvalId: string | undefined,
+	approved: boolean,
+	reason = approved ? "approved" : "rejected",
+) {
+	const pending = approvalId ? activeSession.pendingTerminalCalls.get(approvalId) : undefined;
+	const approval = reason === "expired"
+		? activeSession.terminalApprovals.expire(approvalId)
+		: activeSession.terminalApprovals.resolve(approvalId, approved);
+	if (!approval || !pending) {
+		sendToClient(activeSession, {
+			type: "error",
+			message: `Terminal approval not found or expired: ${approvalId || "missing"}`,
+		}, false);
+		return;
+	}
+	if (pending.timer) clearTimeout(pending.timer);
+	activeSession.pendingTerminalCalls.delete(approval.id);
+	appendTerminalAudit(activeSession, {
+		kind: "terminal.approval_resolved",
+		toolCallId: pending.call.id,
+		approvalId: approval.id,
+		...buildRealtimeTerminalPlanAuditFields(pending.plan),
+		cwd: getCurrentCwd(),
+		approved,
+		decision: reason,
+	});
+	sendToClient(activeSession, {
+		type: "tool_approval_resolved",
+		approvalId: approval.id,
+		name: pending.call.name,
+		command: pending.plan.command,
+		cwd: getCurrentCwd(),
+		timeoutMs: pending.plan.timeoutMs,
+		reason: pending.plan.reason,
+		message: approved ? "Terminal command approved." : "Terminal command rejected.",
+	}, false);
+
+	const outputText = approved
+		? await executeRealtimeTerminalCommand(activeSession, pending.plan, pending.call.id, approval.id)
+		: (() => {
+			appendTerminalAudit(activeSession, {
+				kind: "terminal.execution_result",
+				toolCallId: pending.call.id,
+				approvalId: approval.id,
+				...buildRealtimeTerminalPlanAuditFields(pending.plan),
+				cwd: getCurrentCwd(),
+				result: buildRealtimeTerminalAuditResult({
+					ok: false,
+					code: null,
+					skipped: reason === "expired" ? "expired" : "rejected",
+				}),
+			});
+			return JSON.stringify({
+			ok: false,
+			rejected: true,
+			requiresConfirmation: true,
+			reason,
+			command: pending.plan.command,
+			cwd: getCurrentCwd(),
+			timeoutMs: pending.plan.timeoutMs,
+			riskReason: pending.plan.reason,
+			commandFamily: pending.plan.family || "unregistered",
+			message: "Realtime terminal command was not approved by the operator.",
+			});
+		})();
+	sendRealtimeToolResponse(activeSession, pending.call, outputText, approval.id);
 }
 
 function setupSocketHandlers(activeSession: ActiveSession) {
@@ -156,7 +324,9 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 					activeSession.clientSequenceId = Math.max(activeSession.clientSequenceId, ctrl.clientSequenceId);
 				}
 
-				if (ctrl.type === "interrupt") {
+				if (ctrl.type === "terminal_approve" || ctrl.type === "terminal_reject") {
+					void resolveTerminalApproval(activeSession, ctrl.approvalId, ctrl.type === "terminal_approve");
+				} else if (ctrl.type === "interrupt") {
 					// Barge-in / Interrupt from client
 					if (activeSession.session) {
 						activeSession.session.sendRealtimeInput({ activityStart: {} });
@@ -193,6 +363,7 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 
 async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, firstMsgIsBinary?: boolean) {
 	const sessionId = "sess_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
+	const model = getGeminiLiveModel();
 	
 	const activeSession: ActiveSession = {
 		sessionId,
@@ -201,7 +372,11 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 		clientSequenceId: 0,
 		serverSequenceId: 0,
 		pendingServerMessages: [],
-		server
+		server,
+		terminalApprovals: createRealtimeTerminalApprovalRegistry(),
+		pendingTerminalCalls: new Map(),
+		provider: process.env.AGENT_PROVIDER || "gemini-live",
+		model,
 	};
 	activeSessions.set(sessionId, activeSession);
 
@@ -211,7 +386,6 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 		session: sessionId
 	}, false);
 
-	const model = getGeminiLiveModel();
 	const clientConfig = createGeminiClient(process.env, { live: true });
 	const ai = clientConfig.ai;
 
@@ -301,6 +475,8 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 					if (message.toolCall?.functionCalls) {
 						for (const call of message.toolCall.functionCalls) {
 							if (!call.name || !call.id) continue;
+							const toolCall = { id: call.id, name: call.name };
+							let deferToolResponse = false;
 							
 							// Send tool_start event
 							sendToClient(activeSession, {
@@ -315,23 +491,82 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 									const command = call.args?.command as string;
 									if (!command) {
 										outputText = JSON.stringify({ ok: false, error: "Missing 'command' argument" });
+										appendTerminalAudit(activeSession, {
+											kind: "terminal.request",
+											toolCallId: toolCall.id,
+											command: "",
+											action: "requires_confirmation",
+											reason: "missing-command",
+											cwd: getCurrentCwd(),
+										});
+										appendTerminalAudit(activeSession, {
+											kind: "terminal.execution_result",
+											toolCallId: toolCall.id,
+											command: "",
+											action: "requires_confirmation",
+											reason: "missing-command",
+											cwd: getCurrentCwd(),
+											result: buildRealtimeTerminalAuditResult({
+												ok: false,
+												code: null,
+												skipped: "missing-command",
+												stderr: "Missing 'command' argument",
+											}),
+										});
 									} else {
-										const cwd = getCurrentCwd();
-										const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve) => {
-											exec(command, { cwd, timeout: 30000 }, (error, stdout, stderr) => {
-												resolve({
-													stdout,
-													stderr,
-													code: error?.code ?? 0,
-												});
+										const plan = buildRealtimeTerminalCommandPlan(command);
+										appendTerminalAudit(activeSession, {
+											kind: "terminal.request",
+											toolCallId: toolCall.id,
+											...buildRealtimeTerminalPlanAuditFields(plan),
+											cwd: getCurrentCwd(),
+										});
+										if (plan.action !== "allow") {
+											outputText = JSON.stringify({
+												ok: false,
+												requiresConfirmation: true,
+												reason: plan.reason,
+												command,
+												cwd: getCurrentCwd(),
+												timeoutMs: plan.timeoutMs,
+												commandFamily: plan.family || "unregistered",
+												executableKnown: plan.executableKnown,
+												secretInspection: plan.secretInspection,
+												message: "Realtime terminal execution is limited to read-only allowlisted commands. Ask the user for explicit confirmation before running this command outside the realtime tool.",
 											});
-										});
-										outputText = JSON.stringify({
-											ok: result.code === 0,
-											code: result.code,
-											stdout: result.stdout,
-											stderr: result.stderr,
-										});
+											const approval = activeSession.terminalApprovals.request(command, plan.reason);
+											const timeoutMs = Math.max(0, approval.expiresAt - Date.now());
+											const timer = setTimeout(() => {
+												void resolveTerminalApproval(activeSession, approval.id, false, "expired");
+											}, timeoutMs);
+											timer.unref?.();
+											activeSession.pendingTerminalCalls.set(approval.id, {
+												call: { ...toolCall, args: call.args },
+												plan,
+												timer,
+											});
+											appendTerminalAudit(activeSession, {
+												kind: "terminal.approval_requested",
+												toolCallId: toolCall.id,
+												approvalId: approval.id,
+												...buildRealtimeTerminalPlanAuditFields(plan),
+												cwd: getCurrentCwd(),
+											});
+											sendToClient(activeSession, {
+												type: "tool_approval_required",
+												approvalId: approval.id,
+												name: call.name,
+												command,
+												cwd: getCurrentCwd(),
+												timeoutMs: plan.timeoutMs,
+												reason: plan.reason,
+												message: "Confirm to run this terminal command.",
+												output: outputText,
+											}, false);
+											deferToolResponse = true;
+										} else {
+											outputText = await executeRealtimeTerminalCommand(activeSession, plan, toolCall.id);
+										}
 									}
 								} else if (call.name === "switch_session") {
 									const name = call.args?.name as string;
@@ -461,28 +696,9 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 							} catch (err: any) {
 								outputText = JSON.stringify({ ok: false, error: err.message });
 							}
+							if (deferToolResponse) continue;
 
-							// Send tool_complete event
-							sendToClient(activeSession, {
-								type: "tool_complete",
-								name: call.name,
-								output: outputText,
-							}, false);
-
-							// Send function response back to Gemini Live
-							if (activeSession.session) {
-								activeSession.session.sendToolResponse({
-									functionResponses: [
-										{
-											id: call.id,
-											name: call.name,
-											response: {
-												output: outputText,
-											}
-										}
-									]
-								});
-							}
+							sendRealtimeToolResponse(activeSession, toolCall, outputText);
 						}
 					}
 				},
@@ -582,4 +798,3 @@ function findSessionNameByPath(sessionPath: string, sessions: Record<string, str
 	}
 	return undefined;
 }
-

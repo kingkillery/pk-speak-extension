@@ -853,6 +853,40 @@
 			font-size: 11px;
 		}
 
+		.terminal-approvals {
+			display: grid;
+			gap: 8px;
+		}
+		.approval-card {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			gap: 10px;
+			align-items: center;
+			padding: 10px;
+			border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line));
+			border-radius: 8px;
+			background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+		}
+		.approval-body {
+			display: grid;
+			gap: 4px;
+			min-width: 0;
+		}
+		.approval-body code {
+			display: block;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+			color: var(--ink);
+		}
+		.approval-actions {
+			display: flex;
+			gap: 8px;
+		}
+		.approval-actions button {
+			min-height: 36px;
+		}
+
 		.workspace-browser {
 			display: grid;
 			gap: 6px;
@@ -993,6 +1027,7 @@
 			<div class="dock-inner">
 				<div class="dock-status">
 					<div id="status-note" class="status-note">Connecting...</div>
+					<div id="terminal-approvals" class="terminal-approvals hidden" aria-live="polite"></div>
 					<div class="audio-controls-wrapper hidden" id="audio-controls-wrapper">
 						<div class="audio-controls">
 							<audio id="reply-audio" controls preload="none" class="hidden"></audio>

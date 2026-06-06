@@ -2,9 +2,80 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
 import { ControlServer } from "../dist/control-server.js";
+import { classifyRealtimeTerminalCommand } from "../dist/realtime-gateway.js";
+import {
+	buildRealtimeTerminalCommandPlan,
+	executeRealtimeTerminalCommandPlan,
+} from "../dist/realtime-terminal-command.js";
 
 const TEST_PORT = 18768;
 const TEST_TOKEN = "test-secret-token";
+
+test("realtime terminal safety allows only read-only commands", () => {
+	for (const command of [
+		"git status",
+		"git status --short",
+		"npm test",
+		"npm run build",
+		"rg execute_terminal_command realtime-gateway.ts",
+		"Get-Content package.json",
+	]) {
+		assert.deepEqual(
+			classifyRealtimeTerminalCommand(command),
+			{ action: "allow", reason: "read-only-allowlist" },
+			command,
+		);
+	}
+});
+
+test("realtime terminal safety requires confirmation for risky or unknown commands", () => {
+	const cases = [
+		["npm install", "mutating-command"],
+		["git commit -m test", "mutating-command"],
+		["Remove-Item dist -Recurse", "mutating-command"],
+		["rg TODO > todo.txt", "shell-control-operator"],
+		["git status && npm install", "shell-control-operator"],
+		["git status\nnpm install", "shell-control-operator"],
+		["node scripts/write-file.js", "not-on-read-only-allowlist"],
+		["rg API_KEY .", "secret-inspection"],
+		["Get-Content .env", "secret-inspection"],
+	];
+	for (const [command, reason] of cases) {
+		assert.deepEqual(
+			classifyRealtimeTerminalCommand(command),
+			{ action: "requires_confirmation", reason },
+			command,
+		);
+	}
+});
+
+test("realtime terminal command registry creates argv plans without a shell", () => {
+	const plan = buildRealtimeTerminalCommandPlan("git status --short");
+	assert.equal(plan.action, "allow");
+	assert.equal(plan.executableKnown, true);
+	assert.equal(plan.executable, "git");
+	assert.deepEqual(plan.args, ["status", "--short"]);
+
+	const commitPlan = buildRealtimeTerminalCommandPlan('git commit -m "test message"');
+	assert.equal(commitPlan.action, "requires_confirmation");
+	assert.equal(commitPlan.reason, "mutating-command");
+	assert.equal(commitPlan.executableKnown, true);
+	assert.deepEqual(commitPlan.args, ["commit", "-m", "test message"]);
+
+	const unknownPlan = buildRealtimeTerminalCommandPlan("python write.py");
+	assert.equal(unknownPlan.action, "requires_confirmation");
+	assert.equal(unknownPlan.executableKnown, false);
+});
+
+test("realtime terminal command registry executes Get-Content internally", async () => {
+	const plan = buildRealtimeTerminalCommandPlan("Get-Content package.json");
+	assert.equal(plan.action, "allow");
+	assert.equal(plan.internal, "get-content");
+
+	const result = await executeRealtimeTerminalCommandPlan(plan, process.cwd());
+	assert.equal(result.ok, true);
+	assert.match(result.stdout, /"name": "pk-speak"/);
+});
 
 test("WebSocket realtime gateway authentication and routing", async (t) => {
 	let connectionReceived = false;

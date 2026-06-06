@@ -73,6 +73,8 @@ artifacts/
 !.codex/skills/llm-as-verifier/**
 !.codex/skills/llm-wiki-skills/
 !.codex/skills/llm-wiki-skills/**
+!.codex/skills/pk-speak/
+!.codex/skills/pk-speak/**
 !.codex/skills/pokemon-benchmark/
 !.codex/skills/pokemon-benchmark/**
 .build-outputs/
