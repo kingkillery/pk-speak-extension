@@ -120,6 +120,94 @@ test("sag diagnostics expose command and auth availability without secrets", asy
 	});
 });
 
+test("higgs provider is available only when reference audio is configured", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-higgs-"));
+	const referencePath = join(tempDir, "reference.wav");
+	try {
+		await writeFile(referencePath, Buffer.from([0, 1, 2, 3]));
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "higgs",
+			PI_SPEAK_HIGGS_REFERENCE_AUDIO: undefined,
+		}, async () => {
+			assert.notEqual(tts.resolveTtsProvider(), "higgs");
+		});
+
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "higgs",
+			PI_SPEAK_HIGGS_REFERENCE_AUDIO: referencePath,
+		}, async () => {
+			assert.equal(tts.resolveTtsProvider(), "higgs");
+			const diagnostics = tts.getTtsDiagnostics();
+			assert.equal(diagnostics.providers.higgs.available, true);
+			assert.equal(diagnostics.providers.higgs.referenceAudioConfigured, true);
+		});
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("higgs writes speech through the gradio provider hook", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-higgs-synth-"));
+	const referencePath = join(tempDir, "reference.wav");
+	const outputPath = join(tempDir, "higgs.mp3");
+	let seenText = "";
+	try {
+		await writeFile(referencePath, Buffer.from([0, 1, 2, 3]));
+		tts.testOverrides.synthesizeHiggs = async (text, path) => {
+			seenText = text;
+			await writeFile(path, "higgs audio");
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "higgs",
+			PI_SPEAK_HIGGS_REFERENCE_AUDIO: referencePath,
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			const result = await tts.synthesizeToFile({
+				text: "spoken by higgs",
+				outputPath,
+				state: { provider: "higgs", rewriteEnabled: false },
+			});
+			assert.equal(result.provider, "higgs");
+			assert.equal(seenText, "spoken by higgs");
+			assert.equal(await readFile(outputPath, "utf8"), "higgs audio");
+		});
+	} finally {
+		tts.testOverrides.synthesizeHiggs = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("stable-audio writes generated prompt audio through the gradio provider hook", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-stable-audio-"));
+	const outputPath = join(tempDir, "stable.mp3");
+	let seenPrompt = "";
+	try {
+		tts.testOverrides.synthesizeStableAudio = async (text, path) => {
+			seenPrompt = text;
+			await writeFile(path, "stable audio");
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "stable-audio",
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			const result = await tts.synthesizeToFile({
+				text: "short alert sound",
+				outputPath,
+				state: { provider: "stable-audio", rewriteEnabled: false },
+			});
+			assert.equal(result.provider, "stable-audio");
+			assert.equal(seenPrompt, "short alert sound");
+			assert.equal(await readFile(outputPath, "utf8"), "stable audio");
+			assert.equal(tts.getTtsDiagnostics().providers.stableAudio.available, true);
+		});
+	} finally {
+		tts.testOverrides.synthesizeStableAudio = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
 test("sag writes spoken text to stdin without including it in argv", async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-sag-"));
 	const previousCwd = process.cwd();

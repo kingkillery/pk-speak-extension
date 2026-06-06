@@ -1,11 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, delimiter, join } from "node:path";
 import { withAbortTimeout } from "./request-timeout.js";
 
-export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs" | "sag";
+export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs" | "sag" | "higgs" | "stable-audio";
 
 export type SpeakRuntimeState = {
 	enabled?: boolean;
@@ -42,6 +42,21 @@ export const DEFAULT_ELEVENLABS_OUTPUT_FORMAT =
 export const DEFAULT_SAG_MODEL_ID = process.env.PI_SPEAK_SAG_MODEL_ID || DEFAULT_ELEVENLABS_MODEL_ID;
 export const DEFAULT_SAG_VOICE =
 	process.env.PI_SPEAK_SAG_VOICE || process.env.ELEVENLABS_VOICE_ID || DEFAULT_ELEVENLABS_VOICE_ID;
+export const DEFAULT_HIGGS_SPACE = process.env.PI_SPEAK_HIGGS_SPACE || "multimodalart/higgs-audio-v3-tts";
+export const DEFAULT_HIGGS_REFERENCE_AUDIO = process.env.PI_SPEAK_HIGGS_REFERENCE_AUDIO || "";
+export const DEFAULT_HIGGS_REFERENCE_TEXT = process.env.PI_SPEAK_HIGGS_REFERENCE_TEXT || "";
+export const DEFAULT_HIGGS_TEMPERATURE = Number.parseFloat(process.env.PI_SPEAK_HIGGS_TEMPERATURE || "0.7");
+export const DEFAULT_HIGGS_TOP_P = Number.parseFloat(process.env.PI_SPEAK_HIGGS_TOP_P || "0.95");
+export const DEFAULT_HIGGS_TOP_K = Number.parseInt(process.env.PI_SPEAK_HIGGS_TOP_K || "50", 10);
+export const DEFAULT_HIGGS_MAX_NEW_TOKENS = Number.parseInt(process.env.PI_SPEAK_HIGGS_MAX_NEW_TOKENS || "2048", 10);
+export const DEFAULT_HIGGS_SEED = Number.parseInt(process.env.PI_SPEAK_HIGGS_SEED || "-1", 10);
+export const DEFAULT_STABLE_AUDIO_SPACE = process.env.PI_SPEAK_STABLE_AUDIO_SPACE || "stabilityai/stable-audio-3";
+export const DEFAULT_STABLE_AUDIO_VARIANT = process.env.PI_SPEAK_STABLE_AUDIO_VARIANT || "small-sfx";
+export const DEFAULT_STABLE_AUDIO_DURATION = Number.parseFloat(process.env.PI_SPEAK_STABLE_AUDIO_DURATION || "8");
+export const DEFAULT_STABLE_AUDIO_STEPS = Number.parseInt(process.env.PI_SPEAK_STABLE_AUDIO_STEPS || "8", 10);
+export const DEFAULT_STABLE_AUDIO_CFG_SCALE = Number.parseFloat(process.env.PI_SPEAK_STABLE_AUDIO_CFG_SCALE || "1.0");
+export const DEFAULT_STABLE_AUDIO_SAMPLER = process.env.PI_SPEAK_STABLE_AUDIO_SAMPLER || "pingpong";
+export const DEFAULT_STABLE_AUDIO_SEED = Number.parseInt(process.env.PI_SPEAK_STABLE_AUDIO_SEED || "0", 10);
 export const DEFAULT_REWRITE_MODEL =
 	process.env.PI_SPEAK_REWRITE_MODEL || "openai/gpt-oss-20b:nitro";
 
@@ -177,6 +192,21 @@ export function hasSag() {
 	return isCommandAvailable(getSagCommand());
 }
 
+export function hasHiggsReferenceAudio() {
+	const reference = getHiggsReferenceAudio().trim();
+	if (!reference) return false;
+	if (/^https?:\/\//i.test(reference)) return true;
+	return existsSync(reference);
+}
+
+function getHiggsReferenceAudio() {
+	return process.env.PI_SPEAK_HIGGS_REFERENCE_AUDIO || DEFAULT_HIGGS_REFERENCE_AUDIO;
+}
+
+function getHiggsReferenceText() {
+	return process.env.PI_SPEAK_HIGGS_REFERENCE_TEXT || DEFAULT_HIGGS_REFERENCE_TEXT;
+}
+
 function isProviderAvailable(provider: Exclude<TtsProvider, "auto">) {
 	switch (provider) {
 		case "legacy":
@@ -189,6 +219,10 @@ function isProviderAvailable(provider: Exclude<TtsProvider, "auto">) {
 			return hasSag() && !!process.env.ELEVENLABS_API_KEY;
 		case "edge":
 			return hasEdgeTts();
+		case "higgs":
+			return hasHiggsReferenceAudio();
+		case "stable-audio":
+			return true;
 	}
 }
 
@@ -281,6 +315,10 @@ export function describeTtsProvider(state?: SpeakRuntimeState) {
 			return `elevenlabs (${DEFAULT_ELEVENLABS_VOICE_ID})`;
 		case "sag":
 			return `sag (${DEFAULT_SAG_MODEL_ID}/${DEFAULT_SAG_VOICE})`;
+		case "higgs":
+			return `higgs (${DEFAULT_HIGGS_SPACE})`;
+		case "stable-audio":
+			return `stable-audio (${DEFAULT_STABLE_AUDIO_SPACE}/${DEFAULT_STABLE_AUDIO_VARIANT})`;
 	}
 }
 
@@ -316,6 +354,27 @@ export function getTtsDiagnostics(state?: SpeakRuntimeState) {
 				model: DEFAULT_SAG_MODEL_ID,
 				voice: DEFAULT_SAG_VOICE,
 				outputFormat: DEFAULT_ELEVENLABS_OUTPUT_FORMAT,
+			},
+			higgs: {
+				available: hasHiggsReferenceAudio(),
+				space: DEFAULT_HIGGS_SPACE,
+				referenceAudioConfigured: !!getHiggsReferenceAudio().trim(),
+				referenceTextConfigured: !!getHiggsReferenceText().trim(),
+				temperature: DEFAULT_HIGGS_TEMPERATURE,
+				topP: DEFAULT_HIGGS_TOP_P,
+				topK: DEFAULT_HIGGS_TOP_K,
+				maxNewTokens: DEFAULT_HIGGS_MAX_NEW_TOKENS,
+				seed: DEFAULT_HIGGS_SEED,
+			},
+			stableAudio: {
+				available: true,
+				space: DEFAULT_STABLE_AUDIO_SPACE,
+				variant: DEFAULT_STABLE_AUDIO_VARIANT,
+				duration: DEFAULT_STABLE_AUDIO_DURATION,
+				steps: DEFAULT_STABLE_AUDIO_STEPS,
+				cfgScale: DEFAULT_STABLE_AUDIO_CFG_SCALE,
+				sampler: DEFAULT_STABLE_AUDIO_SAMPLER,
+				seed: DEFAULT_STABLE_AUDIO_SEED,
 			},
 		},
 	};
@@ -452,6 +511,199 @@ async function synthesizeElevenLabs(text: string, outputPath: string, signal?: A
 	await writeFile(outputPath, audio);
 }
 
+function getGradioSpaceBase(space: string) {
+	const trimmed = space.trim();
+	if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/$/, "");
+	return `https://${trimmed.replace("/", "-")}.hf.space`;
+}
+
+async function uploadGradioFile(space: string, filePathOrUrl: string, signal?: AbortSignal) {
+	const baseUrl = getGradioSpaceBase(space);
+	const source = filePathOrUrl.trim();
+	if (!source) throw new Error("A Gradio audio file path or URL is required");
+
+	let bytes: Buffer;
+	let fileName: string;
+	if (/^https?:\/\//i.test(source)) {
+		const response = await withAbortTimeout(
+			(requestSignal) => fetch(source, { signal: requestSignal }),
+			signal,
+		);
+		if (!response.ok) throw new Error(`Failed to fetch Gradio upload source (${response.status})`);
+		bytes = Buffer.from(await response.arrayBuffer());
+		fileName = basename(new URL(source).pathname) || "reference-audio.wav";
+	} else {
+		bytes = await readFile(source);
+		fileName = basename(source) || "reference-audio.wav";
+	}
+
+	const form = new FormData();
+	form.append("files", new Blob([new Uint8Array(bytes)]), fileName);
+	const uploadResponse = await withAbortTimeout(
+		(requestSignal) =>
+			fetch(`${baseUrl}/upload`, {
+				method: "POST",
+				body: form,
+				signal: requestSignal,
+			}),
+		signal,
+	);
+	if (!uploadResponse.ok) {
+		throw new Error(`Gradio upload failed (${uploadResponse.status})`);
+	}
+	const uploadJson = await uploadResponse.json();
+	const uploadedPath = Array.isArray(uploadJson) ? uploadJson[0] : uploadJson?.[0] || uploadJson?.path;
+	if (typeof uploadedPath !== "string" || !uploadedPath) {
+		throw new Error("Gradio upload did not return a file path");
+	}
+	return {
+		path: uploadedPath,
+		meta: { _type: "gradio.FileData" },
+	};
+}
+
+function parseGradioEventData(streamText: string) {
+	let latestData: unknown;
+	for (const block of streamText.split(/\n\n+/)) {
+		const lines = block.split(/\r?\n/);
+		const eventLine = lines.find((line) => line.startsWith("event:"));
+		const dataLines = lines
+			.filter((line) => line.startsWith("data:"))
+			.map((line) => line.slice("data:".length).trim());
+		if (!dataLines.length) continue;
+		const dataText = dataLines.join("\n");
+		if (!dataText || dataText === "null") continue;
+		try {
+			const parsed = JSON.parse(dataText);
+			latestData = parsed;
+			if (eventLine?.includes("complete")) return parsed;
+		} catch {
+			latestData = dataText;
+		}
+	}
+	return latestData;
+}
+
+async function callGradioApi(space: string, apiName: string, payload: Record<string, unknown>, signal?: AbortSignal) {
+	const baseUrl = getGradioSpaceBase(space);
+	const endpoint = apiName.replace(/^\//, "");
+	const startResponse = await withAbortTimeout(
+		(requestSignal) =>
+			fetch(`${baseUrl}/call/v2/${endpoint}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(payload),
+				signal: requestSignal,
+			}),
+		signal,
+	);
+	if (!startResponse.ok) {
+		throw new Error(`Gradio ${apiName} start failed (${startResponse.status})`);
+	}
+	const startJson = await startResponse.json();
+	const eventId = startJson?.event_id || startJson?.eventId || startJson?.id;
+	if (typeof eventId !== "string" || !eventId) {
+		throw new Error(`Gradio ${apiName} did not return an event id`);
+	}
+
+	const eventResponse = await withAbortTimeout(
+		(requestSignal) =>
+			fetch(`${baseUrl}/call/${endpoint}/${eventId}`, {
+				headers: { Accept: "text/event-stream" },
+				signal: requestSignal,
+			}),
+		signal,
+	);
+	if (!eventResponse.ok) {
+		throw new Error(`Gradio ${apiName} event stream failed (${eventResponse.status})`);
+	}
+	return parseGradioEventData(await eventResponse.text());
+}
+
+function extractGradioAudioRef(value: unknown): string | undefined {
+	if (typeof value === "string") return value;
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const ref = extractGradioAudioRef(item);
+			if (ref) return ref;
+		}
+		return undefined;
+	}
+	if (value && typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		for (const key of ["url", "path", "name"]) {
+			const candidate = record[key];
+			if (typeof candidate === "string" && candidate) return candidate;
+		}
+		for (const key of ["data", "value", "file"]) {
+			const ref = extractGradioAudioRef(record[key]);
+			if (ref) return ref;
+		}
+	}
+	return undefined;
+}
+
+async function writeGradioAudioOutput(space: string, gradioResult: unknown, outputPath: string, signal?: AbortSignal) {
+	const audioRef = extractGradioAudioRef(gradioResult);
+	if (!audioRef) throw new Error("Gradio response did not include an audio output");
+	const baseUrl = getGradioSpaceBase(space);
+	const audioUrl = /^https?:\/\//i.test(audioRef)
+		? audioRef
+		: audioRef.startsWith("/file=")
+			? `${baseUrl}${audioRef}`
+			: audioRef.startsWith("file=")
+				? `${baseUrl}/${audioRef}`
+				: `${baseUrl}/file=${audioRef}`;
+	const audioResponse = await withAbortTimeout(
+		(requestSignal) => fetch(audioUrl, { signal: requestSignal }),
+		signal,
+	);
+	if (!audioResponse.ok) {
+		throw new Error(`Failed to download Gradio audio output (${audioResponse.status})`);
+	}
+	await writeFile(outputPath, Buffer.from(await audioResponse.arrayBuffer()));
+}
+
+async function synthesizeHiggs(text: string, outputPath: string, signal?: AbortSignal) {
+	const referenceAudio = getHiggsReferenceAudio().trim();
+	if (!referenceAudio) {
+		throw new Error("PI_SPEAK_HIGGS_REFERENCE_AUDIO is required for Higgs TTS");
+	}
+	const referenceAudioFile = await uploadGradioFile(DEFAULT_HIGGS_SPACE, referenceAudio, signal);
+	const referenceText = getHiggsReferenceText().trim() || String(
+		await callGradioApi(DEFAULT_HIGGS_SPACE, "/transcribe", {
+			reference_audio: referenceAudioFile,
+		}, signal),
+	).trim();
+	if (!referenceText) {
+		throw new Error("PI_SPEAK_HIGGS_REFERENCE_TEXT is required when Higgs transcription is unavailable");
+	}
+	const result = await callGradioApi(DEFAULT_HIGGS_SPACE, "/synthesize", {
+		text,
+		reference_audio: referenceAudioFile,
+		reference_text: referenceText,
+		temperature: DEFAULT_HIGGS_TEMPERATURE,
+		top_p: DEFAULT_HIGGS_TOP_P,
+		top_k: DEFAULT_HIGGS_TOP_K,
+		max_new_tokens: DEFAULT_HIGGS_MAX_NEW_TOKENS,
+		seed: DEFAULT_HIGGS_SEED,
+	}, signal);
+	await writeGradioAudioOutput(DEFAULT_HIGGS_SPACE, result, outputPath, signal);
+}
+
+async function synthesizeStableAudio(text: string, outputPath: string, signal?: AbortSignal) {
+	const result = await callGradioApi(DEFAULT_STABLE_AUDIO_SPACE, "/infer", {
+		variant_key: DEFAULT_STABLE_AUDIO_VARIANT,
+		prompt: text,
+		duration: DEFAULT_STABLE_AUDIO_DURATION,
+		steps: DEFAULT_STABLE_AUDIO_STEPS,
+		cfg_scale: DEFAULT_STABLE_AUDIO_CFG_SCALE,
+		sampler_type: DEFAULT_STABLE_AUDIO_SAMPLER,
+		seed: DEFAULT_STABLE_AUDIO_SEED,
+	}, signal);
+	await writeGradioAudioOutput(DEFAULT_STABLE_AUDIO_SPACE, result, outputPath, signal);
+}
+
 function synthesizeLegacy(text: string, outputPath: string, signal?: AbortSignal, onPhase?: (phase: SynthesisPhase) => void, onLegacyProcess?: (process: ChildProcess | undefined) => void) {
 	return new Promise<void>((resolve, reject) => {
 		const { command, args } = getSpeak11Invocation(outputPath);
@@ -582,6 +834,8 @@ export function abortAllActiveTTS() {
 export const testOverrides = {
 	synthesizeElevenLabs: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
 	synthesizeEdge: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
+	synthesizeHiggs: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
+	synthesizeStableAudio: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
 };
 
 export async function synthesizeToFile(options: SynthesisOptions): Promise<SynthesisResult> {
@@ -644,11 +898,25 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 				case "sag":
 					await synthesizeSag(spokenText, options.outputPath, localController.signal);
 					break;
+				case "higgs":
+					if (testOverrides.synthesizeHiggs) {
+						await testOverrides.synthesizeHiggs(spokenText, options.outputPath, localController.signal);
+					} else {
+						await synthesizeHiggs(spokenText, options.outputPath, localController.signal);
+					}
+					break;
+				case "stable-audio":
+					if (testOverrides.synthesizeStableAudio) {
+						await testOverrides.synthesizeStableAudio(spokenText, options.outputPath, localController.signal);
+					} else {
+						await synthesizeStableAudio(spokenText, options.outputPath, localController.signal);
+					}
+					break;
 				default:
 					throw new Error(`Unsupported TTS provider: ${provider satisfies never}`);
 			}
 		} catch (error) {
-			if (provider === "openai" || provider === "elevenlabs" || provider === "sag") {
+			if (provider === "openai" || provider === "elevenlabs" || provider === "sag" || provider === "higgs" || provider === "stable-audio") {
 				console.warn(`[TTS Fallback] Primary provider '${provider}' failed: ${getErrorMessage(error)}. Falling back to 'edge' TTS. Metrics: { timestamp: ${Date.now()}, originalProvider: "${provider}", targetProvider: "edge", error: "${getErrorMessage(error)}" }`);
 				if (testOverrides.synthesizeEdge) {
 					await testOverrides.synthesizeEdge(spokenText, options.outputPath, localController.signal);

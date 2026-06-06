@@ -279,7 +279,7 @@ function printWrapHelp() {
 		"",
 		"Options:",
 		"  --label <name>             Friendly name to say",
-		"  --provider <auto|edge|elevenlabs|openai|sag|legacy>",
+		"  --provider <auto|edge|elevenlabs|openai|sag|higgs|stable-audio|legacy>",
 		"  --cwd <path>               Working directory for the command",
 		"  --shell                    Run through the platform shell",
 		"  --capture                  Mirror and classify stdout/stderr",
@@ -460,6 +460,8 @@ function normalizeTtsProvider(value: string | undefined): TtsProvider | undefine
 		|| normalized === "openai"
 		|| normalized === "elevenlabs"
 		|| normalized === "sag"
+		|| normalized === "higgs"
+		|| normalized === "stable-audio"
 	) {
 		return normalized;
 	}
