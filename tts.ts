@@ -271,7 +271,12 @@ export function sanitizeForSpeech(text: string): string {
 	// Inline code and emphasis markers: keep the word, drop the markup.
 	out = out.replace(/`([^`]+)`/g, "$1");
 	out = out.replace(/(\*\*|__)(.*?)\1/g, "$2");
-	out = out.replace(/(\*|_)(?=\S)(.*?)(?<=\S)\1/g, "$2");
+	// Single-emphasis. `*` may be intraword, but `_` is emphasis ONLY at word
+	// boundaries (CommonMark) — otherwise snake_case identifiers get mangled into
+	// "snakecaseword" when spoken. Handle the two markers separately so an
+	// underscore inside an identifier is left intact.
+	out = out.replace(/\*(?=\S)([^*]*?)(?<=\S)\*/g, "$1");
+	out = out.replace(/(^|[^A-Za-z0-9_])_(?=\S)([^_]*?)(?<=\S)_(?![A-Za-z0-9_])/g, "$1$2");
 	out = out.replace(/~~(.*?)~~/g, "$1");
 
 	// Line-leading structure: headings, blockquotes, and list bullets.

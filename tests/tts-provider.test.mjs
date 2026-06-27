@@ -94,6 +94,18 @@ test("sanitizeForSpeech is idempotent on already-clean text", () => {
 	assert.equal(tts.sanitizeForSpeech(tts.sanitizeForSpeech(clean)), clean);
 });
 
+test("sanitizeForSpeech preserves snake_case identifiers but still strips word-bounded _emphasis_", () => {
+	// Regression: intraword underscores were treated as markdown emphasis, mangling
+	// "snake_case_word" into "snakecaseword" (and joining the words) when spoken.
+	const out = tts.sanitizeForSpeech("call really_long_identifier_name and foo_bar(), then _emphasize_ this");
+	assert.match(out, /really_long_identifier_name/, "snake_case identifier kept intact");
+	assert.match(out, /foo_bar/, "snake_case with parens kept intact");
+	assert.match(out, /\bemphasize\b/, "word-bounded _emphasis_ still unwrapped");
+	assert.equal(out.includes("_emphasize_"), false, "emphasis markers removed");
+	// Asterisk emphasis is still stripped (it may be intraword in markdown).
+	assert.equal(tts.sanitizeForSpeech("this is *bold* now"), "this is bold now");
+});
+
 test("sanitize can be disabled and is reflected in diagnostics", async () => {
 	await withEnv({ PI_SPEAK_SANITIZE: undefined }, async () => {
 		assert.equal(tts.isSanitizeEnabled(), true);
