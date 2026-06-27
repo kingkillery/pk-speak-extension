@@ -886,6 +886,10 @@ export class ControlServer {
 		}
 
 		if (req.method === "POST" && url.pathname === "/v1/omp/select-session") {
+			if (!this.onOmpSelectSession) {
+				this.writeJson(res, 501, { ok: false, error: "Omp session selection is not available on this gateway." });
+				return;
+			}
 			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 			const rawPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
 			const explicitClient = typeof payload?.clientId === "string" ? payload.clientId : undefined;
@@ -904,8 +908,12 @@ export class ControlServer {
 		}
 
 		if (req.method === "GET" && url.pathname === "/v1/omp/selected-session") {
+			if (!this.onOmpGetSelectedSession) {
+				this.writeJson(res, 501, { ok: false, error: "Omp session selection is not available on this gateway." });
+				return;
+			}
 			const clientKey = this.clientKey(req, url.searchParams.get("clientId") || undefined);
-			const sessionPath = this.onOmpGetSelectedSession?.(clientKey) ?? null;
+			const sessionPath = this.onOmpGetSelectedSession(clientKey) ?? null;
 			this.writeJson(res, 200, { ok: true, sessionPath });
 			return;
 		}

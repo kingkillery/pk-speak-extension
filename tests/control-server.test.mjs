@@ -1570,3 +1570,30 @@ test("omp select-session surfaces validation failure as 400 (review H2)", async 
 		assert.equal((await clear.json()).cleared, true);
 	});
 });
+
+test("omp select-session returns 501 (not a fake 200) when callback is missing", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/omp/select-session",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ sessionPath: "/x.jsonl" }),
+		});
+		assert.equal(response.statusCode, 501, "must not claim success when no handler stored the selection");
+		assert.equal((await response.json()).ok, false);
+	});
+});
+
+test("omp selected-session returns 501 when callback is missing", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/omp/selected-session",
+			method: "GET",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 501);
+		assert.equal((await response.json()).ok, false);
+	});
+});

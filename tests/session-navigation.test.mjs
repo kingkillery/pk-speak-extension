@@ -109,6 +109,40 @@ test("archive then recover round-trips an oh-my-pi background lane", () => {
 	}
 });
 
+test("archive resolves the path before reading/writing (raw vs resolved consistency)", () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-nav-"));
+	try {
+		const sessionsRoot = join(tmp, "sessions");
+		const projectDir = join(sessionsRoot, "C-dev-repo");
+		mkdirSync(projectDir, { recursive: true });
+		const canonical = join(projectDir, "2026-06-23T000000_lane.jsonl");
+		writeFileSync(
+			canonical,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "lane-1",
+				cwd: "C:\\dev\\repo",
+				backgroundInstance: { name: "scout", status: "active", model: "gpt-5" },
+			})}\n`,
+		);
+		const env = { PI_SPEAK_OH_MY_PI_SESSIONS_ROOT: sessionsRoot };
+
+		// Same file, spelled with a `..` segment. Containment + read + write must all
+		// agree on the resolved path; otherwise the canonical file is never mutated.
+		const dotted = join(projectDir, "sub", "..", "2026-06-23T000000_lane.jsonl");
+		const archived = archiveOhMyPiBackgroundSession(dotted, env);
+		assert.equal(archived.ok, true);
+		assert.equal(
+			JSON.parse(readFileSync(canonical, "utf8").split(/\r?\n/)[0]).backgroundInstance.status,
+			"archived",
+			"the canonical file must be the one mutated",
+		);
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
 test("recover rejects a non-archived lane", () => {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-nav-"));
 	try {
