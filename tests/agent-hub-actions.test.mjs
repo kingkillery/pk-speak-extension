@@ -125,5 +125,11 @@ test("validateOmpSelection accepts a real in-roots session, rejects bad ones, al
 		const missing = validateOmpSelection(join(projectDir, "gone.jsonl"), env);
 		assert.equal(missing.ok, false);
 		assert.match(missing.error, /does not exist/);
+
+		// A path with `..` that normalizes to the real in-roots file must be accepted:
+		// containment and existence must both be checked against the SAME resolved path,
+		// not the raw string (regression guard for existsSync(raw) vs resolve(raw) drift).
+		const dotted = join(projectDir, "sub", "..", "2026-06-23T000000_s.jsonl");
+		assert.deepEqual(validateOmpSelection(dotted, env), { ok: true });
 	});
 });
