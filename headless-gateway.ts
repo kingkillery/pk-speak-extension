@@ -23,14 +23,14 @@ import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
-import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession } from "./agent-hub-actions.js";
+import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
 import { defaultOhMyPiSessionRoots, mergeOhMyPiAgentHubSessionsCached } from "./agent-hub-dashboard.js";
 import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashboardEntry } from "./session-routing.js";
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { OmpSelectionStore } from "./omp-selection.js";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve as resolvePath, sep as pathSep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -791,16 +791,8 @@ server = new ControlServer({
 	getDiscoveredAgents: () => discoverAgentInventoryCached(),
 	onRealtimeConnection: handleRealtimeGateway,
 	onOmpSelectSession: (clientKey, sessionPath) => {
-		if (sessionPath) {
-			// Validate before selecting so a stale/typo'd path fails loudly here (H2)
-			// instead of silently breaking every later turn.
-			if (!isOhMyPiSessionPath(sessionPath)) {
-				return { ok: false, error: "Session path is outside the configured oh-my-pi roots." };
-			}
-			if (!existsSync(sessionPath)) {
-				return { ok: false, error: "Session file does not exist (it may have been archived or removed)." };
-			}
-		}
+		const validation = validateOmpSelection(sessionPath);
+		if (!validation.ok) return validation;
 		ompSelection.select(clientKey, sessionPath);
 		return { ok: true };
 	},

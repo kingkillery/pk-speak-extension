@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { defaultOhMyPiSessionRoots } from "./agent-hub-dashboard.js";
 
@@ -13,6 +13,27 @@ export type ArchiveOhMyPiBackgroundSessionResult = {
 	ok: boolean;
 	message: string;
 };
+
+export type OmpSelectionValidation = { ok: true } | { ok: false; error: string };
+
+// Single source of truth for whether an omp session may be selected. Used by BOTH
+// the network gateway (-> HTTP 400) and the in-terminal extension (-> notify/log),
+// so the two entrypoints can't drift. Deselect (null/empty) is always valid.
+export function validateOmpSelection(
+	sessionPath: string | null | undefined,
+	env: NodeJS.ProcessEnv = process.env,
+): OmpSelectionValidation {
+	const path = sessionPath?.trim();
+	if (!path) return { ok: true }; // deselect
+	const resolved = resolve(path);
+	const inRoots = defaultOhMyPiSessionRoots(env).some((root) => {
+		const resolvedRoot = resolve(root);
+		return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + sep);
+	});
+	if (!inRoots) return { ok: false, error: "Session path is outside the configured oh-my-pi roots." };
+	if (!existsSync(path)) return { ok: false, error: "Session file does not exist (it may have been archived or removed)." };
+	return { ok: true };
+}
 
 export function archiveOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.ProcessEnv = process.env): ArchiveOhMyPiBackgroundSessionResult {
 	const roots = defaultOhMyPiSessionRoots(env);

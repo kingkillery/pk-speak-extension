@@ -28,7 +28,7 @@ import {
 	setWakeAlias,
 } from "./session-routing.js";
 import { mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
-import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv } from "./agent-hub-actions.js";
+import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv, validateOmpSelection } from "./agent-hub-actions.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
@@ -1614,6 +1614,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 			} catch (error) {
 				const reason = `Failed to run remote turn: ${getErrorMessage(error)}`;
 				diagnostics.lastErrors.remote = reason;
+				// H3 parity: a failed omp --resume (stale/archived path) clears the
+				// selection so we don't keep running the broken resume every turn.
+				if (executionPlan.backend === "oh-my-pi" && ompSelection.get(undefined)) {
+					ompSelection.select(undefined, null);
+					appendSessionEvent("sess.omp-select-cleared", "admin", { reason });
+					lastCtx?.ui?.notify?.("Cleared the omp session selection after a resume failure.", "warning");
+				}
 				const failedMs = Date.now() - (startedWithAgent || Date.now());
 				agentRunMs = failedMs;
 				appendExecutionTrace({
@@ -2485,10 +2492,18 @@ export default function speakExtension(pi: ExtensionAPI) {
 					}
 				},
 				onOmpSelectSession: (_clientKey, sessionPath) => {
-					// Local single-user extension: one selection, keyed under "default" to
-					// match getActiveOmpProvider(). sessionPath null clears it (deselect).
+					// Local single-user extension: one selection (default bucket) matching
+					// getActiveOmpProvider(). Same shared validation as the gateway, surfaced
+					// via notify/log instead of an HTTP 400. Deselect (null) always allowed.
+					const validation = validateOmpSelection(sessionPath);
+					if (!validation.ok) {
+						appendSessionEvent("sess.omp-select-rejected", "admin", { sessionPath, error: validation.error });
+						lastCtx?.ui?.notify?.(`Can't select omp session: ${validation.error}`, "error");
+						return validation;
+					}
 					ompSelection.select(undefined, sessionPath);
 					appendSessionEvent("sess.omp-select", "admin", { sessionPath });
+					return { ok: true };
 				},
 				onOmpGetSelectedSession: () => ompSelection.get(undefined),
 				onSessionRename: (payload) => {

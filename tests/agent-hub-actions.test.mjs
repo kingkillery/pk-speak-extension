@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildOhMyPiLaunchArgv } from "../dist/agent-hub-actions.js";
+import { buildOhMyPiLaunchArgv, validateOmpSelection } from "../dist/agent-hub-actions.js";
 
 function withTempDir(fn) {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-launch-argv-"));
@@ -96,5 +96,34 @@ test("buildOhMyPiLaunchArgv rejects non-string cwd and oversize prompt", () => {
 		assert.equal(oversize.ok, false);
 		if (oversize.ok) return;
 		assert.match(oversize.message, /exceeds 4096/);
+	});
+});
+
+test("validateOmpSelection accepts a real in-roots session, rejects bad ones, allows deselect", () => {
+	withTempDir((tmp) => {
+		const root = join(tmp, "sessions");
+		const projectDir = join(root, "proj");
+		mkdirSync(projectDir, { recursive: true });
+		const realPath = join(projectDir, "2026-06-23T000000_s.jsonl");
+		writeFileSync(realPath, `${JSON.stringify({ type: "session", id: "s" })}\n`);
+		const env = { PI_SPEAK_OH_MY_PI_SESSIONS_ROOT: root };
+
+		// Deselect is always ok.
+		assert.deepEqual(validateOmpSelection(null, env), { ok: true });
+		assert.deepEqual(validateOmpSelection("", env), { ok: true });
+		assert.deepEqual(validateOmpSelection("   ", env), { ok: true });
+
+		// Real path under roots → ok.
+		assert.deepEqual(validateOmpSelection(realPath, env), { ok: true });
+
+		// Outside configured roots → rejected.
+		const outside = validateOmpSelection(join(tmp, "elsewhere", "x.jsonl"), env);
+		assert.equal(outside.ok, false);
+		assert.match(outside.error, /outside the configured oh-my-pi roots/);
+
+		// Under roots but does not exist → rejected.
+		const missing = validateOmpSelection(join(projectDir, "gone.jsonl"), env);
+		assert.equal(missing.ok, false);
+		assert.match(missing.error, /does not exist/);
 	});
 });

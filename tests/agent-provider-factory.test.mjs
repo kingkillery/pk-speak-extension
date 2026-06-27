@@ -3,10 +3,25 @@ import assert from "node:assert/strict";
 import {
 	createInitialAgentProviders,
 	createOmpAgentProvider,
+	createOmpResumeProvider,
 	createTurnAgentProvider,
 	ompExtensionArgs,
 	resolveAgentWorkspace,
 } from "../dist/agent-provider-factory.js";
+import { collectAgentResponse } from "../dist/agent-provider.js";
+
+test("omp resume provider rejects on a failing CLI — feeds runCodingAgentTurn's onPrimaryFailure (H3)", async () => {
+	// A bogus omp binary makes runCli reject (spawn error or non-zero exit), which
+	// propagates out of collectAgentResponse. This is the real reject->throw chain
+	// that triggers the omp selection clear in runCodingAgentTurn; no mock seam.
+	const provider = createOmpResumeProvider(
+		"pi-speak-nonexistent-omp-binary-xyz",
+		process.cwd(),
+		"/no/such/session.jsonl",
+		{ ...process.env, AGENT_TURN_TIMEOUT_MS: "4000" },
+	);
+	await assert.rejects(() => collectAgentResponse(provider, "hello"));
+});
 
 test("ompExtensionArgs defaults OFF (M2: no blanket capability stripping)", () => {
 	assert.deepEqual(ompExtensionArgs({}), []);
