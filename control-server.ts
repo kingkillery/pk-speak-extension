@@ -243,7 +243,7 @@ export type ControlServerOptions = {
 	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionArchive?: (body: SessionArchivePayload) => Promise<ControlActionResult> | ControlActionResult;
 	/** Select (sessionPath) or deselect (null) the omp resume session for a client. */
-	onOmpSelectSession?: (clientKey: string, sessionPath: string | null) => void;
+	onOmpSelectSession?: (clientKey: string, sessionPath: string | null) => { ok: boolean; error?: string } | void;
 	onOmpGetSelectedSession?: (clientKey: string) => string | null;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
@@ -894,7 +894,11 @@ export class ControlServer {
 			// returning it to normal backend routing.
 			const clear = payload?.clear === true || rawPath.length === 0;
 			const sessionPath = clear ? null : rawPath;
-			this.onOmpSelectSession?.(clientKey, sessionPath);
+			const result = this.onOmpSelectSession?.(clientKey, sessionPath);
+			if (result && result.ok === false) {
+				this.writeJson(res, 400, { ok: false, error: result.error || "Invalid omp session." });
+				return;
+			}
 			this.writeJson(res, 200, { ok: true, sessionPath, cleared: clear });
 			return;
 		}

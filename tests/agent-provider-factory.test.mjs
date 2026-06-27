@@ -4,8 +4,22 @@ import {
 	createInitialAgentProviders,
 	createOmpAgentProvider,
 	createTurnAgentProvider,
+	ompExtensionArgs,
 	resolveAgentWorkspace,
 } from "../dist/agent-provider-factory.js";
+
+test("ompExtensionArgs defaults OFF (M2: no blanket capability stripping)", () => {
+	assert.deepEqual(ompExtensionArgs({}), []);
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "" }), []);
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "0" }), []);
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "false" }), []);
+});
+
+test("ompExtensionArgs opts in via env (M1: consistent across providers)", () => {
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "1" }), ["--no-extensions"]);
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "true" }), ["--no-extensions"]);
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "YES" }), ["--no-extensions"]);
+});
 
 const baseConfig = {
 	provider: "codex",

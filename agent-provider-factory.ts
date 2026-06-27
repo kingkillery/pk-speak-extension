@@ -7,6 +7,17 @@ import { resolveWindowsPiNodeCommand } from "./agent-discovery.js";
 import { runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { ResumedGatewayTarget } from "./headless-gateway-routing.js";
 
+// Whether omp invocations should pass --no-extensions. Default OFF: the original
+// npm auto-update failure (pi-speak-pk@latest) was fixed by removing that package
+// from pi settings, so blanket-disabling extensions would needlessly strip local
+// extension capabilities a session may rely on (review M2). Opt back in with
+// PI_SPEAK_OMP_NO_EXTENSIONS=1 if a broken extension resurfaces. Applied to BOTH
+// fresh and resume omp providers so behavior is consistent (review M1).
+export function ompExtensionArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+	const raw = (env.PI_SPEAK_OMP_NO_EXTENSIONS || "").trim().toLowerCase();
+	return raw === "1" || raw === "true" || raw === "yes" ? ["--no-extensions"] : [];
+}
+
 export type AgentProviderFactoryOptions = {
 	config: AgentProviderConfig;
 	env?: NodeJS.ProcessEnv;
@@ -177,7 +188,7 @@ class OmpCliProvider implements AgentProvider {
 
 	async *sendPrompt(prompt: string, options: AgentPromptOptions = {}) {
 		const cwd = options.cwd || this.cwd;
-		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, "--auto-approve", prompt], {
+		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, ...ompExtensionArgs(this.env), "--auto-approve", prompt], {
 			cwd,
 			name: "oh-my-pi",
 			env: this.env,
@@ -197,7 +208,7 @@ class OmpResumeProvider implements AgentProvider {
 
 	async *sendPrompt(prompt: string, options: AgentPromptOptions = {}) {
 		const cwd = options.cwd || this.cwd;
-		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, "--no-extensions", "--resume", this.sessionPath, "--auto-approve", prompt], {
+		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, ...ompExtensionArgs(this.env), "--resume", this.sessionPath, "--auto-approve", prompt], {
 			cwd,
 			name: "oh-my-pi-resume",
 			env: this.env,

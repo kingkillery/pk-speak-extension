@@ -30,7 +30,7 @@ import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashb
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { OmpSelectionStore } from "./omp-selection.js";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve as resolvePath, sep as pathSep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -193,7 +193,16 @@ async function runTextTurn(
 	if (selectedOmp && !explicitOverride) {
 		const workingDirectory = cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
 		const resumeProvider = createOmpResumeProvider(agentConfig.ompBin, workingDirectory, selectedOmp, process.env);
-		return runCodingAgentTurn(prompt, includeAudio, workingDirectory, transcript, agentConfig.provider === "elevenlabs" ? "elevenlabs" : undefined, [], resumeProvider);
+		return runCodingAgentTurn(
+			prompt,
+			includeAudio,
+			workingDirectory,
+			transcript,
+			agentConfig.provider === "elevenlabs" ? "elevenlabs" : undefined,
+			[],
+			resumeProvider,
+			() => { ompSelection.select(clientKey, null); },
+		);
 	}
 	const route = resolveTurnRoute(target, cwd, agentProvider);
 	if (route.providerOverride) {
@@ -239,6 +248,7 @@ async function runCodingAgentTurn(
 	audioProvider?: TtsProvider,
 	progress: TurnProgressEvent[] = [],
 	providerOverride?: AgentProvider,
+	onPrimaryFailure?: (error: unknown) => void,
 ): Promise<RemoteTurnResult> {
 	const options = {
 		model: agentConfig.model,
@@ -253,6 +263,21 @@ async function runCodingAgentTurn(
 	try {
 		replyText = await collectAgentResponse(activeProvider, prompt, options);
 	} catch (error) {
+		// When the caller owns failure handling (e.g. an explicit omp resume
+		// selection), surface the error to the user instead of silently answering
+		// from an unrelated fallback backend (review H3).
+		if (onPrimaryFailure) {
+			onPrimaryFailure(error);
+			const message = error instanceof Error ? error.message : String(error);
+			addProgress(progress, "error", `${activeProvider.name} failed: ${message}`, startedAt);
+			return {
+				replyText: `The ${activeProvider.name} session failed: ${message}. I've cleared that session selection — try again or pick another session.`,
+				transcript: transcript ?? prompt,
+				providers: { agent: activeProvider.name },
+				warnings: [`${activeProvider.name}-failed`],
+				progress,
+			};
+		}
 		if (!fallbackProvider) throw error;
 		warnings = [`Primary ${activeProvider.name} backend failed; used ${fallbackProvider.name} fallback.`];
 		addProgress(progress, "agent", warnings[0], startedAt);
@@ -765,7 +790,20 @@ server = new ControlServer({
 	},
 	getDiscoveredAgents: () => discoverAgentInventoryCached(),
 	onRealtimeConnection: handleRealtimeGateway,
-	onOmpSelectSession: (clientKey, sessionPath) => { ompSelection.select(clientKey, sessionPath); },
+	onOmpSelectSession: (clientKey, sessionPath) => {
+		if (sessionPath) {
+			// Validate before selecting so a stale/typo'd path fails loudly here (H2)
+			// instead of silently breaking every later turn.
+			if (!isOhMyPiSessionPath(sessionPath)) {
+				return { ok: false, error: "Session path is outside the configured oh-my-pi roots." };
+			}
+			if (!existsSync(sessionPath)) {
+				return { ok: false, error: "Session file does not exist (it may have been archived or removed)." };
+			}
+		}
+		ompSelection.select(clientKey, sessionPath);
+		return { ok: true };
+	},
 	onOmpGetSelectedSession: (clientKey) => ompSelection.get(clientKey),
 });
 

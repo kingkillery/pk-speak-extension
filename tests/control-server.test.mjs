@@ -1528,3 +1528,45 @@ test("omp select/selected endpoints isolate selections per client and support de
 		assert.equal((await (await selected("B")).json()).sessionPath, "/omp/b.jsonl");
 	});
 });
+
+test("omp select-session surfaces validation failure as 400 (review H2)", async () => {
+	await withServer({
+		onOmpSelectSession: (_clientKey, sessionPath) => {
+			if (sessionPath && !sessionPath.startsWith("/valid/")) {
+				return { ok: false, error: "Session file does not exist." };
+			}
+			return { ok: true };
+		},
+	}, async (port) => {
+		const bad = await request({
+			port,
+			path: "/v1/omp/select-session",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json", "x-pi-speak-client": "c" },
+			body: JSON.stringify({ sessionPath: "/stale/gone.jsonl" }),
+		});
+		assert.equal(bad.statusCode, 400);
+		assert.match((await bad.json()).error, /does not exist/);
+
+		const good = await request({
+			port,
+			path: "/v1/omp/select-session",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json", "x-pi-speak-client": "c" },
+			body: JSON.stringify({ sessionPath: "/valid/ok.jsonl" }),
+		});
+		assert.equal(good.statusCode, 200);
+		assert.equal((await good.json()).ok, true);
+
+		// Deselect must never be rejected by validation.
+		const clear = await request({
+			port,
+			path: "/v1/omp/select-session",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json", "x-pi-speak-client": "c" },
+			body: JSON.stringify({ clear: true }),
+		});
+		assert.equal(clear.statusCode, 200);
+		assert.equal((await clear.json()).cleared, true);
+	});
+});
