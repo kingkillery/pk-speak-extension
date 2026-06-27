@@ -28,6 +28,7 @@ import { defaultOhMyPiSessionRoots, mergeOhMyPiAgentHubSessionsCached } from "./
 import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashboardEntry } from "./session-routing.js";
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
+import { OmpSelectionStore } from "./omp-selection.js";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve as resolvePath, sep as pathSep } from "node:path";
@@ -51,7 +52,7 @@ const agentConfig = resolveAgentProviderConfig({
 });
 let provider: AgentProvider;
 let fallbackProvider: AgentProvider | undefined;
-let activeOmpSessionPath: string | null = null;
+const ompSelection = new OmpSelectionStore();
 const resumedTargets = new Map<string, ResumedGatewayTarget>();
 
 function createAgentProvider(): AgentProvider {
@@ -145,7 +146,9 @@ function createExecutionProviderDecision(
 		preferShared,
 		sharedProvider: provider,
 		fallbackProvider,
-		ompSessionPath: activeOmpSessionPath ?? undefined,
+		// omp resume selection is handled per-client upstream in runTextTurn/runVoiceTurn;
+		// the route path only runs when no selection short-circuited, so none here.
+		ompSessionPath: undefined,
 	});
 }
 
@@ -179,12 +182,17 @@ async function runTextTurn(
 	transcript?: string,
 	target?: string,
 	agentProvider?: GatewayProviderOverride,
+	clientKey?: string,
 ): Promise<RemoteTurnResult> {
 	const prompt = text.trim();
 	if (!prompt) return { replyText: "Send a message first." };
-	if (activeOmpSessionPath) {
+	// Per-client omp resume selection. An explicit non-omp agentProvider/target on
+	// this turn overrides the sticky selection (one-off to another backend).
+	const selectedOmp = ompSelection.get(clientKey);
+	const explicitOverride = (agentProvider && agentProvider !== "oh-my-pi") || !!target;
+	if (selectedOmp && !explicitOverride) {
 		const workingDirectory = cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
-		const resumeProvider = createOmpResumeProvider(agentConfig.ompBin, workingDirectory, activeOmpSessionPath, process.env);
+		const resumeProvider = createOmpResumeProvider(agentConfig.ompBin, workingDirectory, selectedOmp, process.env);
 		return runCodingAgentTurn(prompt, includeAudio, workingDirectory, transcript, agentConfig.provider === "elevenlabs" ? "elevenlabs" : undefined, [], resumeProvider);
 	}
 	const route = resolveTurnRoute(target, cwd, agentProvider);
@@ -287,6 +295,7 @@ async function runVoiceTurn(
 	cwd?: string,
 	target?: string,
 	agentProvider?: GatewayProviderOverride,
+	clientKey?: string,
 ): Promise<RemoteTurnResult> {
 	const startedAt = Date.now();
 	const progress: TurnProgressEvent[] = [];
@@ -332,7 +341,13 @@ async function runVoiceTurn(
 			],
 		};
 	}
-	const result = await runRoutedVoiceTextTurn(transcript, includeAudio, cwd, transcript, progress, target, agentProvider);
+	// Honor this client's omp selection for voice too (parity with text), unless an
+	// explicit non-omp provider/target overrides it for this turn.
+	const selectedOmp = ompSelection.get(clientKey);
+	const explicitOverride = (agentProvider && agentProvider !== "oh-my-pi") || !!target;
+	const result = selectedOmp && !explicitOverride
+		? await runTextTurn(transcript, includeAudio, cwd, transcript, target, agentProvider, clientKey)
+		: await runRoutedVoiceTextTurn(transcript, includeAudio, cwd, transcript, progress, target, agentProvider);
 	return {
 		...result,
 		timings: {
@@ -708,8 +723,8 @@ server = new ControlServer({
 	onMonoAction: (action) => ok(`Mono ${action} is unavailable in tray gateway mode.`),
 	onSpeakAction: (action) => ok(`Speak ${action} is unavailable in tray gateway mode.`),
 	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
-	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider) => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider),
-	onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, _mode, agentProvider) => runVoiceTurn(buffer, mimeType, includeAudio, cwd, target, agentProvider),
+	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider, clientKey) => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider, clientKey),
+	onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, _mode, agentProvider, clientKey) => runVoiceTurn(buffer, mimeType, includeAudio, cwd, target, agentProvider, clientKey),
 	onTurnCancel: cancelCurrentTurn,
 	getSessionDashboard: buildRecentSessionDashboard,
 	getCompactRouteSlots: () => [],
@@ -750,8 +765,8 @@ server = new ControlServer({
 	},
 	getDiscoveredAgents: () => discoverAgentInventoryCached(),
 	onRealtimeConnection: handleRealtimeGateway,
-	onOmpSelectSession: (sessionPath) => { activeOmpSessionPath = sessionPath; },
-	onOmpGetSelectedSession: () => activeOmpSessionPath,
+	onOmpSelectSession: (clientKey, sessionPath) => { ompSelection.select(clientKey, sessionPath); },
+	onOmpGetSelectedSession: (clientKey) => ompSelection.get(clientKey),
 });
 
 Promise.resolve(provider.start?.())
@@ -774,6 +789,8 @@ function runStaleSessionSweep() {
 			if (!entry.stale || entry.isCurrent || entry.archived) continue;
 			const sessionPath = entry.sessionPath ?? entry.path;
 			if (!sessionPath) continue;
+			// Never archive a session a client currently has selected (review M3).
+			if (ompSelection.isActive(sessionPath)) continue;
 			archiveOrRecoverSession(sessionPath, "archive");
 		}
 	} catch (error) {

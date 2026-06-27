@@ -42,6 +42,7 @@ import { PiAgentProvider } from "./pi-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
 import { ClaudeAgentProvider } from "./claude-agent-provider.js";
 import { createOmpAgentProvider, createOmpResumeProvider } from "./agent-provider-factory.js";
+import { OmpSelectionStore } from "./omp-selection.js";
 import {
 	appendExecutionTrace,
 	type ExecutionDecision,
@@ -601,11 +602,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 		sendUserMessage: (content, options) => pi.sendUserMessage(content, options),
 	});
 	const ompAgentProvider = createOmpAgentProvider(resolveOhMyPiCommand(), DEFAULT_AGENT_CWD || process.cwd(), process.env);
-	let activeOmpSessionPath: string | null = null;
-	const getActiveOmpProvider = () =>
-		activeOmpSessionPath
-			? createOmpResumeProvider(resolveOhMyPiCommand(), DEFAULT_AGENT_CWD || process.cwd(), activeOmpSessionPath, process.env)
+	const ompSelection = new OmpSelectionStore();
+	const getActiveOmpProvider = (clientKey?: string) => {
+		const selected = ompSelection.get(clientKey);
+		return selected
+			? createOmpResumeProvider(resolveOhMyPiCommand(), DEFAULT_AGENT_CWD || process.cwd(), selected, process.env)
 			: ompAgentProvider;
+	};
 	const codexAgentProvider = new CodexAgentProvider({
 		codexBin: agentProviderConfig.codexBin,
 		model: agentProviderConfig.model,
@@ -2481,11 +2484,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 						return { ok: false, message: `Oh-my-pi launch failed: ${getErrorMessage(error)}` };
 					}
 				},
-				onOmpSelectSession: (sessionPath) => {
-					activeOmpSessionPath = sessionPath;
+				onOmpSelectSession: (_clientKey, sessionPath) => {
+					// Local single-user extension: one selection, keyed under "default" to
+					// match getActiveOmpProvider(). sessionPath null clears it (deselect).
+					ompSelection.select(undefined, sessionPath);
 					appendSessionEvent("sess.omp-select", "admin", { sessionPath });
 				},
-				onOmpGetSelectedSession: () => activeOmpSessionPath,
+				onOmpGetSelectedSession: () => ompSelection.get(undefined),
 				onSessionRename: (payload) => {
 					const sessionPath = payload.sessionPath;
 					const newName = payload.newName.trim();

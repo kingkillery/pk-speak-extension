@@ -221,6 +221,7 @@ export type ControlServerOptions = {
 		cwd?: string,
 		mode?: "auto" | "live",
 		agentProvider?: GatewayAgentProvider,
+		clientKey?: string,
 	) => Promise<RemoteTurnResult>;
 	onVoiceTurn: (
 		buffer: Buffer,
@@ -230,6 +231,7 @@ export type ControlServerOptions = {
 		cwd?: string,
 		mode?: "auto" | "live",
 		agentProvider?: GatewayAgentProvider,
+		clientKey?: string,
 	) => Promise<RemoteTurnResult>;
 	onTurnCancel?: () => Promise<ControlActionResult> | ControlActionResult;
 	getSessionDashboard?: () => SessionDashboard;
@@ -240,8 +242,9 @@ export type ControlServerOptions = {
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionArchive?: (body: SessionArchivePayload) => Promise<ControlActionResult> | ControlActionResult;
-	onOmpSelectSession?: (sessionPath: string) => void;
-	onOmpGetSelectedSession?: () => string | null;
+	/** Select (sessionPath) or deselect (null) the omp resume session for a client. */
+	onOmpSelectSession?: (clientKey: string, sessionPath: string | null) => void;
+	onOmpGetSelectedSession?: (clientKey: string) => string | null;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 	onRealtimeConnection?: (ws: WebSocket) => void;
@@ -884,18 +887,21 @@ export class ControlServer {
 
 		if (req.method === "POST" && url.pathname === "/v1/omp/select-session") {
 			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
-			const sessionPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : null;
-			if (!sessionPath) {
-				this.writeJson(res, 400, { ok: false, error: "sessionPath is required" });
-				return;
-			}
-			this.onOmpSelectSession?.(sessionPath);
-			this.writeJson(res, 200, { ok: true, sessionPath });
+			const rawPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
+			const explicitClient = typeof payload?.clientId === "string" ? payload.clientId : undefined;
+			const clientKey = this.clientKey(req, explicitClient);
+			// Empty sessionPath (or clear:true) deselects this client's omp session,
+			// returning it to normal backend routing.
+			const clear = payload?.clear === true || rawPath.length === 0;
+			const sessionPath = clear ? null : rawPath;
+			this.onOmpSelectSession?.(clientKey, sessionPath);
+			this.writeJson(res, 200, { ok: true, sessionPath, cleared: clear });
 			return;
 		}
 
 		if (req.method === "GET" && url.pathname === "/v1/omp/selected-session") {
-			const sessionPath = this.onOmpGetSelectedSession?.() ?? null;
+			const clientKey = this.clientKey(req, url.searchParams.get("clientId") || undefined);
+			const sessionPath = this.onOmpGetSelectedSession?.(clientKey) ?? null;
 			this.writeJson(res, 200, { ok: true, sessionPath });
 			return;
 		}
@@ -954,7 +960,7 @@ export class ControlServer {
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
 			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -976,7 +982,7 @@ export class ControlServer {
 			const target = typeof payload?.target === "string" ? payload.target.trim() || undefined : undefined;
 			const cwd = getLaunchCwdFromPayload(payload);
 			const agentProvider = parseAgentProviderOverride(typeof payload?.agentProvider === "string" ? payload.agentProvider : undefined);
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, typeof payload?.clientId === "string" ? payload.clientId : undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -993,7 +999,7 @@ export class ControlServer {
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
 			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
-			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider));
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -1459,6 +1465,19 @@ export class ControlServer {
 	private extractPresentedToken(req: IncomingMessage) {
 		return getPrimaryHeaderValue(req.headers["x-pi-speak-token"])
 			|| getBearerToken(getPrimaryHeaderValue(req.headers.authorization));
+	}
+
+	// Stable per-client key for scoping per-client state (e.g. omp session
+	// selection). An explicit `clientId` (header or body) wins; otherwise derive
+	// from remote address + presented token so distinct devices/tokens are
+	// distinct clients. Mirrors the rate-limit bucket key.
+	private clientKey(req: IncomingMessage, explicit?: string): string {
+		const fromHeader = getPrimaryHeaderValue(req.headers["x-pi-speak-client"]);
+		const id = (explicit || fromHeader || "").trim();
+		if (id) return `id:${id}`;
+		const remote = req.socket.remoteAddress || "unknown";
+		const token = this.extractPresentedToken(req) || "anon";
+		return `${remote}:${token}`;
 	}
 
 	private async createTurnPayload(result: RemoteTurnResult) {

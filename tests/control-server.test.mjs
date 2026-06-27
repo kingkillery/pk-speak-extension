@@ -92,6 +92,8 @@ async function withServer(overrides = {}, fn) {
 		onSessionResume: overrides.onSessionResume,
 		onSessionLaunch: overrides.onSessionLaunch,
 		onSessionArchive: overrides.onSessionArchive,
+		onOmpSelectSession: overrides.onOmpSelectSession,
+		onOmpGetSelectedSession: overrides.onOmpGetSelectedSession,
 		getDiscoveredAgents: overrides.getDiscoveredAgents,
 		tailSessionEvents: overrides.tailSessionEvents,
 	});
@@ -1487,4 +1489,42 @@ test("workspace file API rejects Windows reserved device names", async () => {
 	} finally {
 		rmSync(tempDir, { recursive: true, force: true });
 	}
+});
+
+test("omp select/selected endpoints isolate selections per client and support deselect", async () => {
+	const { OmpSelectionStore } = await import("../dist/omp-selection.js");
+	const store = new OmpSelectionStore();
+	await withServer({
+		onOmpSelectSession: (clientKey, sessionPath) => store.select(clientKey, sessionPath),
+		onOmpGetSelectedSession: (clientKey) => store.get(clientKey),
+	}, async (port) => {
+		const select = (client, sessionPath) => request({
+			port,
+			path: "/v1/omp/select-session",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json", "x-pi-speak-client": client },
+			body: JSON.stringify(sessionPath === null ? { clear: true } : { sessionPath }),
+		});
+		const selected = (client) => request({
+			port,
+			path: "/v1/omp/selected-session",
+			headers: { Authorization: "Bearer secret-token", "x-pi-speak-client": client },
+		});
+
+		// Client A selects; client B must NOT see it (C1).
+		await select("A", "/omp/a.jsonl");
+		assert.equal((await (await selected("A")).json()).sessionPath, "/omp/a.jsonl");
+		assert.equal((await (await selected("B")).json()).sessionPath, null);
+
+		// Client B selects its own.
+		await select("B", "/omp/b.jsonl");
+		assert.equal((await (await selected("A")).json()).sessionPath, "/omp/a.jsonl");
+		assert.equal((await (await selected("B")).json()).sessionPath, "/omp/b.jsonl");
+
+		// Client A deselects (C2) — B unaffected.
+		const clearRes = await (await select("A", null)).json();
+		assert.equal(clearRes.cleared, true);
+		assert.equal((await (await selected("A")).json()).sessionPath, null);
+		assert.equal((await (await selected("B")).json()).sessionPath, "/omp/b.jsonl");
+	});
 });
