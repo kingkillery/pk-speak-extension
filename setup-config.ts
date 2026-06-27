@@ -6,6 +6,7 @@ export type PiSpeakSetupConfig = {
 	agentProvider?: string;
 	executionRouterMode?: string;
 	ttsProvider?: string;
+	speakPlaybackGate?: string;
 	elevenLabsApiKey?: string;
 	elevenLabsVoiceId?: string;
 	elevenLabsModelId?: string;
@@ -30,6 +31,7 @@ const ENV_TO_CONFIG: Array<[keyof PiSpeakSetupConfig, string]> = [
 	["agentProvider", "AGENT_PROVIDER"],
 	["executionRouterMode", "PI_SPEAK_EXECUTION_ROUTER_MODE"],
 	["ttsProvider", "PI_SPEAK_TTS_PROVIDER"],
+	["speakPlaybackGate", "PI_SPEAK_PLAYBACK_GATE"],
 	["elevenLabsApiKey", "ELEVENLABS_API_KEY"],
 	["elevenLabsVoiceId", "PI_SPEAK_ELEVENLABS_VOICE_ID"],
 	["elevenLabsModelId", "PI_SPEAK_ELEVENLABS_MODEL_ID"],
