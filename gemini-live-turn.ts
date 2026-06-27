@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality, type LiveServerMessage } from "@google/genai";
+import { GoogleGenAI, Modality, Type, type LiveServerMessage, type LiveServerToolCall } from "@google/genai";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +40,7 @@ export function getGeminiApiVersion(backend: GeminiBackend, env: NodeJS.ProcessE
 export function getGeminiBackend(env: NodeJS.ProcessEnv = process.env): GeminiBackend {
 	const configured = (env.PI_SPEAK_GEMINI_BACKEND || env.GOOGLE_GENAI_BACKEND || "").trim().toLowerCase();
 	if (configured === "vertex" || configured === "vertexai" || configured === "gcloud") return "vertex";
+	if (configured === "developer-api" || configured === "developer" || configured === "api") return "developer-api";
 	if (isTruthy(env.GOOGLE_GENAI_USE_VERTEXAI) || isTruthy(env.GOOGLE_GENAI_USE_ENTERPRISE)) return "vertex";
 	if (env.PI_SPEAK_VERTEX_API_KEY) return "vertex";
 	if (!env.GOOGLE_API_KEY && !env.GEMINI_API_KEY && getVertexConfig(env)) return "vertex";
@@ -130,9 +131,23 @@ export async function runGeminiTextTurn(
 	}
 }
 
+export type GeminiToolHandler = (name: string, args: Record<string, unknown>) => Promise<string>;
+
+const OMP_FUNCTION_DECLARATION = {
+	name: "run_coding_task",
+	description: "Execute a coding/system task via the oh-my-pi agent. Use for file ops, code generation, running tests, reading files, or any concrete action. Returns the agent's text output.",
+	parameters: {
+		type: Type.OBJECT,
+		properties: {
+			task: { type: Type.STRING, description: "The task description for the coding agent." },
+		},
+		required: ["task"],
+	},
+};
+
 export async function runGeminiLiveTurn(
 	prompt: string,
-	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
+	options: { apiKey?: string; model?: string; timeoutMs?: number; toolHandler?: GeminiToolHandler } = {},
 ): Promise<RemoteTurnResult> {
 	const model = options.model || getGeminiLiveModel();
 	const client = options.apiKey
@@ -146,6 +161,25 @@ export async function runGeminiLiveTurn(
 	let turnComplete = false;
 	let session: Awaited<ReturnType<typeof ai.live.connect>> | undefined;
 	const timeoutMs = options.timeoutMs || Number.parseInt(process.env.PI_SPEAK_GEMINI_LIVE_TIMEOUT_MS || String(DEFAULT_TIMEOUT_MS), 10);
+	const withTools = !!options.toolHandler;
+
+	const handleToolCall = async (toolCall: LiveServerToolCall) => {
+		if (!session || !options.toolHandler) return;
+		const functionResponses: Array<{ id: string; name: string; response: { output: string } }> = [];
+		for (const fc of toolCall.functionCalls || []) {
+			if (!fc.id || !fc.name) continue;
+			let output: string;
+			try {
+				output = await options.toolHandler(fc.name, (fc.args || {}) as Record<string, unknown>);
+			} catch (err) {
+				output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+			}
+			functionResponses.push({ id: fc.id, name: fc.name, response: { output } });
+		}
+		if (functionResponses.length > 0) {
+			session.sendToolResponse({ functionResponses });
+		}
+	};
 
 	const result = await new Promise<RemoteTurnResult>((resolve, reject) => {
 		let settled = false;
@@ -184,13 +218,19 @@ export async function runGeminiLiveTurn(
 		};
 		const timer = setTimeout(finish, timeoutMs);
 
+		const config: Parameters<typeof ai.live.connect>[0]["config"] = {
+			responseModalities: [Modality.AUDIO],
+			outputAudioTranscription: {},
+			systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT ||
+				(withTools
+					? "You are a voice assistant for a coding workflow. For conversational questions, reply directly and briefly. For tasks that require file access, code execution, or system actions, call run_coding_task with the task description and narrate the result naturally."
+					: "You are a concise voice coding assistant."),
+			...(withTools ? { tools: [{ functionDeclarations: [OMP_FUNCTION_DECLARATION] }] } : {}),
+		};
+
 		ai.live.connect({
 			model,
-			config: {
-				responseModalities: [Modality.AUDIO],
-				outputAudioTranscription: {},
-				systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || "You are a concise voice coding assistant.",
-			},
+			config,
 			callbacks: {
 				onopen: () => {},
 				onmessage: (message: LiveServerMessage) => {
@@ -200,6 +240,10 @@ export async function runGeminiLiveTurn(
 						if (!part.inlineData?.data) continue;
 						if (part.inlineData.mimeType) audioMimeType = part.inlineData.mimeType;
 						audioChunks.push(Buffer.from(part.inlineData.data, "base64"));
+					}
+					if (message.toolCall) {
+						handleToolCall(message.toolCall).catch(fail);
+						return;
 					}
 					if (message.serverContent?.turnComplete) {
 						turnComplete = true;

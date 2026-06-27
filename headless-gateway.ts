@@ -219,7 +219,20 @@ async function runTextTurn(
 		return result;
 	}
 	if (agentConfig.provider === "gemini-live") {
-		return includeAudio ? await runGeminiLiveTurn(prompt) : await runGeminiTextTurn(prompt);
+		if (!includeAudio) return await runGeminiTextTurn(prompt);
+		const toolHandler: import("./gemini-live-turn.js").GeminiToolHandler = async (name, args) => {
+			if (name === "run_coding_task") {
+				const taskResult = await runCodingAgentTurn(
+					String((args as { task?: unknown }).task ?? prompt),
+					false,
+					route.cwd,
+					transcript,
+				);
+				return taskResult.replyText || "Task completed with no text output.";
+			}
+			return `Unknown tool: ${name}`;
+		};
+		return await runGeminiLiveTurn(prompt, { toolHandler });
 	}
 	if (agentConfig.provider === "gemini") {
 		const result = await runGeminiTextTurn(prompt);
@@ -397,20 +410,45 @@ async function runRoutedVoiceTextTurn(
 	agentProvider?: GatewayProviderOverride,
 ): Promise<RemoteTurnResult> {
 	const route = resolveTurnRoute(target, cwd, agentProvider);
+
+	// When using Gemini Live as the agent, skip the reducer entirely. Gemini handles
+	// routing naturally via the run_coding_task function call.
+	if (agentConfig.provider === "gemini-live" && includeAudio) {
+		addProgress(progress, "route", "Voice route: Gemini Live with oh-my-pi tool.");
+		const toolHandler: import("./gemini-live-turn.js").GeminiToolHandler = async (name, args) => {
+			if (name === "run_coding_task") {
+				const taskResult = await runCodingAgentTurn(
+					String((args as { task?: unknown }).task ?? text),
+					false,
+					route.cwd,
+					transcript,
+					undefined,
+					[],
+				);
+				return taskResult.replyText || "Task completed with no text output.";
+			}
+			return `Unknown tool: ${name}`;
+		};
+		const geminiResult = await runGeminiLiveTurn(text, { toolHandler });
+		return {
+			...geminiResult,
+			transcript: transcript ?? geminiResult.transcript,
+			progress: [...progress, ...(geminiResult.progress || [])],
+		};
+	}
+
 	const reduction = await reduceConversationTurn(text, { source: "http-voice" });
 	const plan = planConversationExecution(reduction.summary);
 	addProgress(progress, "route", plan.userProgress || `Voice route: ${plan.routeClass || "fast"} via ${plan.backend}.`);
 	if (!reduction.dispatch || !plan.dispatch || !isRunnableVoiceBackend(plan.backend)) {
+		// Not a routable coding task — still let the agent respond conversationally.
+		const fallback = await runCodingAgentTurn(text, includeAudio, route.cwd, transcript, undefined, progress);
 		return {
-			replyText: reduction.replyText || plan.userAck || plan.rationale || "I need a concrete action before I can route this.",
-			transcript,
+			...fallback,
 			reducer: reduction.summary,
 			execution: plan,
-			timings: { reducerMs: reduction.reducerMs },
-			progress: [
-				...progress,
-				makeProgress("complete", "Voice turn stopped before agent dispatch."),
-			],
+			timings: { ...fallback.timings, reducerMs: reduction.reducerMs },
+			progress: fallback.progress || progress,
 		};
 	}
 	const backend = route.providerName || plan.backend;

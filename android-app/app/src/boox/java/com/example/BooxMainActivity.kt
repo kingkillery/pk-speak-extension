@@ -809,9 +809,9 @@ private fun BooxCockpit(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // ─── Action row: TALK (push-to-talk) / STOP / AUTO-SPEAK ──
+        // ─── Action row: TALK (push-to-talk) / STOP ──────────────
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().height(120.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -844,7 +844,7 @@ private fun BooxCockpit(
                         recordingStartedAtMs = 0L
                     }
                 },
-                modifier = Modifier.weight(1f).heightIn(min = 64.dp),
+                modifier = Modifier.weight(1f),
             )
 
             StopButton(
@@ -852,11 +852,11 @@ private fun BooxCockpit(
                 onClick = {
                     stopCurrentTurn(state, scope, client, audioHelper, ttsHelper, prefs)
                 },
-                modifier = Modifier.weight(1f).heightIn(min = 64.dp),
+                modifier = Modifier.weight(1f),
             )
         }
 
-        // ─── Auto-speak toggle (checkbox-style button) ────────────
+        // ─── Speak-replies toggle: controls audio output for both text and voice turns ─
         Spacer(modifier = Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -869,7 +869,7 @@ private fun BooxCockpit(
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 Text(
-                    text = if (prefs.autoSpeakEnabled) "[x] AUTO-SPEAK" else "[ ] AUTO-SPEAK",
+                    text = if (prefs.autoSpeakEnabled) "[x] SPEAK REPLIES" else "[ ] SPEAK REPLIES",
                     color = Ink,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
