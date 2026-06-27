@@ -473,12 +473,18 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 	});
 
 	ws.on("close", () => {
+		// A prior disconnect timer may still be pending if this socket churned;
+		// clear it so we keep a single grace timer, not a growing pile.
+		if (activeSession.disconnectTimeout) clearTimeout(activeSession.disconnectTimeout);
 		activeSession.disconnectTimeout = setTimeout(() => {
 			try {
 				activeSession.session?.close();
 			} catch {}
 			activeSessions.delete(activeSession.sessionId);
-		}, 60000); // 60 seconds timeout
+		}, 60000); // 60 seconds grace for client reconnect/resume
+		// unref so a lingering grace timer never blocks process shutdown (matches the
+		// approval/init timers); the session still closes on the next tick if idle.
+		activeSession.disconnectTimeout.unref?.();
 	});
 }
 

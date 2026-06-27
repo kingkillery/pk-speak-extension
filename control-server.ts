@@ -501,7 +501,10 @@ export class ControlServer {
 			this.state.port = address.port;
 		}
 
-		this.cleanupTimer = setInterval(() => this.cleanupExpiredAudio(), CLEANUP_INTERVAL_MS);
+		this.cleanupTimer = setInterval(() => {
+			this.cleanupExpiredAudio();
+			this.cleanupStaleRateLimitBuckets();
+		}, CLEANUP_INTERVAL_MS);
 		this.cleanupTimer.unref?.();
 		this.onStateChange({ enabled: true, host, port: this.state.port, authToken });
 		await this.startDiscoveryResponder().catch((error) => {
@@ -1538,6 +1541,20 @@ export class ControlServer {
 			if (artifact.expiresAt <= now) {
 				this.audioArtifacts.delete(id);
 				void rm(artifact.path, { force: true }).catch(() => {});
+			}
+		}
+	}
+
+	// Evict rate-limit buckets whose window has fully elapsed: an expired bucket is
+	// indistinguishable from a fresh one (checkRateLimit resets counters on a stale
+	// window), so dropping it is behavior-preserving and bounds the Map. Without this
+	// the Map grows once per distinct remoteAddress:token forever — a slow memory leak
+	// on a long-lived public/Tailscale gateway facing rotating IPs and probe tokens.
+	private cleanupStaleRateLimitBuckets() {
+		const now = Date.now();
+		for (const [key, bucket] of this.rateLimitBuckets.entries()) {
+			if (now - bucket.windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
+				this.rateLimitBuckets.delete(key);
 			}
 		}
 	}
