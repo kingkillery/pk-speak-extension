@@ -44,6 +44,9 @@ export function createInitialAgentProviders(options: AgentProviderFactoryOptions
 	if (providerName === "claude") {
 		return { provider: createClaudeProvider(options, cwd) };
 	}
+	if (providerName === "oh-my-pi") {
+		return { provider: createOmpAgentProvider(options.config.ompBin, cwd, options.env) };
+	}
 	if (providerName === "pi") {
 		return { provider: createPiProvider(options, cwd) };
 	}
@@ -94,6 +97,7 @@ function createCodingAgentProviders(options: AgentProviderFactoryOptions, cwd: s
 	const backend = normalizeRunnableAgentProviderName(env.PI_SPEAK_AGENT_BACKEND || env.PI_SPEAK_CODING_AGENT) || "codex";
 	if (backend === "pi") return { provider: createPiProvider(options, cwd) };
 	if (backend === "claude") return { provider: createClaudeProvider(options, cwd) };
+	if (backend === "oh-my-pi") return { provider: createOmpAgentProvider(options.config.ompBin, cwd, options.env) };
 	return createCodexProviders(options, cwd);
 }
 
@@ -107,7 +111,16 @@ function createCodexProviders(options: AgentProviderFactoryOptions, cwd: string)
 function createProviderForBackend(options: AgentProviderFactoryOptions, backend: RunnableAgentProviderName, cwd: string): AgentProvider {
 	if (backend === "pi") return createPiProvider(options, cwd);
 	if (backend === "claude") return createClaudeProvider(options, cwd);
+	if (backend === "oh-my-pi") return createOmpAgentProvider(options.config.ompBin, cwd, options.env);
 	return createCodexProvider(options, cwd);
+}
+
+export function createOmpAgentProvider(ompBin: string, cwd: string, env?: NodeJS.ProcessEnv): AgentProvider {
+	return new OmpCliProvider(ompBin, cwd, env);
+}
+
+export function createOmpResumeProvider(ompBin: string, cwd: string, sessionPath: string, env?: NodeJS.ProcessEnv): AgentProvider {
+	return new OmpResumeProvider(ompBin, cwd, sessionPath, env);
 }
 
 function createPiProvider(options: AgentProviderFactoryOptions, cwd: string): AgentProvider {
@@ -144,6 +157,41 @@ class PiCliProvider implements AgentProvider {
 			cwd: options.cwd || this.cwd,
 			name: "pi",
 			shell: command.shell,
+			env: this.env,
+		});
+		if (text) yield { type: "text" as const, text };
+	}
+}
+
+class OmpCliProvider implements AgentProvider {
+	readonly name = "oh-my-pi" as const;
+	constructor(private readonly ompBin: string, private readonly cwd: string, private readonly env?: NodeJS.ProcessEnv) {}
+
+	async *sendPrompt(prompt: string, options: AgentPromptOptions = {}) {
+		const cwd = options.cwd || this.cwd;
+		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, "--auto-approve", prompt], {
+			cwd,
+			name: "oh-my-pi",
+			env: this.env,
+		});
+		if (text) yield { type: "text" as const, text };
+	}
+}
+
+class OmpResumeProvider implements AgentProvider {
+	readonly name = "oh-my-pi" as const;
+	constructor(
+		private readonly ompBin: string,
+		private readonly cwd: string,
+		private readonly sessionPath: string,
+		private readonly env?: NodeJS.ProcessEnv,
+	) {}
+
+	async *sendPrompt(prompt: string, options: AgentPromptOptions = {}) {
+		const cwd = options.cwd || this.cwd;
+		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, "--resume", this.sessionPath, "--auto-approve", prompt], {
+			cwd,
+			name: "oh-my-pi-resume",
 			env: this.env,
 		});
 		if (text) yield { type: "text" as const, text };

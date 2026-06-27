@@ -36,9 +36,9 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
     private val healthClient = OkHttpClient.Builder()
-        .connectTimeout(1500, TimeUnit.MILLISECONDS)
-        .readTimeout(1500, TimeUnit.MILLISECONDS)
-        .writeTimeout(1500, TimeUnit.MILLISECONDS)
+        .connectTimeout(3000, TimeUnit.MILLISECONDS)
+        .readTimeout(3000, TimeUnit.MILLISECONDS)
+        .writeTimeout(3000, TimeUnit.MILLISECONDS)
         .build()
     @Volatile
     private var activeTurnCall: Call? = null
@@ -807,6 +807,39 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
+    suspend fun listProjects(base: String? = null): Pair<String, List<String>> {
+        return withContext(Dispatchers.IO) {
+            val url = buildString {
+                append("${gatewayBaseUrl()}/v1/projects")
+                if (!base.isNullOrBlank()) append("?base=${urlParam(base)}")
+            }
+            val request = Request.Builder()
+                .url(url)
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: return@withContext ("" to emptyList())
+                    val json = try { JSONObject(body) } catch (_: Exception) { return@withContext ("" to emptyList()) }
+                    val basePath = json.optString("base", "")
+                    val projectsJson = json.optJSONArray("projects")
+                    val projects = mutableListOf<String>()
+                    if (projectsJson != null) {
+                        for (i in 0 until projectsJson.length()) {
+                            val name = projectsJson.optString(i)
+                            if (name.isNotBlank()) projects.add(name)
+                        }
+                    }
+                    basePath to projects
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "listProjects failed", e)
+                "" to emptyList()
+            }
+        }
+    }
+
     fun listWorkspace(path: String = prefs.workspacePath): WorkspaceListing? {
         val gatewayUrl = "${gatewayBaseUrl()}/v1/workspace?path=${urlParam(path)}"
         val request = Request.Builder()
@@ -1046,6 +1079,51 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
+    suspend fun selectOmpSession(sessionPath: String): String {
+        return withContext(Dispatchers.IO) {
+            val requestBody = JSONObject().apply {
+                put("sessionPath", sessionPath)
+            }.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("${gatewayBaseUrl()}/v1/omp/select-session")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(requestBody)
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                        return@withContext json.optString("error", "Select failed: ${response.code}")
+                    }
+                    "Routing turns → ${json.optString("sessionPath", sessionPath).substringAfterLast("/")}"
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "selectOmpSession failed", e)
+                "Select failed: ${shortError(e)}"
+            }
+        }
+    }
+
+    suspend fun getSelectedOmpSession(): String? {
+        return withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url("${gatewayBaseUrl()}/v1/omp/selected-session")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    json.optString("sessionPath").ifBlank { null }
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
     suspend fun removeGatewaySession(entry: GatewaySessionEntry): String {
         return withContext(Dispatchers.IO) {
             val sessionPath = entry.canonicalSessionPath
@@ -1070,6 +1148,68 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             } catch (e: Exception) {
                 Log.e("VoiceAgent", "Session remove failed", e)
                 "Session remove failed: ${shortError(e)}"
+            }
+        }
+    }
+
+    /**
+     * Asks the gateway to launch (or focus) the OMP Agent Hub. POSTs hubOnly=true to
+     * /v1/sessions/launch and returns a human-readable result string. Mirrors the
+     * cancelTurn()/resumeGatewaySession() request style.
+     */
+    suspend fun launchOmpHub(): String {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext "No gateway URL is configured."
+            val requestBody = JSONObject().apply {
+                put("hubOnly", true)
+            }.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("$baseUrl/v1/sessions/launch")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(requestBody)
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                        return@withContext json.optString("error", json.optString("message", "OMP hub launch failed: ${response.code}"))
+                    }
+                    json.optString("message", "OMP hub launched.")
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "OMP hub launch failed", e)
+                "OMP hub launch failed: ${shortError(e)}"
+            }
+        }
+    }
+
+    suspend fun getCollabLink(): CollabLink {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext CollabLink(false, null, null)
+            val request = Request.Builder()
+                .url("$baseUrl/v1/collab-link")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                        return@withContext CollabLink(false, null, null)
+                    }
+                    val collab = json.optJSONObject("collab") ?: return@withContext CollabLink(false, null, null)
+                    val active = collab.optBoolean("active", false)
+                    val webLink = collab.optString("webLink", collab.optString("link", "")).ifBlank { null }
+                    val viewLink = collab.optString("webViewLink", collab.optString("viewLink", "")).ifBlank { null }
+                    CollabLink(active, webLink, viewLink)
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "Collab link fetch failed", e)
+                CollabLink(false, null, null)
             }
         }
     }
@@ -1416,6 +1556,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         "Gateway Claude (Claude Code)" -> "claude"
         "Gateway Voice (ElevenLabs)" -> "elevenlabs"
         "Gateway Gemini (Vertex AI)" -> "gemini"
+        "Gateway OMP (oh-my-pi)" -> "oh-my-pi"
         else -> "codex"
     }
 
@@ -1478,6 +1619,12 @@ data class RemoteSlashCommand(
     val description: String,
     val usage: String,
     val examples: List<String>
+)
+
+data class CollabLink(
+    val active: Boolean,
+    val webLink: String?,
+    val viewLink: String?
 )
 
 data class ConnectionCheck(

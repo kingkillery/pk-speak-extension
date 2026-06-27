@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, mkdirSync, opendirSync, openSync, readFileSync, realpathSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import dgram, { type Socket as UdpSocket } from "node:dgram";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, randomUUID } from "node:crypto";
-import { dirname, join, parse, resolve } from "node:path";
+import { basename, dirname, join, parse, resolve } from "node:path";
 import { hostname, networkInterfaces, platform } from "node:os";
 import QRCode from "qrcode";
 import Bonjour from "bonjour-service";
@@ -16,6 +16,7 @@ import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
 import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
 import type { SessionDashboard, CompactRouteSlot } from "./session-routing.js";
 import type { AgentDiscoverySnapshot } from "./agent-discovery.js";
+import { getPiSpeakConfigDir } from "./setup-config.js";
 
 export type ControlServerState = {
 
@@ -69,7 +70,7 @@ export type RemoteSlashCommand = {
 	source?: "extension" | "prompt" | "skill" | "builtin";
 };
 
-export type GatewayAgentProvider = "pi" | "codex" | "claude";
+export type GatewayAgentProvider = "pi" | "codex" | "claude" | "oh-my-pi";
 export type ControlAgentProvider = GatewayAgentProvider | "gemini" | "gemini-live" | "elevenlabs";
 
 export type ControlServerStatus = {
@@ -174,7 +175,18 @@ export type WarpControlSnapshot = {
 export type WorkspaceEntry = {
 	name: string;
 	path: string;
-	type: "directory";
+	type: "directory" | "file";
+	size?: number;
+};
+
+export type CollabLinkSnapshot = {
+	active: boolean;
+	webLink?: string;
+	webViewLink?: string;
+	link?: string;
+	viewLink?: string;
+	view?: boolean;
+	startedAt?: string;
 };
 
 export type ControlServerOptions = {
@@ -222,6 +234,8 @@ export type ControlServerOptions = {
 	onSessionRemove?: (body: SessionRemovePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
+	onOmpSelectSession?: (sessionPath: string) => void;
+	onOmpGetSelectedSession?: () => string | null;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 	onRealtimeConnection?: (ws: WebSocket) => void;
@@ -334,6 +348,8 @@ export class ControlServer {
 	private readonly onSessionRemove?: ControlServerOptions["onSessionRemove"];
 	private readonly onSessionResume?: ControlServerOptions["onSessionResume"];
 	private readonly onSessionLaunch?: ControlServerOptions["onSessionLaunch"];
+	private readonly onOmpSelectSession?: ControlServerOptions["onOmpSelectSession"];
+	private readonly onOmpGetSelectedSession?: ControlServerOptions["onOmpGetSelectedSession"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
 	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
 	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
@@ -375,6 +391,8 @@ export class ControlServer {
 		this.onSessionRemove = options.onSessionRemove;
 		this.onSessionResume = options.onSessionResume;
 		this.onSessionLaunch = options.onSessionLaunch;
+		this.onOmpSelectSession = options.onOmpSelectSession;
+		this.onOmpGetSelectedSession = options.onOmpGetSelectedSession;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
@@ -659,6 +677,22 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/workspace/file") {
+			const result = readWorkspaceFile(url.searchParams.get("path") || undefined);
+			if (!result.ok) {
+				this.writeJson(res, result.status, { ok: false, error: result.error });
+				return;
+			}
+			const { ok: _ok, ...file } = result;
+			this.writeJson(res, 200, { ok: true, file });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/collab-link") {
+			this.writeJson(res, 200, { ok: true, collab: readCollabLink() });
+			return;
+		}
+
 		if (req.method === "POST" && url.pathname === "/v1/route") {
 			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 			if (!payload) {
@@ -788,6 +822,52 @@ export class ControlServer {
 			const hubOnly = typeof payload.hubOnly === "boolean" ? payload.hubOnly : undefined;
 			const result = await this.onSessionLaunch({ cwd, prompt, model, provider, sessionDir, hubOnly });
 			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/projects") {
+			const base = url.searchParams.get("base")?.trim()
+				|| process.env.PI_SPEAK_PROJECTS_BASE?.trim()
+				|| (() => {
+					const cwd = getDefaultWorkspacePath();
+					const parent = dirname(resolve(cwd));
+					return parent;
+				})();
+			const projects: string[] = [];
+			try {
+				const dir = opendirSync(resolve(base));
+				try {
+					let dirent = dir.readSync();
+					while (dirent) {
+						if (dirent.isDirectory() && !dirent.name.startsWith(".")) {
+							projects.push(dirent.name);
+						}
+						dirent = dir.readSync();
+					}
+				} finally {
+					dir.closeSync();
+				}
+			} catch {}
+			projects.sort((a, b) => a.localeCompare(b));
+			this.writeJson(res, 200, { ok: true, base: resolve(base), projects });
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/omp/select-session") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const sessionPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : null;
+			if (!sessionPath) {
+				this.writeJson(res, 400, { ok: false, error: "sessionPath is required" });
+				return;
+			}
+			this.onOmpSelectSession?.(sessionPath);
+			this.writeJson(res, 200, { ok: true, sessionPath });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/omp/selected-session") {
+			const sessionPath = this.onOmpGetSelectedSession?.() ?? null;
+			this.writeJson(res, 200, { ok: true, sessionPath });
 			return;
 		}
 
@@ -1099,6 +1179,8 @@ export class ControlServer {
 				cancelTurn: "/v1/turn/cancel",
 				route: "/v1/route",
 				workspace: "/v1/workspace",
+				workspaceFile: "/v1/workspace/file",
+				collabLink: "/v1/collab-link",
 				sessions: "/v1/sessions",
 				slots: "/v1/sessions/slots",
 				agents: "/v1/agents",
@@ -1116,6 +1198,8 @@ export class ControlServer {
 				"routing",
 				"slash-commands",
 				"workspace-browse",
+				"workspace-file-read",
+				"collab-link",
 				"turn-cancel",
 				"progress-events",
 				"pwa",
@@ -1288,11 +1372,19 @@ export class ControlServer {
 		const token = this.state.authToken || "";
 		if (!token) return true;
 		if (isLocalRequest(req, url)) return true;
-		const headerToken = getPrimaryHeaderValue(req.headers["x-pi-speak-token"]);
-		if (headerToken === token) return true;
-		const authHeader = getPrimaryHeaderValue(req.headers.authorization);
-		if (authHeader === `Bearer ${token}`) return true;
-		return allowQueryToken && url.searchParams.get("token") === token;
+		// Accept any token from PI_SPEAK_EXTRA_TOKEN (comma-separated) in addition to the primary.
+		const extraTokens = (process.env.PI_SPEAK_EXTRA_TOKEN || "")
+			.split(",").map(t => t.trim()).filter(Boolean);
+		const isValid = (presented: string) =>
+			presented === token || extraTokens.includes(presented);
+		const headerToken = getPrimaryHeaderValue(req.headers["x-pi-speak-token"]) || "";
+		if (headerToken && isValid(headerToken)) return true;
+		const authHeader = getPrimaryHeaderValue(req.headers.authorization) || "";
+		const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+		if (bearerToken && isValid(bearerToken)) return true;
+		if (!allowQueryToken) return false;
+		const queryToken = url.searchParams.get("token") || "";
+		return !!queryToken && isValid(queryToken);
 	}
 
 	private checkRateLimit(req: IncomingMessage, url: URL, localRequest: boolean) {
@@ -1761,9 +1853,10 @@ function parseRemoteTurnMode(value: string | null | undefined) {
 	return normalized === "live" ? "live" : "auto";
 }
 
-function parseAgentProviderOverride(value: string | null | undefined) {
+function parseAgentProviderOverride(value: string | null | undefined): GatewayAgentProvider | undefined {
 	const normalized = (value || "").trim().toLowerCase();
 	if (normalized === "pi" || normalized === "codex" || normalized === "claude") return normalized;
+	if (normalized === "oh-my-pi" || normalized === "omp") return "oh-my-pi";
 	return undefined;
 }
 
@@ -1933,8 +2026,20 @@ function getLaunchCwdFromUrl(url: URL) {
 }
 
 function getWorkspaceRoot() {
-	return process.env.PI_SPEAK_WORKSPACE_ROOT?.trim()
-		|| (platform() === "win32" ? parse(process.cwd()).root || "C:\\" : "/");
+	const explicit = process.env.PI_SPEAK_WORKSPACE_ROOT?.trim();
+	if (explicit) {
+		// "/" (or a drive root) is an explicit, deliberate opt-in to browse the whole filesystem.
+		if (explicit === "fs" || explicit === "*") {
+			return platform() === "win32" ? parse(process.cwd()).root || "C:\\" : "/";
+		}
+		return explicit;
+	}
+	// Default to the agent working directory rather than the whole drive. The
+	// authenticated /v1/workspace/file route reads file CONTENT confined to this
+	// root, so a permissive default would let any remote-token holder exfiltrate
+	// arbitrary files (SSH keys, .env, the pi-speak token itself). Opt in to a
+	// broader root with PI_SPEAK_WORKSPACE_ROOT (set it to "fs" for the drive root).
+	return getDefaultWorkspacePath();
 }
 
 function getDefaultWorkspacePath() {
@@ -1943,29 +2048,201 @@ function getDefaultWorkspacePath() {
 		|| process.cwd();
 }
 
+// Resolve symlinks/junctions and confirm the real path stays within the workspace
+// root. resolve()/isPathInsideRoot() are purely lexical, but statSync/readSync follow
+// links, so a link inside the root could otherwise expose files outside it. Returns the
+// canonical path when contained, otherwise undefined.
+function realPathInsideRoot(target: string, root: string): string | undefined {
+	let realTarget: string;
+	try {
+		realTarget = realpathSync(target);
+	} catch {
+		return undefined;
+	}
+	let realRoot: string;
+	try {
+		realRoot = realpathSync(root);
+	} catch {
+		realRoot = resolve(root);
+	}
+	return isPathInsideRoot(realTarget, realRoot) ? realTarget : undefined;
+}
+
+const WINDOWS_RESERVED_DEVICE_NAMES = new Set([
+	"CON", "PRN", "AUX", "NUL",
+	"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+	"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+]);
+
+// Windows resolves names like CON / NUL / COM1 to console/serial devices regardless of
+// directory, and reading one can block forever. Reject them before any stat/open.
+function isWindowsReservedDeviceName(pathOrName: string) {
+	if (platform() !== "win32") return false;
+	const base = basename(pathOrName);
+	const stem = base.split(".")[0].replace(/[ .]+$/, "").trim().toUpperCase();
+	return WINDOWS_RESERVED_DEVICE_NAMES.has(stem);
+}
+
+const WORKSPACE_LIST_MAX_ENTRIES = 2000;
+
 function listWorkspaceDirectory(requestedPath?: string) {
 	const root = resolve(getWorkspaceRoot());
 	const requested = resolve(requestedPath?.trim() || root);
-	const currentPath = isPathInsideRoot(requested, root) ? requested : root;
-	const current = safeStatDirectory(currentPath) ? currentPath : root;
-	const entries: WorkspaceEntry[] = [];
+	// Lexical clamp first (cheap ../ guard), then confirm the real directory stays in
+	// root so a symlinked subdirectory cannot walk outside it.
+	const lexical = isPathInsideRoot(requested, root) ? requested : root;
+	const current = safeStatDirectory(lexical) && realPathInsideRoot(lexical, root) ? lexical : root;
+	const directories: WorkspaceEntry[] = [];
+	const files: WorkspaceEntry[] = [];
+	let truncated = false;
 	try {
-		for (const dirent of readdirSync(current, { withFileTypes: true })) {
-			if (!dirent.isDirectory()) continue;
-			if (dirent.name === "$RECYCLE.BIN" || dirent.name === "System Volume Information") continue;
-			const childPath = join(current, dirent.name);
-			entries.push({ name: dirent.name, path: childPath, type: "directory" });
+		const dir = opendirSync(current);
+		try {
+			// Stream entries with a hard cap so an enormous directory (node_modules,
+			// WinSxS, ...) can't pin the event loop or balloon the response.
+			let dirent = dir.readSync();
+			while (dirent) {
+				if (directories.length + files.length >= WORKSPACE_LIST_MAX_ENTRIES) {
+					truncated = true;
+					break;
+				}
+				const name = dirent.name;
+				if (name !== "$RECYCLE.BIN" && name !== "System Volume Information") {
+					const childPath = join(current, name);
+					if (dirent.isDirectory()) {
+						directories.push({ name, path: childPath, type: "directory" });
+					} else if (dirent.isFile()) {
+						let size: number | undefined;
+						try {
+							size = statSync(childPath).size;
+						} catch {}
+						files.push({ name, path: childPath, type: "file", size });
+					}
+				}
+				dirent = dir.readSync();
+			}
+		} finally {
+			dir.closeSync();
 		}
 	} catch {}
-	entries.sort((left, right) => left.name.localeCompare(right.name));
+	directories.sort((left, right) => left.name.localeCompare(right.name));
+	files.sort((left, right) => left.name.localeCompare(right.name));
 	const parent = current !== root ? dirname(current) : undefined;
 	return {
 		root,
 		current,
 		parent: parent && isPathInsideRoot(parent, root) ? parent : undefined,
 		defaultPath: getDefaultWorkspacePath(),
-		entries,
+		entries: [...directories, ...files],
+		truncated,
 	};
+}
+
+const WORKSPACE_FILE_MAX_BYTES = 512 * 1024;
+
+// Decode a (possibly mid-stream) byte slice as UTF-8. When the slice was truncated at the
+// byte cap, drop a trailing partial multi-byte sequence so the preview doesn't end in U+FFFD.
+function decodeTextPreview(buffer: Buffer, truncated: boolean): string {
+	if (!truncated || buffer.length === 0) return buffer.toString("utf8");
+	let i = buffer.length - 1;
+	while (i >= 0 && (buffer[i] & 0xc0) === 0x80) i--; // skip continuation bytes (10xxxxxx)
+	if (i < 0) return buffer.toString("utf8");
+	const lead = buffer[i];
+	let seqLen = 1;
+	if ((lead & 0xe0) === 0xc0) seqLen = 2;
+	else if ((lead & 0xf0) === 0xe0) seqLen = 3;
+	else if ((lead & 0xf8) === 0xf0) seqLen = 4;
+	const available = buffer.length - i;
+	const end = available < seqLen ? i : buffer.length;
+	return buffer.subarray(0, end).toString("utf8");
+}
+
+type WorkspaceFileResult =
+	| {
+		ok: true;
+		name: string;
+		path: string;
+		size: number;
+		truncated: boolean;
+		binary: boolean;
+		content: string;
+	}
+	| { ok: false; status: number; error: string };
+
+function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
+	const trimmed = requestedPath?.trim();
+	if (!trimmed) {
+		return { ok: false, status: 400, error: "A file path is required." };
+	}
+	const root = resolve(getWorkspaceRoot());
+	const target = resolve(trimmed);
+	if (!isPathInsideRoot(target, root)) {
+		return { ok: false, status: 403, error: "Path is outside the workspace root." };
+	}
+	if (isWindowsReservedDeviceName(target)) {
+		return { ok: false, status: 400, error: "Path is not a regular file." };
+	}
+	let stats;
+	try {
+		stats = statSync(target);
+	} catch {
+		return { ok: false, status: 404, error: "File not found." };
+	}
+	if (stats.isDirectory()) {
+		return { ok: false, status: 400, error: "Path is a directory, not a file." };
+	}
+	if (!stats.isFile()) {
+		return { ok: false, status: 400, error: "Path is not a regular file." };
+	}
+	// Symlink/junction hardening: the real (link-resolved) path must also stay in root.
+	if (!realPathInsideRoot(target, root)) {
+		return { ok: false, status: 403, error: "Path is outside the workspace root." };
+	}
+	let buffer: Buffer;
+	try {
+		const fd = openSync(target, "r");
+		try {
+			const readLength = Math.min(stats.size, WORKSPACE_FILE_MAX_BYTES);
+			const scratch = Buffer.alloc(readLength);
+			const bytes = readSync(fd, scratch, 0, readLength, 0);
+			buffer = scratch.subarray(0, bytes);
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return { ok: false, status: 500, error: "Unable to read file." };
+	}
+	const binary = buffer.includes(0);
+	const truncated = stats.size > buffer.length;
+	return {
+		ok: true,
+		name: basename(target),
+		path: target,
+		size: stats.size,
+		truncated,
+		binary,
+		content: binary ? "" : decodeTextPreview(buffer, truncated),
+	};
+}
+
+function readCollabLink(): CollabLinkSnapshot {
+	try {
+		const file = join(getPiSpeakConfigDir(), "collab.json");
+		const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return { active: false };
+		}
+		const snapshot: CollabLinkSnapshot = { active: !!parsed.active };
+		if (typeof parsed.webLink === "string") snapshot.webLink = parsed.webLink;
+		if (typeof parsed.webViewLink === "string") snapshot.webViewLink = parsed.webViewLink;
+		if (typeof parsed.link === "string") snapshot.link = parsed.link;
+		if (typeof parsed.viewLink === "string") snapshot.viewLink = parsed.viewLink;
+		if (typeof parsed.view === "boolean") snapshot.view = parsed.view;
+		if (typeof parsed.startedAt === "string") snapshot.startedAt = parsed.startedAt;
+		return snapshot;
+	} catch {
+		return { active: false };
+	}
 }
 
 function getOrCreateInstallAuthToken() {
@@ -2034,8 +2311,11 @@ function safeStatDirectory(path: string) {
 }
 
 function isPathInsideRoot(path: string, root: string) {
-	const normalizedPath = resolve(path).toLowerCase();
-	const normalizedRoot = resolve(root).toLowerCase();
+	// Case-fold only on Windows; POSIX filesystems are case-sensitive and folding there
+	// would conflate distinct directories (e.g. /srv/Data vs /srv/data).
+	const caseFold = platform() === "win32";
+	const normalizedPath = caseFold ? resolve(path).toLowerCase() : resolve(path);
+	const normalizedRoot = caseFold ? resolve(root).toLowerCase() : resolve(root);
 	const separator = platform() === "win32" ? "\\" : "/";
 	const rootWithSeparator = normalizedRoot.endsWith(separator) ? normalizedRoot : `${normalizedRoot}${separator}`;
 	return normalizedPath === normalizedRoot || normalizedPath.startsWith(rootWithSeparator);

@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -23,7 +24,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,6 +60,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.isGranted
+import com.google.accompanist.permissions.rememberPermissionState
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.example.api.GatewaySessionDashboard
 import com.example.api.GatewaySessionEntry
 import com.example.api.GatewaySessionException
@@ -195,11 +203,17 @@ private fun BooxRoot(
     // every 5s so the UI dynamically adapts when the reverse tunnel is enabled.
     // Restarts immediately when settings change (forceCheckTrigger increments).
     LaunchedEffect(forceCheckTrigger) {
+        // Debounce: opening the Hub starts polling the heavy /v1/sessions dashboard, which can
+        // briefly stall the single-threaded gateway so the very next 1.5s/3s /health ping times
+        // out. A SINGLE missed ping must NOT flip the global connection state to reconnecting --
+        // we keep showing the last-good "Connected" state until we miss at least twice in a row.
+        var consecutiveFailures = 0
         while (true) {
             val startTime = System.currentTimeMillis()
             val healthy = withContext(Dispatchers.IO) { client.pingHealth() }
             val latency = System.currentTimeMillis() - startTime
             if (healthy) {
+                consecutiveFailures = 0
                 unreachableSinceMs = null
                 state.isGatewayConnected = true
                 state.isReconnecting = false
@@ -207,13 +221,20 @@ private fun BooxRoot(
                 state.connectionStatusText = "Connected"
                 state.connectionBannerText = ""
             } else {
+                consecutiveFailures += 1
                 val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
                 unreachableSinceMs = firstFailureMs
+                // First miss: hold the last-good state (likely just a dashboard-induced stall).
+                if (consecutiveFailures < 2) {
+                    delay(5_000)
+                    continue
+                }
                 state.isGatewayConnected = false
                 state.isReconnecting = true
                 state.connectionStatusText = "Reconnecting..."
                 val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
                 if (result.connected) {
+                    consecutiveFailures = 0
                     unreachableSinceMs = null
                     state.isGatewayConnected = true
                     state.isReconnecting = false
@@ -287,7 +308,12 @@ private fun BooxRoot(
             when {
                 showHub -> {
                     Box(modifier = Modifier.weight(1f)) {
-                        HubPane(state = hubState)
+                        HubPane(
+                            state = hubState,
+                            client = client,
+                            prefs = prefs,
+                            scope = scope,
+                        )
                     }
                 }
                 showSettings -> {
@@ -439,6 +465,188 @@ private fun StatusBanner(state: StudioRuntimeState) {
     }
 }
 
+// ─── Session selector (working dir + recent omp sessions in that dir) ─────────
+@Composable
+private fun SessionSelector(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    projects: List<String>,
+    selectedProject: String,
+    onSelectProject: (String) -> Unit,
+    recentSessions: List<GatewaySessionEntry>,
+    selectedSessionName: String,
+    onSelectSession: (GatewaySessionEntry) -> Unit,
+    status: String,
+) {
+    val stripLabel = buildString {
+        append(if (selectedProject.isNotBlank()) selectedProject else "no project")
+        if (selectedSessionName.isNotBlank()) { append(" / "); append(selectedSessionName) }
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Paper,
+        shape = RoundedCornerShape(3.dp),
+        border = BorderStroke(1.dp, if (expanded) Ink else SoftChrome),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            // ── Collapsed strip: single tap-target showing current selection ──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggle),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (expanded) "▲ SESSION" else "▼ SESSION",
+                    color = Ink,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = stripLabel,
+                    color = if (selectedSessionName.isNotBlank()) Ink else Color(0xFF888888),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            if (expanded) {
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // ── Working directory row ─────────────────────────────────────
+                Text(
+                    text = "WORKING DIR",
+                    color = Ink,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                if (projects.isEmpty()) {
+                    Text(
+                        text = "Loading projects...",
+                        color = Color(0xFF888888),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                } else {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(projects, key = { it }) { name ->
+                            val sel = name == selectedProject
+                            Surface(
+                                modifier = Modifier.clickable { onSelectProject(name) },
+                                color = if (sel) Ink else Paper,
+                                shape = RoundedCornerShape(3.dp),
+                                border = BorderStroke(if (sel) 2.dp else 1.dp, if (sel) Ink else SoftChrome),
+                            ) {
+                                Text(
+                                    text = name,
+                                    color = if (sel) Paper else Ink,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // ── Recent sessions (last 24h by lastActivity) ────────────────
+                Text(
+                    text = "RECENT SESSIONS  (last 24h)",
+                    color = Ink,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                if (recentSessions.isEmpty()) {
+                    Text(
+                        text = if (selectedProject.isBlank()) "Select a project above."
+                               else "No sessions used in the last 24h for $selectedProject.",
+                        color = Color(0xFF888888),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        recentSessions.take(8).forEach { entry ->
+                            val sel = entry.name == selectedSessionName
+                            val ago = entry.lastActivity?.let { formatAgo(it) } ?: "?"
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelectSession(entry) },
+                                color = if (sel) Color(0xFFE8E8E8) else Paper,
+                                shape = RoundedCornerShape(2.dp),
+                                border = BorderStroke(if (sel) 2.dp else 1.dp, if (sel) Ink else SoftChrome),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = if (sel) "[*]" else "[ ]",
+                                        color = Ink,
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.padding(end = 6.dp),
+                                    )
+                                    Text(
+                                        text = entry.name.ifBlank { "(unnamed)" },
+                                        color = Ink,
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Text(
+                                        text = ago,
+                                        color = Color(0xFF666666),
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (status.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = status,
+                        color = Ink,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatAgo(timestampMs: Long): String {
+    val diff = System.currentTimeMillis() - timestampMs
+    val mins = diff / 60_000
+    return when {
+        mins < 1 -> "just now"
+        mins < 60 -> "${mins}m ago"
+        mins < 1440 -> "${mins / 60}h ago"
+        else -> "${mins / 1440}d ago"
+    }
+}
+
 // ─── Cockpit ───────────────────────────────────────────────────────────────
 @Composable
 private fun BooxCockpit(
@@ -453,12 +661,44 @@ private fun BooxCockpit(
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
-    // Auto-scroll only when new content actually arrives (state.chatMessages.size changes).
-    // NO smoothScroller, NO animateScrollToItem -- snap-to-bottom keeps EPD clean.
     LaunchedEffect(state.chatMessages.size, state.isProcessing) {
         if (state.chatMessages.isNotEmpty()) {
             listState.scrollToItem(state.chatMessages.size - 1)
         }
+    }
+
+    // ─── Session selector state ───────────────────────────────────────────────
+    var selectorExpanded by remember { mutableStateOf(false) }
+    var projectsBase by remember { mutableStateOf("") }
+    var projects by remember { mutableStateOf<List<String>>(emptyList()) }
+    var selectedProject by remember { mutableStateOf(prefs.workspacePath.substringAfterLast("/").substringAfterLast("\\")) }
+    var recentSessions by remember { mutableStateOf<List<GatewaySessionEntry>>(emptyList()) }
+    var selectedSessionName by remember { mutableStateOf("") }
+    var selectorStatus by remember { mutableStateOf("") }
+
+    LaunchedEffect(selectorExpanded) {
+        if (!selectorExpanded) return@LaunchedEffect
+        val (base, list) = withContext(kotlinx.coroutines.Dispatchers.IO) { client.listProjects() }
+        projectsBase = base
+        projects = list
+        if (selectedProject.isBlank() && list.isNotEmpty()) selectedProject = list.first()
+    }
+
+    val cutoffMs = 24L * 60 * 60 * 1000
+    LaunchedEffect(selectorExpanded, selectedProject, projectsBase) {
+        if (!selectorExpanded || selectedProject.isBlank()) return@LaunchedEffect
+        val dashboard = runCatching {
+            withContext(kotlinx.coroutines.Dispatchers.IO) { client.getSessionDashboard() }
+        }.getOrNull() ?: return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        val targetCwd = if (projectsBase.isNotBlank()) "$projectsBase/$selectedProject" else selectedProject
+        recentSessions = dashboard.sessions.filter { entry ->
+            val last = entry.lastActivity ?: return@filter false
+            val cwdMatch = listOf(entry.cwd, entry.workingDirectory)
+                .filterNotNull()
+                .any { c -> c.replace("\\", "/").contains(selectedProject, ignoreCase = true) }
+            cwdMatch && (now - last) <= cutoffMs
+        }.sortedByDescending { it.lastActivity }
     }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -496,7 +736,34 @@ private fun BooxCockpit(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // ─── Session selector strip ───────────────────────────────────────────
+        SessionSelector(
+            expanded = selectorExpanded,
+            onToggle = { selectorExpanded = !selectorExpanded },
+            projects = projects,
+            selectedProject = selectedProject,
+            onSelectProject = { name ->
+                selectedProject = name
+                val fullPath = if (projectsBase.isNotBlank()) "$projectsBase/$name" else name
+                prefs.workspacePath = fullPath
+            },
+            recentSessions = recentSessions,
+            selectedSessionName = selectedSessionName,
+            onSelectSession = { entry ->
+                val path = entry.canonicalSessionPath ?: return@SessionSelector
+                scope.launch {
+                    val msg = client.selectOmpSession(path)
+                    selectedSessionName = entry.name
+                    selectorStatus = msg
+                    selectorExpanded = false
+                }
+            },
+            status = selectorStatus,
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
 
         // ─── Latest reply (visible block so user can re-read without scrolling) ─
         if (state.latestReply.isNotBlank() && !state.isProcessing) {
@@ -867,7 +1134,21 @@ private fun mapGatewayError(e: Throwable): BooxHubUiState = when (e) {
 }
 
 @Composable
-private fun HubPane(state: BooxHubUiState) {
+private fun HubPane(
+    state: BooxHubUiState,
+    client: VoiceAgentClient,
+    prefs: AppPreferences,
+    scope: kotlinx.coroutines.CoroutineScope,
+) {
+    var launchStatus by remember { mutableStateOf("") }
+    var launching by remember { mutableStateOf(false) }
+    var joiningCollab by remember { mutableStateOf(false) }
+    var selectedOmpSessionPath by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        selectedOmpSessionPath = client.getSelectedOmpSession()
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -875,7 +1156,7 @@ private fun HubPane(state: BooxHubUiState) {
             .padding(8.dp)
     ) {
         Text(
-            text = "GATEWAY SESSIONS (read-only)",
+            text = "OMP AGENT HUB (read-only)",
             color = Ink,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
@@ -883,11 +1164,89 @@ private fun HubPane(state: BooxHubUiState) {
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
-            text = "oh-my-pi background lanes appear under 'agent'. No control buttons: the gateway does not route turns to a specific lane today.",
+            text = "Persistent oh-my-pi sessions on the host. " +
+                "Tap ROUTE TURNS HERE on a session to direct voice/text turns into it. " +
+                "LAUNCH OMP HUB starts a new background session.",
             color = Color(0xFF555555),
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
         )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // ─── Launch OMP Hub (EPD-friendly: bordered, monospace, no animation) ─
+        OutlinedButton(
+            onClick = {
+                if (launching) return@OutlinedButton
+                launching = true
+                launchStatus = "Launching OMP hub..."
+                // Launching the hub also routes turns to it.
+                prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+                scope.launch {
+                    launchStatus = client.launchOmpHub()
+                    launching = false
+                }
+            },
+            border = BorderStroke(1.dp, Ink),
+            shape = RoundedCornerShape(4.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = if (launching) "LAUNCHING..." else "LAUNCH OMP HUB",
+                color = Ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // ─── Join Collab (opens the live OMP collab session in a browser) ─────
+        OutlinedButton(
+            onClick = {
+                if (joiningCollab) return@OutlinedButton
+                joiningCollab = true
+                launchStatus = "Checking collab..."
+                scope.launch {
+                    val c = client.getCollabLink()
+                    if (c.active && !c.webLink.isNullOrBlank()) {
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(c.webLink)).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                            launchStatus = "Opening collab in browser..."
+                        } catch (e: Exception) {
+                            launchStatus = "Couldn't open collab link: ${e.message}"
+                        }
+                    } else {
+                        launchStatus = "No active collab. Run /collab in the omp hub on the host."
+                    }
+                    joiningCollab = false
+                }
+            },
+            border = BorderStroke(1.dp, Ink),
+            shape = RoundedCornerShape(4.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = if (joiningCollab) "JOINING..." else "JOIN COLLAB",
+                color = Ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        if (launchStatus.isNotBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = launchStatus,
+                color = Ink,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         Spacer(modifier = Modifier.height(8.dp))
 
         when (state) {
@@ -953,14 +1312,28 @@ private fun HubPane(state: BooxHubUiState) {
                 )
             }
             is BooxHubUiState.Loaded -> {
-                HubLoadedContent(state.dashboard)
+                HubLoadedContent(
+                    dashboard = state.dashboard,
+                    selectedOmpSessionPath = selectedOmpSessionPath,
+                    onSelectSession = { path ->
+                        scope.launch {
+                            val msg = client.selectOmpSession(path)
+                            selectedOmpSessionPath = path
+                            launchStatus = msg
+                        }
+                    },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun HubLoadedContent(dashboard: GatewaySessionDashboard) {
+private fun HubLoadedContent(
+    dashboard: GatewaySessionDashboard,
+    selectedOmpSessionPath: String?,
+    onSelectSession: (String) -> Unit,
+) {
     val byKind = remember(dashboard) { groupSessionsByKind(dashboard.sessions) }
     val isOhMyPiGroupEmpty = byKind["oh-my-pi"].isNullOrEmpty()
     if (dashboard.sessions.isEmpty()) {
@@ -976,9 +1349,9 @@ private fun HubLoadedContent(dashboard: GatewaySessionDashboard) {
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // Surface oh-my-pi (background agent) lanes FIRST so the cockpit's headline feature
-        // is the first thing the user sees. Read-only -- no "drive lane" button.
-        val order = listOf("oh-my-pi", "codex", "remote", "other")
+        // This is the OMP Agent Hub: surface ONLY oh-my-pi background agent lanes. codex/remote/
+        // other gateway sessions are intentionally hidden here. Read-only -- no "drive lane" button.
+        val order = listOf("oh-my-pi")
         for (kind in order) {
             val entries = byKind[kind].orEmpty()
             if (entries.isEmpty()) continue
@@ -992,7 +1365,13 @@ private fun HubLoadedContent(dashboard: GatewaySessionDashboard) {
                 )
             }
             items(entries, key = { it.sessionPath ?: it.name ?: it.path ?: it.hashCode().toString() }) { entry ->
-                HubSessionRow(entry, dashboard)
+                val entryPath = entry.canonicalSessionPath ?: entry.sessionPath ?: entry.path
+                HubSessionRow(
+                    entry = entry,
+                    dashboard = dashboard,
+                    isSelected = entryPath != null && entryPath == selectedOmpSessionPath,
+                    onSelect = { if (entryPath != null) onSelectSession(entryPath) },
+                )
             }
         }
         if (isOhMyPiGroupEmpty) {
@@ -1009,9 +1388,12 @@ private fun HubLoadedContent(dashboard: GatewaySessionDashboard) {
 }
 
 @Composable
-private fun HubSessionRow(entry: GatewaySessionEntry, dashboard: GatewaySessionDashboard) {
-    // Each status gets BOTH a glyph ([+]/[*]/[~]/[ ]/[!]) and a label, plus a border
-    // weight change so it survives EPD color loss. Text alone is unambiguous.
+private fun HubSessionRow(
+    entry: GatewaySessionEntry,
+    dashboard: GatewaySessionDashboard,
+    isSelected: Boolean = false,
+    onSelect: () -> Unit = {},
+) {
     val (statusGlyph, statusLabel, statusBorderWeight) = when {
         entry.isCurrentIn(dashboard) -> Triple("[+]", "current", 2.dp)
         entry.isReadyIn(dashboard) -> Triple("[+]", "ready", 2.dp)
@@ -1020,12 +1402,11 @@ private fun HubSessionRow(entry: GatewaySessionEntry, dashboard: GatewaySessionD
         entry.activity.isNullOrBlank() -> Triple("[ ]", "—", 1.dp)
         else -> Triple("[!]", entry.activity, 1.dp)
     }
-    @Suppress("UNUSED_VARIABLE") val _unused = Ink
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Paper,
+        color = if (isSelected) Color(0xFFE8E8E8) else Paper,
         shape = RoundedCornerShape(2.dp),
-        border = BorderStroke(1.dp, SoftChrome)
+        border = BorderStroke(if (isSelected) 2.dp else 1.dp, if (isSelected) Ink else SoftChrome)
     ) {
         Column(modifier = Modifier.padding(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1076,6 +1457,22 @@ private fun HubSessionRow(entry: GatewaySessionEntry, dashboard: GatewaySessionD
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            Spacer(modifier = Modifier.height(4.dp))
+            OutlinedButton(
+                onClick = onSelect,
+                border = BorderStroke(if (isSelected) 2.dp else 1.dp, Ink),
+                shape = RoundedCornerShape(3.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = if (isSelected) "[*] ROUTING TURNS HERE" else "[ ] ROUTE TURNS HERE",
+                    color = Ink,
+                    fontSize = 11.sp,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
         }
     }
 }
@@ -1103,15 +1500,67 @@ private fun groupSessionsByKind(sessions: List<GatewaySessionEntry>): Map<String
 }
 
 // ─── Settings pane (minimal — the things a Palma user actually needs) ─────
+@OptIn(ExperimentalPermissionsApi::class)
 @Composable
 private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () -> Unit) {
     var gateway by remember { mutableStateOf(prefs.targetIpAddress) }
     var token by remember { mutableStateOf(prefs.remoteToken) }
     var session by remember { mutableStateOf(prefs.codexSessionName) }
     var agent by remember { mutableStateOf(prefs.activeAgent) }
+    val ompAgent = "Gateway OMP (oh-my-pi)"
+    // Remember what to fall back to when OMP routing is switched off.
+    var previousAgent by remember {
+        mutableStateOf(if (agent == ompAgent) "Local Codex (Pi)" else agent.ifBlank { "Local Codex (Pi)" })
+    }
     var showProgress by remember { mutableStateOf(prefs.showTurnProgress) }
     var speakProgress by remember { mutableStateOf(prefs.speakTurnProgress) }
     var savedHint by remember { mutableStateOf(false) }
+    var scanHint by remember { mutableStateOf("") }
+
+    val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val content = result.contents ?: return@rememberLauncherForActivityResult
+        val uri = Uri.parse(content)
+        val setup = parseSetupDeepLink(uri)
+        var scannedGateway = ""
+        var scannedToken = ""
+        when {
+            setup != null -> {
+                // pi-speak://setup?base_url=...&token=... (native setup deep link)
+                scannedGateway = setup.baseUrl
+                scannedToken = setup.token
+                setup.defaultTarget?.takeIf { it.isNotBlank() }?.let { session = it }
+                scanHint = "[OK] QR applied + saved."
+            }
+            content.startsWith("http://") || content.startsWith("https://") -> {
+                // HTTP URL — extract scheme://host:port and ?token= if present.
+                val port = uri.port
+                scannedGateway = buildString {
+                    append(uri.scheme); append("://"); append(uri.host)
+                    if (port != -1) { append(":"); append(port) }
+                }
+                val tok = uri.getQueryParameter("token")?.takeIf { it.isNotBlank() }
+                if (tok != null) {
+                    scannedToken = tok
+                    scanHint = "[OK] URL + token applied + saved."
+                } else {
+                    scanHint = "[OK] URL applied. Enter token then SAVE."
+                }
+            }
+            else -> {
+                scanHint = "[!!] Not a setup QR."
+            }
+        }
+        if (scannedGateway.isNotBlank()) {
+            gateway = scannedGateway
+            if (scannedToken.isNotBlank()) token = scannedToken
+            // Auto-save immediately so the user doesn't have to tap SAVE.
+            prefs.targetIpAddress = scannedGateway
+            if (scannedToken.isNotBlank()) prefs.remoteToken = scannedToken
+            onSave()
+        }
+        savedHint = false
+    }
 
     Column(
         modifier = Modifier
@@ -1128,9 +1577,62 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        SettingsRow("Gateway URL", gateway) { gateway = it; savedHint = false }
-        SettingsRow("Token", token) { token = it; savedHint = false }
-        SettingsRow("Session name", session) { session = it; savedHint = false }
+        SettingsRow("Gateway URL", gateway) { gateway = it; savedHint = false; scanHint = "" }
+        SettingsRow("Token", token) { token = it; savedHint = false; scanHint = "" }
+        SettingsRow("Session name", session) { session = it; savedHint = false; scanHint = "" }
+
+        // QR scanner — fills Gateway URL + Token + Session from a pi-speak://setup QR.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedButton(
+                onClick = {
+                    scanHint = ""
+                    if (cameraPermission.status.isGranted) {
+                        scanLauncher.launch(
+                            ScanOptions().apply {
+                                setOrientationLocked(false)
+                                setBeepEnabled(false)
+                                setPrompt("Point at the pi-speak setup QR code")
+                            }
+                        )
+                    } else {
+                        cameraPermission.launchPermissionRequest()
+                    }
+                },
+                border = BorderStroke(1.dp, Ink),
+                shape = RoundedCornerShape(4.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+            ) {
+                Text(
+                    text = if (cameraPermission.status.isGranted) "[+] SCAN QR" else "[?] ALLOW CAMERA",
+                    color = Ink,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+            if (scanHint.isNotEmpty()) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(scanHint, color = Ink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // Sends agentProvider="oh-my-pi" with each turn so the gateway runs omp -p --auto-approve.
+        // This is stateless (a fresh omp process per turn), not the same as routing into a running Hub session.
+        ToggleRow(
+            label = "Send turns via oh-my-pi (stateless)",
+            value = agent == ompAgent,
+        ) { on ->
+            if (on) {
+                if (agent != ompAgent) previousAgent = agent.ifBlank { "Local Codex (Pi)" }
+                agent = ompAgent
+            } else {
+                agent = previousAgent.ifBlank { "Local Codex (Pi)" }
+            }
+            savedHint = false
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Button(
                 onClick = {

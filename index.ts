@@ -41,6 +41,7 @@ import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } 
 import { PiAgentProvider } from "./pi-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
 import { ClaudeAgentProvider } from "./claude-agent-provider.js";
+import { createOmpAgentProvider, createOmpResumeProvider } from "./agent-provider-factory.js";
 import {
 	appendExecutionTrace,
 	type ExecutionDecision,
@@ -599,6 +600,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const piAgentProvider = new PiAgentProvider({
 		sendUserMessage: (content, options) => pi.sendUserMessage(content, options),
 	});
+	const ompAgentProvider = createOmpAgentProvider(resolveOhMyPiCommand(), DEFAULT_AGENT_CWD || process.cwd(), process.env);
+	let activeOmpSessionPath: string | null = null;
+	const getActiveOmpProvider = () =>
+		activeOmpSessionPath
+			? createOmpResumeProvider(resolveOhMyPiCommand(), DEFAULT_AGENT_CWD || process.cwd(), activeOmpSessionPath, process.env)
+			: ompAgentProvider;
 	const codexAgentProvider = new CodexAgentProvider({
 		codexBin: agentProviderConfig.codexBin,
 		model: agentProviderConfig.model,
@@ -634,7 +641,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 			? codexAgentProvider
 			: agentProviderConfig.provider === "claude"
 				? claudeAgentProvider
-				: piAgentProvider;
+				: agentProviderConfig.provider === "oh-my-pi"
+					? ompAgentProvider
+					: piAgentProvider;
 	let forceSpeechPromptNextTurn = false;
 	const diagnostics: RuntimeDiagnostics = {
 		lastErrors: {},
@@ -1241,7 +1250,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const desiredTarget = targetName?.trim() || remoteDefaultTarget;
 		const isVoiceInput = source === "http-voice" || source === "telegram-voice";
 		const directBackend: GatewayAgentProvider = agentProvider || (
-			agentProviderConfig.provider === "codex" || agentProviderConfig.provider === "claude"
+			agentProviderConfig.provider === "codex" || agentProviderConfig.provider === "claude" || agentProviderConfig.provider === "oh-my-pi"
 				? agentProviderConfig.provider
 				: "pi"
 		);
@@ -1265,9 +1274,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 				? "dispatch-codex"
 				: directBackend === "claude"
 					? "dispatch-claude"
-					: "dispatch-pi",
+					: directBackend === "oh-my-pi"
+						? "dispatch-oh-my-pi"
+						: "dispatch-pi",
 			confidence: 1,
-			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : directBackend === "claude" ? "Claude" : "Pi"}; voice-only router bypassed.`,
+			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : directBackend === "claude" ? "Claude" : directBackend === "oh-my-pi" ? "Oh-my-pi" : "Pi"}; voice-only router bypassed.`,
 			actionForSeed: trimmed,
 		};
 		const reducer = isVoiceInput
@@ -1521,6 +1532,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 			executionProvider = claudeAgentProvider;
 		} else if (executionPlan.backend === "pi") {
 			executionProvider = piAgentProvider;
+		} else if (executionPlan.backend === "oh-my-pi") {
+			executionProvider = getActiveOmpProvider();
 		} else {
 			const reason = `Execution route \"${executionPlan.backend}\" is a placeholder and cannot run this turn yet.`;
 			appendExecutionTrace({
@@ -2468,6 +2481,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 						return { ok: false, message: `Oh-my-pi launch failed: ${getErrorMessage(error)}` };
 					}
 				},
+				onOmpSelectSession: (sessionPath) => {
+					activeOmpSessionPath = sessionPath;
+					appendSessionEvent("sess.omp-select", "admin", { sessionPath });
+				},
+				onOmpGetSelectedSession: () => activeOmpSessionPath,
 				onSessionRename: (payload) => {
 					const sessionPath = payload.sessionPath;
 					const newName = payload.newName.trim();
