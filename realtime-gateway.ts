@@ -1,5 +1,5 @@
 import { WebSocket } from "ws";
-import { GoogleGenAI, Modality } from "@google/genai";
+import { Behavior, FunctionResponseScheduling, GoogleGenAI, Modality } from "@google/genai";
 import type { LiveServerMessage } from "@google/genai";
 import { createGeminiClient, getGeminiLiveModel } from "./gemini-live-turn.js";
 import { readAttentionSnapshots, readAttentionLeaderLease, claimAttentionLeader } from "./attention-broker.js";
@@ -75,6 +75,28 @@ function launchDetachedCli(command: string, args: string[], cwd: string, title: 
 	}
 }
 
+function resolveOhMyPiCommand(): string {
+	return process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
+		|| process.env.OMP_BIN?.trim()
+		|| resolveWindowsNpmShim("omp.cmd")
+		|| resolveWindowsNpmShim("omp")
+		|| "omp";
+}
+
+// Spawn an omp agent with stdout captured (NOT detached) so progress can be
+// narrated. Used only on the NON_BLOCKING path; the detached fire-and-forget
+// launch via onSessionLaunch is unchanged.
+function spawnNarratedOmp(prompt: string, cwd: string) {
+	const command = resolveOhMyPiCommand();
+	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+	return spawn(command, ["--cwd", cwd, "--", prompt], {
+		cwd,
+		stdio: ["ignore", "pipe", "pipe"],
+		windowsHide: true,
+		shell,
+	});
+}
+
 interface ActiveSession {
 	sessionId: string;
 	ws: WebSocket;
@@ -88,6 +110,14 @@ interface ActiveSession {
 	provider: string;
 	model: string;
 	server: any; // store server reference
+	/** Backend of the Live connection ("developer-api" | "vertex"). */
+	backend: string;
+	/** True when NON_BLOCKING async function calling is available (developer-api only). */
+	nonBlockingEnabled: boolean;
+	/** Latest session-resumption handle from sessionResumptionUpdate. */
+	resumptionHandle?: string;
+	/** FunctionResponses queued while the session is mid-reconnect. */
+	pendingToolResponses: Record<string, unknown>[];
 }
 
 type PendingTerminalCall = {
@@ -97,6 +127,17 @@ type PendingTerminalCall = {
 };
 
 export const activeSessions = new Map<string, ActiveSession>();
+
+// Voice-feel guidance: when a background tool runs (NON_BLOCKING), the model should
+// acknowledge briefly and keep conversing instead of going silent, narrate progress
+// only when it receives an update, and never narrate SILENT-scheduled updates.
+export const REALTIME_SYSTEM_PROMPT = [
+	"You are a concise voice coding assistant.",
+	"When you fire a background tool (launch_agent, execute_terminal_command), acknowledge in one short sentence, then continue the conversation normally.",
+	"Do not narrate a tool's progress unless you receive an explicit progress update.",
+	"When a tool result arrives, announce it conversationally at the next natural pause.",
+	"Do not narrate background state refreshes delivered silently.",
+].join(" ");
 
 export { classifyRealtimeTerminalCommand, type RealtimeTerminalCommandSafety };
 
@@ -193,32 +234,112 @@ async function executeRealtimeTerminalCommand(
 	});
 }
 
-function sendRealtimeToolResponse(
+type ToolResponseOptions = {
+	approvalId?: string;
+	scheduling?: FunctionResponseScheduling;
+	willContinue?: boolean;
+	/** Raw response payload override; defaults to { output: outputText }. */
+	response?: Record<string, unknown>;
+};
+
+export function sendRealtimeToolResponse(
 	activeSession: ActiveSession,
 	call: { id: string; name: string },
 	outputText: string,
-	approvalId?: string,
+	opts: ToolResponseOptions = {},
 ) {
 	sendToClient(activeSession, {
 		type: "tool_complete",
 		name: call.name,
-		approvalId,
+		approvalId: opts.approvalId,
 		output: outputText,
+		willContinue: opts.willContinue,
 	}, false);
 
+	const functionResponse: Record<string, unknown> = {
+		id: call.id,
+		name: call.name,
+		response: opts.response ?? { output: outputText },
+	};
+	// scheduling/willContinue are only meaningful for NON_BLOCKING calls; harmless
+	// (ignored) otherwise per the @google/genai FunctionResponse contract.
+	if (opts.scheduling !== undefined) functionResponse.scheduling = opts.scheduling;
+	if (opts.willContinue !== undefined) functionResponse.willContinue = opts.willContinue;
+
 	if (activeSession.session) {
-		activeSession.session.sendToolResponse({
-			functionResponses: [
-				{
-					id: call.id,
-					name: call.name,
-					response: {
-						output: outputText,
-					}
-				}
-			]
-		});
+		try {
+			activeSession.session.sendToolResponse({ functionResponses: [functionResponse] });
+		} catch {
+			// Session may be mid-reconnect; queue for delivery after resumption.
+			activeSession.pendingToolResponses.push(functionResponse);
+		}
+	} else {
+		activeSession.pendingToolResponses.push(functionResponse);
 	}
+}
+
+const MEANINGFUL_LINE = /planning|executing|error|done|file written|complete|finished/i;
+const NARRATION_MIN_INTERVAL_MS = 30_000;
+
+export function summarizeAgentLine(line: string): string {
+	const trimmed = line.replace(/\s+/g, " ").trim();
+	return trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
+}
+
+/**
+ * Tail an already-spawned process's stdout and narrate progress into the live
+ * conversation. Emits intermediate FunctionResponses (willContinue:true,
+ * WHEN_IDLE) on meaningful lines or every ~30s, capped to MAX_INFLIGHT_PROGRESS
+ * so the model never narrates a backlog, then a final willContinue:false result.
+ * Accepts any object exposing `stdout`/`stderr` Readables + an `exit`/`close`
+ * event, so it is unit-testable with a fake process.
+ */
+export async function runWithProgressNarration(
+	activeSession: ActiveSession,
+	call: { id: string; name: string },
+	child: {
+		stdout?: NodeJS.ReadableStream | null;
+		stderr?: NodeJS.ReadableStream | null;
+		on(event: string, listener: (...args: any[]) => void): unknown;
+	},
+): Promise<void> {
+	let lastNarration = 0;
+	let lastLine = "";
+	const tail = (chunk: Buffer | string) => {
+		const text = chunk.toString();
+		for (const raw of text.split(/\r?\n/)) {
+			const line = raw.trim();
+			if (!line) continue;
+			lastLine = line;
+			const now = Date.now();
+			const meaningful = MEANINGFUL_LINE.test(line);
+			const due = now - lastNarration >= NARRATION_MIN_INTERVAL_MS;
+			// Throttle to at most one progress update per interval (the first fires
+			// immediately, lastNarration starting at 0). Caps backlog narration so the
+			// model never reads a wall of log lines at once.
+			if ((meaningful || due) && (lastNarration === 0 || due)) {
+				lastNarration = now;
+				sendRealtimeToolResponse(activeSession, call, summarizeAgentLine(line), {
+					scheduling: FunctionResponseScheduling.WHEN_IDLE,
+					willContinue: true,
+					response: { progress: summarizeAgentLine(line) },
+				});
+			}
+		}
+	};
+	child.stdout?.on("data", tail);
+	child.stderr?.on("data", tail);
+	await new Promise<void>((resolve) => {
+		const finish = () => resolve();
+		child.on("exit", finish);
+		child.on("close", finish);
+		child.on("error", finish);
+	});
+	sendRealtimeToolResponse(activeSession, call, lastLine || "done", {
+		scheduling: FunctionResponseScheduling.WHEN_IDLE,
+		willContinue: false,
+		response: { done: true, lastLine },
+	});
 }
 
 async function resolveTerminalApproval(
@@ -288,7 +409,7 @@ async function resolveTerminalApproval(
 			message: "Realtime terminal command was not approved by the operator.",
 			});
 		})();
-	sendRealtimeToolResponse(activeSession, pending.call, outputText, approval.id);
+	sendRealtimeToolResponse(activeSession, pending.call, outputText, { approvalId: approval.id, scheduling: FunctionResponseScheduling.INTERRUPT });
 }
 
 function setupSocketHandlers(activeSession: ActiveSession) {
@@ -361,10 +482,30 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 	});
 }
 
-async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, firstMsgIsBinary?: boolean) {
-	const sessionId = "sess_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
+type ReconnectContext = {
+	resumptionHandle?: string;
+	pendingToolResponses: Record<string, unknown>[];
+	priorSessionId: string;
+};
+
+async function startNewSession(
+	ws: WebSocket,
+	server: any,
+	firstMsg?: any,
+	firstMsgIsBinary?: boolean,
+	reconnect?: ReconnectContext,
+) {
+	const sessionId = reconnect?.priorSessionId || ("sess_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 5));
 	const model = getGeminiLiveModel();
+	const resumptionHandle = reconnect?.resumptionHandle;
 	
+	const clientConfig = createGeminiClient(process.env, { live: true });
+	const ai = clientConfig.ai;
+	// NON_BLOCKING function behavior is developer-API only (not supported on Vertex
+	// AI per the @google/genai FunctionDeclaration contract). On Vertex we keep the
+	// existing blocking dispatch so tool calls still resolve correctly.
+	const nonBlockingEnabled = clientConfig.backend === "developer-api";
+
 	const activeSession: ActiveSession = {
 		sessionId,
 		ws,
@@ -377,6 +518,10 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 		pendingTerminalCalls: new Map(),
 		provider: process.env.AGENT_PROVIDER || "gemini-live",
 		model,
+		backend: clientConfig.backend,
+		nonBlockingEnabled,
+		resumptionHandle,
+		pendingToolResponses: reconnect?.pendingToolResponses ?? [],
 	};
 	activeSessions.set(sessionId, activeSession);
 
@@ -385,9 +530,6 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 		type: "start",
 		session: sessionId
 	}, false);
-
-	const clientConfig = createGeminiClient(process.env, { live: true });
-	const ai = clientConfig.ai;
 
 	// Tool definitions
 	const tools = [
@@ -405,7 +547,8 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 							}
 						},
 						required: ["command"]
-					}
+					},
+					...(nonBlockingEnabled ? { behavior: Behavior.NON_BLOCKING } : {}),
 				},
 				{
 					name: "switch_session",
@@ -448,7 +591,8 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 							cwd: { type: "STRING", description: "Optional working directory for the agent." },
 							hubOnly: { type: "BOOLEAN", description: "If true, just open the agent hub instead of launching a prompted agent." }
 						}
-					}
+					},
+					...(nonBlockingEnabled ? { behavior: Behavior.NON_BLOCKING } : {}),
 				},
 				{
 					name: "archive_session",
@@ -472,8 +616,16 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 			config: {
 				responseModalities: [Modality.AUDIO],
 				outputAudioTranscription: {},
-				systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || "You are a concise voice coding assistant.",
+				systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || REALTIME_SYSTEM_PROMPT,
 				tools: tools as any,
+				// Keep long coding sessions alive: compress context before the ~128k
+				// audio-token cap, and enable resumption handles so we can reconnect
+				// across the ~10-min WS limit / goAway without losing the conversation.
+				contextWindowCompression: {
+					triggerTokens: "24000",
+					slidingWindow: { targetTokens: "16000" },
+				},
+				sessionResumption: resumptionHandle ? { handle: resumptionHandle } : {},
 			},
 			callbacks: {
 				onopen: () => {
@@ -502,6 +654,19 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 						sendToClient(activeSession, {
 							type: "interrupt"
 						}, false);
+					}
+
+					// 3b. Cache resumption handle for reconnection across the WS limit.
+					if (message.sessionResumptionUpdate?.resumable && message.sessionResumptionUpdate.newHandle) {
+						activeSession.resumptionHandle = message.sessionResumptionUpdate.newHandle;
+					}
+
+					// 3c. goAway: server will terminate the WS (~10-min limit) ~60s out.
+					// Proactively reconnect with the cached handle; in-flight NON_BLOCKING
+					// results queue in pendingToolResponses and flush after reconnect.
+					if (message.goAway) {
+						sendToClient(activeSession, { type: "reconnecting", timeLeft: message.goAway.timeLeft }, false);
+						void reconnectLiveSession(activeSession);
 					}
 
 					// 4. Handle Tool calls
@@ -597,6 +762,21 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 												output: outputText,
 											}, false);
 											deferToolResponse = true;
+										} else if (activeSession.nonBlockingEnabled) {
+											// NON_BLOCKING: run the allowlisted command without blocking the
+											// receive loop; deliver the result at the next natural pause.
+											deferToolResponse = true;
+											executeRealtimeTerminalCommand(activeSession, plan, toolCall.id)
+												.then((result) => {
+													sendRealtimeToolResponse(activeSession, toolCall, result, {
+														scheduling: FunctionResponseScheduling.WHEN_IDLE,
+													});
+												})
+												.catch((err) => {
+													sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
+														scheduling: FunctionResponseScheduling.INTERRUPT,
+													});
+												});
 										} else {
 											outputText = await executeRealtimeTerminalCommand(activeSession, plan, toolCall.id);
 										}
@@ -743,12 +923,24 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 										outputText = JSON.stringify({ ok: false, error: "Session dashboard is not available." });
 									}
 								} else if (call.name === "launch_agent") {
-									if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
-										const result = await activeSession.server.onSessionLaunch({
-											prompt: call.args?.prompt as string | undefined,
-											cwd: call.args?.cwd as string | undefined,
-											hubOnly: call.args?.hubOnly as boolean | undefined,
-										});
+									const prompt = call.args?.prompt as string | undefined;
+									const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd();
+									const hubOnly = call.args?.hubOnly as boolean | undefined;
+									if (activeSession.nonBlockingEnabled && prompt && !hubOnly) {
+										// Narrated launch: spawn omp with captured stdout and stream progress
+										// into the conversation. Deferred (NON_BLOCKING) so the loop stays live.
+										deferToolResponse = true;
+										try {
+											const child = spawnNarratedOmp(prompt, cwd);
+											void runWithProgressNarration(activeSession, toolCall, child);
+											sendToClient(activeSession, { type: "tool_progress", name: call.name, message: "Launching agent…" }, false);
+										} catch (err: any) {
+											sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
+												scheduling: FunctionResponseScheduling.INTERRUPT,
+											});
+										}
+									} else if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
+										const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly });
 										outputText = JSON.stringify(result);
 									} else {
 										outputText = JSON.stringify({ ok: false, error: "Session launch is not available." });
@@ -792,6 +984,18 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 		});
 		activeSession.session = geminiSession;
 
+		// Deliver any FunctionResponses that completed while we were reconnecting.
+		if (activeSession.pendingToolResponses.length > 0) {
+			const queued = activeSession.pendingToolResponses.splice(0);
+			for (const functionResponse of queued) {
+				try {
+					geminiSession.sendToolResponse({ functionResponses: [functionResponse] });
+				} catch {
+					activeSession.pendingToolResponses.push(functionResponse);
+				}
+			}
+		}
+
 		setupSocketHandlers(activeSession);
 
 		if (firstMsg !== undefined) {
@@ -801,6 +1005,24 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 		activeSessions.delete(sessionId);
 		ws.close(1011, `Failed to connect to Gemini Live: ${error.message}`);
 	}
+}
+
+// Reconnect the upstream Gemini Live session (same client WS) using the cached
+// resumption handle, carrying the pending-tool-response queue so results that
+// land mid-reconnect still deliver. The client WS is untouched.
+async function reconnectLiveSession(activeSession: ActiveSession) {
+	const ws = activeSession.ws;
+	const server = activeSession.server;
+	const reconnect: ReconnectContext = {
+		resumptionHandle: activeSession.resumptionHandle,
+		pendingToolResponses: activeSession.pendingToolResponses,
+		priorSessionId: activeSession.sessionId,
+	};
+	try {
+		activeSession.session?.close();
+	} catch {}
+	activeSession.session = null;
+	await startNewSession(ws, server, undefined, undefined, reconnect);
 }
 
 function resumeSession(ws: WebSocket, reconnectMsg: RealtimeControlMessage) {
