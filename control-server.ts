@@ -1525,6 +1525,15 @@ export class ControlServer {
 			this.writeJson(res, 404, { ok: false, error: "Audio not found" });
 			return;
 		}
+		// Enforce the TTL at read time, not only via the periodic sweep: between
+		// sweeps (or if cleanup is delayed/disabled) an expired artifact must not
+		// remain accessible. Treat expired as 404 and drop it opportunistically.
+		if (artifact.expiresAt <= Date.now()) {
+			this.audioArtifacts.delete(id);
+			void rm(artifact.path, { force: true }).catch(() => {});
+			this.writeJson(res, 404, { ok: false, error: "Audio not found" });
+			return;
+		}
 
 		res.statusCode = 200;
 		res.setHeader("Content-Type", artifact.mimeType);
