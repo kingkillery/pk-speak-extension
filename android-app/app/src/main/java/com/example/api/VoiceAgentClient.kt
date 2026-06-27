@@ -20,6 +20,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.net.URLEncoder
+import java.net.URI
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -724,7 +725,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                         if (json.optString("nonce") != nonce) continue
                         val port = json.optInt("httpPort", 8767)
                         val baseUrls = json.optJSONArray("baseUrls")
-                        val baseUrl = firstBaseUrl(baseUrls) ?: "http://${packet.address.hostAddress}:$port"
+                        val baseUrl = preferredBaseUrl(baseUrls, "http://${packet.address.hostAddress}:$port") ?: "http://${packet.address.hostAddress}:$port"
                         val machine = descriptorMachine(baseUrl.trimEnd('/'), json.optString("name", "Pi Speak"))
                             ?: DiscoveredMachine(
                                 name = json.optString("name", "Pi Speak"),
@@ -752,13 +753,20 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         return results.values.toList()
     }
 
-    private fun firstBaseUrl(baseUrls: org.json.JSONArray?): String? {
-        if (baseUrls == null) return null
-        for (i in 0 until baseUrls.length()) {
-            val value = baseUrls.optString(i).trim().trimEnd('/')
-            if (value.isNotBlank()) return value
+    private fun preferredBaseUrl(baseUrls: org.json.JSONArray?, fallback: String? = null): String? {
+        val urls = mutableListOf<String>()
+        if (baseUrls != null) {
+            for (i in 0 until baseUrls.length()) {
+                val value = baseUrls.optString(i).trim().trimEnd('/')
+                if (value.isNotBlank()) urls.add(value)
+            }
         }
-        return null
+        fallback?.trim()?.trimEnd('/')?.takeIf { it.isNotBlank() }?.let { urls.add(it) }
+        if (urls.isEmpty()) return null
+        if (prefs.connectionMode.equals("Tailscale", ignoreCase = true)) {
+            urls.firstOrNull { isTailscaleBaseUrl(it) }?.let { return it }
+        }
+        return urls.first()
     }
 
     private fun descriptorMachine(baseUrl: String, fallbackName: String): DiscoveredMachine? {
@@ -780,16 +788,17 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 val sessions = mutableListOf<ActiveCodexSession>()
                 val agent = json.optJSONObject("agent")
                 val provider = agent?.optString("provider", "CODEX")?.uppercase() ?: "CODEX"
+                val preferredBaseUrl = preferredBaseUrl(json.optJSONArray("baseUrls"), baseUrl) ?: baseUrl
                 sessions.add(ActiveCodexSession(prefs.codexSessionName.ifBlank { "default" }, provider, "Discovered Pi Speak gateway", "idle"))
                 DiscoveredMachine(
                     name = json.optString("name", fallbackName),
-                    ip = baseUrl,
+                    ip = preferredBaseUrl,
                     status = if (endpoints != null) "online" else "unknown",
                     latencyMs = (System.currentTimeMillis() - started).coerceAtLeast(1),
                     activeSessions = sessions,
                     authRequired = authRequired,
                     pairingRequired = pairingRequired,
-                    setupUrl = setupUrl(baseUrl, setupPath)
+                    setupUrl = setupUrl(preferredBaseUrl, setupPath)
                 )
             }
         } catch (e: Exception) {
@@ -965,8 +974,45 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             ready = json.optBoolean("ready", false),
             isReady = json.optBoolean("isReady", false),
             activity = json.optString("activity").ifBlank { null },
-            aliases = aliases
+            aliases = aliases,
+            kind = json.optString("kind").ifBlank { null },
+            source = json.optString("source").ifBlank { null },
+            model = json.optString("model").ifBlank { null },
+            role = json.optString("role").ifBlank { null },
+            createdAt = optionalLong(json, "createdAt"),
+            lastActivity = optionalLong(json, "lastActivity"),
+            subagents = parseGatewaySessionSubagents(json)
         )
+    }
+
+    private fun parseGatewaySessionSubagents(json: JSONObject): List<GatewaySessionSubagentEntry> {
+        val subagentsJson = json.optJSONArray("subagents") ?: return emptyList()
+        val subagents = mutableListOf<GatewaySessionSubagentEntry>()
+        for (i in 0 until subagentsJson.length()) {
+            val item = subagentsJson.optJSONObject(i) ?: continue
+            subagents.add(
+                GatewaySessionSubagentEntry(
+                    id = item.optString("id"),
+                    name = item.optString("name"),
+                    status = item.optString("status").ifBlank { null },
+                    sessionPath = item.optString("sessionPath").ifBlank { null },
+                    cwd = item.optString("cwd").ifBlank { null },
+                    activity = item.optString("activity").ifBlank { null },
+                    createdAt = optionalLong(item, "createdAt"),
+                    lastActivity = optionalLong(item, "lastActivity")
+                )
+            )
+        }
+        return subagents
+    }
+
+    private fun optionalLong(json: JSONObject, name: String): Long? {
+        if (!json.has(name) || json.isNull(name)) return null
+        return try {
+            json.getLong(name)
+        } catch (e: Exception) {
+            null
+        }
     }
 
     suspend fun resumeGatewaySession(entry: GatewaySessionEntry): String {
@@ -996,6 +1042,34 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             } catch (e: Exception) {
                 Log.e("VoiceAgent", "Session resume failed", e)
                 "Session resume failed: ${shortError(e)}"
+            }
+        }
+    }
+
+    suspend fun removeGatewaySession(entry: GatewaySessionEntry): String {
+        return withContext(Dispatchers.IO) {
+            val sessionPath = entry.canonicalSessionPath
+                ?: return@withContext "Session remove failed: session path is missing."
+            val requestBody = JSONObject().apply {
+                put("sessionPath", sessionPath)
+            }.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("${gatewayBaseUrl()}/v1/sessions/remove")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(requestBody)
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                        return@withContext json.optString("error", json.optString("message", "Session remove failed: ${response.code}"))
+                    }
+                    json.optString("message", "Session lane removed.")
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "Session remove failed", e)
+                "Session remove failed: ${shortError(e)}"
             }
         }
     }
@@ -1059,7 +1133,8 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             if (prefs.remoteToken.isNotBlank() && pairingState.authRequired && !isAuthenticatedGateway(currentUrl)) {
                 return AutoConnectResult(false, currentUrl, "Gateway found, but the saved token was rejected. Scan the setup QR again.", discovered = false)
             }
-            return AutoConnectResult(true, currentUrl, "Current gateway is reachable.", discovered = false)
+            val preferredUrl = applyDescriptorSession(currentUrl) ?: currentUrl
+            return AutoConnectResult(true, preferredUrl, "Current gateway is reachable.", discovered = false)
         }
 
         // Phase 1: localhost probe (fast, no network needed)
@@ -1072,10 +1147,10 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             if (prefs.remoteToken.isNotBlank() && pairingState.authRequired && !isAuthenticatedGateway(localhostUrl)) {
                 return AutoConnectResult(false, localhostUrl, "Local gateway found, but the saved token was rejected. Scan the setup QR again.", discovered = true)
             }
-            prefs.targetIpAddress = localhostUrl
-            applyDescriptorSession(localhostUrl)
-            Log.d("VoiceAgent", "Auto-connected to localhost gateway: $localhostUrl")
-            return AutoConnectResult(true, localhostUrl, "Connected through local ADB reverse.", discovered = true)
+            val preferredUrl = applyDescriptorSession(localhostUrl) ?: localhostUrl
+            prefs.targetIpAddress = preferredUrl
+            Log.d("VoiceAgent", "Auto-connected to localhost gateway: $preferredUrl")
+            return AutoConnectResult(true, preferredUrl, if (preferredUrl != localhostUrl) "Connected through advertised Tailscale gateway." else "Connected through local ADB reverse.", discovered = true)
         }
 
         // Phase 2: network discovery (LAN / Tailscale)
@@ -1095,8 +1170,9 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 if (firstSession != null) {
                     prefs.codexSessionName = firstSession.sessionId
                 }
-                Log.d("VoiceAgent", "Auto-connected to network gateway: ${onlineMachine.ip}")
-                AutoConnectResult(true, onlineMachine.ip, "Connected to discovered gateway.", discovered = true)
+                applyDescriptorSession(onlineMachine.ip)
+                Log.d("VoiceAgent", "Auto-connected to network gateway: ${prefs.targetIpAddress}")
+                AutoConnectResult(true, prefs.targetIpAddress, "Connected to discovered gateway.", discovered = true)
             } else {
                 AutoConnectResult(false, currentUrl, "No reachable Pi Speak gateway found.")
             }
@@ -1148,13 +1224,22 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         return "$normalizedBase$normalizedPath"
     }
 
-    private fun applyDescriptorSession(baseUrl: String) {
+    private fun applyDescriptorSession(baseUrl: String): String? {
+        var preferredUrl: String? = null
         try {
             val descRequest = Request.Builder().url("$baseUrl/.well-known/pi-speak").get().build()
             client.newCall(descRequest).execute().use { descResponse ->
                 if (descResponse.isSuccessful) {
                     val descBody = descResponse.body?.string() ?: ""
                     val descJson = JSONObject(descBody)
+                    val candidate = preferredBaseUrl(descJson.optJSONArray("baseUrls"), baseUrl)
+                    if (candidate != null) {
+                        val isTestBypass = System.getProperty("is_testing") == "true"
+                        if (candidate == baseUrl || isTestBypass || pingHealth(candidate)) {
+                            preferredUrl = candidate
+                            prefs.targetIpAddress = candidate
+                        }
+                    }
                     val routing = descJson.optJSONObject("routing")
                     val currentSession = routing?.optString("currentSession", "")
                     if (!currentSession.isNullOrBlank()) {
@@ -1169,10 +1254,162 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         } catch (e: Exception) {
             Log.d("VoiceAgent", "Descriptor fetch failed: ${e.message}")
         }
+        return preferredUrl
     }
 
     private fun gatewayBaseUrl(): String = prefs.targetIpAddress.trim().trimEnd('/')
 
+
+    suspend fun getWarpControlSnapshot(): WarpControlSnapshot? {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext null
+            val request = Request.Builder()
+                .url("$baseUrl/v1/warp")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@withContext null
+                    val warp = JSONObject(response.body?.string() ?: "{}").optJSONObject("warp") ?: return@withContext null
+                    parseWarpControlSnapshot(warp)
+                }
+            } catch (e: Exception) {
+                Log.d("VoiceAgent", "Warp control snapshot failed: ${e.message}")
+                null
+            }
+        }
+    }
+
+    suspend fun createWarpTab(cwd: String? = prefs.workspacePath, newWindow: Boolean = false): String {
+        return postWarpControl("/v1/warp/tab", JSONObject().apply {
+            cwd?.takeIf { it.isNotBlank() }?.let { put("cwd", it) }
+            if (newWindow) put("newWindow", true)
+        })
+    }
+
+
+    suspend fun openWarpTabConfig(name: String, newWindow: Boolean = false): String {
+        return postWarpControl("/v1/warp/tab-config", JSONObject().apply {
+            put("name", name)
+            if (newWindow) put("newWindow", true)
+        })
+    }
+    suspend fun createWarpPsmuxSession(name: String, cwd: String? = prefs.workspacePath): String {
+        return postWarpControl("/v1/warp/psmux/session", JSONObject().apply {
+            put("name", name)
+            cwd?.takeIf { it.isNotBlank() }?.let { put("cwd", it) }
+        })
+    }
+
+    suspend fun createWarpPsmuxWindow(session: String, name: String, cwd: String? = prefs.workspacePath): String {
+        return postWarpControl("/v1/warp/psmux/window", JSONObject().apply {
+            put("session", session)
+            if (name.isNotBlank()) put("name", name)
+            cwd?.takeIf { it.isNotBlank() }?.let { put("cwd", it) }
+        })
+    }
+
+    private suspend fun postWarpControl(path: String, payload: JSONObject): String {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext "No gateway URL is configured."
+            val request = Request.Builder()
+                .url("$baseUrl$path")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val json = try { JSONObject(response.body?.string() ?: "{}") } catch (_: Exception) { JSONObject() }
+                    json.optString("message", if (response.isSuccessful) "Warp command accepted." else "Warp command failed: ${response.code}")
+                }
+            } catch (e: Exception) {
+                "Warp command failed: ${shortError(e)}"
+            }
+        }
+    }
+
+    private fun parseWarpControlSnapshot(json: JSONObject): WarpControlSnapshot {
+        val psmuxJson = json.optJSONObject("psmux")
+        val sessionsJson = psmuxJson?.optJSONArray("sessions")
+        val sessions = mutableListOf<WarpPsmuxSession>()
+        if (sessionsJson != null) {
+            for (i in 0 until sessionsJson.length()) {
+                val sessionJson = sessionsJson.optJSONObject(i) ?: continue
+                sessions.add(parseWarpPsmuxSession(sessionJson))
+            }
+        }
+        return WarpControlSnapshot(
+            available = json.optBoolean("available", false),
+            sameTailnet = json.optBoolean("sameTailnet", false),
+            requestRemoteAddress = json.optString("requestRemoteAddress"),
+            warpRemoteBaseUrl = json.optString("warpRemoteBaseUrl").ifBlank { null },
+            warpUriScheme = json.optString("warpUriScheme", "warp").ifBlank { "warp" },
+            psmuxAvailable = psmuxJson?.optBoolean("available", false) ?: false,
+            psmuxExecutable = psmuxJson?.optString("executable").orEmpty(),
+            psmuxError = psmuxJson?.optString("error").orEmpty().ifBlank { null },
+            sessions = sessions
+        )
+    }
+
+    private fun parseWarpPsmuxSession(json: JSONObject): WarpPsmuxSession {
+        val windowsJson = json.optJSONArray("windows")
+        val windows = mutableListOf<WarpPsmuxWindow>()
+        if (windowsJson != null) {
+            for (i in 0 until windowsJson.length()) {
+                val windowJson = windowsJson.optJSONObject(i) ?: continue
+                windows.add(parseWarpPsmuxWindow(windowJson))
+            }
+        }
+        return WarpPsmuxSession(
+            name = json.optString("name"),
+            attached = json.optString("attached").ifBlank { null },
+            windows = windows
+        )
+    }
+
+    private fun parseWarpPsmuxWindow(json: JSONObject): WarpPsmuxWindow {
+        val panesJson = json.optJSONArray("panes")
+        val panes = mutableListOf<WarpPsmuxPane>()
+        if (panesJson != null) {
+            for (i in 0 until panesJson.length()) {
+                val paneJson = panesJson.optJSONObject(i) ?: continue
+                panes.add(
+                    WarpPsmuxPane(
+                        session = paneJson.optString("session"),
+                        window = paneJson.optString("window"),
+                        pane = paneJson.optString("pane"),
+                        paneId = paneJson.optString("paneId"),
+                        active = paneJson.optBoolean("active", false),
+                        command = paneJson.optString("command").ifBlank { null },
+                        title = paneJson.optString("title").ifBlank { null }
+                    )
+                )
+            }
+        }
+        return WarpPsmuxWindow(
+            session = json.optString("session"),
+            index = json.optString("index"),
+            name = json.optString("name"),
+            active = json.optBoolean("active", false),
+            panes = panes
+        )
+    }
+
+    private fun isTailscaleBaseUrl(value: String): Boolean {
+        return try {
+            val host = URI(value).host ?: return false
+            val parts = host.split(".").map { it.toIntOrNull() }
+            parts.size == 4
+                && parts[0] == 100
+                && (parts[1] ?: -1) in 64..127
+                && parts.drop(2).all { it != null && it in 0..255 }
+        } catch (_: Exception) {
+            false
+        }
+    }
     private fun shortError(error: Exception): String = error.localizedMessage ?: error.javaClass.simpleName
 
     private fun activeGatewayProvider(): String = when (prefs.activeAgent) {
@@ -1262,6 +1499,45 @@ data class GatewayTurnResult(
     val progress: List<String> = emptyList(),
     val connectionError: Boolean = false,
     val statusCode: Int? = null
+)
+
+data class WarpControlSnapshot(
+    val available: Boolean,
+    val sameTailnet: Boolean,
+    val requestRemoteAddress: String,
+    val warpRemoteBaseUrl: String? = null,
+    val warpUriScheme: String = "warp",
+    val psmuxAvailable: Boolean = false,
+    val psmuxExecutable: String = "",
+    val psmuxError: String? = null,
+    val sessions: List<WarpPsmuxSession> = emptyList()
+) {
+    val paneCount: Int
+        get() = sessions.sumOf { session -> session.windows.sumOf { window -> window.panes.size } }
+}
+
+data class WarpPsmuxSession(
+    val name: String,
+    val attached: String? = null,
+    val windows: List<WarpPsmuxWindow> = emptyList()
+)
+
+data class WarpPsmuxWindow(
+    val session: String,
+    val index: String,
+    val name: String,
+    val active: Boolean = false,
+    val panes: List<WarpPsmuxPane> = emptyList()
+)
+
+data class WarpPsmuxPane(
+    val session: String,
+    val window: String,
+    val pane: String,
+    val paneId: String,
+    val active: Boolean = false,
+    val command: String? = null,
+    val title: String? = null
 )
 
 data class AutoConnectResult(

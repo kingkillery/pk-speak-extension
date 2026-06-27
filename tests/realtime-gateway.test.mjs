@@ -158,5 +158,62 @@ test("WebSocket realtime gateway authentication and routing", async (t) => {
 		await new Promise((resolve) => ws.on("close", resolve));
 	});
 
+
+	await t.test("exposes Warp and psmux status through authenticated API", async () => {
+		const previousPsmuxBin = process.env.PI_SPEAK_PSMUX_BIN;
+		const previousWarpOpenBin = process.env.PI_SPEAK_WARP_OPEN_BIN;
+		process.env.PI_SPEAK_PSMUX_BIN = "__missing_psmux_for_test__";
+		process.env.PI_SPEAK_WARP_OPEN_BIN = "__missing_warp_open_for_test__";
+		try {
+
+			const response = await fetch(`http://127.0.0.1:${TEST_PORT}/v1/warp`, {
+				headers: {
+					Host: "tailnet.example",
+					"X-Pi-Speak-Token": TEST_TOKEN,
+				},
+			});
+			assert.equal(response.status, 200);
+			const body = await response.json();
+			assert.equal(body.ok, true);
+			assert.equal(body.warp.psmux.available, false);
+			assert.equal(body.warp.psmux.executable, "__missing_psmux_for_test__");
+			assert.ok(typeof body.warp.psmux.error === "string");
+			assert.equal(body.warp.warpUriScheme, "warp");
+
+			const tabResponse = await fetch(`http://127.0.0.1:${TEST_PORT}/v1/warp/tab`, {
+				method: "POST",
+				headers: {
+					Host: "tailnet.example",
+					"X-Pi-Speak-Token": TEST_TOKEN,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ cwd: process.cwd() }),
+			});
+			assert.equal(tabResponse.status, 400);
+			const tabBody = await tabResponse.json();
+			assert.equal(tabBody.ok, false);
+			assert.match(tabBody.uri, /^warp:\/\/action\/new_tab\?path=/);
+			assert.match(tabBody.message, /ENOENT|not found|no such file|Failed/i);
+
+			const configResponse = await fetch(`http://127.0.0.1:${TEST_PORT}/v1/warp/tab-config`, {
+				method: "POST",
+				headers: {
+					Host: "tailnet.example",
+					"X-Pi-Speak-Token": TEST_TOKEN,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ name: "phone_remote", newWindow: true }),
+			});
+			assert.equal(configResponse.status, 400);
+			const configBody = await configResponse.json();
+			assert.equal(configBody.ok, false);
+			assert.equal(configBody.uri, "warp://tab_config/phone_remote?new_window=true");
+		} finally {
+			if (previousPsmuxBin === undefined) delete process.env.PI_SPEAK_PSMUX_BIN;
+			else process.env.PI_SPEAK_PSMUX_BIN = previousPsmuxBin;
+			if (previousWarpOpenBin === undefined) delete process.env.PI_SPEAK_WARP_OPEN_BIN;
+			else process.env.PI_SPEAK_WARP_OPEN_BIN = previousWarpOpenBin;
+		}
+	});
 	await server.stop();
 });

@@ -1,0 +1,276 @@
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent, type Stats } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
+import type { SessionDashboard, SessionDashboardEntry } from "./session-routing.js";
+
+const JSONL_SUFFIX = ".jsonl";
+const ADVISOR_TRANSCRIPT_FILENAME = "__advisor.jsonl";
+
+type BackgroundInstance = { name: string; status: "active"; model?: string; role?: string };
+type SessionHeader = {
+	id: string;
+	cwd?: string;
+	timestamp?: string;
+	backgroundInstance?: unknown;
+	hasBackgroundInstance: boolean;
+};
+
+export type OhMyPiAgentHubSubagent = {
+	id: string;
+	name: string;
+	status: "parked";
+	sessionPath: string;
+	activity: "background subagent";
+	createdAt: number;
+	lastActivity: number;
+};
+
+export type OhMyPiBackgroundSessionEntry = SessionDashboardEntry & {
+	path: string;
+	sessionPath: string;
+	provider: "oh-my-pi";
+	resumable: true;
+	resumeCommand: string[];
+	kind: "background";
+	source: "oh-my-pi";
+	model?: string;
+	role?: string;
+	createdAt?: number;
+	lastActivity?: number;
+	subagents: OhMyPiAgentHubSubagent[];
+};
+
+export type OhMyPiAgentHubDashboard = Omit<SessionDashboard, "sessions"> & {
+	sessions: OhMyPiBackgroundSessionEntry[];
+	scannedRoots: string[];
+	source: "oh-my-pi";
+	generatedAt: number;
+};
+
+export type BuildOhMyPiAgentHubDashboardOptions = {
+	sessionsRoots?: string[];
+	env?: NodeJS.ProcessEnv;
+	now?: () => number;
+};
+
+export function defaultOhMyPiSessionRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+	const configuredRoots = [
+		...splitConfiguredRoots(env.PI_SPEAK_OH_MY_PI_SESSIONS_ROOT),
+		...splitConfiguredRoots(env.PI_SPEAK_AGENT_HUB_SESSIONS_ROOT),
+	];
+	const agentDirs = [env.PI_CODING_AGENT_DIR?.trim(), env.PI_SPEAK_OH_MY_PI_AGENT_DIR?.trim()]
+		.filter((value): value is string => !!value);
+	return dedupeStrings([
+		...configuredRoots,
+		...agentDirs.map((dir) => join(dir, "sessions")),
+		join(homedir(), ".omp", "agent", "sessions"),
+	]);
+}
+
+export function buildOhMyPiAgentHubDashboard(
+	options: BuildOhMyPiAgentHubDashboardOptions = {},
+): OhMyPiAgentHubDashboard {
+	const now = options.now ?? Date.now;
+	const roots = options.sessionsRoots ?? defaultOhMyPiSessionRoots(options.env);
+	const scannedRoots = roots.filter((root) => existsSync(root));
+	const sessions = scannedRoots
+		.flatMap((root) => listSessionFiles(root).map(parseBackgroundSessionFile))
+		.filter((entry): entry is OhMyPiBackgroundSessionEntry => entry !== undefined)
+		.sort((left, right) => (right.lastActivity ?? 0) - (left.lastActivity ?? 0));
+	return {
+		current: "oh-my-pi",
+		ready: [],
+		storePath: roots.length === 1 ? roots[0] : roots.join(delimiter),
+		sessions,
+		scannedRoots,
+		source: "oh-my-pi",
+		generatedAt: now(),
+	};
+}
+
+export function mergeOhMyPiAgentHubSessions(
+	dashboard: SessionDashboard,
+	options: BuildOhMyPiAgentHubDashboardOptions = {},
+): SessionDashboard {
+	const agentHub = buildOhMyPiAgentHubDashboard(options);
+	const existingPaths = new Set(
+		dashboard.sessions.map((entry) => entry.sessionPath ?? entry.path).filter((path): path is string => !!path),
+	);
+	const additions = agentHub.sessions.filter((entry) => !existingPaths.has(entry.sessionPath));
+	return additions.length === 0 ? dashboard : { ...dashboard, sessions: [...dashboard.sessions, ...additions] };
+}
+
+function splitConfiguredRoots(value: string | undefined): string[] {
+	return value ? value.split(delimiter).map((part) => part.trim()).filter((part) => part.length > 0) : [];
+}
+
+function dedupeStrings(values: string[]): string[] {
+	return Array.from(new Set(values.filter((value) => value.length > 0)));
+}
+
+function listSessionFiles(root: string): string[] {
+	const sessionFiles: string[] = [];
+	for (const entry of safeReadDir(root)) {
+		const entryPath = join(root, entry.name);
+		if (entry.isFile() && isSessionJsonl(entry.name)) {
+			sessionFiles.push(entryPath);
+		} else if (entry.isDirectory()) {
+			for (const child of safeReadDir(entryPath)) {
+				if (child.isFile() && isSessionJsonl(child.name)) sessionFiles.push(join(entryPath, child.name));
+			}
+		}
+	}
+	return sessionFiles;
+}
+
+function parseBackgroundSessionFile(sessionPath: string): OhMyPiBackgroundSessionEntry | undefined {
+	const stat = safeStat(sessionPath);
+	const content = safeReadText(sessionPath);
+	if (!stat || content === undefined) return undefined;
+
+	const records = parseJsonLineRecords(content);
+	const header = readSessionHeader(records);
+	if (!header) return undefined;
+	const backgroundInstance = resolveBackgroundInstance(header, records);
+	if (!backgroundInstance) return undefined;
+
+	const createdAt = parseTimestamp(header.timestamp) ?? fallbackCreatedAt(stat);
+	const lastActivity = Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : Date.now();
+	const activity = backgroundInstance.model
+		? `background session - ${backgroundInstance.model}`
+		: "background session";
+	return {
+		name: backgroundInstance.name,
+		path: sessionPath,
+		sessionPath,
+		provider: "oh-my-pi",
+		sessionId: header.id,
+		resumable: true,
+		resumeCommand: ["omp", "--resume", header.id],
+		workingDirectory: header.cwd,
+		cwd: header.cwd,
+		current: false,
+		isCurrent: false,
+		ready: false,
+		isReady: false,
+		activity,
+		aliases: [],
+		kind: "background",
+		source: "oh-my-pi",
+		model: backgroundInstance.model,
+		role: backgroundInstance.role,
+		createdAt,
+		lastActivity,
+		subagents: collectBackgroundSubagents(sessionPath, `background:${header.id}`),
+	};
+}
+
+function parseJsonLineRecords(content: string): Record<string, unknown>[] {
+	const records: Record<string, unknown>[] = [];
+	for (const line of content.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("{")) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch (error) {
+			if (error instanceof SyntaxError) continue;
+			throw error;
+		}
+		if (isRecord(parsed)) records.push(parsed);
+	}
+	return records;
+}
+
+function readSessionHeader(records: Record<string, unknown>[]): SessionHeader | undefined {
+	const first = records[0];
+	if (!first || first.type !== "session" || typeof first.id !== "string") return undefined;
+	return {
+		id: first.id,
+		cwd: typeof first.cwd === "string" ? first.cwd : undefined,
+		timestamp: typeof first.timestamp === "string" ? first.timestamp : undefined,
+		backgroundInstance: first.backgroundInstance,
+		hasBackgroundInstance: Object.prototype.hasOwnProperty.call(first, "backgroundInstance"),
+	};
+}
+
+function resolveBackgroundInstance(
+	header: Pick<SessionHeader, "backgroundInstance" | "hasBackgroundInstance">,
+	records: Record<string, unknown>[],
+): BackgroundInstance | undefined {
+	if (header.hasBackgroundInstance) return normalizeBackgroundInstance(header.backgroundInstance);
+	for (let index = records.length - 1; index >= 0; index -= 1) {
+		if (records[index].type === "background_instance") return normalizeBackgroundInstance(records[index]);
+	}
+	return undefined;
+}
+
+function normalizeBackgroundInstance(value: unknown): BackgroundInstance | undefined {
+	if (!isRecord(value) || value.status !== "active" || typeof value.name !== "string") return undefined;
+	return {
+		name: value.name,
+		status: "active",
+		model: typeof value.model === "string" ? value.model : undefined,
+		role: typeof value.role === "string" ? value.role : undefined,
+	};
+}
+
+function collectBackgroundSubagents(sessionPath: string, laneId: string): OhMyPiAgentHubSubagent[] {
+	const artifactsDir = sessionPath.slice(0, -JSONL_SUFFIX.length);
+	const subagents: OhMyPiAgentHubSubagent[] = [];
+	for (const entry of safeReadDir(artifactsDir)) {
+		if (!entry.isFile() || !isSessionJsonl(entry.name) || entry.name === ADVISOR_TRANSCRIPT_FILENAME) continue;
+		const name = entry.name.slice(0, -JSONL_SUFFIX.length);
+		const subagentPath = join(artifactsDir, entry.name);
+		const stat = safeStat(subagentPath);
+		const lastActivity = stat?.mtimeMs && Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : Date.now();
+		subagents.push({
+			id: `${laneId}/${name}`,
+			name,
+			status: "parked",
+			sessionPath: subagentPath,
+			activity: "background subagent",
+			createdAt: lastActivity,
+			lastActivity,
+		});
+	}
+	return subagents.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function isSessionJsonl(name: string): boolean {
+	return name.endsWith(JSONL_SUFFIX) && !name.includes(".bak");
+}
+
+function safeReadDir(path: string): Dirent[] {
+	return tryOrUndefined(() => readdirSync(path, { withFileTypes: true })) ?? [];
+}
+
+function safeStat(path: string): Stats | undefined {
+	return tryOrUndefined(() => statSync(path));
+}
+
+function safeReadText(path: string): string | undefined {
+	return tryOrUndefined(() => readFileSync(path, "utf8"));
+}
+
+function tryOrUndefined<T>(fn: () => T): T | undefined {
+	try {
+		return fn();
+	} catch (error) {
+		if (error instanceof Error) return undefined;
+		throw error;
+	}
+}
+
+function parseTimestamp(value: string | undefined): number | undefined {
+	const parsed = value ? Date.parse(value) : Number.NaN;
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function fallbackCreatedAt(stat: Stats): number {
+	return stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs > 0 ? stat.ctimeMs : stat.mtimeMs;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}

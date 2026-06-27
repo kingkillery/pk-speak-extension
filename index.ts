@@ -27,6 +27,8 @@ import {
 	setNamedSession,
 	setWakeAlias,
 } from "./session-routing.js";
+import { mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
+import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv } from "./agent-hub-actions.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
@@ -187,6 +189,13 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 		description: "Start the phone remote and show Android setup QR details",
 		usage: "/pk-remote [bluetooth]",
 		examples: ["/pk-remote", "/pk-remote bluetooth"],
+		source: "extension",
+	},
+	{
+		name: "pk-remote-launch",
+		description: "Start the phone remote and automatically supervise ADB reverse port forwarding",
+		usage: "/pk-remote-launch [bluetooth]",
+		examples: ["/pk-remote-launch", "/pk-remote-launch bluetooth"],
 		source: "extension",
 	},
 ];
@@ -476,6 +485,42 @@ function sleep(ms: number) {
 function getErrorMessage(error: unknown) {
 	if (error instanceof Error) return error.message;
 	return String(error);
+}
+
+function resolveOhMyPiCommand() {
+	return process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
+		|| process.env.OMP_BIN?.trim()
+		|| resolveWindowsNpmShim("omp.cmd")
+		|| resolveWindowsNpmShim("omp")
+		|| "omp";
+}
+
+function launchOhMyPiResume(sessionArg: string, cwd: string) {
+	const command = resolveOhMyPiCommand();
+	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+	const child = spawn(command, ["--resume", sessionArg], {
+		cwd,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: false,
+		shell,
+	});
+	child.unref();
+	return command;
+}
+
+function launchOhMyPiAgent(argv: string[], cwd: string) {
+	const command = resolveOhMyPiCommand();
+	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+	const child = spawn(command, argv, {
+		cwd,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: false,
+		shell,
+	});
+	child.unref();
+	return { command, argv, cwd };
 }
 
 function getTelegramBotToken(state?: PhoneBridgeState) {
@@ -2113,6 +2158,107 @@ export default function speakExtension(pi: ExtensionAPI) {
 		return { ok: true, message: `Phone unpaired. New link code: ${linkCode}.`, phone: getPhoneStatus() };
 	};
 
+	let adbReverseTimer: ReturnType<typeof setInterval> | undefined;
+	let adbWarned = false;
+
+	const getAdbPath = (): string => {
+		const env = process.env;
+		const sdkRoot = env.ANDROID_HOME || env.ANDROID_SDK_ROOT;
+		if (sdkRoot && existsSync(join(sdkRoot, "platform-tools", "adb.exe"))) {
+			return join(sdkRoot, "platform-tools", "adb.exe");
+		}
+		if (sdkRoot && existsSync(join(sdkRoot, "platform-tools", "adb"))) {
+			return join(sdkRoot, "platform-tools", "adb");
+		}
+		if (env.LOCALAPPDATA && existsSync(join(env.LOCALAPPDATA, "Android", "Sdk", "platform-tools", "adb.exe"))) {
+			return join(env.LOCALAPPDATA, "Android", "Sdk", "platform-tools", "adb.exe");
+		}
+		return "adb";
+	};
+
+	const getAdbDevices = (adbPath: string): Promise<string[]> => {
+		return new Promise((resolve, reject) => {
+			const child = spawn(adbPath, ["devices"]);
+			let stdout = "";
+			child.stdout.on("data", (data) => { stdout += data.toString(); });
+			child.on("error", (err) => reject(err));
+			child.on("close", (code) => {
+				if (code !== 0) {
+					reject(new Error(`adb exited with code ${code}`));
+					return;
+				}
+				const lines = stdout.split(/\r?\n/);
+				const devices: string[] = [];
+				for (const line of lines.slice(1)) {
+					const trimmed = line.trim();
+					if (!trimmed) continue;
+					const parts = trimmed.split(/\s+/);
+					if (parts[1] === "device" && parts[0]) {
+						devices.push(parts[0]);
+					}
+				}
+				resolve(devices);
+			});
+		});
+	};
+
+	const reversedSerials = new Map<string, Set<number>>();
+
+	const startAdbReverseWatcher = (ctx?: any) => {
+		if (adbReverseTimer) return;
+		adbWarned = false;
+		reversedSerials.clear();
+		const port = remoteState.port || DEFAULT_REMOTE_PORT;
+
+		const poll = async () => {
+			const adbPath = getAdbPath();
+			try {
+				const devices = await getAdbDevices(adbPath);
+				const activeSet = new Set(devices);
+
+				// Clean up disconnected devices
+				for (const serial of reversedSerials.keys()) {
+					if (!activeSet.has(serial)) {
+						reversedSerials.delete(serial);
+					}
+				}
+
+				if (devices.length > 0) {
+					for (const serial of devices) {
+						const ports = reversedSerials.get(serial) || new Set<number>();
+						if (!ports.has(port)) {
+							const child = spawn(adbPath, ["-s", serial, "reverse", `tcp:${port}`, `tcp:${port}`]);
+							child.on("error", () => {});
+							child.on("close", (code) => {
+								if (code === 0) {
+									if (!reversedSerials.has(serial)) {
+										reversedSerials.set(serial, new Set());
+									}
+									reversedSerials.get(serial)!.add(port);
+								}
+							});
+						}
+					}
+				}
+			} catch (error: any) {
+				if (!adbWarned) {
+					adbWarned = true;
+					ctx?.ui?.notify(`ADB reverse watcher warning: could not run adb (${error.message || error})`, "warning");
+				}
+			}
+		};
+
+		void poll();
+		adbReverseTimer = setInterval(poll, 5000);
+	};
+
+	const stopAdbReverseWatcher = () => {
+		if (adbReverseTimer) {
+			clearInterval(adbReverseTimer);
+			adbReverseTimer = undefined;
+		}
+		reversedSerials.clear();
+	};
 	const startRemoteServer = async (ctx?: any, quiet = false) => {
 		if (!remoteServer) {
 			remoteServer = new ControlServer({
@@ -2214,7 +2360,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 						currentSessionPath || undefined,
 						...snapshots.map((snapshot) => snapshot.sessionPath),
 					];
-					return buildSessionDashboard({
+					const dashboard = buildSessionDashboard({
 						sessions: persisted.sessions,
 						aliases: persisted.aliases,
 						runtimeSnapshots: snapshots,
@@ -2228,8 +2374,63 @@ export default function speakExtension(pi: ExtensionAPI) {
 						),
 						storePath: getSessionRoutingStorePath(),
 					});
+					return mergeOhMyPiAgentHubSessions(dashboard);
 				},
 				getCompactRouteSlots: () => buildCompactRouteSlots({ sessions: sessionRegistry, aliases: sessionWakeAliases }),
+				onSessionResume: (payload) => {
+					const provider = payload.provider?.trim().toLowerCase();
+					if (provider && provider !== "oh-my-pi") {
+						return { ok: false, message: `Resume is not available for provider "${provider}".` };
+					}
+					const sessionArg = payload.sessionId?.trim() || payload.sessionPath?.trim();
+					if (!sessionArg) return { ok: false, message: "Session id or path is required." };
+					const cwd = payload.cwd?.trim() || process.cwd();
+					try {
+						const command = launchOhMyPiResume(sessionArg, cwd);
+						appendSessionEvent("sess.resume", "admin", { provider: "oh-my-pi", session: sessionArg, cwd, command });
+						return { ok: true, message: `Launching Oh-my-pi resume for ${sessionArg}.` };
+					} catch (error) {
+						return { ok: false, message: `Oh-my-pi resume failed: ${getErrorMessage(error)}` };
+					}
+				},
+				onSessionLaunch: (payload) => {
+					const fallbackCwd = payload.cwd?.trim()
+						|| process.env.AGENT_CWD?.trim()
+						|| process.env.AGENT_WORKSPACE?.trim()
+						|| process.cwd();
+					const built = buildOhMyPiLaunchArgv({
+						cwd: payload.cwd,
+						prompt: payload.prompt,
+						model: payload.model,
+						provider: payload.provider,
+						sessionDir: payload.sessionDir,
+						hubOnly: payload.hubOnly,
+					}, fallbackCwd);
+					if (!built.ok) {
+						return { ok: false, message: built.message };
+					}
+					try {
+						const launched = launchOhMyPiAgent(built.argv, built.cwd);
+						appendSessionEvent("sess.launch", "admin", {
+							provider: "oh-my-pi",
+							mode: built.mode,
+							argv: launched.argv,
+							cwd: launched.cwd,
+							command: launched.command,
+						});
+						return {
+							ok: true,
+							message: built.mode === "hub"
+								? `Launching Oh-my-pi Agent Hub in ${launched.cwd}.`
+								: `Launching Oh-my-pi agent in ${launched.cwd}.`,
+							command: launched.command,
+							argv: launched.argv,
+							cwd: launched.cwd,
+						};
+					} catch (error) {
+						return { ok: false, message: `Oh-my-pi launch failed: ${getErrorMessage(error)}` };
+					}
+				},
 				onSessionRename: (payload) => {
 					const sessionPath = payload.sessionPath;
 					const newName = payload.newName.trim();
@@ -2264,6 +2465,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 					const sessionPath = payload.sessionPath;
 					if (!sessionPath) return { ok: false, message: "Session path is required." };
 					if (!Object.values(sessionRegistry).includes(sessionPath) && lastCtx?.sessionManager?.getSessionFile?.() !== sessionPath) {
+						const archived = archiveOhMyPiBackgroundSession(sessionPath);
+						if (archived.ok) {
+							appendSessionEvent("sess.remove", "admin", { provider: "oh-my-pi", path: sessionPath, archived: true });
+							return { ok: true, message: archived.message, route: getRoutingStatus() };
+						}
 						return { ok: false, message: "Unknown session path." };
 					}
 					const removal = removeSessionRoutingForPath(sessionRegistry, sessionWakeAliases, sessionPath);
@@ -2302,6 +2508,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const stopRemoteServer = async (ctx?: any, quiet = false) => {
 		remoteTurnManager.cancelAll("Remote API stopped before queued work completed");
+		stopAdbReverseWatcher();
 		if (remoteServer) {
 			await remoteServer.stop().catch(() => {});
 			remoteServer = undefined;
@@ -3117,7 +3324,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.registerCommand("remote", {
 		description: "Control Pi through the local HTTP API for phone remotes and automations",
 		getArgumentCompletions: (prefix) => {
-			const options = ["on", "off", "status", "token", "setup", "setup bluetooth", "tray on", "tray off", "tray status"];
+			const options = ["on", "off", "status", "token", "setup", "setup bluetooth", "tray on", "tray off", "tray status", "launch", "launch bluetooth"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -3125,8 +3332,14 @@ export default function speakExtension(pi: ExtensionAPI) {
 			lastCtx = ctx;
 			const lower = args.trim().toLowerCase();
 
-			if (!lower || lower === "on" || lower === "start") {
-				await startRemoteServer(ctx);
+			if (!lower || lower === "on" || lower === "start" || lower === "launch" || lower === "launch bluetooth") {
+				const isAdbLaunch = lower.startsWith("launch");
+				const isBluetooth = lower.includes("bluetooth");
+				await startRemoteServer(ctx, isAdbLaunch);
+				if (isAdbLaunch) {
+					startAdbReverseWatcher(ctx);
+					ctx.ui.notify(await getRemoteSetupText(isBluetooth ? "bluetooth" : "tailscale", true), "info");
+				}
 				return;
 			}
 
@@ -3200,6 +3413,25 @@ export default function speakExtension(pi: ExtensionAPI) {
 				? "bluetooth"
 				: "tailscale";
 			await startRemoteServer(ctx, true);
+			ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
+		},
+	});
+
+	pi.registerCommand("pk-remote-launch", {
+		description: "Start the phone remote, show the setup QR, and supervise ADB reverse port forwarding",
+		getArgumentCompletions: (prefix) => {
+			const options = ["", "bluetooth"];
+			const matches = options.filter((opt) => opt.startsWith(prefix));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value || "setup" })) : null;
+		},
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const lower = args.trim().toLowerCase();
+			const mode = lower === "bluetooth" || lower === "setup bluetooth" || lower === "bluetooth setup"
+				? "bluetooth"
+				: "tailscale";
+			await startRemoteServer(ctx, true);
+			startAdbReverseWatcher(ctx);
 			ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
 		},
 	});

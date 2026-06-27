@@ -126,7 +126,7 @@ function getSnapshotActivity(snapshot: SessionRuntimeSnapshot | undefined) {
 	return snapshot.phase && snapshot.phase !== "ready" ? "busy" : "idle";
 }
 
-export type SessionActivity = "busy" | "idle" | "saved";
+export type SessionActivity = string;
 
 export type SessionDashboardEntry = {
 	name: string;

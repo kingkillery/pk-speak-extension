@@ -47,6 +47,24 @@ android {
       signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
+
+  // "standard" is the regular phone/tablet build (LCD, full animations).
+  // "boox" is the Onyx Boox Palma e-ink build: a separate launchable app
+  // (applicationId .boox so it installs side-by-side) whose UI lives entirely
+  // in src/boox/ -- pure black/white, no animations, large touch targets.
+  flavorDimensions += "device"
+  productFlavors {
+    create("standard") {
+      dimension = "device"
+      buildConfigField("Boolean", "IS_EINK", "false")
+    }
+    create("boox") {
+      dimension = "device"
+      applicationIdSuffix = ".boox"
+      versionNameSuffix = "-eink"
+      buildConfigField("Boolean", "IS_EINK", "true")
+    }
+  }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11

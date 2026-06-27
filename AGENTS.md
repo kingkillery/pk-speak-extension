@@ -33,8 +33,9 @@ npm test         # Run tests
 | `stt.ts` | Remote voice transcription |
 | `phone-bridge.ts` | Telegram transport |
 | `control-server.ts` | HTTP API + mobile web app server |
+| `agent-hub-dashboard.ts` | Scans Oh-my-pi session roots and merges active background lanes into the route dashboard |
+| `agent-hub-actions.ts` | Pure helpers: `archiveOhMyPiBackgroundSession`, `buildOhMyPiLaunchArgv` for `/v1/sessions/launch` and `/v1/sessions/remove` |
 | `listener/listener.py` | Always-on wake-word listener (faster-whisper wake detection + transcription) |
-| `web/remote/index.html` | Mobile web app |
 
 ## TTS Provider Logic
 
@@ -53,6 +54,8 @@ Auto-resolution order:
 - **Short numeric routes**: Keep `one/1` and `two/2` as distinct voice families. `PK one` / `PK1` should stay separate from `PK two` / `PK2`, while multi-word names like `PK to Google` must stay literal.
 - **Operator UX**: `/sess` should surface the compact-lane summary inline, `/sess slots` should show the explicit PK1/PK2 lane ownership view, and `/sess ui` should launch the Ink management pane in a separate terminal so it does not steal the pi-coding-agent TTY.
 - **Phone setup UX**: `/pk-remote` is the shortest Android setup path. It should start the HTTP gateway if needed, choose public/Tailscale/LAN URLs in that order, and print a QR for the native `pi-speak://setup` deep link.
+- **Agent hub launch**: `POST /v1/sessions/launch` spawns a fresh Oh-my-pi agent via `omp --cwd <dir> [--model/--provider/--session-dir] -- <prompt>` or opens the Agent Hub via `omp bg` (`hubOnly: true`). Defaults to `AGENT_CWD` → `AGENT_WORKSPACE` → `process.cwd()` when the payload omits `cwd`, so set `AGENT_CWD=C:/dev/Desktop-Projects/oh-my-pi-fork` (or use the Boox/PWA UI which sends the workspace cwd) to land in the fork. The argv is built by `buildOhMyPiLaunchArgv` (testable in `tests/agent-hub-actions.test.mjs`); the spawn helper in `index.ts` reuses the resume pattern and appends a `sess.launch` event.
+
 - **Pane write path**: All pane-driven mutations flow through `loadPersistedSessionRouting` → pure helper in `session-routing.ts` → `persistSessionRouting` → `appendSessionEvent(kind, "admin", payload)`. The extension watches the routing store mtime and reloads in-process state on external writes.
 - **Remote audio**: Browser mic requires HTTPS origin (use Tailscale Serve or tunnel)
 

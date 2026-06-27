@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import dgram, { type Socket as UdpSocket } from "node:dgram";
@@ -49,6 +50,15 @@ export type SessionResumePayload = {
 	sessionId?: string;
 	provider?: string;
 	cwd?: string;
+};
+
+export type SessionLaunchPayload = {
+	cwd?: string;
+	prompt?: string;
+	model?: string;
+	provider?: string;
+	sessionDir?: string;
+	hubOnly?: boolean;
 };
 
 export type RemoteSlashCommand = {
@@ -123,6 +133,44 @@ export type DiscoveryDiagnostics = {
 	lastError?: string;
 };
 
+export type WarpPsmuxPane = {
+	session: string;
+	window: string;
+	pane: string;
+	paneId: string;
+	active: boolean;
+	command?: string;
+	title?: string;
+};
+
+export type WarpPsmuxWindow = {
+	session: string;
+	index: string;
+	name: string;
+	active: boolean;
+	panes: WarpPsmuxPane[];
+};
+
+export type WarpPsmuxSession = {
+	name: string;
+	windows: WarpPsmuxWindow[];
+	attached?: string;
+};
+
+export type WarpControlSnapshot = {
+	available: boolean;
+	sameTailnet: boolean;
+	requestRemoteAddress: string;
+	warpRemoteBaseUrl?: string;
+	warpUriScheme: string;
+	psmux: {
+		available: boolean;
+		executable: string;
+		sessions: WarpPsmuxSession[];
+		error?: string;
+	};
+};
+
 export type WorkspaceEntry = {
 	name: string;
 	path: string;
@@ -173,6 +221,7 @@ export type ControlServerOptions = {
 	onSessionAlias?: (body: SessionAliasPayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionRemove?: (body: SessionRemovePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
+	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 	onRealtimeConnection?: (ws: WebSocket) => void;
@@ -284,6 +333,7 @@ export class ControlServer {
 	private readonly onSessionAlias?: ControlServerOptions["onSessionAlias"];
 	private readonly onSessionRemove?: ControlServerOptions["onSessionRemove"];
 	private readonly onSessionResume?: ControlServerOptions["onSessionResume"];
+	private readonly onSessionLaunch?: ControlServerOptions["onSessionLaunch"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
 	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
 	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
@@ -324,6 +374,7 @@ export class ControlServer {
 		this.onSessionAlias = options.onSessionAlias;
 		this.onSessionRemove = options.onSessionRemove;
 		this.onSessionResume = options.onSessionResume;
+		this.onSessionLaunch = options.onSessionLaunch;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
@@ -559,6 +610,39 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/warp") {
+			this.writeJson(res, 200, { ok: true, warp: buildWarpControlSnapshot(req) });
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/warp/tab") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = openWarpTab(payload);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/warp/tab-config") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = openWarpTabConfig(payload);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/warp/psmux/session") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = createPsmuxSession(payload);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/warp/psmux/window") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = createPsmuxWindow(payload);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
 		if (req.method === "GET" && url.pathname === "/v1/commands") {
 			this.writeJson(res, 200, {
 				ok: true,
@@ -669,6 +753,40 @@ export class ControlServer {
 				return;
 			}
 			const result = await this.onSessionResume({ sessionPath, sessionId, provider, cwd });
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/v1/sessions/launch") {
+			if (!this.onSessionLaunch) {
+				this.writeJson(res, 501, { ok: false, error: "Session launch is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid JSON body." });
+				return;
+			}
+			const fieldTypes: Record<string, "string" | "boolean"> = {
+				cwd: "string",
+				prompt: "string",
+				model: "string",
+				provider: "string",
+				sessionDir: "string",
+				hubOnly: "boolean",
+			};
+			for (const [field, expected] of Object.entries(fieldTypes)) {
+				if (payload[field] !== undefined && typeof payload[field] !== expected) {
+					this.writeJson(res, 400, { ok: false, error: `Invalid payload: ${field} must be a ${expected}.` });
+					return;
+				}
+			}
+			const cwd = typeof payload.cwd === "string" ? payload.cwd : undefined;
+			const prompt = typeof payload.prompt === "string" ? payload.prompt : undefined;
+			const model = typeof payload.model === "string" ? payload.model : undefined;
+			const provider = typeof payload.provider === "string" ? payload.provider : undefined;
+			const sessionDir = typeof payload.sessionDir === "string" ? payload.sessionDir : undefined;
+			const hubOnly = typeof payload.hubOnly === "boolean" ? payload.hubOnly : undefined;
+			const result = await this.onSessionLaunch({ cwd, prompt, model, provider, sessionDir, hubOnly });
 			this.writeJson(res, result.ok ? 200 : 400, result);
 			return;
 		}
@@ -985,6 +1103,11 @@ export class ControlServer {
 				slots: "/v1/sessions/slots",
 				agents: "/v1/agents",
 				events: "/v1/events",
+				warp: "/v1/warp",
+				warpTab: "/v1/warp/tab",
+				warpTabConfig: "/v1/warp/tab-config",
+				warpPsmuxSession: "/v1/warp/psmux/session",
+				warpPsmuxWindow: "/v1/warp/psmux/window",
 			},
 			capabilities: [
 				"text-turn",
@@ -1002,6 +1125,8 @@ export class ControlServer {
 				"session-mutations",
 				"agent-discovery",
 				"event-stream",
+				"warp-control",
+				"psmux-control",
 			],
 			agent: status.agent
 				? {
@@ -1393,6 +1518,219 @@ export class ControlServer {
 	}
 }
 
+
+function buildWarpControlSnapshot(req: IncomingMessage): WarpControlSnapshot {
+	const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress || "");
+	const warpRemoteBaseUrl = process.env.PI_SPEAK_WARP_REMOTE_BASE_URL?.trim() || undefined;
+	const psmux = listPsmuxSessions();
+	return {
+		available: !!warpRemoteBaseUrl || psmux.available,
+		sameTailnet: isTailscaleIpv4(remoteAddress),
+		requestRemoteAddress: remoteAddress,
+		warpRemoteBaseUrl,
+		warpUriScheme: getWarpUriScheme(),
+		psmux,
+	};
+}
+
+function listPsmuxSessions(): WarpControlSnapshot["psmux"] {
+	const executable = getPsmuxExecutable();
+	const sessionsResult = runPsmux(["list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_attached}"]);
+	if (!sessionsResult.ok) {
+		return { available: false, executable, sessions: [], error: sessionsResult.error };
+	}
+	const sessions: WarpPsmuxSession[] = [];
+	for (const line of splitOutputLines(sessionsResult.stdout)) {
+		const parts = line.split("\t");
+		const parsed = parts.length > 1 ? undefined : parsePsmuxSessionLine(line);
+		const name = parts.length > 1 ? parts[0] : parsed?.name;
+		if (!name) continue;
+		sessions.push({
+			name,
+			attached: parts.length > 1 ? parts[2] : parsed?.attached,
+			windows: listPsmuxWindows(name),
+		});
+	}
+	return { available: true, executable, sessions };
+}
+
+function listPsmuxWindows(session: string): WarpPsmuxWindow[] {
+	const windowsResult = runPsmux(["list-windows", "-t", session, "-F", "#{window_index}\t#{window_name}\t#{window_active}"]);
+	if (!windowsResult.ok) return [];
+	const windows: WarpPsmuxWindow[] = [];
+	for (const line of splitOutputLines(windowsResult.stdout)) {
+		const parts = line.split("\t");
+		const parsed = parts.length > 1 ? undefined : parsePsmuxWindowLine(line);
+		const index = parts.length > 1 ? parts[0] : parsed?.index;
+		if (!index) continue;
+		windows.push({
+			session,
+			index,
+			name: (parts.length > 1 ? parts[1] : parsed?.name) || index,
+			active: parts.length > 1 ? parts[2] === "1" : !!parsed?.active,
+			panes: listPsmuxPanes(session, index),
+		});
+	}
+	return windows;
+}
+
+function listPsmuxPanes(session: string, windowIndex: string): WarpPsmuxPane[] {
+	const target = `${session}:${windowIndex}`;
+	const panesResult = runPsmux(["list-panes", "-t", target, "-F", "#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_title}"]);
+	if (!panesResult.ok) return [];
+	const panes: WarpPsmuxPane[] = [];
+	for (const line of splitOutputLines(panesResult.stdout)) {
+		const parts = line.split("\t");
+		const parsed = parts.length > 1 ? undefined : parsePsmuxPaneLine(line);
+		const pane = parts.length > 1 ? parts[0] : parsed?.pane;
+		if (!pane) continue;
+		panes.push({
+			session,
+			window: windowIndex,
+			pane,
+			paneId: (parts.length > 1 ? parts[1] : parsed?.paneId) || "",
+			active: parts.length > 1 ? parts[2] === "1" : !!parsed?.active,
+			command: parts.length > 1 ? parts[3] || undefined : undefined,
+			title: parts.length > 1 ? parts[4] || undefined : undefined,
+		});
+	}
+	return panes;
+}
+
+function parsePsmuxSessionLine(line: string) {
+	const match = /^([^:]+):\s+(\d+)\s+windows?(?:\s+\(created\s+(.+)\))?/.exec(line);
+	if (!match) return undefined;
+	return { name: match[1], attached: undefined as string | undefined };
+}
+
+function parsePsmuxWindowLine(line: string) {
+	const match = /^(\d+):\s+(.+?)(\*)?\s+\(\d+\s+panes?\)/.exec(line);
+	if (!match) return undefined;
+	return { index: match[1], name: match[2].trim(), active: match[3] === "*" };
+}
+
+function parsePsmuxPaneLine(line: string) {
+	const match = /^(\d+):.*\s(%\d+)\s*(?:\((active)\))?/.exec(line);
+	if (!match) return undefined;
+	return { pane: match[1], paneId: match[2], active: match[3] === "active" };
+}
+function createPsmuxSession(payload: Record<string, unknown> | undefined): ControlActionResult {
+	const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+	if (!isSafePsmuxName(name)) {
+		return { ok: false, message: "Invalid psmux session name. Use 1-64 letters, numbers, dots, underscores, or dashes." };
+	}
+	const args = ["new-session", "-d", "-s", name];
+	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined);
+	if (cwd) args.push("-c", cwd);
+	const result = runPsmux(args);
+	return result.ok
+		? { ok: true, message: `Created psmux session ${name}.`, session: name }
+		: { ok: false, message: result.error || "Failed to create psmux session." };
+}
+
+function createPsmuxWindow(payload: Record<string, unknown> | undefined): ControlActionResult {
+	const session = typeof payload?.session === "string" ? payload.session.trim() : "";
+	const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+	if (!isSafePsmuxName(session)) {
+		return { ok: false, message: "Invalid psmux session target." };
+	}
+	if (name && !isSafePsmuxName(name)) {
+		return { ok: false, message: "Invalid psmux window name. Use 1-64 letters, numbers, dots, underscores, or dashes." };
+	}
+	const args = ["new-window", "-t", session];
+	if (name) args.push("-n", name);
+	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined);
+	if (cwd) args.push("-c", cwd);
+	const result = runPsmux(args);
+	return result.ok
+		? { ok: true, message: `Created psmux tab in ${session}.`, session, window: name || undefined }
+		: { ok: false, message: result.error || "Failed to create psmux tab." };
+}
+
+function openWarpTab(payload: Record<string, unknown> | undefined): ControlActionResult {
+	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined) || process.cwd();
+	const newWindow = payload?.newWindow === true;
+	const scheme = getWarpUriScheme();
+	const action = newWindow ? "new_window" : "new_tab";
+	const uri = `${scheme}://action/${action}?path=${encodeURIComponent(cwd)}`;
+	const result = openLocalUri(uri);
+	return result.ok
+		? { ok: true, message: `Opened Warp ${newWindow ? "window" : "tab"}.`, uri, cwd }
+		: { ok: false, message: result.error || "Failed to open Warp URI.", uri, cwd };
+}
+
+function openWarpTabConfig(payload: Record<string, unknown> | undefined): ControlActionResult {
+	const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+	if (!isSafeWarpTabConfigName(name)) {
+		return { ok: false, message: "Invalid Warp tab config name. Use a .toml file stem with letters, numbers, dots, underscores, or dashes." };
+	}
+	const newWindow = payload?.newWindow === true;
+	const uri = `${getWarpUriScheme()}://tab_config/${encodeURIComponent(name)}${newWindow ? "?new_window=true" : ""}`;
+	const result = openLocalUri(uri);
+	return result.ok
+		? { ok: true, message: `Opened Warp tab config ${name}.`, uri, name }
+		: { ok: false, message: result.error || "Failed to open Warp tab config.", uri, name };
+}
+
+function getWarpUriScheme() {
+	const configured = process.env.PI_SPEAK_WARP_URI_SCHEME?.trim();
+	if (configured && /^[A-Za-z][A-Za-z0-9+.-]*$/.test(configured)) return configured;
+	return "warp";
+}
+
+function openLocalUri(uri: string) {
+	const override = process.env.PI_SPEAK_WARP_OPEN_BIN?.trim();
+	if (override) return runProcess(override, [uri], 3000);
+	if (platform() === "win32") return runProcess("rundll32.exe", ["url.dll,FileProtocolHandler", uri], 3000);
+	if (platform() === "darwin") return runProcess("open", [uri], 3000);
+	return runProcess("xdg-open", [uri], 3000);
+}
+
+function getPsmuxExecutable() {
+	return process.env.PI_SPEAK_PSMUX_BIN?.trim() || (platform() === "win32" ? "psmux.exe" : "tmux");
+}
+
+function runPsmux(args: string[]) {
+	const executable = getPsmuxExecutable();
+	const result = runProcess(executable, args, 3000);
+	return result.ok
+		? { ok: true as const, stdout: result.stdout, error: "" }
+		: { ok: false as const, stdout: result.stdout, error: result.error };
+}
+
+function runProcess(executable: string, args: string[], timeout: number) {
+	const result = spawnSync(executable, args, {
+		encoding: "utf8",
+		timeout,
+		windowsHide: true,
+	});
+	if (result.error) {
+		return { ok: false as const, stdout: "", error: result.error.message };
+	}
+	if (result.status !== 0) {
+		const error = (result.stderr || result.stdout || `${executable} exited with ${result.status}`).trim();
+		return { ok: false as const, stdout: result.stdout || "", error };
+	}
+	return { ok: true as const, stdout: result.stdout || "", error: "" };
+}
+
+function splitOutputLines(output: string) {
+	return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function isSafeWarpTabConfigName(value: string) {
+	return /^[A-Za-z0-9_.-]{1,128}(?:\.toml)?$/.test(value) && !value.includes("..");
+}
+
+function isSafePsmuxName(value: string) {
+	return /^[A-Za-z0-9_.-]{1,64}$/.test(value);
+}
+
+function normalizeExistingDirectory(value: string | undefined) {
+	if (!value) return undefined;
+	const resolved = resolve(value);
+	return safeStatDirectory(resolved) ? resolved : undefined;
+}
 class RequestLimitError extends Error {
 	constructor(message: string, readonly statusCode: number) {
 		super(message);
@@ -1442,14 +1780,6 @@ function normalizeRemoteAddress(address: string) {
 	return address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
 }
 
-function isTailscaleIp(remoteAddress: string) {
-	// Tailscale uses the CGNAT range 100.64.0.0/10
-	const parts = remoteAddress.split(".");
-	if (parts.length !== 4) return false;
-	const first = parseInt(parts[0], 10);
-	const second = parseInt(parts[1], 10);
-	return first === 100 && second >= 64 && second <= 127;
-}
 
 function isLocalRequest(req: IncomingMessage, url: URL) {
 	const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress || "");

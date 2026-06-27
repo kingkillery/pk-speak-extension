@@ -27,6 +27,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -141,7 +148,7 @@ class MainActivity : ComponentActivity() {
                 defaultTarget?.takeIf { it.isNotBlank() }?.let { appPreferences.codexSessionName = it }
                 workspaceRoot?.takeIf { it.isNotBlank() }?.let { appPreferences.workspaceRoot = it }
                 workspacePath?.takeIf { it.isNotBlank() }?.let { appPreferences.workspacePath = it }
-                connectionMode?.let { appPreferences.connectionMode = it }
+                connectionMode?.let { appPreferences.connectionMode = normalizeConnectionMode(it) }
                 when (agentProvider?.lowercase()) {
                     "codex", "pi" -> appPreferences.activeAgent = "Local Codex (Pi)"
                     "claude" -> appPreferences.activeAgent = "Gateway Claude (Claude Code)"
@@ -151,6 +158,12 @@ class MainActivity : ComponentActivity() {
                 Log.d("MainActivity", "Successfully processed zero-touch onboarding QR link: base_url=$baseUrl, profile=$profileName, target=$defaultTarget")
             }
         }
+    }
+
+    private fun normalizeConnectionMode(value: String): String = when (value.trim().lowercase()) {
+        "tailscale", "tailnet" -> "Tailscale"
+        "bluetooth", "bt" -> "Bluetooth"
+        else -> "Manual"
     }
 
     override fun onDestroy() {
@@ -199,7 +212,7 @@ fun PiSpeakConsoleScreen(
         "studio" -> "Studio"
         "discovery" -> "Discover"
         "commands" -> "Commands"
-        "sessions" -> "Sessions"
+        "sessions" -> "Agent Hub"
         "settings" -> "Configure"
         else -> "Pi Speak"
     }
@@ -588,7 +601,7 @@ fun PiSpeakDrawer(
             DrawerRow(glyph = "◉", label = "Studio", selected = activeTab == "studio") { onSelect("studio") }
             DrawerRow(glyph = "⊚", label = "Discover", selected = activeTab == "discovery") { onSelect("discovery") }
             DrawerRow(glyph = "</>", label = "Commands", selected = activeTab == "commands", mono = true) { onSelect("commands") }
-            DrawerRow(glyph = "≣", label = "Sessions", selected = activeTab == "sessions") { onSelect("sessions") }
+            DrawerRow(glyph = "≣", label = "Agent Hub", selected = activeTab == "sessions") { onSelect("sessions") }
             DrawerRow(glyph = "⚙", label = "Configure", selected = activeTab == "settings") { onSelect("settings") }
 
             if (recents.isNotEmpty()) {
@@ -2032,7 +2045,7 @@ fun SessionsTabContent(
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text("Gateway Sessions", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Agent Hub", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
             Button(
                 onClick = { selectedPane = "history" },
@@ -2043,7 +2056,7 @@ fun SessionsTabContent(
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text("Local Turn History", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Turn History", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -2073,11 +2086,15 @@ fun GatewaySessionsPane(
     modifier: Modifier = Modifier
 ) {
     var state by remember { mutableStateOf<GatewaySessionsUiState>(GatewaySessionsUiState.Idle) }
+    var filterText by remember { mutableStateOf("") }
+    var pendingRemoveKey by remember { mutableStateOf<String?>(null) }
+    val expandedLanes = remember { mutableStateMapOf<String, Boolean>() }
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
 
     fun refresh() {
         state = GatewaySessionsUiState.Loading
+        pendingRemoveKey = null
         scope.launch {
             state = try {
                 val dashboard = client.getSessionDashboard()
@@ -2098,10 +2115,20 @@ fun GatewaySessionsPane(
         refresh()
     }
 
+    LaunchedEffect(pendingRemoveKey) {
+        val key = pendingRemoveKey ?: return@LaunchedEffect
+        delay(3_000)
+        if (pendingRemoveKey == key) {
+            pendingRemoveKey = null
+        }
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
         GatewaySessionsHeader(
             prefs = prefs,
             state = state,
+            filterText = filterText,
+            onFilterTextChange = { filterText = it },
             onRefresh = { refresh() }
         )
 
@@ -2112,40 +2139,96 @@ fun GatewaySessionsPane(
             GatewaySessionsUiState.Unauthorized -> GatewaySessionsStatus("Gateway token required or invalid. Check Configure.")
             GatewaySessionsUiState.Unsupported -> GatewaySessionsStatus("This gateway does not expose the session dashboard.")
             is GatewaySessionsUiState.Error -> GatewaySessionsStatus(currentState.message)
-            is GatewaySessionsUiState.Loaded -> LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(bottom = 12.dp)
-            ) {
-                items(currentState.dashboard.sessions, key = { it.canonicalSessionPath ?: it.name }) { entry ->
-                    GatewaySessionRow(
-                        entry = entry,
-                        dashboard = currentState.dashboard,
-                        prefs = prefs,
-                        onUse = {
-                            onRemoteSessionSelected(entry, currentState.dashboard)
-                            android.widget.Toast.makeText(
-                                context,
-                                if (entry.isRouteCapableIn(currentState.dashboard)) "Gateway session target selected." else "Gateway workspace selected.",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        onResume = if (entry.resumable) {
-                            {
-                                scope.launch {
-                                    val message = client.resumeGatewaySession(entry)
-                                    refresh()
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        message,
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
-                        } else {
-                            null
-                        }
+            is GatewaySessionsUiState.Loaded -> {
+                val groups = buildGatewayAgentHubGroups(
+                    dashboard = currentState.dashboard,
+                    currentWorkspace = prefs.workspacePath,
+                    query = filterText
+                )
+                if (groups.isEmpty()) {
+                    GatewaySessionsStatus(
+                        if (filterText.isBlank()) "No background sessions found."
+                        else "No sessions match \"$filterText\"."
                     )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(bottom = 12.dp)
+                    ) {
+                        groups.forEach { group ->
+                            item(key = "folder:${group.key}") {
+                                GatewayAgentHubFolderHeader(group)
+                            }
+                            items(
+                                group.sessions,
+                                key = { entry -> "${group.key}:${gatewaySessionKey(entry)}" }
+                            ) { entry ->
+                                val laneKey = gatewaySessionKey(entry)
+                                val defaultExpanded = entry.isCurrentIn(currentState.dashboard)
+                                val expanded = expandedLanes[laneKey] ?: defaultExpanded
+                                GatewaySessionRow(
+                                    entry = entry,
+                                    dashboard = currentState.dashboard,
+                                    prefs = prefs,
+                                    expanded = expanded,
+                                    pendingRemove = pendingRemoveKey == laneKey,
+                                    onToggleExpanded = {
+                                        expandedLanes[laneKey] = !expanded
+                                    },
+                                    onUse = {
+                                        onRemoteSessionSelected(entry, currentState.dashboard)
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            if (entry.isRouteCapableIn(currentState.dashboard)) "Gateway session target selected." else "Gateway workspace selected.",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    },
+                                    onResume = if (entry.resumable) {
+                                        {
+                                            scope.launch {
+                                                val message = client.resumeGatewaySession(entry)
+                                                onRemoteSessionSelected(entry, currentState.dashboard)
+                                                refresh()
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    message,
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    onRemove = if (!entry.canonicalSessionPath.isNullOrBlank()) {
+                                        {
+                                            if (pendingRemoveKey == laneKey) {
+                                                scope.launch {
+                                                    val message = client.removeGatewaySession(entry)
+                                                    pendingRemoveKey = null
+                                                    refresh()
+                                                    android.widget.Toast.makeText(
+                                                        context,
+                                                        message,
+                                                        android.widget.Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            } else {
+                                                pendingRemoveKey = laneKey
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    "Tap Remove again to remove this lane.",
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
+                                    } else {
+                                        null
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2156,6 +2239,8 @@ fun GatewaySessionsPane(
 fun GatewaySessionsHeader(
     prefs: AppPreferences,
     state: GatewaySessionsUiState,
+    filterText: String,
+    onFilterTextChange: (String) -> Unit,
     onRefresh: () -> Unit
 ) {
     Surface(
@@ -2166,35 +2251,56 @@ fun GatewaySessionsHeader(
         shape = RoundedCornerShape(14.dp),
         border = BorderStroke(1.dp, Color(0xFFE3DCCC))
     ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("GATEWAY SESSIONS", color = Color(0xFFC2542F), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text("Gateway: ${prefs.targetIpAddress.ifBlank { "not configured" }}", color = Color(0xFF211C16), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Target: ${prefs.codexSessionName}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Workspace: ${prefs.workspacePath}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (state is GatewaySessionsUiState.Loaded) {
-                    val dashboard = state.dashboard
-                    Text(
-                        "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | Store: ${dashboard.storePath ?: "unknown"}",
-                        color = Color(0xFF6E665A),
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("AGENT HUB", color = Color(0xFFC2542F), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("Gateway: ${prefs.targetIpAddress.ifBlank { "not configured" }}", color = Color(0xFF211C16), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Target: ${prefs.codexSessionName}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Workspace: ${prefs.workspacePath}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (state is GatewaySessionsUiState.Loaded) {
+                        val dashboard = state.dashboard
+                        Text(
+                            "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | Lanes: ${dashboard.sessions.size}",
+                            color = Color(0xFF6E665A),
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onRefresh,
+                    enabled = state !is GatewaySessionsUiState.Loading
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = "Refresh sessions",
+                        tint = Color(0xFF211C16)
                     )
                 }
             }
-            OutlinedButton(
-                onClick = onRefresh,
-                enabled = state !is GatewaySessionsUiState.Loading,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-            ) {
-                Text("Refresh", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedTextField(
+                value = filterText,
+                onValueChange = onFilterTextChange,
+                modifier = Modifier.fillMaxWidth(),
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Search,
+                        contentDescription = null,
+                        tint = Color(0xFF6E665A)
+                    )
+                },
+                placeholder = { Text("Filter sessions, paths, aliases", fontSize = 12.sp) },
+                singleLine = true,
+                textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, color = Color(0xFF211C16))
+            )
         }
     }
 }
@@ -2221,30 +2327,48 @@ fun GatewaySessionRow(
     entry: GatewaySessionEntry,
     dashboard: GatewaySessionDashboard,
     prefs: AppPreferences,
+    expanded: Boolean,
+    pendingRemove: Boolean,
+    onToggleExpanded: () -> Unit,
     onUse: () -> Unit,
-    onResume: (() -> Unit)? = null
+    onResume: (() -> Unit)? = null,
+    onRemove: (() -> Unit)? = null
 ) {
     val isRouteCapable = entry.isRouteCapableIn(dashboard)
     val isSelectedFile = prefs.selectedGatewaySessionPath.isNotBlank() && prefs.selectedGatewaySessionPath == entry.canonicalSessionPath
     val isSelectedTarget = isRouteCapable && prefs.codexSessionName == entry.name
+    val isCurrent = entry.isCurrentIn(dashboard)
+    val isReady = entry.isReadyIn(dashboard)
+    val statusText = gatewaySessionStatusText(entry, dashboard)
+    val statusColor = gatewaySessionStatusColor(statusText)
     val borderColor = when {
         isSelectedTarget -> Color(0xFF2E7D52)
         isSelectedFile -> Color(0xFFC2542F)
+        isReady -> Color(0xFFC97E1A)
         else -> Color(0xFFE3DCCC)
     }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color.White,
-        shape = RoundedCornerShape(14.dp),
+        color = if (isCurrent) Color(0xFFFDFBF5) else Color.White,
+        shape = RoundedCornerShape(12.dp),
         border = BorderStroke(1.dp, borderColor)
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleExpanded() },
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
+                    contentDescription = if (expanded) "Collapse session lane" else "Expand session lane",
+                    tint = Color(0xFF6E665A),
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = entry.name.ifBlank { "Unnamed session" },
@@ -2256,72 +2380,308 @@ fun GatewaySessionRow(
                     )
                     Spacer(modifier = Modifier.height(3.dp))
                     Text(
-                        text = entry.displayCwd,
+                        text = gatewaySessionSubtitle(entry, dashboard),
                         color = Color(0xFF6E665A),
                         fontSize = 12.sp,
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
                 Text(
-                    text = entry.activity ?: "saved",
-                    color = if (isRouteCapable) Color(0xFF2E7D52) else Color(0xFF6E665A),
+                    text = statusText,
+                    color = statusColor,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
-                        .background(Color(0xFFF0ECE2), RoundedCornerShape(6.dp))
+                        .background(statusColor.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
+                        .border(1.dp, statusColor.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 )
             }
 
             Spacer(modifier = Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (entry.isCurrentIn(dashboard)) GatewaySessionBadge("current", Color(0xFF2E7D52))
-                if (entry.isReadyIn(dashboard)) GatewaySessionBadge("ready", Color(0xFFC97E1A))
-                entry.provider?.takeIf { it.isNotBlank() }?.let { GatewaySessionBadge(it, Color(0xFF3C6E71)) }
-                entry.sessionId?.takeIf { it.isNotBlank() }?.let { GatewaySessionBadge("resume id", Color(0xFF6E665A)) }
-                if (entry.aliases.isNotEmpty()) GatewaySessionBadge("aliases: ${entry.aliases.joinToString(", ")}", Color(0xFF6E665A))
-                if (!isRouteCapable) GatewaySessionBadge("workspace only", Color(0xFF6E665A))
-                if (entry.resumable) GatewaySessionBadge("resumable", Color(0xFF2E7D52))
-            }
-
-            val path = entry.canonicalSessionPath
-            if (!path.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "sessionPath: $path",
-                    color = Color(0xFF8A8174),
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onUse,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isRouteCapable) Color(0xFF2E7D52) else Color(0xFFC2542F),
-                        contentColor = Color.White
-                    ),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
-                    modifier = Modifier.height(34.dp)
-                ) {
-                    Text(if (isRouteCapable) "Use as target" else "Use workspace", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (isCurrent) item { GatewaySessionBadge("current", Color(0xFF2E7D52)) }
+                if (isReady) item { GatewaySessionBadge("ready", Color(0xFFC97E1A)) }
+                item { GatewaySessionBadge(if (isCurrent) "current session" else "background lane", Color(0xFF3C6E71)) }
+                gatewaySessionSourceLabel(entry)?.let { source ->
+                    item { GatewaySessionBadge(source, Color(0xFF3C6E71)) }
                 }
-                if (onResume != null) {
-                    OutlinedButton(
-                        onClick = onResume,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
-                        modifier = Modifier.height(34.dp)
+                entry.provider?.takeIf { it.isNotBlank() }?.let { provider ->
+                    item { GatewaySessionBadge(provider, Color(0xFF3C6E71)) }
+                }
+                entry.model?.takeIf { it.isNotBlank() }?.let { model ->
+                    item { GatewaySessionBadge(model, Color(0xFF6E665A)) }
+                }
+                entry.role?.takeIf { it.isNotBlank() }?.let { role ->
+                    item { GatewaySessionBadge(role, Color(0xFF6E665A)) }
+                }
+                if (entry.aliases.isNotEmpty()) {
+                    item { GatewaySessionBadge("aliases: ${entry.aliases.joinToString(", ")}", Color(0xFF6E665A)) }
+                }
+                if (entry.subagents.isNotEmpty()) {
+                    item { GatewaySessionBadge("${entry.subagents.size} subagents", Color(0xFFC97E1A)) }
+                }
+                if (!isRouteCapable) item { GatewaySessionBadge("workspace only", Color(0xFF6E665A)) }
+                if (entry.resumable) item { GatewaySessionBadge("resumable", Color(0xFF2E7D52)) }
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    GatewaySessionDetailLine("Workspace", entry.displayCwd)
+                    entry.sessionId?.takeIf { it.isNotBlank() }?.let {
+                        GatewaySessionDetailLine("Resume id", it)
+                    }
+                    entry.canonicalSessionPath?.takeIf { it.isNotBlank() }?.let {
+                        GatewaySessionDetailLine("Session file", it)
+                    }
+                    if (entry.aliases.isNotEmpty()) {
+                        GatewaySessionDetailLine("Voice aliases", entry.aliases.joinToString(", "))
+                    }
+                    entry.source?.takeIf { it.isNotBlank() }?.let {
+                        GatewaySessionDetailLine("Source", it)
+                    }
+                    entry.model?.takeIf { it.isNotBlank() }?.let {
+                        GatewaySessionDetailLine("Model", it)
+                    }
+                    entry.role?.takeIf { it.isNotBlank() }?.let {
+                        GatewaySessionDetailLine("Role", it)
+                    }
+                    if (entry.subagents.isNotEmpty()) {
+                        GatewaySessionDetailLine(
+                            "Subagents",
+                            entry.subagents.joinToString(", ") { subagent -> subagent.name.ifBlank { subagent.id } }
+                        )
+                    }
+                    if (entry.resumeCommand.isNotEmpty()) {
+                        GatewaySessionDetailLine("Resume command", entry.resumeCommand.joinToString(" "))
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Resume", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Button(
+                            onClick = onResume ?: onUse,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (onResume != null || isRouteCapable) Color(0xFF2E7D52) else Color(0xFFC2542F),
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 5.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (onResume != null) "Resume" else if (isRouteCapable) "Focus" else "Workspace", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(
+                            onClick = onUse,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 5.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text(if (isRouteCapable) "Target" else "Mount", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        if (onRemove != null) {
+                            OutlinedButton(
+                                onClick = onRemove,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+                                modifier = Modifier.height(34.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = if (pendingRemove) Color(0xFFB3261E) else Color(0xFF6E665A)
+                                ),
+                                border = BorderStroke(1.dp, if (pendingRemove) Color(0xFFB3261E) else Color(0xFFE3DCCC))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Delete,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(if (pendingRemove) "Confirm" else "Remove", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+fun GatewayAgentHubFolderHeader(group: GatewayAgentHubGroup) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 2.dp, start = 2.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = group.label,
+                    color = Color(0xFF211C16),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (group.isCurrentWorkspace) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    GatewaySessionBadge("current folder", Color(0xFF2E7D52))
+                }
+            }
+            Text(
+                text = group.cwd.ifBlank { "unknown workspace" },
+                color = Color(0xFF8A8174),
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            text = "${group.sessions.size} ${if (group.sessions.size == 1) "lane" else "lanes"}",
+            color = Color(0xFF6E665A),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+fun GatewaySessionDetailLine(label: String, value: String) {
+    if (value.isBlank()) return
+    Column(modifier = Modifier.padding(bottom = 6.dp)) {
+        Text(
+            text = label.uppercase(),
+            color = Color(0xFFC2542F),
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = value,
+            color = Color(0xFF6E665A),
+            fontSize = 11.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+data class GatewayAgentHubGroup(
+    val key: String,
+    val label: String,
+    val cwd: String,
+    val isCurrentWorkspace: Boolean,
+    val sessions: List<GatewaySessionEntry>
+)
+
+fun buildGatewayAgentHubGroups(
+    dashboard: GatewaySessionDashboard,
+    currentWorkspace: String,
+    query: String
+): List<GatewayAgentHubGroup> {
+    val normalizedQuery = query.trim().lowercase()
+    val visibleSessions = dashboard.sessions.filter { entry ->
+        normalizedQuery.isBlank() || gatewaySessionMatches(entry, dashboard, normalizedQuery)
+    }
+    val currentKey = gatewayFolderKey(currentWorkspace)
+    return visibleSessions
+        .groupBy { gatewayFolderKey(it.displayCwd) }
+        .map { (key, entries) ->
+            val cwd = entries.firstOrNull()?.displayCwd.orEmpty()
+            GatewayAgentHubGroup(
+                key = key,
+                label = gatewayFolderLabel(cwd),
+                cwd = cwd,
+                isCurrentWorkspace = key == currentKey,
+                sessions = entries.sortedWith(
+                    compareByDescending<GatewaySessionEntry> { it.isCurrentIn(dashboard) }
+                        .thenByDescending { it.isReadyIn(dashboard) }
+                        .thenByDescending { it.resumable }
+                        .thenBy { it.name.lowercase() }
+                )
+            )
+        }
+        .sortedWith(
+            compareByDescending<GatewayAgentHubGroup> { it.isCurrentWorkspace }
+                .thenByDescending { group -> group.sessions.any { it.isCurrentIn(dashboard) || it.isReadyIn(dashboard) } }
+                .thenBy { it.label.lowercase() }
+        )
+}
+
+fun gatewaySessionKey(entry: GatewaySessionEntry): String =
+    entry.canonicalSessionPath?.takeIf { it.isNotBlank() }
+        ?: entry.sessionId?.takeIf { it.isNotBlank() }
+        ?: entry.name.ifBlank { "session-${entry.hashCode()}" }
+
+fun gatewaySessionMatches(entry: GatewaySessionEntry, dashboard: GatewaySessionDashboard, query: String): Boolean {
+    val fields = listOfNotNull(
+        entry.name,
+        entry.displayCwd,
+        entry.activity,
+        entry.provider,
+        entry.source,
+        entry.model,
+        entry.role,
+        entry.sessionId,
+        entry.canonicalSessionPath,
+        gatewaySessionStatusText(entry, dashboard),
+        entry.aliases.joinToString(" "),
+        entry.subagents.joinToString(" ") { subagent ->
+            listOfNotNull(subagent.name, subagent.status, subagent.activity, subagent.sessionPath).joinToString(" ")
+        }
+    )
+    return fields.any { it.lowercase().contains(query) }
+}
+
+fun gatewayFolderKey(cwd: String): String =
+    cwd.trim().replace('\\', '/').trimEnd('/').lowercase().ifBlank { "unknown" }
+
+fun gatewayFolderLabel(cwd: String): String {
+    val normalized = cwd.trim().replace('\\', '/').trimEnd('/')
+    return normalized.substringAfterLast('/').ifBlank { normalized.ifBlank { "Unknown workspace" } }
+}
+
+fun gatewaySessionStatusText(entry: GatewaySessionEntry, dashboard: GatewaySessionDashboard): String = when {
+    entry.isCurrentIn(dashboard) -> "current"
+    entry.isReadyIn(dashboard) -> "ready"
+    entry.activity.equals("busy", ignoreCase = true) -> "running"
+    entry.source == "oh-my-pi" || entry.kind == "background" -> "parked"
+    entry.resumable -> "parked"
+    else -> entry.activity ?: "saved"
+}
+
+fun gatewaySessionStatusColor(status: String): Color = when (status.lowercase()) {
+    "current", "idle" -> Color(0xFF2E7D52)
+    "ready", "running", "busy" -> Color(0xFFC97E1A)
+    "parked", "saved" -> Color(0xFF6E665A)
+    else -> Color(0xFF6E665A)
+}
+
+fun gatewaySessionSubtitle(entry: GatewaySessionEntry, dashboard: GatewaySessionDashboard): String {
+    val kind = when {
+        entry.isCurrentIn(dashboard) -> "current session"
+        entry.source == "oh-my-pi" || entry.kind == "background" -> "background agent"
+        else -> "background session"
+    }
+    val cwd = gatewayFolderLabel(entry.displayCwd)
+    val provider = entry.provider?.takeIf { it.isNotBlank() }
+    val source = gatewaySessionSourceLabel(entry)
+    val model = entry.model?.takeIf { it.isNotBlank() }
+    val role = entry.role?.takeIf { it.isNotBlank() }
+    return listOfNotNull(kind, source, provider, model, role, cwd).distinct().joinToString(" | ")
+}
+
+fun gatewaySessionSourceLabel(entry: GatewaySessionEntry): String? = when (entry.source) {
+    "oh-my-pi" -> "Oh-my-pi"
+    else -> entry.source?.takeIf { it.isNotBlank() }
 }
 
 @Composable
@@ -3448,6 +3808,10 @@ fun DiscoveryTabContent(
     var isScanning by remember { mutableStateOf(false) }
     var machines by remember { mutableStateOf<List<com.example.api.DiscoveredMachine>>(emptyList()) }
     var selectedMachine by remember { mutableStateOf<com.example.api.DiscoveredMachine?>(null) }
+    var warpSnapshot by remember { mutableStateOf<com.example.api.WarpControlSnapshot?>(null) }
+    var warpStatusText by remember { mutableStateOf("Warp bridge not loaded.") }
+    var warpLoading by remember { mutableStateOf(false) }
+    var warpTabConfigName by remember { mutableStateOf("phone_remote") }
     val context = androidx.compose.ui.platform.LocalContext.current
 
     // Trigger automatic network scan on tab launch for seamless UX
@@ -3459,6 +3823,12 @@ fun DiscoveryTabContent(
             isScanning = false
             // Automatically select the first online machine
             selectedMachine = machines.firstOrNull { it.status == "online" } ?: machines.firstOrNull()
+            warpLoading = true
+            warpSnapshot = client.getWarpControlSnapshot()
+            warpStatusText = warpSnapshot?.let {
+                if (it.available) "Warp bridge ready: ${it.sessions.size} psmux sessions, ${it.paneCount} panes." else "Warp bridge reachable; psmux is not available."
+            } ?: "Warp bridge unavailable on active gateway."
+            warpLoading = false
         }
     }
 
@@ -3544,6 +3914,158 @@ fun DiscoveryTabContent(
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold
                 )
+            }
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFFFFFFFF),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Warp / psmux control",
+                                color = Color(0xFF211C16),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = warpStatusText,
+                                color = if (warpSnapshot?.available == true) Color(0xFF2E7D52) else Color(0xFF6E665A),
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp
+                            )
+                            warpSnapshot?.warpRemoteBaseUrl?.let { url ->
+                                Text(
+                                    text = "Warp relay: $url",
+                                    color = Color(0xFF6E665A),
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            warpSnapshot?.let { snapshot ->
+                                Text(
+                                    text = "Connection: ${if (snapshot.sameTailnet) "Tailscale" else "gateway"} • ${prefs.targetIpAddress} • ${snapshot.warpUriScheme}://",
+                                    color = Color(0xFF6E665A),
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                snapshot.psmuxError?.let { error ->
+                                    Text(
+                                        text = "psmux: $error",
+                                        color = Color(0xFFC2542F),
+                                        fontSize = 10.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    warpLoading = true
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                    warpStatusText = warpSnapshot?.let {
+                                        if (it.available) "Warp bridge ready: ${it.sessions.size} psmux sessions, ${it.paneCount} panes." else "Warp bridge reachable; psmux is not available."
+                                    } ?: "Warp bridge unavailable on active gateway."
+                                    warpLoading = false
+                                }
+                            },
+                            enabled = !warpLoading,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC2542F), contentColor = Color.White),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(if (warpLoading) "Loading" else "Refresh", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = warpTabConfigName,
+                        onValueChange = { warpTabConfigName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Warp tab config", fontSize = 11.sp) },
+                        placeholder = { Text("phone_remote", fontSize = 11.sp) },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    warpStatusText = client.createWarpTab(prefs.workspacePath)
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                }
+                            }
+                        ) { Text("New Warp tab") }
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    warpStatusText = client.openWarpTabConfig(warpTabConfigName.trim())
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                }
+                            },
+                            enabled = warpTabConfigName.isNotBlank()
+                        ) { Text("Open Warp config") }
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    val name = "phone-${System.currentTimeMillis()}"
+                                    warpStatusText = client.createWarpPsmuxSession(name, prefs.workspacePath)
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                }
+                            }
+                        ) { Text("New psmux session") }
+                        val firstSession = warpSnapshot?.sessions?.firstOrNull()?.name
+                        TextButton(
+                            enabled = firstSession != null,
+                            onClick = {
+                                val session = firstSession ?: return@TextButton
+                                scope.launch {
+                                    val name = "phone-${System.currentTimeMillis()}"
+                                    warpStatusText = client.createWarpPsmuxWindow(session, name, prefs.workspacePath)
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                }
+                            }
+                        ) { Text("New psmux tab") }
+                    }
+                    warpSnapshot?.sessions?.take(6)?.forEach { session ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Session ${session.name}",
+                            color = Color(0xFF211C16),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        session.windows.take(4).forEach { window ->
+                            Text(
+                                text = "  tab ${window.index}: ${window.name}",
+                                color = Color(0xFF6E665A),
+                                fontSize = 11.sp
+                            )
+                            window.panes.take(8).forEach { pane ->
+                                Text(
+                                    text = "    pane ${pane.paneId.ifBlank { pane.pane }} ${if (pane.active) "• active" else ""} ${pane.command ?: ""}",
+                                    color = if (pane.active) Color(0xFF2E7D52) else Color(0xFF6E665A),
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
 

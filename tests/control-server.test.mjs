@@ -90,6 +90,7 @@ async function withServer(overrides = {}, fn) {
 		onSessionAlias: overrides.onSessionAlias,
 		onSessionRemove: overrides.onSessionRemove,
 		onSessionResume: overrides.onSessionResume,
+		onSessionLaunch: overrides.onSessionLaunch,
 		getDiscoveredAgents: overrides.getDiscoveredAgents,
 		tailSessionEvents: overrides.tailSessionEvents,
 	});
@@ -929,6 +930,123 @@ test("session resume endpoint requires sessionPath or sessionId", async () => {
 		});
 		assert.equal(response.statusCode, 400);
 		assert.equal((await response.json()).ok, false);
+	});
+});
+test("session launch endpoint invokes callback and forwards fields", async () => {
+	await withServer({
+		onSessionLaunch: async (payload) => ({
+			ok: true,
+			message: `launch:${payload.hubOnly}:${payload.cwd}:${payload.prompt}:${payload.model}:${payload.provider}:${payload.sessionDir}`,
+			argv: ["--cwd", payload.cwd || "", "--", payload.prompt || ""],
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/launch",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				cwd: "C:\\dev\\repo",
+				prompt: "hello world",
+				model: "gpt-5",
+				provider: "openai",
+				sessionDir: "C:\\dev\\sessions",
+			}),
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "launch:undefined:C:\\dev\\repo:hello world:gpt-5:openai:C:\\dev\\sessions");
+		assert.deepEqual(body.argv, ["--cwd", "C:\\dev\\repo", "--", "hello world"]);
+	});
+});
+
+test("session launch endpoint forwards hubOnly true to the callback", async () => {
+	await withServer({
+		onSessionLaunch: async (payload) => ({
+			ok: true,
+			message: `hubOnly=${payload.hubOnly}`,
+			argv: ["bg"],
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/launch",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ cwd: "C:\\dev\\fork", hubOnly: true }),
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "hubOnly=true");
+		assert.deepEqual(body.argv, ["bg"]);
+	});
+});
+
+test("session launch endpoint rejects wrong-typed hubOnly", async () => {
+	await withServer({
+		onSessionLaunch: async () => ({ ok: true, message: "unreachable" }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/launch",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ hubOnly: "true" }),
+		});
+		assert.equal(response.statusCode, 400);
+		const body = await response.json();
+		assert.equal(body.ok, false);
+		assert.match(body.error, /hubOnly must be a boolean/);
+	});
+});
+
+test("session launch endpoint rejects wrong-typed model", async () => {
+	await withServer({
+		onSessionLaunch: async () => ({ ok: true, message: "unreachable" }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/launch",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ model: 42 }),
+		});
+		assert.equal(response.statusCode, 400);
+		const body = await response.json();
+		assert.equal(body.ok, false);
+		assert.match(body.error, /model must be a string/);
+	});
+});
+
+test("session launch endpoint returns 501 when callback is missing", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/launch",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ hubOnly: true }),
+		});
+		assert.equal(response.statusCode, 501);
+		const body = await response.json();
+		assert.equal(body.ok, false);
 	});
 });
 
