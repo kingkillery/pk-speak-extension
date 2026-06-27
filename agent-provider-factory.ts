@@ -30,6 +30,7 @@ export type TurnAgentProviderInput = AgentProviderFactoryOptions & {
 	preferShared?: boolean;
 	sharedProvider?: AgentProvider;
 	fallbackProvider?: AgentProvider;
+	ompSessionPath?: string;
 };
 
 export function createInitialAgentProviders(options: AgentProviderFactoryOptions): InitialAgentProviders {
@@ -54,6 +55,13 @@ export function createInitialAgentProviders(options: AgentProviderFactoryOptions
 }
 
 export function createTurnAgentProvider(input: TurnAgentProviderInput): TurnAgentProviderDecision {
+	if (input.ompSessionPath && input.backend === "oh-my-pi") {
+		return {
+			provider: createOmpResumeProvider(input.config.ompBin, input.cwd || resolveAgentWorkspace(input), input.ompSessionPath, input.env),
+			stopAfterTurn: true,
+			source: "resume",
+		};
+	}
 	if (input.target && input.backend === "codex") {
 		return {
 			provider: new CodexResumeProvider(input.config.codexBin, input.cwd || resolveAgentWorkspace(input), input.target.sessionId, input.config.model, input.env),

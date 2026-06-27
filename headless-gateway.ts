@@ -23,11 +23,14 @@ import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
+import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession } from "./agent-hub-actions.js";
+import { defaultOhMyPiSessionRoots, mergeOhMyPiAgentHubSessionsCached } from "./agent-hub-dashboard.js";
 import { handleRealtimeGateway } from "./realtime-gateway.js";
-import type { SessionDashboard, SessionDashboardEntry } from "./session-routing.js";
+import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashboardEntry } from "./session-routing.js";
+import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve as resolvePath, sep as pathSep } from "node:path";
 import { tmpdir } from "node:os";
 
 applyPiSpeakSetupConfig();
@@ -48,6 +51,7 @@ const agentConfig = resolveAgentProviderConfig({
 });
 let provider: AgentProvider;
 let fallbackProvider: AgentProvider | undefined;
+let activeOmpSessionPath: string | null = null;
 const resumedTargets = new Map<string, ResumedGatewayTarget>();
 
 function createAgentProvider(): AgentProvider {
@@ -141,6 +145,7 @@ function createExecutionProviderDecision(
 		preferShared,
 		sharedProvider: provider,
 		fallbackProvider,
+		ompSessionPath: activeOmpSessionPath ?? undefined,
 	});
 }
 
@@ -506,14 +511,23 @@ function buildRecentSessionDashboard(): SessionDashboard {
 			isReady: !!resumed,
 			activity: resumed ? "idle" : "saved",
 			aliases: resumed && displayName !== name ? [displayName] : [],
+			lastActivity: session.updatedAt ? Date.parse(session.updatedAt) || undefined : undefined,
 		};
 	});
-	return {
+	const base: SessionDashboard = {
 		current: routing.defaultTarget || "none",
 		ready: [...resumedTargets.keys()],
 		storePath: "recent CLI sessions",
 		sessions,
 	};
+	// oh-my-pi background agents are the primary surface of the app; merge them in
+	// (cached, stale-while-revalidate) so they appear over Tailscale, not just in
+	// the in-terminal extension.
+	const merged = mergeOhMyPiAgentHubSessionsCached(base);
+	// Group by workspace, mark stale (>24h, not current), and hide archived paths.
+	return enrichDashboardWithWorkspaces(merged, {
+		archivedPaths: loadPersistedSessionRouting().archivedPaths,
+	});
 }
 
 function resolveResumeExecutable(provider: string | undefined) {
@@ -598,6 +612,67 @@ function launchDetachedCli(command: string, args: string[], cwd: string, title: 
 	child.unref();
 }
 
+function resolveOhMyPiCommand(): string {
+	return process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
+		|| process.env.OMP_BIN?.trim()
+		|| resolveWindowsNpmShim("omp.cmd")
+		|| resolveWindowsNpmShim("omp")
+		|| "omp";
+}
+
+function launchOhMyPiAgent(argv: string[], cwd: string) {
+	const command = resolveOhMyPiCommand();
+	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+	const child = spawn(command, argv, {
+		cwd,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: false,
+		shell,
+	});
+	child.unref();
+	return { command, argv, cwd };
+}
+
+function isOhMyPiSessionPath(sessionPath: string): boolean {
+	const resolved = resolvePath(sessionPath);
+	return defaultOhMyPiSessionRoots().some((root) => {
+		const resolvedRoot = resolvePath(root);
+		return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + pathSep);
+	});
+}
+
+function archiveOrRecoverSession(sessionPath: string, action: "archive" | "recover"): ControlActionResult {
+	const trimmed = sessionPath?.trim();
+	if (!trimmed) return { ok: false, message: "sessionPath is required." };
+
+	// oh-my-pi lanes carry an in-file backgroundInstance.status; flip it in place.
+	if (isOhMyPiSessionPath(trimmed)) {
+		const result = action === "recover"
+			? recoverOhMyPiBackgroundSession(trimmed)
+			: archiveOhMyPiBackgroundSession(trimmed);
+		return result;
+	}
+
+	// codex/claude: track-and-hide in the routing store (reversible, no file move).
+	const persisted = loadPersistedSessionRouting();
+	const set = new Set(persisted.archivedPaths);
+	if (action === "recover") {
+		if (!set.delete(trimmed)) return { ok: false, message: "Session is not archived." };
+	} else {
+		set.add(trimmed);
+	}
+	persistSessionRouting({
+		sessions: persisted.sessions,
+		aliases: persisted.aliases,
+		archivedPaths: [...set],
+	});
+	return {
+		ok: true,
+		message: action === "recover" ? "Recovered session." : "Archived session.",
+	};
+}
+
 provider = createAgentProvider();
 
 server = new ControlServer({
@@ -634,8 +709,44 @@ server = new ControlServer({
 	getSessionDashboard: buildRecentSessionDashboard,
 	getCompactRouteSlots: () => [],
 	onSessionResume: resumeStoredSession,
+	onSessionArchive: (payload) =>
+		archiveOrRecoverSession(payload.sessionPath ?? "", payload.action === "recover" ? "recover" : "archive"),
+	onSessionLaunch: (payload) => {
+		const fallbackCwd = payload.cwd?.trim()
+			|| process.env.AGENT_CWD?.trim()
+			|| process.env.AGENT_WORKSPACE?.trim()
+			|| process.cwd();
+		const built = buildOhMyPiLaunchArgv({
+			cwd: payload.cwd,
+			prompt: payload.prompt,
+			model: payload.model,
+			provider: payload.provider,
+			sessionDir: payload.sessionDir,
+			hubOnly: payload.hubOnly,
+		}, fallbackCwd);
+		if (!built.ok) {
+			return { ok: false, message: built.message };
+		}
+		try {
+			const launched = launchOhMyPiAgent(built.argv, built.cwd);
+			return {
+				ok: true,
+				message: built.mode === "hub"
+					? `Launching Oh-my-pi Agent Hub in ${launched.cwd}.`
+					: `Launching Oh-my-pi agent in ${launched.cwd}.`,
+				command: launched.command,
+				argv: launched.argv,
+				cwd: launched.cwd,
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return { ok: false, message: `Oh-my-pi launch failed: ${message}` };
+		}
+	},
 	getDiscoveredAgents: () => discoverAgentInventoryCached(),
 	onRealtimeConnection: handleRealtimeGateway,
+	onOmpSelectSession: (sessionPath) => { activeOmpSessionPath = sessionPath; },
+	onOmpGetSelectedSession: () => activeOmpSessionPath,
 });
 
 Promise.resolve(provider.start?.())
@@ -647,6 +758,25 @@ Promise.resolve(provider.start?.())
 		console.error(error instanceof Error ? error.stack || error.message : String(error));
 		process.exit(1);
 	});
+
+// Once-per-day sweep: archive sessions stale 24h+ without use (never the current
+// session). Reversible (omp in-file flip; codex/claude track-and-hide).
+const AUTO_ARCHIVE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+function runStaleSessionSweep() {
+	try {
+		const dashboard = buildRecentSessionDashboard();
+		for (const entry of dashboard.sessions) {
+			if (!entry.stale || entry.isCurrent || entry.archived) continue;
+			const sessionPath = entry.sessionPath ?? entry.path;
+			if (!sessionPath) continue;
+			archiveOrRecoverSession(sessionPath, "archive");
+		}
+	} catch (error) {
+		console.error(`[auto-archive] sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+const autoArchiveTimer = setInterval(runStaleSessionSweep, AUTO_ARCHIVE_INTERVAL_MS);
+autoArchiveTimer.unref?.();
 
 process.on("SIGINT", () => shutdown());
 process.on("SIGTERM", () => shutdown());
