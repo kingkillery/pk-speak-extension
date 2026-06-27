@@ -197,7 +197,7 @@ class OmpResumeProvider implements AgentProvider {
 
 	async *sendPrompt(prompt: string, options: AgentPromptOptions = {}) {
 		const cwd = options.cwd || this.cwd;
-		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, "--resume", this.sessionPath, "--auto-approve", prompt], {
+		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, "--no-extensions", "--resume", this.sessionPath, "--auto-approve", prompt], {
 			cwd,
 			name: "oh-my-pi-resume",
 			env: this.env,

@@ -2,7 +2,7 @@
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
 import { applyPiSpeakSetupConfig } from "./setup-config.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
-import { createInitialAgentProviders, createTurnAgentProvider } from "./agent-provider-factory.js";
+import { createInitialAgentProviders, createOmpResumeProvider, createTurnAgentProvider } from "./agent-provider-factory.js";
 import {
 	buildAgentResumeArgs,
 	buildAgentResumeCommandPreview,
@@ -182,6 +182,11 @@ async function runTextTurn(
 ): Promise<RemoteTurnResult> {
 	const prompt = text.trim();
 	if (!prompt) return { replyText: "Send a message first." };
+	if (activeOmpSessionPath) {
+		const workingDirectory = cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
+		const resumeProvider = createOmpResumeProvider(agentConfig.ompBin, workingDirectory, activeOmpSessionPath, process.env);
+		return runCodingAgentTurn(prompt, includeAudio, workingDirectory, transcript, agentConfig.provider === "elevenlabs" ? "elevenlabs" : undefined, [], resumeProvider);
+	}
 	const route = resolveTurnRoute(target, cwd, agentProvider);
 	if (route.providerOverride) {
 		return runWithTurnRoute(
