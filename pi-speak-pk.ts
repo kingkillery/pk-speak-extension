@@ -12,7 +12,7 @@ import {
 	savePiSpeakSetupConfig,
 	type PiSpeakSetupConfig,
 } from "./setup-config.js";
-import { describeSpeakPlaybackGate, normalizeSpeakPlaybackGate } from "./speak-gate.js";
+import { describeSpeakPlaybackGate, normalizeSpeakPlaybackGate, resolveSpeakPlaybackGate } from "./speak-gate.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -212,7 +212,7 @@ function printDoctor() {
 	console.log(`Package root: ${ROOT}`);
 	console.log(`Agent: ${config.agentProvider || process.env.AGENT_PROVIDER || "codex"}`);
 	console.log(`TTS: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "edge"}`);
-	console.log(`Playback gate: ${describeSpeakPlaybackGate(normalizeSpeakPlaybackGate(config.speakPlaybackGate || process.env.PI_SPEAK_PLAYBACK_GATE) || "immediate")}`);
+	console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ env: process.env, config }))}`);
 	console.log(`Gateway port: ${config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767"}`);
 	console.log(`Android APK: ${existsSync(join(ROOT, "android-app", ".build-outputs", "app-debug.apk")) ? "bundled" : "not bundled"}`);
 }

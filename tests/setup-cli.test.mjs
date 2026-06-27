@@ -83,6 +83,39 @@ test("pk-speak doctor reads saved setup config", async () => {
 	}
 });
 
+test("pi-speak-pk doctor honors playback gate env override", async () => {
+	const configDir = await mkdtemp(join(tmpdir(), "pi-speak-doctor-gate-test-"));
+	try {
+		await execFileAsync(process.execPath, [
+			"dist/pi-speak-pk.js",
+			"setup",
+			"--non-interactive",
+			"--provider",
+			"codex",
+			"--tts",
+			"edge",
+			"--speak-gate",
+			"enter",
+			"--token",
+			"doctor-gate-token-1234567890",
+		], {
+			cwd: process.cwd(),
+			env: { ...process.env, PI_SPEAK_CONFIG_DIR: configDir },
+		});
+		const { stdout } = await execFileAsync(process.execPath, ["dist/pi-speak-pk.js", "doctor"], {
+			cwd: process.cwd(),
+			env: {
+				...process.env,
+				PI_SPEAK_CONFIG_DIR: configDir,
+				PI_SPEAK_PLAYBACK_GATE: "immediate",
+			},
+		});
+		assert.match(stdout, /Playback gate: immediate/);
+	} finally {
+		await rm(configDir, { recursive: true, force: true });
+	}
+});
+
 test("pk-speak doctor warns when process and user ElevenLabs keys differ", async () => {
 	const configDir = await mkdtemp(join(tmpdir(), "pk-speak-doctor-env-test-"));
 	try {
