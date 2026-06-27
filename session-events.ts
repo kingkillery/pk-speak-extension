@@ -7,6 +7,12 @@ export type SessionEventSource = "voice" | "command" | "admin";
 export type SessionEventPayload = Record<string, unknown>;
 
 export type SessionEvent = {
+	/**
+	 * Monotonic sequence number, stable across the MAX_EVENT_LINES rollover. The
+	 * tail cursor (`nextOffset`) is the highest seq seen, NOT a line index — a line
+	 * index desynced silently once the log trimmed, permanently starving pollers.
+	 */
+	seq: number;
 	ts: number;
 	kind: string;
 	source: SessionEventSource;
@@ -49,6 +55,7 @@ function parseEventLine(line: string): SessionEvent | undefined {
 				? (parsed.payload as SessionEventPayload)
 				: {};
 		return {
+			seq: typeof parsed.seq === "number" && Number.isFinite(parsed.seq) ? parsed.seq : 0,
 			ts: typeof parsed.ts === "number" ? parsed.ts : 0,
 			kind: parsed.kind,
 			source,
@@ -65,28 +72,45 @@ export function appendSessionEvent(
 	payload: SessionEventPayload = {},
 ): SessionEvent {
 	ensureEventsDir();
+	const path = getSessionEventsPath();
+	const lines = readAllLines(path);
+	// Next seq = (highest existing seq) + 1, so it keeps climbing across the
+	// MAX_EVENT_LINES trim. Legacy lines without seq parse as 0.
+	let maxSeq = 0;
+	for (const line of lines) {
+		const existing = parseEventLine(line);
+		if (existing && existing.seq > maxSeq) maxSeq = existing.seq;
+	}
 	const event: SessionEvent = {
+		seq: maxSeq + 1,
 		ts: Date.now(),
 		kind,
 		source,
 		payload,
 	};
-	const path = getSessionEventsPath();
-	const lines = readAllLines(path);
 	lines.push(JSON.stringify(event));
 	const trimmed = lines.length > MAX_EVENT_LINES ? lines.slice(lines.length - MAX_EVENT_LINES) : lines;
 	writeFileSync(path, `${trimmed.join("\n")}\n`, "utf8");
 	return event;
 }
 
+// `sinceSeq` is the last seq the caller already saw (the prior `nextOffset`).
+// Returns events strictly newer than it, plus the new high-water seq. This is
+// trim-stable: appends keep incrementing seq even as old lines roll off, so a
+// poller never silently stops receiving events after MAX_EVENT_LINES (the old
+// line-index cursor did). The parameter name stays `sinceOffset` for callers,
+// but it is now an opaque monotonic cursor, not a line index.
 export function tailSessionEvents(sinceOffset = 0): TailSessionEventsResult {
 	const path = getSessionEventsPath();
 	const lines = readAllLines(path);
-	const start = sinceOffset < 0 || sinceOffset > lines.length ? 0 : sinceOffset;
+	const sinceSeq = sinceOffset < 0 ? 0 : sinceOffset;
 	const events: SessionEvent[] = [];
-	for (let i = start; i < lines.length; i++) {
-		const event = parseEventLine(lines[i]);
-		if (event) events.push(event);
+	let maxSeq = sinceSeq;
+	for (const line of lines) {
+		const event = parseEventLine(line);
+		if (!event) continue;
+		if (event.seq > maxSeq) maxSeq = event.seq;
+		if (event.seq > sinceSeq) events.push(event);
 	}
-	return { events, nextOffset: lines.length };
+	return { events, nextOffset: maxSeq };
 }
