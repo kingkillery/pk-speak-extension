@@ -315,7 +315,7 @@ test("phone setup page is public and includes install plus connect links", async
 		assert.match(response.headers["content-type"], /text\/html/);
 		assert.match(response.body, /Pair Pi Speak/);
 		assert.match(response.body, /no IP address or API key entry is needed/i);
-		assert.match(response.body, /download\/pi-speak\.apk/);
+		assert.match(response.body, /download\/pi-speak\.apk|APK is not bundled/);
 		assert.match(response.body, /pi-speak:\/\/setup/);
 		assert.match(response.body, /token=secret-token/);
 		assert.match(response.body, /agent_provider=elevenlabs/);

@@ -45,7 +45,7 @@
     "build": "tsc -p tsconfig.json",
     "build:ui": "tsc -p tsconfig.ui.json && node scripts/sync-ui-package.mjs",
     "build:pi-extension": "npm run build && npm run build:ui && node scripts/sync-pi-extension-package.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.ui.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json --noEmit",
     "test": "npm run build && npm run build:ui && node --test tests/*.test.mjs",
     "test:parallel": "npm run build && npm run build:ui && node --test --test-concurrency=4 tests/*.test.mjs",
     "test:coverage": "npm run build && npm run build:ui && c8 --reporter=text --reporter=lcov --include='dist/**/*.js' node --test tests/*.test.mjs",
