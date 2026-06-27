@@ -143,19 +143,8 @@ class BooxMainActivity : ComponentActivity() {
     }
 
     private fun handleDeepLink(intent: Intent?) {
-        val data: Uri = intent?.data ?: return
-        if (data.scheme != "pi-speak" || data.host != "setup") return
-        val host = data.getQueryParameter("host")
-        val token = data.getQueryParameter("token")
-        val name = data.getQueryParameter("name")
-        if (host.isNullOrBlank() || token.isNullOrBlank()) return
-        // Build a base URL: prefer explicit scheme if present, otherwise http://host:8787.
-        val scheme = data.getQueryParameter("scheme") ?: "http"
-        val port = data.getQueryParameter("port") ?: "8787"
-        val baseUrl = "$scheme://$host:$port"
-        prefs.targetIpAddress = baseUrl
-        prefs.remoteToken = token
-        if (!name.isNullOrBlank()) prefs.codexSessionName = name
+        val setup = parseSetupDeepLink(intent?.data) ?: return
+        applySetupDeepLink(prefs, setup)
     }
 
     internal fun ensureMicPermission(onGranted: () -> Unit) {

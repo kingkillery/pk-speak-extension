@@ -129,41 +129,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleDeepLink(intent: Intent?) {
-        intent?.data?.let { uri ->
-            if (uri.scheme == "pi-speak" && uri.host == "setup") {
-                val baseUrl = uri.getQueryParameter("base_url")
-                val token = uri.getQueryParameter("token")
-                val profileName = uri.getQueryParameter("profile_name") ?: uri.getQueryParameter("machine_id")
-                val connectionMode = uri.getQueryParameter("connection_mode")
-                val defaultTarget = uri.getQueryParameter("default_target")
-                    ?: uri.getQueryParameter("target")
-                    ?: uri.getQueryParameter("session")
-                val agentProvider = uri.getQueryParameter("agent_provider")
-                val workspaceRoot = uri.getQueryParameter("workspace_root")
-                val workspacePath = uri.getQueryParameter("workspace_path")
-
-                baseUrl?.let { appPreferences.targetIpAddress = it.trim().trimEnd('/') }
-                token?.takeIf { it.isNotBlank() }?.let { appPreferences.remoteToken = it }
-                profileName?.let { appPreferences.machineProfileName = it }
-                defaultTarget?.takeIf { it.isNotBlank() }?.let { appPreferences.codexSessionName = it }
-                workspaceRoot?.takeIf { it.isNotBlank() }?.let { appPreferences.workspaceRoot = it }
-                workspacePath?.takeIf { it.isNotBlank() }?.let { appPreferences.workspacePath = it }
-                connectionMode?.let { appPreferences.connectionMode = normalizeConnectionMode(it) }
-                when (agentProvider?.lowercase()) {
-                    "codex", "pi" -> appPreferences.activeAgent = "Local Codex (Pi)"
-                    "claude" -> appPreferences.activeAgent = "Gateway Claude (Claude Code)"
-                    "elevenlabs" -> appPreferences.activeAgent = "Gateway Voice (ElevenLabs)"
-                    "gemini", "gemini-live", "vertex" -> appPreferences.activeAgent = "Gateway Gemini (Vertex AI)"
-                }
-                Log.d("MainActivity", "Successfully processed zero-touch onboarding QR link: base_url=$baseUrl, profile=$profileName, target=$defaultTarget")
-            }
-        }
-    }
-
-    private fun normalizeConnectionMode(value: String): String = when (value.trim().lowercase()) {
-        "tailscale", "tailnet" -> "Tailscale"
-        "bluetooth", "bt" -> "Bluetooth"
-        else -> "Manual"
+        val setup = parseSetupDeepLink(intent?.data) ?: return
+        applySetupDeepLink(appPreferences, setup)
+        Log.d(
+            "MainActivity",
+            "Successfully processed zero-touch onboarding QR link: base_url=${setup.baseUrl}, profile=${setup.profileName}, target=${setup.defaultTarget}"
+        )
     }
 
     override fun onDestroy() {

@@ -142,6 +142,8 @@ const MONO_WAKE_PHRASE = process.env.PI_SPEAK_WAKE_PHRASE || process.env.PI_SPEA
 const PHONE_TURN_WAIT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_PHONE_WAIT_TIMEOUT_MS || "180000", 10);
 const DEFAULT_REMOTE_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
+const DEFAULT_ADB_REMOTE_HOST = process.env.PI_SPEAK_ADB_HTTP_HOST || "127.0.0.1";
+const DEFAULT_ADB_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_ADB_HTTP_PORT || "8787", 10);
 const PUBLIC_REMOTE_BASE_URL = process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim() || "";
 const DEFAULT_REMOTE_AUTH_TOKEN = process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
 const TAILSCALE_APPSERVER_IP = "100.76.136.91";
@@ -2259,7 +2261,42 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 		reversedSerials.clear();
 	};
-	const startRemoteServer = async (ctx?: any, quiet = false) => {
+	type RemoteSetupMode = "tailscale" | "bluetooth";
+
+	const getDesiredRemoteState = (mode: RemoteSetupMode): Partial<RemoteState> => {
+		if (mode === "bluetooth") {
+			return {
+				host: DEFAULT_ADB_REMOTE_HOST,
+				port: DEFAULT_ADB_REMOTE_PORT,
+			};
+		}
+		return {
+			host: DEFAULT_REMOTE_HOST,
+			port: DEFAULT_REMOTE_PORT,
+		};
+	};
+
+	const shouldRestartRemoteServerForMode = (mode: RemoteSetupMode) => {
+		if (!remoteServer) return false;
+		const desired = getDesiredRemoteState(mode);
+		const runtime = remoteServer.getRuntimeState();
+		return runtime.host !== desired.host || runtime.port !== desired.port;
+	};
+
+	const stopRemoteServerRuntime = async () => {
+		if (!remoteServer) return;
+		await remoteServer.stop().catch(() => {});
+		remoteServer = undefined;
+	};
+
+	const startRemoteServer = async (ctx?: any, quiet = false, mode: RemoteSetupMode = "tailscale") => {
+		if (mode === "tailscale") {
+			stopAdbReverseWatcher();
+		}
+		if (shouldRestartRemoteServerForMode(mode)) {
+			await stopRemoteServerRuntime();
+		}
+		syncRemoteState(getDesiredRemoteState(mode), true);
 		if (!remoteServer) {
 			remoteServer = new ControlServer({
 				state: remoteState,
@@ -3333,12 +3370,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const lower = args.trim().toLowerCase();
 
 			if (!lower || lower === "on" || lower === "start" || lower === "launch" || lower === "launch bluetooth") {
-				const isAdbLaunch = lower.startsWith("launch");
-				const isBluetooth = lower.includes("bluetooth");
-				await startRemoteServer(ctx, isAdbLaunch);
-				if (isAdbLaunch) {
+				const mode: RemoteSetupMode = lower.includes("bluetooth") ? "bluetooth" : "tailscale";
+				await startRemoteServer(ctx, lower.startsWith("launch"), mode);
+				if (lower === "launch bluetooth") {
 					startAdbReverseWatcher(ctx);
-					ctx.ui.notify(await getRemoteSetupText(isBluetooth ? "bluetooth" : "tailscale", true), "info");
+				}
+				if (lower.startsWith("launch")) {
+					ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
 				}
 				return;
 			}
@@ -3354,13 +3392,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (lower === "setup") {
-				await startRemoteServer(ctx, true);
+				await startRemoteServer(ctx, true, "tailscale");
 				ctx.ui.notify(await getRemoteSetupText("tailscale", true), "info");
 				return;
 			}
 
 			if (lower === "setup bluetooth" || lower === "bluetooth setup") {
-				await startRemoteServer(ctx, true);
+				await startRemoteServer(ctx, true, "bluetooth");
 				ctx.ui.notify(await getRemoteSetupText("bluetooth", true), "info");
 				return;
 			}
@@ -3412,7 +3450,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const mode = lower === "bluetooth" || lower === "setup bluetooth" || lower === "bluetooth setup"
 				? "bluetooth"
 				: "tailscale";
-			await startRemoteServer(ctx, true);
+			await startRemoteServer(ctx, true, mode);
 			ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
 		},
 	});
@@ -3430,8 +3468,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const mode = lower === "bluetooth" || lower === "setup bluetooth" || lower === "bluetooth setup"
 				? "bluetooth"
 				: "tailscale";
-			await startRemoteServer(ctx, true);
-			startAdbReverseWatcher(ctx);
+			await startRemoteServer(ctx, true, mode);
+			if (mode === "bluetooth") {
+				startAdbReverseWatcher(ctx);
+			}
 			ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
 		},
 	});
