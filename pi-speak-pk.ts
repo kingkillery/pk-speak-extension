@@ -12,6 +12,7 @@ import {
 	savePiSpeakSetupConfig,
 	type PiSpeakSetupConfig,
 } from "./setup-config.js";
+import { describeSpeakPlaybackGate, normalizeSpeakPlaybackGate, resolveSpeakPlaybackGate } from "./speak-gate.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -73,6 +74,14 @@ async function runSetup(args: Args) {
 			current: config.ttsProvider,
 			defaultValue: valueArg(args.tts) || "edge",
 			choices: ["edge", "elevenlabs", "openai", "sag", "auto"],
+			yes,
+			nonInteractive,
+		});
+		config.speakPlaybackGate = await choice(rl, {
+			label: "Spoken playback gate",
+			current: config.speakPlaybackGate,
+			defaultValue: valueArg(args.gate || args["speak-gate"]) || "immediate",
+			choices: ["immediate", "enter"],
 			yes,
 			nonInteractive,
 		});
@@ -177,6 +186,7 @@ function printConfigSummary(config: PiSpeakSetupConfig, heading: string) {
 	console.log(`Agent: ${config.agentProvider || "codex"}`);
 	console.log(`Voice router: ${config.executionRouterMode || "auto"}`);
 	console.log(`TTS: ${config.ttsProvider || "edge"}`);
+	console.log(`Playback gate: ${describeSpeakPlaybackGate(normalizeSpeakPlaybackGate(config.speakPlaybackGate) || "immediate")}`);
 	if (config.elevenLabsApiKey) console.log(`ElevenLabs key: ${maskSecret(config.elevenLabsApiKey)}`);
 	if (config.openAiKey) console.log(`OpenAI audio key: ${maskSecret(config.openAiKey)}`);
 	console.log(`STT: ${config.remoteSttProvider || "auto"}`);
@@ -202,6 +212,7 @@ function printDoctor() {
 	console.log(`Package root: ${ROOT}`);
 	console.log(`Agent: ${config.agentProvider || process.env.AGENT_PROVIDER || "codex"}`);
 	console.log(`TTS: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "edge"}`);
+	console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ env: process.env, config }))}`);
 	console.log(`Gateway port: ${config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767"}`);
 	console.log(`Android APK: ${existsSync(join(ROOT, "android-app", ".build-outputs", "app-debug.apk")) ? "bundled" : "not bundled"}`);
 }
@@ -218,6 +229,7 @@ function printHelp() {
 		"  --provider <codex|claude|pi>",
 		"  --router <auto|codex|claude|pi>",
 		"  --tts <edge|elevenlabs|openai|sag|auto>",
+		"  --speak-gate <immediate|enter>  Require Enter before spoken playback",
 		"  --mobile <true|false>     Include Android setup in next steps",
 		"  --tray <true|false>       Prefer the Windows tray launcher",
 		"  --port <port>",

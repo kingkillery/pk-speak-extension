@@ -29,6 +29,8 @@ test("pi-speak-pk non-interactive setup writes local config", async () => {
 			"auto",
 			"--tts",
 			"edge",
+			"--speak-gate",
+			"enter",
 			"--mobile",
 			"false",
 			"--token",
@@ -42,6 +44,7 @@ test("pi-speak-pk non-interactive setup writes local config", async () => {
 		assert.equal(config.agentProvider, "claude");
 		assert.equal(config.executionRouterMode, "auto");
 		assert.equal(config.ttsProvider, "edge");
+		assert.equal(config.speakPlaybackGate, "enter");
 		assert.equal(config.installMobileApp, false);
 		assert.equal(config.httpToken, "test-token-1234567890");
 	} finally {
@@ -73,7 +76,41 @@ test("pk-speak doctor reads saved setup config", async () => {
 		assert.match(stdout, /pk-speak doctor/);
 		assert.match(stdout, /Agent provider: codex/);
 		assert.match(stdout, /Gateway token: doct\.\.\.7890/);
+		assert.match(stdout, /Playback gate: immediate/);
 		assert.match(stdout, /Realtime terminal audit:/);
+	} finally {
+		await rm(configDir, { recursive: true, force: true });
+	}
+});
+
+test("pi-speak-pk doctor honors playback gate env override", async () => {
+	const configDir = await mkdtemp(join(tmpdir(), "pi-speak-doctor-gate-test-"));
+	try {
+		await execFileAsync(process.execPath, [
+			"dist/pi-speak-pk.js",
+			"setup",
+			"--non-interactive",
+			"--provider",
+			"codex",
+			"--tts",
+			"edge",
+			"--speak-gate",
+			"enter",
+			"--token",
+			"doctor-gate-token-1234567890",
+		], {
+			cwd: process.cwd(),
+			env: { ...process.env, PI_SPEAK_CONFIG_DIR: configDir },
+		});
+		const { stdout } = await execFileAsync(process.execPath, ["dist/pi-speak-pk.js", "doctor"], {
+			cwd: process.cwd(),
+			env: {
+				...process.env,
+				PI_SPEAK_CONFIG_DIR: configDir,
+				PI_SPEAK_PLAYBACK_GATE: "immediate",
+			},
+		});
+		assert.match(stdout, /Playback gate: immediate/);
 	} finally {
 		await rm(configDir, { recursive: true, force: true });
 	}
@@ -116,6 +153,8 @@ test("pk-speak speak dry-run reads text args and sanitizes spoken output", async
 		"--provider",
 		"edge",
 		"Build",
+		"--gate",
+		"enter",
 		"finished",
 		"with",
 		"**success**",
@@ -126,6 +165,7 @@ test("pk-speak speak dry-run reads text args and sanitizes spoken output", async
 	assert.match(stdout, /Requested provider: edge/);
 	assert.match(stdout, /Provider: \w+/);
 	assert.match(stdout, /Text: Build finished with success/);
+	assert.match(stdout, /Playback gate: press Enter before playback/);
 	assert.doesNotMatch(stdout, /\*\*/);
 });
 
@@ -138,6 +178,7 @@ test("pk-speak speak help makes OS media-player fallback explicit", async () => 
 		cwd: process.cwd(),
 	});
 	assert.match(stdout, /--allow-open-fallback/);
+	assert.match(stdout, /--gate <immediate\\|enter>/);
 	assert.match(stdout, /OS default app/);
 });
 
@@ -158,6 +199,7 @@ test("pk-speak wrap help makes OS media-player fallback explicit", async () => {
 		cwd: process.cwd(),
 	});
 	assert.match(stdout, /--allow-open-fallback/);
+	assert.match(stdout, /--gate <immediate\\|enter>/);
 	assert.match(stdout, /OS default app/);
 });
 

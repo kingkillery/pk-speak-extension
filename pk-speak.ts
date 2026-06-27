@@ -7,6 +7,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret } from "./setup-config.js";
 import { resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
+import {
+	describeSpeakPlaybackGate,
+	normalizeSpeakPlaybackGate,
+	resolveSpeakPlaybackGate,
+	waitForSpeakPlaybackGate,
+	type SpeakPlaybackGate,
+} from "./speak-gate.js";
 import { getRealtimeTerminalAuditPath } from "./realtime-terminal-audit.js";
 
 type Args = Record<string, string | boolean>;
@@ -105,6 +112,7 @@ function printDoctor() {
 	console.log(`Agent provider: ${config.agentProvider || process.env.AGENT_PROVIDER || "codex"}`);
 	console.log(`Voice router: ${config.executionRouterMode || process.env.PI_SPEAK_EXECUTION_ROUTER_MODE || "auto"}`);
 	console.log(`TTS provider: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "edge"}`);
+	console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ env: process.env, config }))}`);
 	console.log(`ElevenLabs key: ${elevenLabsEnv.summary}`);
 	if (elevenLabsEnv.warning) console.log(`Warning: ${elevenLabsEnv.warning}`);
 	console.log(`Gateway port: ${config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767"}`);
@@ -123,6 +131,7 @@ function printConfig() {
 	console.log(`Agent provider: ${config.agentProvider || ""}`);
 	console.log(`Voice router: ${config.executionRouterMode || ""}`);
 	console.log(`TTS provider: ${config.ttsProvider || ""}`);
+	console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ env: process.env, config }))}`);
 	console.log(`ElevenLabs key: ${maskSecret(config.elevenLabsApiKey)}`);
 	console.log(`OpenAI audio key: ${maskSecret(config.openAiKey)}`);
 	console.log(`Gateway token: ${maskSecret(config.httpToken)}`);
@@ -202,6 +211,7 @@ async function speakText(text: string, options: SpeakTextOptions) {
 		if (options.provider) console.log(`Requested provider: ${options.provider}`);
 		console.log(`Provider: ${resolvedProvider}`);
 		console.log(`Text: ${spokenPreview}`);
+		console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ cliGate: options.gate, env: process.env, config: loadPiSpeakSetupConfig() }))}`);
 		return;
 	}
 	const tempDir = options.output ? undefined : await mkdtemp(join(tmpdir(), "pk-speak-"));
@@ -217,6 +227,13 @@ async function speakText(text: string, options: SpeakTextOptions) {
 			console.log(`Spoke with ${result.provider}${result.rewriteApplied ? " (rewritten)" : ""}: ${outputPath}`);
 		}
 		if (!options.noPlay) {
+			const gate = resolveSpeakPlaybackGate({ cliGate: options.gate, env: process.env, config: loadPiSpeakSetupConfig() });
+			const gateResult = await waitForSpeakPlaybackGate(gate);
+			if (gateResult === "skipped") {
+				console.warn(`pk-speak playback gated (${describeSpeakPlaybackGate(gate)}) but stdin is not interactive; audio left at ${outputPath}.`);
+				removeTempDir = false;
+				return;
+			}
 			const playback = await playAudioFile(outputPath, { allowOpenFallback: options.allowOpenFallback });
 			if (playback === "opened") removeTempDir = false;
 		}
@@ -256,6 +273,7 @@ async function runWrapCommand(argv: string[]) {
 			console.log(`Start notice: ${startMessage}`);
 			console.log(`Success notice: ${successMessage}`);
 			console.log(`Failure notice: ${failureMessage} <code>`);
+			console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ cliGate: options.gate, env: process.env, config: loadPiSpeakSetupConfig() }))}`);
 		}
 		return;
 	}
@@ -290,6 +308,7 @@ function printWrapHelp() {
 		"  --no-speak                 Run command without speaking notices",
 		"  --no-start                 Skip the start notice",
 		"  --allow-open-fallback      If hidden playback fails, open audio with the OS default app",
+		"  --gate <immediate|enter>    Require Enter before speaking notices",
 		"  --start-text <text>        Override start notice",
 		"  --success-text <text>      Override success notice",
 		"  --failure-text <text>      Override failure prefix",
@@ -315,6 +334,7 @@ function printSpeakHelp() {
 		"  --output <path>       Write audio to a file",
 		"  --no-play             Synthesize only; do not play audio",
 		"  --allow-open-fallback  If hidden playback fails, open the file with the OS default app",
+		"  --gate <immediate|enter>  Require Enter before playing audio",
 		"  --keep                Keep the temp audio file when no --output is supplied",
 		"  --rewrite <true|false>",
 		"  --dry-run             Print provider and spoken text without synthesis",
@@ -333,6 +353,7 @@ type SpeakCommandOptions = {
 	noPlay: boolean;
 	allowOpenFallback: boolean;
 	keep: boolean;
+	gate?: SpeakPlaybackGate;
 	dryRun: boolean;
 	rewrite?: boolean;
 	help: boolean;
@@ -344,6 +365,7 @@ type SpeakTextOptions = {
 	noPlay: boolean;
 	allowOpenFallback?: boolean;
 	keep: boolean;
+	gate?: SpeakPlaybackGate;
 	dryRun: boolean;
 	rewrite?: boolean;
 	quiet?: boolean;
@@ -360,6 +382,7 @@ type WrapCommandOptions = {
 	noSpeak: boolean;
 	noStart: boolean;
 	allowOpenFallback: boolean;
+	gate?: SpeakPlaybackGate;
 	dryRun: boolean;
 	startText?: string;
 	successText?: string;
@@ -401,6 +424,8 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 			options.keep = true;
 		} else if (key === "dry-run") {
 			options.dryRun = true;
+		} else if (key === "gate" || key === "playback-gate") {
+			options.gate = normalizeSpeakPlaybackGate(argv[++i]);
 		} else if (key === "rewrite") {
 			options.rewrite = boolArg(argv[++i]);
 		}
@@ -452,6 +477,8 @@ function parseWrapArgs(argv: string[]): WrapCommandOptions {
 			options.noStart = true;
 		} else if (key === "allow-open-fallback") {
 			options.allowOpenFallback = true;
+		} else if (key === "gate" || key === "playback-gate") {
+			options.gate = normalizeSpeakPlaybackGate(argv[++i]);
 		} else if (key === "dry-run") {
 			options.dryRun = true;
 		} else if (key === "start-text") {
@@ -585,6 +612,7 @@ async function speakTextSafely(text: string, options: WrapCommandOptions) {
 		keep: false,
 		dryRun: false,
 		rewrite: false,
+		gate: options.gate,
 		quiet: true,
 	}).catch((error) => {
 		console.error(`pk-speak notice failed: ${error instanceof Error ? error.message : String(error)}`);
