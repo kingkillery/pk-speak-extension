@@ -144,6 +144,24 @@ export type SessionDashboardEntry = {
 	isReady: boolean;
 	activity: SessionActivity;
 	aliases: string[];
+	/** Basename of the working directory, for display grouping. */
+	workspace?: string;
+	/** Full working-directory path; stable grouping key (avoids basename collisions). */
+	workspaceKey?: string;
+	/** Last activity epoch ms (from runtime snapshot or session mtime). */
+	lastActivity?: number;
+	/** True when the session has been hidden/archived. */
+	archived?: boolean;
+	/** True when the session is stale (no use for >= STALE_SESSION_MS) and not current. */
+	stale?: boolean;
+};
+
+export type WorkspaceGroup = {
+	/** Display label (working-directory basename, or "(no workspace)"). */
+	workspace: string;
+	/** Full path grouping key. */
+	workspaceKey: string;
+	sessions: SessionDashboardEntry[];
 };
 
 export type SessionDashboard = {
@@ -151,7 +169,45 @@ export type SessionDashboard = {
 	ready: string[];
 	storePath?: string;
 	sessions: SessionDashboardEntry[];
+	/** Sessions grouped by workspace (working directory). */
+	workspaces?: WorkspaceGroup[];
 };
+
+/** A session is stale after 24h without use. */
+export const STALE_SESSION_MS = 24 * 60 * 60 * 1000;
+
+export function deriveWorkspaceKey(cwd: string | undefined): string | undefined {
+	const trimmed = cwd?.trim();
+	return trimmed ? trimmed.replace(/[\\/]+$/, "") : undefined;
+}
+
+export function deriveWorkspaceLabel(cwd: string | undefined): string {
+	const key = deriveWorkspaceKey(cwd);
+	if (!key) return "(no workspace)";
+	const base = key.replace(/^.*[\\/]/, "");
+	return base || key;
+}
+
+export function isSessionStale(lastActivity: number | undefined, now: number, isCurrent: boolean): boolean {
+	if (isCurrent) return false;
+	if (!lastActivity || !Number.isFinite(lastActivity)) return false;
+	return now - lastActivity >= STALE_SESSION_MS;
+}
+
+export function groupSessionsByWorkspace(sessions: SessionDashboardEntry[]): WorkspaceGroup[] {
+	const groups = new Map<string, WorkspaceGroup>();
+	for (const entry of sessions) {
+		const key = entry.workspaceKey ?? "(no workspace)";
+		const label = entry.workspace ?? "(no workspace)";
+		let group = groups.get(key);
+		if (!group) {
+			group = { workspace: label, workspaceKey: key, sessions: [] };
+			groups.set(key, group);
+		}
+		group.sessions.push(entry);
+	}
+	return [...groups.values()].sort((a, b) => a.workspace.localeCompare(b.workspace));
+}
 
 export type BuildSessionDashboardOptions = {
 	sessions: Record<string, string>;
@@ -197,6 +253,8 @@ export function buildSessionDashboard(options: BuildSessionDashboardOptions): Se
 			sessionPath,
 			workingDirectory,
 			cwd: workingDirectory,
+			workspace: deriveWorkspaceLabel(workingDirectory),
+			workspaceKey: deriveWorkspaceKey(workingDirectory) ?? "(no workspace)",
 			current: isCurrent,
 			isCurrent,
 			ready: isReady,
@@ -237,6 +295,43 @@ export function buildSessionDashboard(options: BuildSessionDashboardOptions): Se
 
 export function buildSessionManagerEntries(options: BuildSessionDashboardOptions) {
 	return buildSessionDashboard(options).sessions;
+}
+
+export type EnrichDashboardOptions = {
+	now?: number;
+	/** Full paths to treat as archived (hidden from the default view). */
+	archivedPaths?: Iterable<string>;
+};
+
+// Post-processing applied to a merged dashboard (gateway side, where entries
+// carry cwd + lastActivity): derives workspace grouping, marks stale entries
+// (>24h, not current), hides archived paths, and attaches the `workspaces` view.
+export function enrichDashboardWithWorkspaces(
+	dashboard: SessionDashboard,
+	options: EnrichDashboardOptions = {},
+): SessionDashboard {
+	const now = options.now ?? Date.now();
+	const archived = new Set<string>();
+	for (const path of options.archivedPaths ?? []) {
+		const key = path?.trim();
+		if (key) archived.add(key);
+	}
+	const visible: SessionDashboardEntry[] = [];
+	for (const entry of dashboard.sessions) {
+		const entryPath = entry.sessionPath ?? entry.path;
+		const isArchived = !!entryPath && archived.has(entryPath);
+		const cwd = entry.cwd ?? entry.workingDirectory;
+		const enriched: SessionDashboardEntry = {
+			...entry,
+			workspace: entry.workspace ?? deriveWorkspaceLabel(cwd),
+			workspaceKey: entry.workspaceKey ?? deriveWorkspaceKey(cwd) ?? "(no workspace)",
+			archived: isArchived,
+			stale: isSessionStale(entry.lastActivity, now, entry.isCurrent),
+		};
+		if (isArchived) continue; // track-and-hide
+		visible.push(enriched);
+	}
+	return { ...dashboard, sessions: visible, workspaces: groupSessionsByWorkspace(visible) };
 }
 
 export type CompactRouteSlot = {

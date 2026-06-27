@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync, type Dirent, type Stats } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync, type Dirent, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { SessionDashboard, SessionDashboardEntry } from "./session-routing.js";
@@ -88,11 +88,61 @@ export function buildOhMyPiAgentHubDashboard(
 	};
 }
 
+let cachedAgentHub: { at: number; dashboard: OhMyPiAgentHubDashboard } | undefined;
+let agentHubRefreshInFlight = false;
+const DEFAULT_AGENT_HUB_TTL_MS = 2000;
+
+function refreshAgentHubDashboard(): OhMyPiAgentHubDashboard {
+	const dashboard = buildOhMyPiAgentHubDashboard();
+	cachedAgentHub = { at: Date.now(), dashboard };
+	return dashboard;
+}
+
+function scheduleAgentHubRefresh(): void {
+	if (agentHubRefreshInFlight) return;
+	agentHubRefreshInFlight = true;
+	setImmediate(() => {
+		try {
+			refreshAgentHubDashboard();
+		} catch {
+			// Keep the previous snapshot on refresh failure.
+		} finally {
+			agentHubRefreshInFlight = false;
+		}
+	});
+}
+
+// Serve-stale-while-revalidate so the bounded-but-still-disk-bound omp scan never
+// blocks the dashboard request after the first warm-up.
+export function buildOhMyPiAgentHubDashboardCached(ttlMs = DEFAULT_AGENT_HUB_TTL_MS): OhMyPiAgentHubDashboard {
+	const now = Date.now();
+	if (ttlMs <= 0) return refreshAgentHubDashboard();
+	if (cachedAgentHub) {
+		if (now - cachedAgentHub.at >= ttlMs) scheduleAgentHubRefresh();
+		return cachedAgentHub.dashboard;
+	}
+	return refreshAgentHubDashboard();
+}
+
 export function mergeOhMyPiAgentHubSessions(
 	dashboard: SessionDashboard,
 	options: BuildOhMyPiAgentHubDashboardOptions = {},
 ): SessionDashboard {
 	const agentHub = buildOhMyPiAgentHubDashboard(options);
+	const existingPaths = new Set(
+		dashboard.sessions.map((entry) => entry.sessionPath ?? entry.path).filter((path): path is string => !!path),
+	);
+	const additions = agentHub.sessions.filter((entry) => !existingPaths.has(entry.sessionPath));
+	return additions.length === 0 ? dashboard : { ...dashboard, sessions: [...dashboard.sessions, ...additions] };
+}
+
+// Hot-path merge used by the gateway dashboard: reuses the stale-while-revalidate
+// cached omp scan instead of re-scanning disk on every request.
+export function mergeOhMyPiAgentHubSessionsCached(
+	dashboard: SessionDashboard,
+	ttlMs = DEFAULT_AGENT_HUB_TTL_MS,
+): SessionDashboard {
+	const agentHub = buildOhMyPiAgentHubDashboardCached(ttlMs);
 	const existingPaths = new Set(
 		dashboard.sessions.map((entry) => entry.sessionPath ?? entry.path).filter((path): path is string => !!path),
 	);
@@ -123,15 +173,38 @@ function listSessionFiles(root: string): string[] {
 	return sessionFiles;
 }
 
+const SESSION_HEADER_READ_BYTES = 256 * 1024;
+const BACKGROUND_INSTANCE_TAIL_BYTES = 256 * 1024;
+
 function parseBackgroundSessionFile(sessionPath: string): OhMyPiBackgroundSessionEntry | undefined {
 	const stat = safeStat(sessionPath);
-	const content = safeReadText(sessionPath);
-	if (!stat || content === undefined) return undefined;
+	if (!stat) return undefined;
 
-	const records = parseJsonLineRecords(content);
-	const header = readSessionHeader(records);
+	// The session header is record 0. Read only a bounded prefix so the 184 of
+	// ~195 transcripts that are NOT background lanes are rejected after a small
+	// read instead of slurping 261 MB of jsonl on every dashboard scan.
+	const headerPrefix = readFilePrefixBytes(sessionPath, SESSION_HEADER_READ_BYTES);
+	if (headerPrefix === undefined) return undefined;
+	const header = readSessionHeader(parseJsonLineRecords(headerPrefix));
 	if (!header) return undefined;
-	const backgroundInstance = resolveBackgroundInstance(header, records);
+
+	let backgroundInstance: BackgroundInstance | undefined;
+	if (header.hasBackgroundInstance) {
+		backgroundInstance = normalizeBackgroundInstance(header.backgroundInstance);
+	} else {
+		// Older sessions append the background_instance record near the end; scan a
+		// bounded tail rather than the whole file.
+		const tail = readFileTailBytes(sessionPath, stat.size, BACKGROUND_INSTANCE_TAIL_BYTES);
+		if (tail !== undefined) {
+			const tailRecords = parseJsonLineRecords(tail);
+			for (let index = tailRecords.length - 1; index >= 0; index -= 1) {
+				if (tailRecords[index].type === "background_instance") {
+					backgroundInstance = normalizeBackgroundInstance(tailRecords[index]);
+					break;
+				}
+			}
+		}
+	}
 	if (!backgroundInstance) return undefined;
 
 	const createdAt = parseTimestamp(header.timestamp) ?? fallbackCreatedAt(stat);
@@ -194,17 +267,6 @@ function readSessionHeader(records: Record<string, unknown>[]): SessionHeader | 
 	};
 }
 
-function resolveBackgroundInstance(
-	header: Pick<SessionHeader, "backgroundInstance" | "hasBackgroundInstance">,
-	records: Record<string, unknown>[],
-): BackgroundInstance | undefined {
-	if (header.hasBackgroundInstance) return normalizeBackgroundInstance(header.backgroundInstance);
-	for (let index = records.length - 1; index >= 0; index -= 1) {
-		if (records[index].type === "background_instance") return normalizeBackgroundInstance(records[index]);
-	}
-	return undefined;
-}
-
 function normalizeBackgroundInstance(value: unknown): BackgroundInstance | undefined {
 	if (!isRecord(value) || value.status !== "active" || typeof value.name !== "string") return undefined;
 	return {
@@ -249,8 +311,39 @@ function safeStat(path: string): Stats | undefined {
 	return tryOrUndefined(() => statSync(path));
 }
 
-function safeReadText(path: string): string | undefined {
-	return tryOrUndefined(() => readFileSync(path, "utf8"));
+function readFilePrefixBytes(path: string, maxBytes: number): string | undefined {
+	let fd: number | undefined;
+	try {
+		fd = openSync(path, "r");
+		const buffer = Buffer.alloc(maxBytes);
+		const bytes = readSync(fd, buffer, 0, maxBytes, 0);
+		return buffer.subarray(0, bytes).toString("utf8");
+	} catch {
+		return undefined;
+	} finally {
+		if (fd !== undefined) {
+			try { closeSync(fd); } catch {}
+		}
+	}
+}
+
+function readFileTailBytes(path: string, size: number, maxBytes: number): string | undefined {
+	const start = Math.max(0, size - maxBytes);
+	const length = size - start;
+	if (length <= 0) return "";
+	let fd: number | undefined;
+	try {
+		fd = openSync(path, "r");
+		const buffer = Buffer.alloc(length);
+		const bytes = readSync(fd, buffer, 0, length, start);
+		return buffer.subarray(0, bytes).toString("utf8");
+	} catch {
+		return undefined;
+	} finally {
+		if (fd !== undefined) {
+			try { closeSync(fd); } catch {}
+		}
+	}
 }
 
 function tryOrUndefined<T>(fn: () => T): T | undefined {

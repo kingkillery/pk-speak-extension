@@ -1,6 +1,6 @@
 import type { AgentProviderCapabilities, AgentProviderName } from "./agent-provider.js";
 
-export type RunnableAgentProviderName = Extract<AgentProviderName, "pi" | "codex" | "claude">;
+export type RunnableAgentProviderName = Extract<AgentProviderName, "pi" | "codex" | "claude" | "oh-my-pi">;
 
 export type AgentProviderSpec = {
 	name: AgentProviderName;
@@ -64,6 +64,15 @@ const AGENT_PROVIDER_SPECS: Record<AgentProviderName, AgentProviderSpec> = {
 		canResumeSession: (sessionId) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId?.trim() || ""),
 		buildResumeArgs: (sessionId) => ["--resume", sessionId],
 	},
+	"oh-my-pi": {
+		name: "oh-my-pi",
+		displayName: "Oh-my-pi",
+		aliases: ["oh-my-pi", "omp", "oh my pi"],
+		defaultExecutable: "omp",
+		executableEnv: "OMP_BIN",
+		capabilities: { ...BASE_CAPABILITIES },
+		canResumeSession: () => false,
+	},
 	gemini: {
 		name: "gemini",
 		displayName: "Gemini",
@@ -98,7 +107,7 @@ export function normalizeAgentProviderName(value: string | undefined): AgentProv
 
 export function normalizeRunnableAgentProviderName(value: string | undefined): RunnableAgentProviderName | undefined {
 	const normalized = normalizeAgentProviderName(value);
-	return normalized === "pi" || normalized === "codex" || normalized === "claude" ? normalized : undefined;
+	return normalized === "pi" || normalized === "codex" || normalized === "claude" || normalized === "oh-my-pi" ? normalized : undefined;
 }
 
 export function getAgentProviderSpec(name: AgentProviderName): AgentProviderSpec {

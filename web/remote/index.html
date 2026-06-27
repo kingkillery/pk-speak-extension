@@ -920,6 +920,111 @@
 		.workspace-entry:hover {
 			background: #f3f7f2;
 		}
+		.workspace-entry.is-file {
+			justify-content: space-between;
+			cursor: pointer;
+		}
+		.workspace-entry.is-file:hover {
+			background: var(--surface-row-hover);
+		}
+		.workspace-entry-name {
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.workspace-entry-size {
+			flex: 0 0 auto;
+			color: var(--muted);
+			font-size: 11px;
+		}
+		.workspace-current {
+			color: var(--muted);
+			font-size: 11px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		#workspace-up,
+		#workspace-use {
+			min-height: 28px;
+			padding: 0 8px;
+			font-size: 12px;
+		}
+		/* Entries are buttons for keyboard access; override the global primary look. */
+		button.workspace-entry {
+			width: 100%;
+			text-align: left;
+			background: var(--surface-row);
+			color: var(--ink);
+			border: 1px solid transparent;
+			border-radius: var(--radius-md);
+			font-weight: var(--weight-normal);
+			min-height: 0;
+			padding: 6px 8px;
+		}
+		button.workspace-entry:hover {
+			background: var(--surface-row-hover);
+		}
+		button.workspace-entry.is-file {
+			display: flex;
+			gap: 8px;
+			align-items: center;
+			justify-content: space-between;
+		}
+		#workspace-up:disabled,
+		#workspace-use:disabled,
+		button.workspace-entry:disabled {
+			cursor: not-allowed;
+		}
+		.file-viewer {
+			position: fixed;
+			inset: 0;
+			z-index: var(--z-overlay);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 16px;
+			background: rgba(0, 0, 0, 0.55);
+		}
+		.file-viewer-dialog {
+			display: flex;
+			flex-direction: column;
+			width: 100%;
+			max-width: 860px;
+			max-height: 80vh;
+			background: var(--surface);
+			border: 1px solid var(--line);
+			border-radius: var(--radius-md);
+			box-shadow: var(--shadow);
+			overflow: hidden;
+		}
+		.file-viewer-header {
+			display: flex;
+			gap: 12px;
+			align-items: flex-start;
+			justify-content: space-between;
+			padding: 12px 14px;
+			border-bottom: 1px solid var(--line);
+		}
+		.file-viewer-titles {
+			min-width: 0;
+		}
+		.file-viewer-meta {
+			color: var(--muted);
+			font-size: 12px;
+			word-break: break-all;
+		}
+		.file-viewer-body {
+			margin: 0;
+			padding: 14px;
+			overflow: auto;
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 12px;
+			line-height: 1.5;
+			white-space: pre-wrap;
+			word-break: break-word;
+			color: var(--ink);
+		}
 
 		/* Cancel button */
 		#cancel-turn-button {
@@ -1017,7 +1122,10 @@
 				<div class="workspace-browser" id="workspace-browser">
 					<div class="workspace-breadcrumb" id="workspace-breadcrumb">
 						<button id="workspace-root" class="secondary" type="button">Root</button>
+						<button id="workspace-up" class="secondary" type="button" disabled>Up</button>
+						<button id="workspace-use" class="secondary" type="button" disabled>Use this folder</button>
 					</div>
+					<div class="workspace-current" id="workspace-current">—</div>
 					<div class="workspace-entries" id="workspace-entries">Loading…</div>
 				</div>
 			</div>
@@ -1099,6 +1207,19 @@
 				</label>
 			</div>
 		</details>
+	</div>
+
+	<div class="file-viewer hidden" id="file-viewer">
+		<div class="file-viewer-dialog" role="dialog" aria-modal="true" aria-labelledby="file-viewer-title">
+			<div class="file-viewer-header">
+				<div class="file-viewer-titles">
+					<strong id="file-viewer-title">File</strong>
+					<div id="file-viewer-meta" class="file-viewer-meta"></div>
+				</div>
+				<button id="file-viewer-close" class="secondary" type="button" aria-label="Close">Close</button>
+			</div>
+			<pre id="file-viewer-body" class="file-viewer-body" tabindex="0"></pre>
+		</div>
 	</div>
 
 	<script type="module" src="/app/app.js"></script>

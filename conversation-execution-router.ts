@@ -1,11 +1,12 @@
 import type { ConversationReducerSummary } from "./remote-turn-manager.js";
 
-export type ExecutionBackend = "pi" | "codex" | "claude" | "shell" | "memory" | "wiki" | "defer";
+export type ExecutionBackend = "pi" | "codex" | "claude" | "oh-my-pi" | "shell" | "memory" | "wiki" | "defer";
 
 export type ExecutionRouteReason =
 	| "dispatch-pi"
 	| "dispatch-codex"
 	| "dispatch-claude"
+	| "dispatch-oh-my-pi"
 	| "dispatch-shell"
 	| "dispatch-memory"
 	| "dispatch-wiki"
@@ -41,7 +42,7 @@ type RouteClass = NonNullable<ConversationExecutionPlan["routeClass"]>;
 type RouteRiskLevel = NonNullable<ConversationExecutionPlan["riskLevel"]>;
 type RouteCostTier = NonNullable<ConversationExecutionPlan["costTier"]>;
 
-type ExecutionRouterMode = "auto" | "pi" | "codex" | "claude";
+type ExecutionRouterMode = "auto" | "pi" | "codex" | "claude" | "oh-my-pi";
 
 const SHELL_KEYWORDS = [
 	"bash",
@@ -408,9 +409,9 @@ function findKeywordSignals(text: string, keywords: string[]) {
 function readExecutionMode() {
 	const configuredMode = process.env.PI_SPEAK_EXECUTION_ROUTER_MODE;
 	const mode = (configuredMode || "").trim().toLowerCase();
-	if (mode === "pi" || mode === "codex" || mode === "claude" || mode === "auto") return mode as ExecutionRouterMode;
+	if (mode === "pi" || mode === "codex" || mode === "claude" || mode === "oh-my-pi" || mode === "auto") return mode as ExecutionRouterMode;
 	const provider = (process.env.AGENT_PROVIDER || "").trim().toLowerCase();
-	if (provider === "pi" || provider === "codex" || provider === "claude") return provider as Exclude<ExecutionRouterMode, "auto">;
+	if (provider === "pi" || provider === "codex" || provider === "claude" || provider === "oh-my-pi") return provider as Exclude<ExecutionRouterMode, "auto">;
 	return "auto";
 }
 
@@ -589,7 +590,7 @@ export function planConversationExecution(
 	options: {
 		mode?: ExecutionRouterMode;
 		targetName?: string;
-		provider?: "pi" | "codex" | "claude";
+		provider?: "pi" | "codex" | "claude" | "oh-my-pi";
 	} = {},
 ): ConversationExecutionPlan {
 	const mode = options.mode || readExecutionMode();
@@ -627,7 +628,9 @@ export function planConversationExecution(
 				? "dispatch-codex"
 				: options.provider === "claude"
 					? "dispatch-claude"
-					: "dispatch-pi",
+					: options.provider === "oh-my-pi"
+						? "dispatch-oh-my-pi"
+						: "dispatch-pi",
 			confidence: summary.confidence,
 			rationale: `Routing to ${describeBackend(options.provider)} because the client selected that backend.${targetContext}`,
 			actionForSeed: summary.actionItems[0] || "execute task",
@@ -640,6 +643,16 @@ export function planConversationExecution(
 			reason: "dispatch-pi",
 			confidence: summary.confidence,
 			rationale: `Routing to Pi for ${summary.actionItems.length} action item(s)${targetContext}.`,
+			actionForSeed: summary.actionItems[0] || "execute task",
+		}, summary);
+	}
+	if (mode === "oh-my-pi") {
+		return withRouteMetadata({
+			dispatch: true,
+			backend: "oh-my-pi",
+			reason: "dispatch-oh-my-pi",
+			confidence: summary.confidence,
+			rationale: `Routing to Oh-my-pi for ${summary.actionItems.length} action item(s)${targetContext}.`,
 			actionForSeed: summary.actionItems[0] || "execute task",
 		}, summary);
 	}
@@ -677,8 +690,9 @@ export function planConversationExecution(
 	}, summary);
 }
 
-function describeBackend(backend: "pi" | "codex" | "claude") {
+function describeBackend(backend: "pi" | "codex" | "claude" | "oh-my-pi") {
 	if (backend === "codex") return "Codex";
 	if (backend === "claude") return "Claude";
+	if (backend === "oh-my-pi") return "Oh-my-pi";
 	return "Pi";
 }

@@ -56,6 +56,68 @@ export function archiveOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.
 	return { ok: true, message: `Removed background session "${current.name}".` };
 }
 
+export function recoverOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.ProcessEnv = process.env): ArchiveOhMyPiBackgroundSessionResult {
+	const roots = defaultOhMyPiSessionRoots(env);
+	const resolved = resolve(sessionPath);
+	const inRoots = roots.some((root) => {
+		const resolvedRoot = resolve(root);
+		return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + sep);
+	});
+	if (!inRoots) {
+		return { ok: false, message: "Session path is outside configured roots." };
+	}
+
+	let raw: string;
+	try {
+		raw = readFileSync(sessionPath, "utf8");
+	} catch (error) {
+		if (error instanceof Error) return { ok: false, message: `Session file is not readable: ${error.message}` };
+		throw error;
+	}
+
+	const lines = raw.split(/\r?\n/);
+	const header = parseRecord(lines[0] ?? "");
+	if (!header || header.type !== "session") return { ok: false, message: "Session file is not an Oh-my-pi session." };
+
+	const archived = Object.prototype.hasOwnProperty.call(header, "backgroundInstance")
+		? normalizeArchivedBackgroundInstance(header.backgroundInstance)
+		: findLatestArchivedBackgroundInstance(lines);
+	if (!archived) return { ok: false, message: "Session is not an archived Oh-my-pi background lane." };
+
+	const active = { ...archived, status: "active" as const };
+	header.backgroundInstance = active;
+	lines[0] = JSON.stringify(header);
+	const recoveredEntry = {
+		id: `pi-speak-recover-${Date.now()}`,
+		parentId: null,
+		timestamp: new Date().toISOString(),
+		type: "background_instance",
+		...active,
+	};
+	writeFileSync(sessionPath, `${lines.join("\n").replace(/\n*$/, "\n")}${JSON.stringify(recoveredEntry)}\n`);
+	return { ok: true, message: `Recovered background session "${active.name}".` };
+}
+
+function findLatestArchivedBackgroundInstance(lines: string[]): ActiveBackgroundInstance | undefined {
+	for (let index = lines.length - 1; index >= 0; index -= 1) {
+		const record = parseRecord(lines[index]);
+		if (record?.type !== "background_instance") continue;
+		const archived = normalizeArchivedBackgroundInstance(record);
+		if (archived) return archived;
+	}
+	return undefined;
+}
+
+function normalizeArchivedBackgroundInstance(value: unknown): ActiveBackgroundInstance | undefined {
+	if (!isRecord(value) || value.status !== "archived" || typeof value.name !== "string") return undefined;
+	return {
+		name: value.name,
+		status: "active",
+		model: typeof value.model === "string" ? value.model : undefined,
+		role: typeof value.role === "string" ? value.role : undefined,
+	};
+}
+
 function findLatestActiveBackgroundInstance(lines: string[]): ActiveBackgroundInstance | undefined {
 	for (let index = lines.length - 1; index >= 0; index -= 1) {
 		const record = parseRecord(lines[index]);

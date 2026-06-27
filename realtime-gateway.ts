@@ -429,6 +429,39 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 						properties: {}
 					}
 				}
+				,
+				{
+					name: "list_sessions",
+					description: "Lists all sessions grouped by workspace (working directory), including which are stale or archived. Use to answer 'what sessions/workspaces do I have'.",
+					parameters: {
+						type: "OBJECT",
+						properties: {}
+					}
+				},
+				{
+					name: "launch_agent",
+					description: "Launches a new oh-my-pi background agent, optionally with a prompt and working directory, or opens the agent hub.",
+					parameters: {
+						type: "OBJECT",
+						properties: {
+							prompt: { type: "STRING", description: "Optional task prompt for the new agent. Omit to open the agent hub." },
+							cwd: { type: "STRING", description: "Optional working directory for the agent." },
+							hubOnly: { type: "BOOLEAN", description: "If true, just open the agent hub instead of launching a prompted agent." }
+						}
+					}
+				},
+				{
+					name: "archive_session",
+					description: "Archives or recovers a session by its path. Archived sessions are hidden from the dashboard but fully recoverable.",
+					parameters: {
+						type: "OBJECT",
+						properties: {
+							sessionPath: { type: "STRING", description: "The full session path to archive or recover." },
+							action: { type: "STRING", description: "Either 'archive' or 'recover'." }
+						},
+						required: ["sessionPath", "action"]
+					}
+				}
 			]
 		}
 	];
@@ -690,6 +723,47 @@ async function startNewSession(ws: WebSocket, server: any, firstMsg?: any, first
 											waitingForAttention: s.waitingForAttention,
 										})),
 									});
+								} else if (call.name === "list_sessions") {
+									if (activeSession.server && typeof activeSession.server.getSessionDashboard === "function") {
+										const dashboard = activeSession.server.getSessionDashboard();
+										outputText = JSON.stringify({
+											ok: true,
+											current: dashboard.current,
+											workspaces: (dashboard.workspaces || []).map((w: any) => ({
+												workspace: w.workspace,
+												sessions: w.sessions.map((s: any) => ({
+													name: s.name,
+													provider: s.provider,
+													stale: !!s.stale,
+													sessionPath: s.sessionPath,
+												})),
+											})),
+										});
+									} else {
+										outputText = JSON.stringify({ ok: false, error: "Session dashboard is not available." });
+									}
+								} else if (call.name === "launch_agent") {
+									if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
+										const result = await activeSession.server.onSessionLaunch({
+											prompt: call.args?.prompt as string | undefined,
+											cwd: call.args?.cwd as string | undefined,
+											hubOnly: call.args?.hubOnly as boolean | undefined,
+										});
+										outputText = JSON.stringify(result);
+									} else {
+										outputText = JSON.stringify({ ok: false, error: "Session launch is not available." });
+									}
+								} else if (call.name === "archive_session") {
+									const sessionPath = call.args?.sessionPath as string;
+									const action = (call.args?.action as string) === "recover" ? "recover" : "archive";
+									if (!sessionPath) {
+										outputText = JSON.stringify({ ok: false, error: "Missing 'sessionPath' argument" });
+									} else if (activeSession.server && typeof activeSession.server.onSessionArchive === "function") {
+										const result = await activeSession.server.onSessionArchive({ sessionPath, action });
+										outputText = JSON.stringify(result);
+									} else {
+										outputText = JSON.stringify({ ok: false, error: "Session archive is not available." });
+									}
 								} else {
 									outputText = JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
 								}

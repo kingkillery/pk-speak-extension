@@ -41,6 +41,23 @@ export function parseVoiceSlashCommand(text: string): VoiceSlashCommandMatch | u
 	const removeTarget = matchPrefixedValue(normalized, ["remove session ", "delete session "]);
 	if (removeTarget) return { kind: "slash-command", command: `/sess remove ${removeTarget}` };
 
+	const archiveTarget = matchPrefixedValue(normalized, ["archive session ", "archive the session "]);
+	if (archiveTarget) return { kind: "slash-command", command: `/sess archive ${archiveTarget}` };
+
+	const recoverTarget = matchPrefixedValue(normalized, ["recover session ", "restore session ", "unarchive session "]);
+	if (recoverTarget) return { kind: "slash-command", command: `/sess recover ${recoverTarget}` };
+
+	const launchAgent = matchPrefixedValue(normalized, ["launch agent ", "launch omp agent ", "start agent ", "new agent "]);
+	if (launchAgent) return { kind: "slash-command", command: `/sess launch ${launchAgent}` };
+
+	if (hasExactMatch(normalized, ["launch agent hub", "open agent hub", "launch omp hub", "open omp hub"])) {
+		return { kind: "slash-command", command: "/sess launch hub" };
+	}
+
+	if (hasExactMatch(normalized, ["list workspaces", "show workspaces", "list by workspace", "group by workspace"])) {
+		return { kind: "slash-command", command: "/sess workspaces" };
+	}
+
 	const sessionName = matchPrefixedValue(normalized, [
 		"name this session ",
 		"rename this session ",

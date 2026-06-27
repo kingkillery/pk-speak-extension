@@ -137,6 +137,14 @@ The web app:
 - stores the remote token in the current browser session by default
 - can explicitly remember the token on that device if you enable it in Settings
 
+The web app also has a **Workspace** tab for reviewing files and choosing where the agent runs:
+
+- browse the directory tree from the workspace root, stepping into folders and back up to the parent
+- tap a file to view its contents in a read-only viewer (preview is capped at the first 512 KB of large files, and binary files show a notice instead of bytes)
+- tap **Use this folder** to set the agent working directory, which becomes the launch path / `cwd` sent with text and voice turns
+
+By default the Workspace tab is rooted at the agent working directory (so the file viewer can't read files elsewhere on the machine). Set `PI_SPEAK_WORKSPACE_ROOT` on the gateway to widen or relocate that root — point it at a specific directory, or set it to `fs` to browse the whole drive/filesystem. The browser is confined to that root; paths outside it (and symlinks resolving outside it) are rejected.
+
 `/remote setup` prints the same QR and links as `/pk-remote`. Use `/remote setup bluetooth` or `/pk-remote bluetooth` when the phone is paired over Bluetooth networking/PAN.
 
 For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel. If the phone is paired over Bluetooth networking/PAN instead, use `/remote setup bluetooth`; the Android app treats that as a Bluetooth local-link profile and does not require Tailscale.
@@ -523,6 +531,9 @@ GET  /v1/status
 GET  /v1/diagnostics
 GET  /v1/route
 POST /v1/route
+
+GET  /v1/workspace?path=<absolute-path>
+GET  /v1/workspace/file?path=<absolute-path>
 
 GET  /v1/mono/status
 POST /v1/mono/on

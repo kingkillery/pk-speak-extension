@@ -62,6 +62,11 @@ export type SessionLaunchPayload = {
 	hubOnly?: boolean;
 };
 
+export type SessionArchivePayload = {
+	sessionPath?: string;
+	action?: "archive" | "recover";
+};
+
 export type RemoteSlashCommand = {
 	name: string;
 	description?: string;
@@ -234,6 +239,7 @@ export type ControlServerOptions = {
 	onSessionRemove?: (body: SessionRemovePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
+	onSessionArchive?: (body: SessionArchivePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onOmpSelectSession?: (sessionPath: string) => void;
 	onOmpGetSelectedSession?: () => string | null;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
@@ -348,6 +354,7 @@ export class ControlServer {
 	private readonly onSessionRemove?: ControlServerOptions["onSessionRemove"];
 	private readonly onSessionResume?: ControlServerOptions["onSessionResume"];
 	private readonly onSessionLaunch?: ControlServerOptions["onSessionLaunch"];
+	private readonly onSessionArchive?: ControlServerOptions["onSessionArchive"];
 	private readonly onOmpSelectSession?: ControlServerOptions["onOmpSelectSession"];
 	private readonly onOmpGetSelectedSession?: ControlServerOptions["onOmpGetSelectedSession"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
@@ -391,6 +398,7 @@ export class ControlServer {
 		this.onSessionRemove = options.onSessionRemove;
 		this.onSessionResume = options.onSessionResume;
 		this.onSessionLaunch = options.onSessionLaunch;
+		this.onSessionArchive = options.onSessionArchive;
 		this.onOmpSelectSession = options.onOmpSelectSession;
 		this.onOmpGetSelectedSession = options.onOmpGetSelectedSession;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
@@ -821,6 +829,27 @@ export class ControlServer {
 			const sessionDir = typeof payload.sessionDir === "string" ? payload.sessionDir : undefined;
 			const hubOnly = typeof payload.hubOnly === "boolean" ? payload.hubOnly : undefined;
 			const result = await this.onSessionLaunch({ cwd, prompt, model, provider, sessionDir, hubOnly });
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/sessions/archive") {
+			if (!this.onSessionArchive) {
+				this.writeJson(res, 501, { ok: false, error: "Session archive is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid JSON body." });
+				return;
+			}
+			const sessionPath = typeof payload.sessionPath === "string" ? payload.sessionPath : undefined;
+			if (!sessionPath) {
+				this.writeJson(res, 400, { ok: false, error: "sessionPath is required." });
+				return;
+			}
+			const action = payload.action === "recover" ? "recover" : "archive";
+			const result = await this.onSessionArchive({ sessionPath, action });
 			this.writeJson(res, result.ok ? 200 : 400, result);
 			return;
 		}

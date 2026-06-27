@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	createInitialAgentProviders,
+	createOmpAgentProvider,
 	createTurnAgentProvider,
 	resolveAgentWorkspace,
 } from "../dist/agent-provider-factory.js";
@@ -11,6 +12,7 @@ const baseConfig = {
 	codexBin: "codex-test",
 	claudeBin: "claude-test",
 	piBin: "pi-test",
+	ompBin: "omp-test",
 	model: "model-test",
 	approvalPolicy: "never",
 	sandbox: "danger-full-access",
@@ -34,6 +36,44 @@ test("agent provider factory honors coding backend override for ElevenLabs mode"
 	});
 	assert.equal(created.provider.name, "claude");
 	assert.equal(created.fallbackProvider, undefined);
+});
+
+test("agent provider factory creates an oh-my-pi provider when configured", () => {
+	const created = createInitialAgentProviders({
+		config: { ...baseConfig, provider: "oh-my-pi" },
+		env: {},
+		cwd: "C:\\repo",
+	});
+	assert.equal(created.provider.name, "oh-my-pi");
+	assert.equal(created.fallbackProvider, undefined);
+});
+
+test("agent provider factory resolves oh-my-pi coding backend from the omp alias", () => {
+	const created = createInitialAgentProviders({
+		config: { ...baseConfig, provider: "elevenlabs" },
+		env: { PI_SPEAK_AGENT_BACKEND: "omp" },
+		cwd: "C:\\repo",
+	});
+	assert.equal(created.provider.name, "oh-my-pi");
+	assert.equal(created.fallbackProvider, undefined);
+});
+
+test("agent provider factory creates a fresh oh-my-pi provider for the routed backend", () => {
+	const fresh = createTurnAgentProvider({
+		config: baseConfig,
+		env: {},
+		backend: "oh-my-pi",
+		cwd: "C:\\repo",
+	});
+	assert.equal(fresh.provider.name, "oh-my-pi");
+	assert.equal(fresh.stopAfterTurn, true);
+	assert.equal(fresh.source, "fresh");
+});
+
+test("createOmpAgentProvider returns a provider named oh-my-pi", () => {
+	const provider = createOmpAgentProvider("omp-test", "C:\\repo", {});
+	assert.equal(provider.name, "oh-my-pi");
+	assert.equal(typeof provider.sendPrompt, "function");
 });
 
 test("agent provider factory reuses shared and fallback providers when requested", () => {

@@ -1,4 +1,4 @@
-export type AgentProviderName = "pi" | "codex" | "claude" | "gemini" | "gemini-live" | "elevenlabs";
+export type AgentProviderName = "pi" | "codex" | "claude" | "oh-my-pi" | "gemini" | "gemini-live" | "elevenlabs";
 
 export type AgentPromptMode = "turn" | "steer" | "followUp";
 
@@ -37,6 +37,7 @@ export type AgentProviderConfig = {
 	codexBin: string;
 	claudeBin: string;
 	piBin: string;
+	ompBin: string;
 	model?: string;
 	approvalPolicy: string;
 	sandbox: string;
@@ -48,6 +49,8 @@ export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env)
 		? "codex"
 		: configuredProvider === "claude"
 			? "claude"
+		: configuredProvider === "oh-my-pi" || configuredProvider === "omp"
+			? "oh-my-pi"
 		: configuredProvider === "gemini" || configuredProvider === "gemini-live"
 			? configuredProvider
 			: configuredProvider === "elevenlabs"
@@ -59,6 +62,7 @@ export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env)
 		codexBin: env.CODEX_BIN?.trim() || "codex",
 		claudeBin: env.CLAUDE_BIN?.trim() || "claude",
 		piBin: env.PI_BIN?.trim() || "pi",
+		ompBin: env.PI_SPEAK_OH_MY_PI_BIN?.trim() || env.OMP_BIN?.trim() || "omp",
 		model,
 		approvalPolicy: env.AGENT_APPROVAL_POLICY?.trim() || env.CODEX_APPROVAL_POLICY?.trim() || "never",
 		sandbox: env.AGENT_SANDBOX?.trim() || env.CODEX_SANDBOX?.trim() || "danger-full-access",

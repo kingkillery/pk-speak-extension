@@ -81,6 +81,10 @@ if (typeof document !== "undefined") {
 		recentAgentSessions: [],
 		agentSnapshotAt: "",
 		workspacePath: "",
+		workspaceCurrent: "",
+		workspaceParent: "",
+		workspaceInitialized: false,
+		fileViewerReturnFocus: null,
 		liveSocket: null,
 		liveClientSequenceId: 0,
 		liveReplyBuffer: "",
@@ -164,8 +168,15 @@ if (typeof document !== "undefined") {
 		agentList: document.getElementById("agent-list"),
 		refreshAgents: document.getElementById("refresh-agents-button"),
 		workspaceEntries: document.getElementById("workspace-entries"),
-		workspaceBreadcrumb: document.getElementById("workspace-breadcrumb"),
 		workspaceRoot: document.getElementById("workspace-root"),
+		workspaceUp: document.getElementById("workspace-up"),
+		workspaceUse: document.getElementById("workspace-use"),
+		workspaceCurrentLabel: document.getElementById("workspace-current"),
+		fileViewer: document.getElementById("file-viewer"),
+		fileViewerTitle: document.getElementById("file-viewer-title"),
+		fileViewerMeta: document.getElementById("file-viewer-meta"),
+		fileViewerBody: document.getElementById("file-viewer-body"),
+		fileViewerClose: document.getElementById("file-viewer-close"),
 	};
 
 	function hasToken() {
@@ -609,51 +620,128 @@ if (typeof document !== "undefined") {
 	}
 
 	/* -------- Workspace Browser -------- */
+	function formatBytes(n) {
+		if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "";
+		if (n < 1024) return `${n} B`;
+		if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+		return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+	}
+
 	async function renderWorkspace(path) {
 		if (!els.workspaceEntries) return;
 		state.workspacePath = path || "";
+		els.workspaceEntries.textContent = "Loading…";
 		try {
-			const payload = await apiFetch(`/v1/workspace?path=${encodeURIComponent(state.workspacePath)}`);
-			const entries = payload && Array.isArray(payload.workspace) ? payload.workspace : [];
-			els.workspaceEntries.innerHTML = "";
-			for (const entry of entries) {
-				const div = document.createElement("div");
-				div.className = "workspace-entry";
-				div.textContent = `${entry.type === "directory" ? "📁" : "📄"} ${entry.name}`;
-				if (entry.type === "directory") {
-					div.addEventListener("click", () => renderWorkspace(entry.path));
+			const payload = await apiFetch(`/v1/workspace?path=${encodeURIComponent(path || "")}`);
+			const ws = payload && payload.workspace ? payload.workspace : {};
+			// Seed the browser to the agent working directory once on first open so a
+			// broadened PI_SPEAK_WORKSPACE_ROOT still lands in the project. Later "Root"
+			// navigations (path "") must still reach the real root, so this runs once.
+			if (!state.workspaceInitialized) {
+				state.workspaceInitialized = true;
+				if (!path && ws.defaultPath && ws.defaultPath !== ws.current) {
+					return renderWorkspace(ws.defaultPath);
 				}
-				els.workspaceEntries.appendChild(div);
 			}
-			renderBreadcrumb(state.workspacePath);
+			state.workspaceCurrent = ws.current || "";
+			state.workspaceParent = ws.parent || "";
+			state.workspacePath = ws.current || path || "";
+			if (els.workspaceCurrentLabel) els.workspaceCurrentLabel.textContent = ws.current || "—";
+			if (els.workspaceUp) els.workspaceUp.disabled = !ws.parent;
+			if (els.workspaceUse) els.workspaceUse.disabled = !state.workspaceCurrent;
+			const entries = Array.isArray(ws.entries) ? ws.entries : [];
+			els.workspaceEntries.innerHTML = "";
+			if (entries.length === 0) {
+				els.workspaceEntries.textContent = "Empty folder.";
+			}
+			for (const entry of entries) {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.className = "workspace-entry";
+				if (entry.type === "directory") {
+					button.classList.add("is-directory");
+					button.textContent = `📁 ${entry.name}`;
+					button.addEventListener("click", () => renderWorkspace(entry.path));
+				} else {
+					button.classList.add("is-file");
+					const name = document.createElement("span");
+					name.className = "workspace-entry-name";
+					name.textContent = `📄 ${entry.name}`;
+					const size = document.createElement("span");
+					size.className = "workspace-entry-size";
+					size.textContent = formatBytes(entry.size);
+					button.appendChild(name);
+					button.appendChild(size);
+					button.addEventListener("click", () => openFileViewer(entry.path, entry.name));
+				}
+				els.workspaceEntries.appendChild(button);
+			}
+			if (ws.truncated) {
+				const note = document.createElement("div");
+				// .muted (not .workspace-current) so the full message wraps instead of
+				// being clipped by ellipsis truncation.
+				note.className = "muted";
+				note.textContent = "Showing first 2000 entries — open a narrower folder to see the rest.";
+				els.workspaceEntries.appendChild(note);
+			}
 		} catch (error) {
 			els.workspaceEntries.textContent = String(error.message || error);
+			// Reset chrome so actionable controls don't contradict the error state.
+			state.workspaceCurrent = "";
+			state.workspaceParent = "";
+			if (els.workspaceCurrentLabel) els.workspaceCurrentLabel.textContent = "—";
+			if (els.workspaceUp) els.workspaceUp.disabled = true;
+			if (els.workspaceUse) els.workspaceUse.disabled = true;
 		}
 	}
 
-	function renderBreadcrumb(path) {
-		if (!els.workspaceBreadcrumb) return;
-		els.workspaceBreadcrumb.innerHTML = "";
-		const rootBtn = document.createElement("button");
-		rootBtn.className = "secondary";
-		rootBtn.type = "button";
-		rootBtn.textContent = "Root";
-		rootBtn.addEventListener("click", () => renderWorkspace(""));
-		els.workspaceBreadcrumb.appendChild(rootBtn);
-		if (!path) return;
-		const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
-		let acc = "";
-		for (const part of parts) {
-			acc += "/" + part;
-			const btn = document.createElement("button");
-			btn.className = "secondary";
-			btn.type = "button";
-			btn.textContent = part;
-			btn.addEventListener("click", (() => {
-				const p = acc;
-				return () => renderWorkspace(p);
-			})());
-			els.workspaceBreadcrumb.appendChild(btn);
+	async function openFileViewer(path, name) {
+		if (!els.fileViewer) return;
+		setStatus("Opening file…");
+		try {
+			const payload = await apiFetch(`/v1/workspace/file?path=${encodeURIComponent(path)}`);
+			const file = payload && payload.file ? payload.file : {};
+			if (els.fileViewerTitle) els.fileViewerTitle.textContent = file.name || name || "File";
+			if (els.fileViewerMeta) {
+				let meta = `${formatBytes(file.size)} · ${file.path || path}`;
+				if (file.binary) meta += " · binary";
+				if (file.truncated) meta += " · truncated (showing first 512 KB)";
+				els.fileViewerMeta.textContent = meta;
+			}
+			if (els.fileViewerBody) {
+				els.fileViewerBody.textContent = file.binary
+					? "Binary file — preview not available."
+					: file.content || "";
+				els.fileViewerBody.scrollTop = 0;
+			}
+			// Save the trigger so focus can return when the dialog closes.
+			state.fileViewerReturnFocus = document.activeElement;
+			els.fileViewer.classList.remove("hidden");
+			// #file-viewer is a sibling of #app-root, so making the app inert/aria-hidden
+			// hides everything behind the dialog without hiding the dialog itself.
+			if (els.appRoot) {
+				els.appRoot.inert = true;
+				els.appRoot.setAttribute("aria-hidden", "true");
+			}
+			document.body.style.overflow = "hidden";
+			els.fileViewerClose?.focus();
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+		}
+	}
+
+	function closeFileViewer() {
+		if (!els.fileViewer) return;
+		els.fileViewer.classList.add("hidden");
+		if (els.appRoot) {
+			els.appRoot.inert = false;
+			els.appRoot.removeAttribute("aria-hidden");
+		}
+		document.body.style.overflow = "";
+		const returnFocus = state.fileViewerReturnFocus;
+		state.fileViewerReturnFocus = null;
+		if (returnFocus && typeof returnFocus.focus === "function" && document.contains(returnFocus)) {
+			returnFocus.focus();
 		}
 	}
 
@@ -1520,6 +1608,52 @@ if (typeof document !== "undefined") {
 	els.aliasButton?.addEventListener("click", doSessionAlias);
 	els.removeButton?.addEventListener("click", doSessionRemove);
 	els.workspaceRoot?.addEventListener("click", () => renderWorkspace(""));
+	els.workspaceUp?.addEventListener("click", () => {
+		if (state.workspaceParent) renderWorkspace(state.workspaceParent);
+	});
+	els.workspaceUse?.addEventListener("click", () => {
+		if (!state.workspaceCurrent) return;
+		// Persist only the launch path; avoid captureSettings() which re-reads the
+		// whole settings form (including the auth token) from the DOM.
+		state.launchPath = state.workspaceCurrent;
+		if (els.launchPathInput) els.launchPathInput.value = state.workspaceCurrent;
+		saveSettings();
+		setStatus(`Working directory set: ${state.workspaceCurrent}`);
+	});
+	els.fileViewerClose?.addEventListener("click", closeFileViewer);
+	els.fileViewer?.addEventListener("click", (event) => {
+		if (event.target === els.fileViewer) closeFileViewer();
+	});
+	document.addEventListener("keydown", (event) => {
+		// Only intercept keys while the file viewer modal is open.
+		if (!els.fileViewer || els.fileViewer.classList.contains("hidden")) return;
+		if (event.key === "Escape") {
+			closeFileViewer();
+			return;
+		}
+		if (event.key === "Tab") {
+			// Trap focus inside the dialog by wrapping between its focusable elements.
+			const focusable = Array.from(
+				els.fileViewer.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+			).filter((node) => !node.disabled);
+			if (focusable.length === 0) {
+				event.preventDefault();
+				return;
+			}
+			const first = focusable[0];
+			const last = focusable[focusable.length - 1];
+			const active = document.activeElement;
+			if (event.shiftKey) {
+				if (active === first || !els.fileViewer.contains(active)) {
+					event.preventDefault();
+					last.focus();
+				}
+			} else if (active === last || !els.fileViewer.contains(active)) {
+				event.preventDefault();
+				first.focus();
+			}
+		}
+	});
 
 	loadSettings();
 	updateRecordingUi();

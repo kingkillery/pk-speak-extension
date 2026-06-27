@@ -70,6 +70,22 @@ Use the HTTPS URL printed by Tailscale as the Android Base URL, or run `/remote 
 
 In native Android settings, set Launch path to the project directory the active provider should run from, for example `C:\dev\Desktop-Projects\my-project`. The app sends that value as `cwd` with text and voice turns. If it is blank, the gateway uses `AGENT_CWD`, `AGENT_WORKSPACE`, or the directory where the extension process started.
 
+### Review files and pick the working directory from the web app
+
+The web app's **Workspace** tab lets you inspect the machine and set where the agent runs without editing settings by hand:
+
+1. Open the **Workspace** tab in the web app.
+2. Browse the directory tree from the workspace root. Tap a folder to step into it, or use the parent entry to step back up.
+3. Tap a file to open a read-only viewer of its contents. Large files preview only the first 512 KB and show a truncation notice; binary files show a "binary file" notice instead of raw bytes.
+4. When you are in the folder the agent should run from, tap **Use this folder**. That path becomes the launch path / `cwd` sent with subsequent text and voice turns.
+
+Set `PI_SPEAK_WORKSPACE_ROOT` on the gateway to control the root the Workspace tab can browse. The browser cannot leave that root; requests for paths outside it (including symlinks/junctions that resolve outside it) are rejected. **If unset, the root defaults to the agent working directory** (`AGENT_CWD` / `AGENT_WORKSPACE` / the process cwd), not the whole drive — the file viewer reads file *contents* under this root, so the default is intentionally narrow to avoid exposing arbitrary files to anyone holding the remote token. Set `PI_SPEAK_WORKSPACE_ROOT` to a specific directory to widen or relocate the root, or to `fs` to deliberately browse the entire drive/filesystem.
+
+The Workspace tab is backed by two read-only HTTP endpoints (both auth-gated like the other control routes):
+
+- `GET /v1/workspace?path=<absolute path>` lists one directory. The response `workspace` object includes `root`, `current`, an optional `parent` (absent when `current` equals `root`), the server `defaultPath`, an `entries` array, and a `truncated` flag (true when the directory had more than 2000 entries and the list was capped). Entries are sorted directories-first then files (alphabetical) and now include files as well as directories; each entry has `name`, `path`, and `type` (`"directory"` or `"file"`), with `size` in bytes on files.
+- `GET /v1/workspace/file?path=<absolute path>` returns a read-only preview: `file` carries `name`, `path`, `size`, `truncated`, `binary`, and `content`. When `binary` is true the content is empty (show a binary notice); when `truncated` is true the content holds only the first 512 KB of a larger file. The path is confined to the workspace root, so it returns `400` (missing path or a directory), `403` (path outside root), `404` (not found), or `500` on error.
+
 ### Use Unified Remote if you mainly want buttons
 
 Good for:

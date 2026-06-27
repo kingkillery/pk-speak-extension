@@ -173,3 +173,50 @@ test("archiveOhMyPiBackgroundSession drops an Oh-my-pi lane from later scans", (
 		rmSync(tmp, { recursive: true, force: true });
 	}
 });
+
+test("prefix-first parse finds inline-header lanes and rejects large non-background sessions", () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-agent-hub-"));
+	try {
+		// Given
+		const sessionsRoot = join(tmp, "sessions");
+		const projectDir = join(sessionsRoot, "C-dev-repo");
+		mkdirSync(projectDir, { recursive: true });
+
+		// Background lane with backgroundInstance ON the header line (modern format):
+		// must be found from the bounded prefix read alone.
+		const lanePath = join(projectDir, "2026-06-23T000000_lane.jsonl");
+		writeFileSync(
+			lanePath,
+			jsonLine({
+				type: "session",
+				version: 3,
+				id: "lane-1",
+				cwd: "C:\\dev\\repo",
+				timestamp: "2026-06-23T10:00:00.000Z",
+				backgroundInstance: { name: "inline-worker", status: "active", model: "gpt-5" },
+			})
+				// A large body must NOT need to be read to classify this lane.
+				+ jsonLine({ type: "message", text: "x".repeat(2_000_000) }),
+		);
+
+		// Plain (non-background) session, also large: must be rejected without a
+		// whole-file read.
+		const plainPath = join(projectDir, "2026-06-23T010000_plain.jsonl");
+		writeFileSync(
+			plainPath,
+			jsonLine({ type: "session", version: 3, id: "plain-1", cwd: "C:\\dev\\repo" })
+				+ jsonLine({ type: "message", text: "y".repeat(2_000_000) }),
+		);
+
+		// When
+		const dashboard = buildOhMyPiAgentHubDashboard({ sessionsRoots: [sessionsRoot] });
+
+		// Then
+		assert.equal(dashboard.sessions.length, 1);
+		assert.equal(dashboard.sessions[0].name, "inline-worker");
+		assert.equal(dashboard.sessions[0].sessionId, "lane-1");
+		assert.equal(dashboard.sessions[0].model, "gpt-5");
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});

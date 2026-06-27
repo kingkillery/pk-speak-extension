@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -91,6 +91,7 @@ async function withServer(overrides = {}, fn) {
 		onSessionRemove: overrides.onSessionRemove,
 		onSessionResume: overrides.onSessionResume,
 		onSessionLaunch: overrides.onSessionLaunch,
+		onSessionArchive: overrides.onSessionArchive,
 		getDiscoveredAgents: overrides.getDiscoveredAgents,
 		tailSessionEvents: overrides.tailSessionEvents,
 	});
@@ -770,6 +771,68 @@ test("turn routes accept an explicit agent provider override", async () => {
 });
 
 
+test("turn routes normalize the oh-my-pi agent provider override and its omp alias", async () => {
+	const seen = [];
+	await withServer({
+		onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider) => {
+			seen.push({ text, agentProvider });
+			return { replyText: `provider:${agentProvider || "none"}` };
+		},
+		onVoiceTurn: async (_buffer, _mimeType, _includeAudio, _target, _cwd, _mode, agentProvider) => {
+			seen.push({ voice: true, agentProvider });
+			return { replyText: `voice-provider:${agentProvider || "none"}` };
+		},
+	}, async (port) => {
+		const canonical = await request({
+			port,
+			path: "/v1/turn/text",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ text: "run it", audio: false, agentProvider: "oh-my-pi" }),
+		});
+		assert.equal(canonical.statusCode, 200);
+		assert.equal(canonical.json().replyText, "provider:oh-my-pi");
+
+		const alias = await request({
+			port,
+			path: "/v1/turn/text",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ text: "run it", audio: false, agentProvider: "omp" }),
+		});
+		assert.equal(alias.statusCode, 200);
+		assert.equal(alias.json().replyText, "provider:oh-my-pi");
+
+		const voiceAlias = await request({
+			port,
+			path: "/v1/turn/voice?audio=0&agentProvider=OMP",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "audio/wav",
+			},
+			body: "fake-wav",
+		});
+		assert.equal(voiceAlias.statusCode, 200);
+		assert.equal(voiceAlias.json().replyText, "voice-provider:oh-my-pi");
+	});
+
+	assert.deepEqual(seen, [
+		{ text: "run it", agentProvider: "oh-my-pi" },
+		{ text: "run it", agentProvider: "oh-my-pi" },
+		{ voice: true, agentProvider: "oh-my-pi" },
+	]);
+});
+
 test("session dashboard endpoint returns dashboard when callback is provided", async () => {
 	await withServer({
 		getSessionDashboard: () => ({ current: "pi", ready: ["claude"], sessions: [{ name: "pi", current: true, ready: true, activity: "idle", aliases: [], workingDirectory: "C:\\dev\\pi" }] }),
@@ -1050,6 +1113,67 @@ test("session launch endpoint returns 501 when callback is missing", async () =>
 	});
 });
 
+test("session archive endpoint forwards path and action to callback", async () => {
+	await withServer({
+		onSessionArchive: async (payload) => ({ ok: true, message: `${payload.action}:${payload.sessionPath}` }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/archive",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ sessionPath: "C:\\s\\lane.jsonl", action: "recover" }),
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "recover:C:\\s\\lane.jsonl");
+	});
+});
+
+test("session archive endpoint defaults action to archive and requires sessionPath", async () => {
+	await withServer({
+		onSessionArchive: async (payload) => ({ ok: true, message: `${payload.action}` }),
+	}, async (port) => {
+		const defaulted = await request({
+			port,
+			path: "/v1/sessions/archive",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ sessionPath: "C:\\s\\lane.jsonl" }),
+		});
+		assert.equal(defaulted.statusCode, 200);
+		assert.equal((await defaulted.json()).message, "archive");
+
+		const missing = await request({
+			port,
+			path: "/v1/sessions/archive",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ action: "archive" }),
+		});
+		assert.equal(missing.statusCode, 400);
+		assert.match((await missing.json()).error, /sessionPath is required/);
+	});
+});
+
+test("session archive endpoint returns 501 when callback is missing", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/archive",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ sessionPath: "C:\\s\\lane.jsonl", action: "archive" }),
+		});
+		assert.equal(response.statusCode, 501);
+		assert.equal((await response.json()).ok, false);
+	});
+});
+
 test("agents endpoint returns discovered agents when callback is provided", async () => {
 	await withServer({
 		getDiscoveredAgents: () => ["codex:1234/project"],
@@ -1139,4 +1263,228 @@ test("event stream endpoint returns SSE headers and initial data", async () => {
 		assert.equal(result.headers["content-type"], "text/event-stream");
 		assert.ok(result.body.includes("data:"));
 	});
+});
+
+test("workspace APIs list directories, read files, and guard the root", async () => {
+	const tempDir = mkdtempSync(join(tmpdir(), "pi-speak-ws-"));
+	const subDir = join(tempDir, "sub");
+	mkdirSync(subDir);
+
+	const textPath = join(tempDir, "hello.txt");
+	const textContent = "Hello, Pi Speak workspace!\nLine two with unicode: café.";
+	writeFileSync(textPath, textContent, "utf8");
+
+	const binaryPath = join(tempDir, "blob.bin");
+	writeFileSync(binaryPath, Buffer.from([0x68, 0x69, 0x00, 0x42, 0xff]));
+
+	const largePath = join(tempDir, "big.txt");
+	writeFileSync(largePath, "a".repeat(600 * 1024), "utf8");
+
+	const authHeaders = { "X-Pi-Speak-Token": "secret-token" };
+
+	try {
+		await withTemporaryEnv("PI_SPEAK_WORKSPACE_ROOT", tempDir, async () => withServer({}, async (port) => {
+			const listing = await request({
+				port,
+				path: `/v1/workspace?path=${encodeURIComponent(tempDir)}`,
+				headers: authHeaders,
+			});
+			assert.equal(listing.statusCode, 200);
+			const listingPayload = listing.json();
+			assert.equal(listingPayload.ok, true);
+			assert.equal(listingPayload.workspace.current, tempDir);
+			assert.equal(listingPayload.workspace.truncated, false);
+
+			const entries = listingPayload.workspace.entries;
+			const dirEntry = entries.find((entry) => entry.name === "sub");
+			assert.ok(dirEntry, "expected the sub directory entry");
+			assert.equal(dirEntry.type, "directory");
+
+			const helloEntry = entries.find((entry) => entry.name === "hello.txt");
+			assert.ok(helloEntry, "expected the hello.txt entry");
+			assert.equal(helloEntry.type, "file");
+			assert.equal(typeof helloEntry.size, "number");
+
+			// Directories sort before files.
+			const dirIndex = entries.findIndex((entry) => entry.name === "sub");
+			const fileIndices = entries
+				.filter((entry) => entry.type === "file")
+				.map((entry) => entries.indexOf(entry));
+			for (const fileIndex of fileIndices) {
+				assert.ok(dirIndex < fileIndex, "expected the directory to sort before files");
+			}
+
+			const textFile = await request({
+				port,
+				path: `/v1/workspace/file?path=${encodeURIComponent(textPath)}`,
+				headers: authHeaders,
+			});
+			assert.equal(textFile.statusCode, 200);
+			const textPayload = textFile.json();
+			assert.equal(textPayload.ok, true);
+			assert.equal(textPayload.file.binary, false);
+			assert.equal(textPayload.file.truncated, false);
+			assert.equal(textPayload.file.content, textContent);
+
+			const binaryFile = await request({
+				port,
+				path: `/v1/workspace/file?path=${encodeURIComponent(binaryPath)}`,
+				headers: authHeaders,
+			});
+			assert.equal(binaryFile.statusCode, 200);
+			const binaryPayload = binaryFile.json();
+			assert.equal(binaryPayload.ok, true);
+			assert.equal(binaryPayload.file.binary, true);
+			assert.equal(binaryPayload.file.content, "");
+
+			const largeFile = await request({
+				port,
+				path: `/v1/workspace/file?path=${encodeURIComponent(largePath)}`,
+				headers: authHeaders,
+			});
+			assert.equal(largeFile.statusCode, 200);
+			const largePayload = largeFile.json();
+			assert.equal(largePayload.ok, true);
+			assert.equal(largePayload.file.truncated, true);
+			assert.equal(largePayload.file.content.length, 512 * 1024);
+
+			const traversalPath = join(tempDir, "..", "escape.txt");
+			const traversal = await request({
+				port,
+				path: `/v1/workspace/file?path=${encodeURIComponent(traversalPath)}`,
+				headers: authHeaders,
+			});
+			assert.equal(traversal.statusCode, 403);
+			assert.equal(traversal.json().ok, false);
+
+			const missingPath = await request({
+				port,
+				path: "/v1/workspace/file",
+				headers: authHeaders,
+			});
+			assert.equal(missingPath.statusCode, 400);
+		}));
+	} finally {
+		rmSync(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("default workspace root is confined to the agent cwd", async () => {
+	const authHeaders = { "X-Pi-Speak-Token": "secret-token" };
+	// Unset every override so getDefaultWorkspacePath() falls back to process.cwd(),
+	// proving the default root is the project dir rather than the filesystem/drive root.
+	await withTemporaryEnv("PI_SPEAK_WORKSPACE_ROOT", undefined, async () =>
+		withTemporaryEnv("AGENT_CWD", undefined, async () =>
+			withTemporaryEnv("AGENT_WORKSPACE", undefined, async () =>
+				withServer({}, async (port) => {
+					const listing = await request({
+						port,
+						path: "/v1/workspace",
+						headers: authHeaders,
+					});
+					assert.equal(listing.statusCode, 200);
+					const payload = listing.json();
+					assert.equal(payload.ok, true);
+					assert.equal(payload.workspace.root, payload.workspace.defaultPath);
+					assert.equal(payload.workspace.root, process.cwd());
+
+					// A file outside the default project root must not be readable through the
+					// authenticated file API; the confinement returns 403, not the file body.
+					const outsideDir = mkdtempSync(join(tmpdir(), "pi-speak-outside-"));
+					const outsidePath = join(outsideDir, "secret.txt");
+					try {
+						writeFileSync(outsidePath, "top secret", "utf8");
+						const blocked = await request({
+							port,
+							path: `/v1/workspace/file?path=${encodeURIComponent(outsidePath)}`,
+							headers: authHeaders,
+						});
+						assert.equal(blocked.statusCode, 403);
+						assert.equal(blocked.json().ok, false);
+					} finally {
+						rmSync(outsideDir, { recursive: true, force: true });
+					}
+				})
+			)
+		)
+	);
+});
+
+test("collab link endpoint reports the active link written to collab.json", async () => {
+	const authHeaders = { Authorization: "Bearer secret-token" };
+	const configDir = mkdtempSync(join(tmpdir(), "pi-speak-collab-"));
+	try {
+		writeFileSync(
+			join(configDir, "collab.json"),
+			JSON.stringify({
+				active: true,
+				webLink: "https://x/#w",
+				webViewLink: "https://x/#v",
+				link: "https://x/#w",
+				viewLink: "https://x/#v",
+				view: false,
+				startedAt: "2026-06-27T00:00:00.000Z",
+			}),
+			"utf8",
+		);
+		await withTemporaryEnv("PI_SPEAK_CONFIG_DIR", configDir, async () => withServer({}, async (port) => {
+			const response = await request({
+				port,
+				path: "/v1/collab-link",
+				headers: authHeaders,
+			});
+			assert.equal(response.statusCode, 200);
+			const payload = response.json();
+			assert.equal(payload.ok, true);
+			assert.equal(payload.collab.active, true);
+			assert.equal(payload.collab.webLink, "https://x/#w");
+			assert.equal(payload.collab.webViewLink, "https://x/#v");
+			assert.equal(payload.collab.view, false);
+			assert.equal(payload.collab.startedAt, "2026-06-27T00:00:00.000Z");
+		}));
+	} finally {
+		rmSync(configDir, { recursive: true, force: true });
+	}
+});
+
+test("collab link endpoint reports inactive when collab.json is absent", async () => {
+	const authHeaders = { Authorization: "Bearer secret-token" };
+	const configDir = mkdtempSync(join(tmpdir(), "pi-speak-collab-empty-"));
+	try {
+		await withTemporaryEnv("PI_SPEAK_CONFIG_DIR", configDir, async () => withServer({}, async (port) => {
+			const response = await request({
+				port,
+				path: "/v1/collab-link",
+				headers: authHeaders,
+			});
+			assert.equal(response.statusCode, 200);
+			const payload = response.json();
+			assert.equal(payload.ok, true);
+			assert.equal(payload.collab.active, false);
+			assert.equal(payload.collab.webLink, undefined);
+		}));
+	} finally {
+		rmSync(configDir, { recursive: true, force: true });
+	}
+});
+
+test("workspace file API rejects Windows reserved device names", async () => {
+	// Reserved device names (CON, NUL, COM1, ...) only resolve to devices on Windows;
+	// on other platforms this guard is a no-op so the suite stays green on Linux CI.
+	if (process.platform !== "win32") return;
+	const authHeaders = { "X-Pi-Speak-Token": "secret-token" };
+	const tempDir = mkdtempSync(join(tmpdir(), "pi-speak-reserved-"));
+	try {
+		await withTemporaryEnv("PI_SPEAK_WORKSPACE_ROOT", tempDir, async () => withServer({}, async (port) => {
+			const response = await request({
+				port,
+				path: `/v1/workspace/file?path=${encodeURIComponent(join(tempDir, "NUL"))}`,
+				headers: authHeaders,
+			});
+			assert.equal(response.statusCode, 400);
+			assert.equal(response.json().ok, false);
+		}));
+	} finally {
+		rmSync(tempDir, { recursive: true, force: true });
+	}
 });

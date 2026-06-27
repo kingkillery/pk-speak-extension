@@ -33,6 +33,33 @@ test("voice parser maps session management phrases to slash commands", () => {
 	});
 });
 
+test("voice parser maps archive/recover/launch/workspace phrases to slash commands", () => {
+	assert.deepEqual(parseVoiceSlashCommand("archive session bugfix"), {
+		kind: "slash-command",
+		command: "/sess archive bugfix",
+	});
+	assert.deepEqual(parseVoiceSlashCommand("recover session bugfix"), {
+		kind: "slash-command",
+		command: "/sess recover bugfix",
+	});
+	assert.deepEqual(parseVoiceSlashCommand("unarchive session bugfix"), {
+		kind: "slash-command",
+		command: "/sess recover bugfix",
+	});
+	assert.deepEqual(parseVoiceSlashCommand("launch agent reviewer"), {
+		kind: "slash-command",
+		command: "/sess launch reviewer",
+	});
+	assert.deepEqual(parseVoiceSlashCommand("launch agent hub"), {
+		kind: "slash-command",
+		command: "/sess launch hub",
+	});
+	assert.deepEqual(parseVoiceSlashCommand("list workspaces"), {
+		kind: "slash-command",
+		command: "/sess workspaces",
+	});
+});
+
 test("voice parser maps wake alias phrases to slash commands", () => {
 	assert.deepEqual(parseVoiceSlashCommand("set wake alias one"), {
 		kind: "slash-command",
