@@ -1888,14 +1888,13 @@ test("ompk select-session surfaces validation failure as 400 (review H2)", async
 	});
 });
 
-<<<<<<< HEAD
 test("omp select-session returns 501 (not a fake 200) when callback is missing", async () => {
 	await withServer({}, async (port) => {
 		const response = await request({
 			port,
 			path: "/v1/omp/select-session",
 			method: "POST",
-			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json" },
+			headers: { Authorization: "******", "Content-Type": "application/json" },
 			body: JSON.stringify({ sessionPath: "/x.jsonl" }),
 		});
 		assert.equal(response.statusCode, 501, "must not claim success when no handler stored the selection");
@@ -1909,11 +1908,13 @@ test("omp selected-session returns 501 when callback is missing", async () => {
 			port,
 			path: "/v1/omp/selected-session",
 			method: "GET",
-			headers: { Authorization: "Bearer secret-token" },
+			headers: { Authorization: "******" },
 		});
 		assert.equal(response.statusCode, 501);
 		assert.equal((await response.json()).ok, false);
-=======
+	});
+});
+
 function firstExternalIpv4() {
 	for (const entries of Object.values(networkInterfaces())) {
 		for (const entry of entries || []) {
@@ -1975,6 +1976,5 @@ test("non-loopback clients cannot read /connect but do mark pairing activity", a
 		assert.ok(pairing.lastRemoteClient, "expected lastRemoteClient to be recorded");
 		assert.ok(pairing.lastRemoteClient.at >= before);
 		assert.equal(pairing.lastRemoteClient.address, externalIp);
->>>>>>> origin/main
 	});
 });
