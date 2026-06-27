@@ -815,21 +815,49 @@ private fun BooxCockpit(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Local recording-start timestamp. Stays in the Boox composable rather than
-            // on StudioRuntimeState so we don't widen the shared runtime state's surface.
+            // Local recording-start timestamp and auto-stop job for the 90s cap.
             var recordingStartedAtMs by remember { mutableLongStateOf(0L) }
+            var maxRecordingJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
             TalkButton(
                 isRecording = state.isRecording,
                 isProcessing = state.isProcessing,
                 onPress = {
-                    // Caller has already armed the mic permission via onRequestMic.
-                    // We start recording immediately; if permission isn't granted yet
-                    // AudioHelper.startRecording returns null and state.isRecording stays false.
                     if (!state.isProcessing && !state.isRecording) {
-                        recordingStartedAtMs = startVoiceRecording(state, audioHelper, ttsHelper)
+                        val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!micGranted) {
+                            appendChat(state, prefs, "system",
+                                "Microphone permission is required. Tap again to grant it, or enable it in Settings → Apps → Pi Speak → Permissions.")
+                            onRequestMic()
+                        } else {
+                            recordingStartedAtMs = startVoiceRecording(state, audioHelper, ttsHelper)
+                            maxRecordingJob = scope.launch {
+                                delay(90_000L)
+                                if (state.isRecording) {
+                                    appendChat(state, prefs, "system",
+                                        "Recording auto-stopped after 90 seconds.")
+                                    val startedAt = recordingStartedAtMs
+                                    if (startedAt > 0L) {
+                                        stopAndSendVoiceTurn(
+                                            recordingStartedAtMs = startedAt,
+                                            state = state,
+                                            scope = scope,
+                                            client = client,
+                                            audioHelper = audioHelper,
+                                            ttsHelper = ttsHelper,
+                                            prefs = prefs,
+                                        )
+                                        recordingStartedAtMs = 0L
+                                    }
+                                }
+                            }
+                        }
                     }
                 },
                 onRelease = {
+                    maxRecordingJob?.cancel()
+                    maxRecordingJob = null
                     val startedAt = recordingStartedAtMs
                     if (startedAt > 0L && state.isRecording) {
                         stopAndSendVoiceTurn(
