@@ -45,6 +45,10 @@ async function main() {
 		await runWrapCommand(argv.slice(1));
 		return;
 	}
+	if (command === "brainstorm" || command === "bs") {
+		await runBrainstormCommand(argv.slice(1));
+		return;
+	}
 	if (command === "gateway" || command === "serve") {
 		await runNodeScript(join(DIST_DIR, "headless-gateway.js"), argv.slice(1));
 		return;
@@ -79,6 +83,7 @@ function printHelp() {
 		"  doctor      Show configured backend, voice, APK, and gateway status inputs",
 		"  speak       Speak text from args or stdin using configured TTS",
 		"  wrap        Run a CLI command and speak start/finish notices",
+		"  brainstorm  Transcribe brainstorm audio using WhisperX and structure it",
 		"  gateway     Start the headless phone/control gateway",
 		"  tray        Start the Windows tray controller and gateway",
 		"  mobile      Print the Android setup/download QR",
@@ -764,6 +769,69 @@ function parseArgs(argv: string[]): Args {
 		parsed[key] = value;
 	}
 	return parsed;
+}
+
+async function runBrainstormCommand(argv: string[]) {
+	if (argv.length < 1 || argv[0].startsWith("-")) {
+		console.log([
+			"Usage: pk-speak brainstorm <audio-file-path>",
+			"",
+			"Transcribes a brainstorm/word-vomit session using WhisperX and structures it into a markdown document.",
+		].join("\n"));
+		return;
+	}
+
+	const filePath = resolve(argv[0]);
+	if (!existsSync(filePath)) {
+		console.error(`Audio file not found: ${filePath}`);
+		process.exitCode = 1;
+		return;
+	}
+
+	const config = loadPiSpeakSetupConfig();
+	const port = config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767";
+	const token = config.httpToken || process.env.PI_SPEAK_HTTP_TOKEN || "";
+	const host = process.env.PI_SPEAK_HTTP_HOST || "127.0.0.1";
+
+	const fileBuffer = await import("node:fs/promises").then(m => m.readFile(filePath));
+	const mimeType = filePath.endsWith(".wav") ? "audio/wav"
+		: filePath.endsWith(".mp3") ? "audio/mpeg"
+		: filePath.endsWith(".m4a") ? "audio/mp4"
+		: filePath.endsWith(".webm") ? "audio/webm"
+		: "application/octet-stream";
+
+	console.log(`Sending brainstorm recording (${Math.round(fileBuffer.length / 1024)} KB) to gateway at http://${host}:${port}...`);
+	try {
+		const response = await fetch(`http://${host}:${port}/v1/brainstorm`, {
+			method: "POST",
+			headers: {
+				"Content-Type": mimeType,
+				"Authorization": token ? `Bearer ${token}` : "",
+			},
+			body: fileBuffer,
+		});
+
+		if (!response.ok) {
+			const errText = await response.text();
+			throw new Error(`Gateway returned status ${response.status}: ${errText}`);
+		}
+
+		const result = (await response.json()) as { ok: boolean; text?: string; formatted?: string; filePath?: string; error?: string };
+		if (!result.ok) {
+			throw new Error(result.error || "Brainstorming failed at gateway");
+		}
+
+		console.log("\n--- Brainstorm Processed Successfully ---");
+		console.log(`Saved output file to: ${result.filePath}`);
+		console.log("\nRaw Transcript Preview:");
+		console.log(result.text?.slice(0, 300) + (result.text && result.text.length > 300 ? "..." : ""));
+		console.log("\nStructured Markdown Output Preview:");
+		console.log(result.formatted?.slice(0, 500) + (result.formatted && result.formatted.length > 500 ? "..." : ""));
+	} catch (error) {
+		console.error(`Brainstorm command failed: ${error instanceof Error ? error.message : String(error)}`);
+		console.error("Please make sure the pk-speak gateway is running (run 'pk-speak gateway' first).");
+		process.exitCode = 1;
+	}
 }
 
 main().catch((error) => {

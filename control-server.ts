@@ -248,6 +248,11 @@ export type ControlServerOptions = {
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 	onRealtimeConnection?: (ws: WebSocket) => void;
+	onBrainstorm?: (
+		buffer: Buffer,
+		mimeType: string | undefined,
+		cwd?: string,
+	) => Promise<{ ok: boolean; text: string; formatted: string; filePath: string }>;
 };
 
 type AudioArtifact = {
@@ -363,6 +368,7 @@ export class ControlServer {
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
 	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
 	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
+	private readonly onBrainstorm?: ControlServerOptions["onBrainstorm"];
 	private wss?: WebSocketServer;
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
@@ -407,6 +413,7 @@ export class ControlServer {
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
+		this.onBrainstorm = options.onBrainstorm;
 	}
 
 	getRuntimeState() {
@@ -1008,6 +1015,23 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "POST" && url.pathname === "/v1/brainstorm") {
+			if (!this.onBrainstorm) {
+				this.writeJson(res, 501, { ok: false, error: "Brainstorming mode is not available on this gateway." });
+				return;
+			}
+			const mimeType = getPrimaryHeaderValue(req.headers["content-type"]);
+			if (!isSupportedVoiceContentType(mimeType)) {
+				this.writeJson(res, 415, { ok: false, error: `Unsupported voice content type: ${mimeType || "unknown"}` });
+				return;
+			}
+			const buffer = await this.readBinaryBody(req, VOICE_BODY_LIMIT_BYTES);
+			const cwd = getLaunchCwdFromUrl(url);
+			const result = await this.withTimeout(this.onBrainstorm(buffer, mimeType, cwd));
+			this.writeJson(res, 200, result);
+			return;
+		}
+
 		this.writeJson(res, 404, { ok: false, error: "Not found" });
 	}
 
@@ -1216,6 +1240,7 @@ export class ControlServer {
 				textTurn: "/v1/turn/text",
 				voiceTurn: "/v1/turn/voice",
 				cancelTurn: "/v1/turn/cancel",
+				brainstorm: "/v1/brainstorm",
 				route: "/v1/route",
 				workspace: "/v1/workspace",
 				workspaceFile: "/v1/workspace/file",

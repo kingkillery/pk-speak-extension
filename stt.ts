@@ -324,3 +324,57 @@ function mimeTypeToExtension(mimeType?: string) {
 	if (normalized.includes("mp4") || normalized.includes("m4a")) return ".m4a";
 	return ".bin";
 }
+
+export async function transcribeWithWhisperX(filePath: string, signal?: AbortSignal): Promise<string> {
+	const python = getPythonExecutable();
+	let pyExec = python;
+	const gpuPy = join(process.cwd(), ".venv-gpu", "Scripts", "python.exe");
+	if (existsSync(gpuPy)) {
+		pyExec = gpuPy;
+	}
+	const script = join(getExtensionDir(), "listener", "whisperx_transcribe.py");
+
+	return new Promise<string>((resolve, reject) => {
+		const child = spawn(pyExec, [script, filePath], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+			env: {
+				...getLocalSttWorkerEnv(),
+				WHISPER_DEVICE: process.env.WHISPER_DEVICE || "cuda",
+				WHISPER_COMPUTE: process.env.WHISPER_COMPUTE || "float16",
+			},
+		});
+
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk: string) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk: string) => {
+			stderr += chunk;
+		});
+
+		child.on("close", (code) => {
+			if (code !== 0) {
+				reject(new Error(stderr.trim() || `WhisperX process exited with code ${code}`));
+				return;
+			}
+			try {
+				const res = JSON.parse(stdout) as { success: boolean; text?: string; error?: string };
+				if (res.success) {
+					resolve(res.text || "");
+				} else {
+					reject(new Error(res.error || "WhisperX transcription failed"));
+				}
+			} catch (err) {
+				reject(new Error(`Failed to parse WhisperX response: ${stdout}`));
+			}
+		});
+
+		signal?.addEventListener("abort", () => {
+			child.kill();
+			reject(new Error("WhisperX aborted"));
+		});
+	});
+}
+

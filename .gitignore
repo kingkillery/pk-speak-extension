@@ -91,3 +91,6 @@ proprompt.md
 coverage/
 goals/
 .llm-wiki/skill-pipeline/failures/
+
+# Scratch files
+test-rl.js

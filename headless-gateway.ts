@@ -20,7 +20,7 @@ import {
 } from "./headless-gateway-routing.js";
 import { runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.js";
-import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
+import { shutdownLocalSttWorker, transcribeAudioBuffer, transcribeWithWhisperX } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
 import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
@@ -30,7 +30,7 @@ import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashb
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { OmpSelectionStore } from "./omp-selection.js";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath, sep as pathSep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -788,6 +788,84 @@ server = new ControlServer({
 	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
 	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider, clientKey) => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider, clientKey),
 	onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, _mode, agentProvider, clientKey) => runVoiceTurn(buffer, mimeType, includeAudio, cwd, target, agentProvider, clientKey),
+	onBrainstorm: async (buffer, mimeType, cwd) => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-speak-brainstorm-"));
+		const extension = mimeType?.includes("webm") ? ".webm"
+			: mimeType?.includes("ogg") ? ".ogg"
+			: mimeType?.includes("wav") ? ".wav"
+			: mimeType?.includes("mpeg") || mimeType?.includes("mp3") ? ".mp3"
+			: mimeType?.includes("mp4") || mimeType?.includes("m4a") ? ".m4a"
+			: ".bin";
+		const filePath = join(tempDir, `input${extension}`);
+		try {
+			writeFileSync(filePath, buffer);
+			
+			// 1. Transcribe using WhisperX
+			let text = "";
+			try {
+				text = await transcribeWithWhisperX(filePath);
+			} catch (error) {
+				console.warn("WhisperX transcription failed, falling back to standard local STT:", error);
+				const fallbackRes = await transcribeAudioBuffer(buffer, mimeType);
+				text = fallbackRes.text;
+			}
+			
+			text = text.trim();
+			if (!text) {
+				return { ok: false, text: "", formatted: "No speech detected in the audio.", filePath: "" };
+			}
+			
+			// 2. Prompt LLM to structure
+			const prompt = `You are an expert research and prompt engineering assistant.
+A user has recorded a brainstorm/word-vomit session. Your job is to analyze the text, organize the ideas, group them logically, extract key concepts, and structure it into a clean, professional, and highly usable prompt or research document.
+
+Here is the raw transcribed brainstorm:
+---
+${text}
+---
+
+Provide the output in clean, formatted Markdown.`;
+
+			const formatted = await collectAgentResponse(provider, prompt, {
+				model: agentConfig.model,
+				cwd: cwd || process.cwd(),
+			});
+			
+			// 3. Save to disk in the current workspace directory under "brainstorming"
+			const targetDir = join(cwd || process.cwd(), "brainstorming");
+			if (!existsSync(targetDir)) {
+				mkdirSync(targetDir, { recursive: true });
+			}
+			
+			const now = new Date();
+			const timestamp = now.toISOString().replace(/T/, "_").replace(/:/g, "-").slice(0, 19);
+			const fileName = `brainstorm_${timestamp}.md`;
+			const savePath = join(targetDir, fileName);
+			
+			const fileContent = `# Brainstorm Session - ${now.toLocaleString()}
+
+## Structured Output
+${formatted}
+
+---
+## Raw Transcript
+${text}
+`;
+			
+			writeFileSync(savePath, fileContent, "utf8");
+			
+			return {
+				ok: true,
+				text,
+				formatted,
+				filePath: savePath,
+			};
+		} finally {
+			try {
+				rmSync(tempDir, { recursive: true, force: true });
+			} catch {}
+		}
+	},
 	onTurnCancel: cancelCurrentTurn,
 	getSessionDashboard: buildRecentSessionDashboard,
 	getCompactRouteSlots: () => [],
