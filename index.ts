@@ -1055,7 +1055,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const synthesis = await synthesizeToFile({
 				text: trimmed,
 				outputPath,
-				state: { ...getSpeakRuntimeState(), provider: "elevenlabs" },
+				state: getSpeakRuntimeState(),
 			});
 			const ttsMs = Date.now() - startedAt;
 			return {
