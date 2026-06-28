@@ -31,13 +31,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -65,11 +68,15 @@ import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import com.example.RealtimeVoiceSession
+import com.example.RealtimeVoiceSessionListener
 import com.example.api.GatewaySessionDashboard
 import com.example.api.GatewaySessionEntry
 import com.example.api.GatewaySessionException
 import com.example.api.VoiceAgentClient
 import com.example.audio.AudioHelper
+import com.example.audio.StreamingPcmPlayer
+import com.example.audio.StreamingPcmRecorder
 import com.example.audio.TtsHelper
 import com.example.data.AppPreferences
 import com.example.data.ChatMessage
@@ -701,6 +708,85 @@ private fun BooxCockpit(
         }.sortedByDescending { it.lastActivity }
     }
 
+    // ─── Live mode state ─────────────────────────────────────────────────────
+    var liveSessionActive by remember { mutableStateOf(false) }
+    val liveSessionRef = remember { mutableStateOf<RealtimeVoiceSession?>(null) }
+    val liveRecorderRef = remember { mutableStateOf<StreamingPcmRecorder?>(null) }
+    val livePlayerRef = remember { mutableStateOf<StreamingPcmPlayer?>(null) }
+    var approvalDialogState by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+
+    // Ensure resources are released if the cockpit leaves the composition.
+    DisposableEffect(Unit) {
+        onDispose {
+            liveRecorderRef.value?.stop()
+            liveSessionRef.value?.disconnect()
+            livePlayerRef.value?.stop()
+        }
+    }
+
+    // ─── Realtime terminal-command approval dialog ────────────────────────────
+    approvalDialogState?.let { (approvalId, command, reason) ->
+        AlertDialog(
+            onDismissRequest = { approvalDialogState = null },
+            title = {
+                Text(
+                    text = "APPROVE COMMAND?",
+                    color = Ink,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = command,
+                        color = Ink,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    if (reason.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = reason,
+                            color = Color(0xFF555555),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    liveSessionRef.value?.approveTerminal(approvalId)
+                    approvalDialogState = null
+                }) {
+                    Text(
+                        text = "APPROVE",
+                        color = Ink,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    liveSessionRef.value?.rejectTerminal(approvalId)
+                    appendChat(state, prefs, "system", "[live] Command rejected by user.")
+                    approvalDialogState = null
+                }) {
+                    Text(
+                        text = "REJECT",
+                        color = Ink,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            },
+            containerColor = Paper,
+            tonalElevation = 0.dp,
+        )
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
 
         // ─── Chat log ─────────────────────────────────────────────
@@ -809,7 +895,7 @@ private fun BooxCockpit(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // ─── Action row: TALK (push-to-talk) / STOP ──────────────
+        // ─── Action row: TALK (push-to-talk) / LIVE / STOP ──────────────
         Row(
             modifier = Modifier.fillMaxWidth().height(120.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -818,11 +904,12 @@ private fun BooxCockpit(
             // Local recording-start timestamp and auto-stop job for the 90s cap.
             var recordingStartedAtMs by remember { mutableLongStateOf(0L) }
             var maxRecordingJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+            // HOLD TO TALK is disabled when live mode is active.
             TalkButton(
                 isRecording = state.isRecording,
-                isProcessing = state.isProcessing,
+                isProcessing = state.isProcessing || liveSessionActive,
                 onPress = {
-                    if (!state.isProcessing && !state.isRecording) {
+                    if (!state.isProcessing && !state.isRecording && !liveSessionActive) {
                         val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
                             context, Manifest.permission.RECORD_AUDIO
                         ) == PackageManager.PERMISSION_GRANTED
@@ -875,10 +962,137 @@ private fun BooxCockpit(
                 modifier = Modifier.weight(1f),
             )
 
-            StopButton(
-                enabled = state.isProcessing,
+            // LIVE toggle: starts / stops a full-duplex Gemini realtime voice session.
+            LiveButton(
+                isActive = liveSessionActive,
                 onClick = {
-                    stopCurrentTurn(state, scope, client, audioHelper, ttsHelper, prefs)
+                    if (liveSessionActive) {
+                        // Toggle OFF — tear down the live session cleanly.
+                        liveRecorderRef.value?.stop()
+                        liveSessionRef.value?.disconnect()
+                        livePlayerRef.value?.stop()
+                        liveSessionRef.value = null
+                        liveRecorderRef.value = null
+                        livePlayerRef.value = null
+                        liveSessionActive = false
+                    } else {
+                        // Toggle ON — check mic permission then start.
+                        val micGranted = ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!micGranted) {
+                            appendChat(state, prefs, "system",
+                                "Microphone permission is required for Live mode. Tap LIVE again after granting it.")
+                            onRequestMic()
+                        } else {
+                            val player = StreamingPcmPlayer()
+                            val recorder = StreamingPcmRecorder(context)
+                            val session = RealtimeVoiceSession(
+                                prefs = prefs,
+                                listener = object : RealtimeVoiceSessionListener {
+                                    override fun onConnected(sessionId: String) {
+                                        // Prepare playback and start streaming mic audio.
+                                        player.start()
+                                        recorder.start { seqId, pcm ->
+                                            liveSessionRef.value?.sendAudioChunk(seqId, pcm)
+                                        }
+                                        scope.launch {
+                                            appendChat(state, prefs, "system",
+                                                "[live] Connected: $sessionId")
+                                        }
+                                    }
+
+                                    override fun onAudioChunk(seqId: Int, pcm: ByteArray) {
+                                        // Deliver server audio directly to the player (background thread, no lock needed).
+                                        player.write(seqId, pcm)
+                                    }
+
+                                    override fun onTranscript(text: String) {
+                                        scope.launch {
+                                            appendChat(state, prefs, "user", text)
+                                        }
+                                    }
+
+                                    override fun onInterrupt() {
+                                        // Server interrupted its own speech — flush and restart the track.
+                                        player.stop()
+                                        player.start()
+                                    }
+
+                                    override fun onToolStart(name: String) {
+                                        scope.launch {
+                                            appendChat(state, prefs, "system", "[tool] $name")
+                                        }
+                                    }
+
+                                    override fun onToolComplete(name: String, output: String) {
+                                        scope.launch {
+                                            appendChat(state, prefs, "system",
+                                                "[tool done] $name: ${output.take(200)}")
+                                        }
+                                    }
+
+                                    override fun onApprovalRequired(
+                                        approvalId: String,
+                                        command: String,
+                                        reason: String,
+                                    ) {
+                                        scope.launch {
+                                            approvalDialogState = Triple(approvalId, command, reason)
+                                        }
+                                    }
+
+                                    override fun onError(message: String) {
+                                        scope.launch {
+                                            appendChat(state, prefs, "system",
+                                                "[live error] $message")
+                                            recorder.stop()
+                                            player.stop()
+                                            liveSessionRef.value = null
+                                            liveRecorderRef.value = null
+                                            livePlayerRef.value = null
+                                            liveSessionActive = false
+                                        }
+                                    }
+
+                                    override fun onDisconnected() {
+                                        scope.launch {
+                                            if (liveSessionActive) {
+                                                appendChat(state, prefs, "system",
+                                                    "[live] Disconnected.")
+                                                recorder.stop()
+                                                player.stop()
+                                            }
+                                            liveSessionRef.value = null
+                                            liveRecorderRef.value = null
+                                            livePlayerRef.value = null
+                                            liveSessionActive = false
+                                        }
+                                    }
+                                }
+                            )
+                            liveSessionRef.value = session
+                            liveRecorderRef.value = recorder
+                            livePlayerRef.value = player
+                            liveSessionActive = true
+                            session.connect()
+                        }
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            )
+
+            // STOP: cancels an in-flight HTTP turn OR interrupts Gemini mid-speech in live mode.
+            StopButton(
+                enabled = state.isProcessing || liveSessionActive,
+                onClick = {
+                    if (liveSessionActive) {
+                        liveSessionRef.value?.sendInterrupt()
+                        livePlayerRef.value?.stop()
+                        livePlayerRef.value?.start()
+                    } else {
+                        stopCurrentTurn(state, scope, client, audioHelper, ttsHelper, prefs)
+                    }
                 },
                 modifier = Modifier.weight(1f),
             )
@@ -1134,6 +1348,38 @@ private fun StopButton(
             fontWeight = FontWeight.Bold,
             fontFamily = FontFamily.Monospace,
         )
+    }
+}
+
+// ─── Live button: toggles full-duplex Gemini realtime voice session ────────
+@Composable
+private fun LiveButton(
+    isActive: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // EPD-safe active indicator: inverted fill (Ink bg / Paper text) mirrors the
+    // RECORDING state of TalkButton. No accent colour — EPD dithering can collapse
+    // colours into the same grey as everything else on a 16-level panel.
+    val container = if (isActive) Ink else Paper
+    val content = if (isActive) Paper else Ink
+    val borderWeight = if (isActive) 2.dp else 1.dp
+    Surface(
+        modifier = modifier
+            .border(borderWeight, Ink, RoundedCornerShape(4.dp))
+            .clickable(onClick = onClick),
+        color = container,
+        shape = RoundedCornerShape(4.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                text = if (isActive) "● LIVE" else "LIVE",
+                color = content,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
     }
 }
 

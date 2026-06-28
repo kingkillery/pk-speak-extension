@@ -1399,6 +1399,9 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
 
     private fun gatewayBaseUrl(): String = prefs.targetIpAddress.trim().trimEnd('/')
 
+    fun buildRealtimeWebSocketUrl(): String =
+        prefs.targetIpAddress.trim().trimEnd('/').replace("http://", "ws://").replace("https://", "wss://") + "/v1/live"
+
 
     suspend fun getWarpControlSnapshot(): WarpControlSnapshot? {
         return withContext(Dispatchers.IO) {
