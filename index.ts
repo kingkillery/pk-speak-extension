@@ -29,7 +29,7 @@ import {
 	setWakeAlias,
 } from "./session-routing.js";
 import { mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
-import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, validateOmpSelection } from "./agent-hub-actions.js";
+import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
@@ -2710,6 +2710,20 @@ export default function speakExtension(pi: ExtensionAPI) {
 					}
 				},
 				onSessionLaunch: (payload) => launchSessionTarget(payload, "admin"),
+				onSessionArchive: (payload) => {
+					const sessionPath = payload.sessionPath;
+					if (!sessionPath) return { ok: false, message: "Session path is required." };
+					const result = payload.action === "recover"
+						? recoverOhMyPiBackgroundSession(sessionPath)
+						: archiveOhMyPiBackgroundSession(sessionPath);
+					if (result.ok) {
+						appendSessionEvent(payload.action === "recover" ? "sess.recover" : "sess.archive", "admin", {
+							provider: "oh-my-pk",
+							path: sessionPath,
+						});
+					}
+					return { ok: result.ok, message: result.message, route: getRoutingStatus() };
+				},
 				onOmpSelectSession: (_clientKey, sessionPath) => {
 					// Local single-user extension: one selection (default bucket) matching
 					// getActiveOmpProvider(). Same shared validation as the gateway, surfaced

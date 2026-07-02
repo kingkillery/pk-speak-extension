@@ -577,8 +577,10 @@ if (typeof document !== "undefined") {
 	function startEventStream() {
 		if (state.eventSource) return;
 		if (!els.eventLog || !els.eventStatus) return;
-		const url = `/v1/events?since=${state.eventLog.length}`;
-		const es = new EventSource(url);
+		const url = new URL("/v1/events", window.location.origin);
+		url.searchParams.set("since", String(state.eventLog.length));
+		if (state.token) url.searchParams.set("token", state.token);
+		const es = new EventSource(url.toString());
 		state.eventSource = es;
 		es.onopen = () => {
 			if (els.eventStatus) els.eventStatus.className = "status-dot ready";

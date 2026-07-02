@@ -2765,10 +2765,11 @@ fun GatewayOpsPane(
                 if (agentInventory == null) {
                     GatewayOpsMutedLine(if (loading) "Scanning agents…" else "Agent discovery unavailable on this gateway.")
                 } else {
-                    if (agentInventory.running.isEmpty() && agentInventory.recent.isEmpty()) {
+                    val discoveredTargets = if (agentInventory.running.isEmpty()) agentInventory.agents else emptyList()
+                    if (agentInventory.running.isEmpty() && discoveredTargets.isEmpty() && agentInventory.recent.isEmpty()) {
                         GatewayOpsMutedLine("No running or recent agents found on the host.")
                     }
-                    if (agentInventory.running.isNotEmpty()) {
+                    if (agentInventory.running.isNotEmpty() || discoveredTargets.isNotEmpty()) {
                         GatewayOpsMutedLine("RUNNING — tap to target")
                         agentInventory.running.forEach { agent ->
                             GatewayOpsRow(
@@ -2780,6 +2781,20 @@ fun GatewayOpsPane(
                                         opsStatus = update.message
                                         update.route?.let { route = it }
                                         applyGatewayRouteUpdateToPrefs(update, agent.target, prefs)
+                                    }
+                                }
+                            )
+                        }
+                        discoveredTargets.forEach { target ->
+                            GatewayOpsRow(
+                                title = target,
+                                subtitle = target.substringBefore(':').ifBlank { "agent" },
+                                onClick = {
+                                    scope.launch {
+                                        val update = client.setRoute(target)
+                                        opsStatus = update.message
+                                        update.route?.let { route = it }
+                                        applyGatewayRouteUpdateToPrefs(update, target, prefs)
                                     }
                                 }
                             )
@@ -3741,6 +3756,7 @@ fun SettingsTabContent(
     var workspaceRoot by remember(prefs.workspaceRoot) { mutableStateOf(prefs.workspaceRoot) }
     var workspacePath by remember(prefs.workspacePath) { mutableStateOf(prefs.workspacePath) }
     var workspaceEntries by remember { mutableStateOf<List<com.example.api.WorkspaceEntry>>(emptyList()) }
+    var workspaceTruncated by remember { mutableStateOf(false) }
     var workspaceParent by remember { mutableStateOf<String?>(null) }
     var workspaceLoading by remember { mutableStateOf(false) }
     var filePreview by remember { mutableStateOf<com.example.api.WorkspaceFilePreview?>(null) }
@@ -4240,6 +4256,7 @@ fun SettingsTabContent(
                                         workspacePath = listing.current
                                         workspaceParent = listing.parent
                                         workspaceEntries = listing.entries
+                                        workspaceTruncated = listing.truncated
                                         prefs.workspaceRoot = listing.root
                                         prefs.workspacePath = listing.current
                                         onConfigChanged()
@@ -4261,6 +4278,7 @@ fun SettingsTabContent(
                                         workspacePath = listing.current
                                         workspaceParent = listing.parent
                                         workspaceEntries = listing.entries
+                                        workspaceTruncated = listing.truncated
                                         prefs.workspacePath = listing.current
                                         onConfigChanged()
                                     }
@@ -4274,6 +4292,13 @@ fun SettingsTabContent(
                     }
                     if (filePreviewLoading) {
                         Text(text = "Loading file preview...", color = Color(0xFF6E665A), fontSize = 11.sp)
+                    }
+                    if (workspaceTruncated || workspaceEntries.size > 24) {
+                        Text(
+                            text = if (workspaceTruncated) "Showing first 24 entries from a capped folder. Open a narrower folder to see the rest." else "Showing first 24 entries.",
+                            color = Color(0xFF6E665A),
+                            fontSize = 11.sp
+                        )
                     }
                     workspaceEntries.take(24).forEach { entry ->
                         if (entry.isFile) {
@@ -4324,6 +4349,7 @@ fun SettingsTabContent(
                                                 workspacePath = listing.current
                                                 workspaceParent = listing.parent
                                                 workspaceEntries = listing.entries
+                                                workspaceTruncated = listing.truncated
                                                 prefs.workspacePath = listing.current
                                                 onConfigChanged()
                                             }

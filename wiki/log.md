@@ -1,5 +1,11 @@
 # Wiki Log
 
+## 2026-07-02 - session: PR 13 Android gateway parity completion
+
+- Added `wiki/sessions/2026-07-02-pr13-android-gateway-parity.md` summarizing the PR #13 merge, GPT subagent review, valid follow-up fixes, skipped findings, validation evidence, and subagent cleanup.
+- Updated `wiki/overview.md` and `wiki/index.md` so the current Android gateway parity state is discoverable.
+- Used direct filesystem writes because no Obsidian MCP write/read tools were exposed in this session.
+
 ## 2026-07-02 - vault: oh-my-pk harness rebrand note
 
 - Added the project note `Projects/pi-speak-extension/OH_MY_PK_HARNESS_REBRAND.md` in `C:\dev\Desktop-Projects\Helpful-Docs-Prompts\VAULTS-OBSIDIAN\designandbuilding-vault`.

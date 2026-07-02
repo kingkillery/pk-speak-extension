@@ -57,16 +57,18 @@ class GatewayEventStream(
                 return
             }
             val since = startOffset + receivedCount
-            val request = Request.Builder()
-                .url("$normalized/v1/events?since=$since")
-                .header("X-Pi-Speak-Token", token)
-                .header("Accept", "text/event-stream")
-                .get()
-                .build()
-            val call = client.newCall(request)
-            activeCall = call
+            var call: okhttp3.Call? = null
             try {
-                call.execute().use { response ->
+                val request = Request.Builder()
+                    .url("$normalized/v1/events?since=$since")
+                    .header("X-Pi-Speak-Token", token)
+                    .header("Accept", "text/event-stream")
+                    .get()
+                    .build()
+                val currentCall = client.newCall(request)
+                call = currentCall
+                activeCall = currentCall
+                currentCall.execute().use { response ->
                     if (!response.isSuccessful) {
                         onStateChange(false, "Events unavailable (${response.code}).")
                         // 401/501 will not fix themselves by retrying quickly.

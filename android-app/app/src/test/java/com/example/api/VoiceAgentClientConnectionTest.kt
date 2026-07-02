@@ -57,6 +57,42 @@ class VoiceAgentClientConnectionTest {
   }
 
   @Test
+  fun gatewayOpsMethodsHandleMalformedGatewayUrl() = kotlinx.coroutines.runBlocking {
+    prefs.targetIpAddress = "http://[::1"
+    val client = VoiceAgentClient(context, prefs)
+
+    assertNull(client.getRoute())
+    assertFalse(client.setRoute("pk1").ok)
+    assertNull(client.getRouteSlots())
+    assertNull(client.getAgentInventory())
+    assertNull(client.listWorkspace("C:/dev"))
+    assertTrue(client.readWorkspaceFile("C:/dev/file.txt").error?.contains("File preview failed") == true)
+    assertTrue(client.archiveGatewaySession("C:/dev/session.jsonl").contains("Session archive failed"))
+  }
+
+  @Test
+  fun listWorkspace_preservesTruncatedFlag() {
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/workspace") { exchange ->
+      val body = """
+        {"ok":true,"workspace":{"root":"C:/dev","current":"C:/dev","parent":null,"defaultPath":"C:/dev","truncated":true,
+        "entries":[{"name":"repo","path":"C:/dev/repo","type":"directory"}]}}
+      """.trimIndent().toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    val client = VoiceAgentClient(context, prefs)
+
+    val listing = client.listWorkspace("C:/dev")
+
+    assertTrue(listing?.truncated == true)
+    assertEquals(1, listing?.entries?.size)
+  }
+
+  @Test
   fun tryAutoConnect_replacesStaleTargetWithLocalhostAdbReverseGateway() {
     val server = try {
       startGatewayServer(8767)

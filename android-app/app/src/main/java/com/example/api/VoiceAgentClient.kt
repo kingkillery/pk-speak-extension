@@ -843,14 +843,15 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     }
 
     fun listWorkspace(path: String = prefs.workspacePath): WorkspaceListing? {
-        val gatewayUrl = "${gatewayBaseUrl()}/v1/workspace?path=${urlParam(path)}"
-        val request = Request.Builder()
-            .url(gatewayUrl)
-            .header("X-Pi-Speak-Token", prefs.remoteToken)
-            .get()
-            .build()
-
+        val baseUrl = gatewayBaseUrl()
+        if (baseUrl.isBlank()) return null
         return try {
+            val gatewayUrl = "$baseUrl/v1/workspace?path=${urlParam(path)}"
+            val request = Request.Builder()
+                .url(gatewayUrl)
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return null
                 val body = response.body?.string() ?: return null
@@ -875,6 +876,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                     current = workspace.optString("current"),
                     parent = workspace.optString("parent").ifBlank { null },
                     defaultPath = workspace.optString("defaultPath").ifBlank { null },
+                    truncated = workspace.optBoolean("truncated", false),
                     entries = entries
                 )
             }
@@ -1194,12 +1196,12 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         return withContext(Dispatchers.IO) {
             val baseUrl = gatewayBaseUrl()
             if (baseUrl.isBlank()) return@withContext "No gateway URL is configured."
-            val request = Request.Builder()
-                .url("$baseUrl$path")
-                .header("X-Pi-Speak-Token", prefs.remoteToken)
-                .post(payload.toString().toRequestBody("application/json".toMediaType()))
-                .build()
             try {
+                val request = Request.Builder()
+                    .url("$baseUrl$path")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
                 client.newCall(request).execute().use { response ->
                     val body = response.body?.string() ?: "{}"
                     val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
@@ -1219,12 +1221,12 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         return withContext(Dispatchers.IO) {
             val baseUrl = gatewayBaseUrl()
             if (baseUrl.isBlank()) return@withContext null
-            val request = Request.Builder()
-                .url("$baseUrl/v1/route")
-                .header("X-Pi-Speak-Token", prefs.remoteToken)
-                .get()
-                .build()
             try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/route")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .get()
+                    .build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@withContext null
                     parseGatewayRoute(JSONObject(response.body?.string() ?: "{}"))
@@ -1241,12 +1243,12 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         return withContext(Dispatchers.IO) {
             val baseUrl = gatewayBaseUrl()
             if (baseUrl.isBlank()) return@withContext GatewayRouteUpdate("No gateway URL is configured.")
-            val request = Request.Builder()
-                .url("$baseUrl/v1/route")
-                .header("X-Pi-Speak-Token", prefs.remoteToken)
-                .post(JSONObject().put("target", target).toString().toRequestBody("application/json".toMediaType()))
-                .build()
             try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/route")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .post(JSONObject().put("target", target).toString().toRequestBody("application/json".toMediaType()))
+                    .build()
                 client.newCall(request).execute().use { response ->
                     val body = response.body?.string() ?: "{}"
                     val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
@@ -1271,12 +1273,12 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         return withContext(Dispatchers.IO) {
             val baseUrl = gatewayBaseUrl()
             if (baseUrl.isBlank()) return@withContext null
-            val request = Request.Builder()
-                .url("$baseUrl/v1/sessions/slots")
-                .header("X-Pi-Speak-Token", prefs.remoteToken)
-                .get()
-                .build()
             try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/sessions/slots")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .get()
+                    .build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@withContext null
                     parseGatewayRouteSlots(JSONObject(response.body?.string() ?: "{}"))
@@ -1292,12 +1294,12 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         return withContext(Dispatchers.IO) {
             val baseUrl = gatewayBaseUrl()
             if (baseUrl.isBlank()) return@withContext null
-            val request = Request.Builder()
-                .url("$baseUrl/v1/agents")
-                .header("X-Pi-Speak-Token", prefs.remoteToken)
-                .get()
-                .build()
             try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/agents")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .get()
+                    .build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@withContext null
                     val json = JSONObject(response.body?.string() ?: "{}")
@@ -1316,12 +1318,12 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         return withContext(Dispatchers.IO) {
             val baseUrl = gatewayBaseUrl()
             if (baseUrl.isBlank()) return@withContext WorkspaceFilePreview(error = "No gateway URL is configured.")
-            val request = Request.Builder()
-                .url("$baseUrl/v1/workspace/file?path=${urlParam(path)}")
-                .header("X-Pi-Speak-Token", prefs.remoteToken)
-                .get()
-                .build()
             try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/workspace/file?path=${urlParam(path)}")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .get()
+                    .build()
                 client.newCall(request).execute().use { response ->
                     val body = response.body?.string() ?: "{}"
                     val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
@@ -1843,6 +1845,7 @@ data class WorkspaceListing(
     val current: String,
     val parent: String?,
     val defaultPath: String?,
+    val truncated: Boolean = false,
     val entries: List<WorkspaceEntry>
 )
 

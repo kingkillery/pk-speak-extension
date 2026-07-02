@@ -1441,6 +1441,45 @@ test("event stream endpoint returns SSE headers and initial data", async () => {
 	});
 });
 
+test("event stream endpoint accepts query token for browser EventSource clients", async () => {
+	await withServer({
+		tailSessionEvents: (sinceOffset = 0) => ({
+			events: sinceOffset === 0 ? [{ ts: 1, kind: "test", source: "admin", payload: {} }] : [],
+			nextOffset: 1,
+		}),
+	}, async (port) => {
+		const result = await new Promise((resolve, reject) => {
+			const req = http.request({
+				host: "127.0.0.1",
+				port,
+				path: "/v1/events?token=secret-token",
+				method: "GET",
+				headers: { Host: "phone.example" },
+			}, (res) => {
+				let data = "";
+				res.setEncoding("utf8");
+				res.on("data", (chunk) => {
+					data += chunk;
+					if (data.includes("data:")) {
+						req.destroy();
+						resolve({ statusCode: res.statusCode, headers: res.headers, body: data });
+					}
+				});
+				res.on("error", reject);
+			});
+			req.on("error", reject);
+			req.setTimeout(3000, () => {
+				req.destroy();
+				reject(new Error("SSE query-token test timeout"));
+			});
+			req.end();
+		});
+		assert.equal(result.statusCode, 200);
+		assert.match(result.headers["content-type"], /text\/event-stream/);
+		assert.match(result.body, /data:/);
+	});
+});
+
 test("workspace APIs list directories, read files, and guard the root", async () => {
 	const tempDir = mkdtempSync(join(tmpdir(), "pi-speak-ws-"));
 	const subDir = join(tempDir, "sub");

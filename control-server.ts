@@ -589,7 +589,8 @@ export class ControlServer {
 			return;
 		}
 
-		if (!this.isAuthorized(req, url, false)) {
+		const allowQueryToken = req.method === "GET" && url.pathname === "/v1/events";
+		if (!this.isAuthorized(req, url, allowQueryToken)) {
 			this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 			return;
 		}
