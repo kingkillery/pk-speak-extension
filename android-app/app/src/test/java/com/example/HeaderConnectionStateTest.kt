@@ -22,17 +22,17 @@ class HeaderConnectionStateTest {
 
   @Test
   fun gatewayIndicatorColor_isGreenWhenConnected() {
-    assertEquals(Color(0xFF22C55E), gatewayConnectionIndicatorColor(isGatewayConnected = true, isReconnecting = false))
+    assertEquals(Color(0xFF2E7D52), gatewayConnectionIndicatorColor(isGatewayConnected = true, isReconnecting = false))
   }
 
   @Test
   fun gatewayIndicatorColor_isOrangeWhenReconnecting() {
-    assertEquals(Color(0xFFF59E0B), gatewayConnectionIndicatorColor(isGatewayConnected = false, isReconnecting = true))
+    assertEquals(Color(0xFFC97E1A), gatewayConnectionIndicatorColor(isGatewayConnected = false, isReconnecting = true))
   }
 
   @Test
   fun gatewayIndicatorColor_isRedWhenUnreachable() {
-    assertEquals(Color(0xFFEF4444), gatewayConnectionIndicatorColor(isGatewayConnected = false, isReconnecting = false))
+    assertEquals(Color(0xFFB3261E), gatewayConnectionIndicatorColor(isGatewayConnected = false, isReconnecting = false))
   }
 
   @Test
