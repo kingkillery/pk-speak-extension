@@ -409,83 +409,83 @@ internal fun StudioIdleState(
     val voiceHint = if (transmissionMode == "PTT") "Hold to talk" else "Tap to talk"
     Column(
         modifier = modifier
-            .padding(horizontal = 14.dp)
+            .padding(start = 14.dp, end = 14.dp, top = 128.dp)
             .fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.Top,
     ) {
         ConnectionGlyph(gatewayStatus = gatewayStatus)
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(14.dp))
         Text(
             text = "Connected to your computer",
             color = Ink,
-            style = MaterialTheme.typography.headlineMedium,
+            style = MaterialTheme.typography.titleLarge,
             textAlign = TextAlign.Center,
         )
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = "Speak naturally. Pi Speak sends each turn to the selected coding session and keeps the thread here.",
+            text = "Speak or send a command to the selected coding session.",
             color = InkMuted,
-            style = MaterialTheme.typography.bodyMedium,
-            lineHeight = 22.sp,
+            style = MaterialTheme.typography.bodySmall,
+            lineHeight = 19.sp,
             textAlign = TextAlign.Center,
-            modifier = Modifier.widthIn(max = 320.dp),
+            modifier = Modifier.widthIn(max = 300.dp),
         )
-        Spacer(modifier = Modifier.height(26.dp))
+        Spacer(modifier = Modifier.height(18.dp))
         Surface(
             color = SurfaceSubtle,
             shape = RoundedCornerShape(24.dp),
             border = BorderStroke(1.dp, Line),
-            modifier = Modifier.widthIn(max = 340.dp),
+            modifier = Modifier.fillMaxWidth(0.88f),
         ) {
             Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 IdleHintRow("Gateway", gatewayStatus.ifBlank { "Checking" })
                 IdleHintRow("Target", targetSession.ifBlank { "Default session" })
                 IdleHintRow("Voice", voiceHint)
+                Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Line))
+                Text(
+                    text = "Try /sess status or ask for the next code change.",
+                    color = InkMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
             }
         }
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = "Try /sess status or ask for the next code change.",
-            color = InkMuted,
-            fontSize = 13.sp,
-            lineHeight = 18.sp,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.widthIn(max = 300.dp),
-        )
     }
 }
+
 
 @Composable
 private fun ConnectionGlyph(gatewayStatus: String) {
     val connected = gatewayStatus.equals("Connected", ignoreCase = true)
-    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(118.dp)) {
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(82.dp)) {
         Box(
             modifier = Modifier
-                .size(118.dp)
+                .size(82.dp)
                 .clip(CircleShape)
                 .background(SurfaceSubtle)
                 .border(BorderStroke(1.dp, Line), CircleShape),
         )
         Box(
             modifier = Modifier
-                .size(72.dp)
-                .clip(RoundedCornerShape(22.dp))
+                .size(50.dp)
+                .clip(RoundedCornerShape(16.dp))
                 .background(SurfacePaper)
-                .border(BorderStroke(1.dp, Line), RoundedCornerShape(22.dp)),
+                .border(BorderStroke(1.dp, Line), RoundedCornerShape(16.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            Text("⌘", color = Ink, fontSize = 30.sp, fontWeight = FontWeight.Medium)
+            Text("⌘", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Medium)
         }
         Surface(
             color = if (connected) SuccessSoft else SurfaceMuted,
             shape = CircleShape,
-            border = BorderStroke(1.dp, if (connected) Success else Line),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .size(30.dp),
+                .padding(end = 3.dp, bottom = 3.dp)
+                .size(18.dp),
         ) {}
-    }
+}
 }
 
 @Composable
@@ -514,6 +514,13 @@ private fun StudioComposer(
 ) {
     val quickCommands = listOf("/sess status", "/sess slots", "/skills", "/model", "/remote status", "/speak status")
     val canSend = state.textInputState.trim().isNotEmpty() && !state.isProcessing
+    val sendQuickCommand = { command: String ->
+        if (!state.isProcessing) {
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            state.textInputState = command
+            onSendText()
+        }
+    }
     LazyRow(
         modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -523,10 +530,7 @@ private fun StudioComposer(
             Surface(
                 color = SelectedFill,
                 shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.clickable {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    state.textInputState = cmd
-                },
+                modifier = Modifier.clickable(enabled = !state.isProcessing) { sendQuickCommand(cmd) },
             ) {
                 Text(cmd, color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
             }
