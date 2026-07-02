@@ -130,4 +130,34 @@ class GatewaySessionSelectionTest {
 
     assertEquals(setOf("OMP lane", "Background lane"), names)
   }
+
+  @Test
+  fun buildGatewayAgentHubGroups_allSessionsModeIncludesNonOmpLanes() {
+    val dashboard = GatewaySessionDashboard(
+      current = "Main",
+      sessions = listOf(
+        GatewaySessionEntry(
+          name = "OMP lane",
+          sessionPath = "C:\\Users\\prest\\.omp\\agent\\sessions\\lane.jsonl",
+          workingDirectory = "C:\\dev\\pi-speak-extension",
+          source = "oh-my-pk"
+        ),
+        GatewaySessionEntry(
+          name = "Codex session",
+          sessionPath = "C:\\Users\\prest\\.codex\\session.jsonl",
+          workingDirectory = "C:\\dev\\pi-speak-extension",
+          provider = "codex"
+        )
+      )
+    )
+
+    val names = buildGatewayAgentHubGroups(
+      dashboard = dashboard,
+      currentWorkspace = "C:\\dev\\pi-speak-extension",
+      query = "",
+      ompOnly = false
+    ).flatMap { it.sessions }.map { it.name }.toSet()
+
+    assertEquals(setOf("OMP lane", "Codex session"), names)
+  }
 }

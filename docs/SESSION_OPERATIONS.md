@@ -98,6 +98,17 @@ Removal is two-step on purpose:
 That clears saved routing metadata.
 It does **not** delete the underlying Pi session file.
 
+## Remote session operations from the phone
+
+The native Android app and the browser remote both expose the same session-manager operations over the gateway HTTP surface, so `/sess`-style routing work does not require the desktop terminal:
+
+- rename, wake-alias, archive, and remove sessions (`POST /v1/sessions/rename|alias|archive|remove`)
+- set or clear the default route target (`GET/POST /v1/route`)
+- inspect the compact `PK1`/`PK2` lanes (`GET /v1/sessions/slots`), mirroring `/sess slots`
+- watch the live voice/admin session-event log (`GET /v1/events`), the same feed the `/sess ui` pane tails
+
+The Android app groups these under the Agent Hub tab's OPS pane; per-session rename/alias/archive live on each expanded session lane.
+
 ## Management Pane
 
 `/sess ui` shows the session-manager summary inline and does not open another terminal by default.

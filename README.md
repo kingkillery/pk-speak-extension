@@ -150,6 +150,8 @@ By default the Workspace tab is rooted at the agent working directory (so the fi
 
 For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel. If the phone is paired over Bluetooth networking/PAN instead, use `/remote setup bluetooth`; the Android app treats that as a Bluetooth local-link profile and does not require Tailscale.
 
+The native Android app matches the web remote's control surface: session dashboard with rename / wake-alias / archive / remove, an OPS pane with the routing target picker (`/v1/route`), `PK1`/`PK2` route slots (`/v1/sessions/slots`), discovered agents (`/v1/agents`), a live session-event feed (`/v1/events`), and a workspace file browser with a read-only viewer (`/v1/workspace/file`).
+
 When the active gateway is reachable over Tailscale, Android prefers advertised `100.64.0.0/10` base URLs and exposes a Warp / psmux control card in Discovery. That card calls `/v1/warp` to list open psmux sessions, tabs, and panes, `/v1/warp/tab` to open a native Warp tab via `warp://action/new_tab?path=...`, `/v1/warp/tab-config` to open a saved Warp Tab Config via `warp://tab_config/<name>`, and can create a detached psmux session or tab from the phone. Set `PI_SPEAK_WARP_REMOTE_BASE_URL` on the gateway to show the deployed Warp remote-control relay URL in the Android card.
 
 Optional Windows tray:

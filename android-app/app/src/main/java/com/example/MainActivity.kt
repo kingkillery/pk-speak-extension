@@ -23,7 +23,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -2096,51 +2098,57 @@ fun SessionsTabContent(
                 .padding(top = 12.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedButton(
-                onClick = { selectedPane = "gateway" },
-                border = BorderStroke(if (selectedPane == "gateway") 2.dp else 1.dp, Color(0xFF111111)),
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(4.dp)
-            ) {
-                Text(
-                    if (selectedPane == "gateway") "[*] AGENT HUB" else "[ ] AGENT HUB",
-                    color = Color(0xFF111111),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-            OutlinedButton(
-                onClick = { selectedPane = "history" },
-                border = BorderStroke(if (selectedPane == "history") 2.dp else 1.dp, Color(0xFF111111)),
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(4.dp)
-            ) {
-                Text(
-                    if (selectedPane == "history") "[*] TURN HISTORY" else "[ ] TURN HISTORY",
-                    color = Color(0xFF111111),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
+            SessionsPaneToggle("gateway", "HUB", selectedPane, Modifier.weight(1f)) { selectedPane = it }
+            SessionsPaneToggle("ops", "OPS", selectedPane, Modifier.weight(1f)) { selectedPane = it }
+            SessionsPaneToggle("history", "HISTORY", selectedPane, Modifier.weight(1f)) { selectedPane = it }
         }
 
-        if (selectedPane == "gateway") {
-            GatewaySessionsPane(
+        when (selectedPane) {
+            "gateway" -> GatewaySessionsPane(
                 client = client,
                 prefs = prefs,
                 onRemoteSessionSelected = onRemoteSessionSelected,
                 modifier = Modifier.weight(1f)
             )
-        } else {
-            LocalTurnHistoryPane(
+            "ops" -> GatewayOpsPane(
+                client = client,
+                prefs = prefs,
+                modifier = Modifier.weight(1f)
+            )
+            else -> LocalTurnHistoryPane(
                 audioHelper = audioHelper,
                 ttsHelper = ttsHelper,
                 prefs = prefs,
                 modifier = Modifier.weight(1f)
             )
         }
+    }
+}
+
+@Composable
+private fun SessionsPaneToggle(
+    pane: String,
+    label: String,
+    selectedPane: String,
+    modifier: Modifier = Modifier,
+    onSelect: (String) -> Unit
+) {
+    val selected = selectedPane == pane
+    OutlinedButton(
+        onClick = { onSelect(pane) },
+        border = BorderStroke(if (selected) 2.dp else 1.dp, Color(0xFF111111)),
+        modifier = modifier,
+        shape = RoundedCornerShape(4.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp)
+    ) {
+        Text(
+            if (selected) "[*] $label" else "[ ] $label",
+            color = Color(0xFF111111),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1
+        )
     }
 }
 
@@ -2158,6 +2166,7 @@ fun GatewaySessionsPane(
     var launchingHub by remember { mutableStateOf(false) }
     var launchingColab by remember { mutableStateOf(false) }
     var joiningCollab by remember { mutableStateOf(false) }
+    var showAllSessions by remember { mutableStateOf(false) }
     var selectedOmpSessionPath by remember { mutableStateOf<String?>(null) }
     val expandedLanes = remember { mutableStateMapOf<String, Boolean>() }
     val scope = rememberCoroutineScope()
@@ -2250,7 +2259,9 @@ fun GatewaySessionsPane(
                     }
                 }
             },
-            onRefresh = { refresh() }
+            onRefresh = { refresh() },
+            showAllSessions = showAllSessions,
+            onToggleShowAll = { showAllSessions = !showAllSessions }
         )
         if (launchStatus.isNotBlank()) {
             Text(
@@ -2275,12 +2286,16 @@ fun GatewaySessionsPane(
                 val groups = buildGatewayAgentHubGroups(
                     dashboard = currentState.dashboard,
                     currentWorkspace = prefs.workspacePath,
-                    query = filterText
+                    query = filterText,
+                    ompOnly = !showAllSessions
                 )
                 if (groups.isEmpty()) {
                     GatewaySessionsStatus(
-                        if (filterText.isBlank()) "No oh-my-pk background lanes found."
-                        else "No sessions match \"$filterText\"."
+                        when {
+                            filterText.isNotBlank() -> "No sessions match \"$filterText\"."
+                            showAllSessions -> "No gateway sessions found."
+                            else -> "No oh-my-pk background lanes found."
+                        }
                     )
                 } else {
                     LazyColumn(
@@ -2374,6 +2389,45 @@ fun GatewaySessionsPane(
                                                 ).show()
                                             }
                                         }
+                                    },
+                                    onRename = entry.canonicalSessionPath?.let { sessionPath ->
+                                        { newName ->
+                                            scope.launch {
+                                                val message = client.renameGatewaySession(sessionPath, newName)
+                                                refresh()
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    message,
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
+                                    },
+                                    onAlias = entry.canonicalSessionPath?.let { sessionPath ->
+                                        { alias ->
+                                            scope.launch {
+                                                val message = client.aliasGatewaySession(sessionPath, alias)
+                                                refresh()
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    message,
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
+                                    },
+                                    onArchive = entry.canonicalSessionPath?.let { sessionPath ->
+                                        {
+                                            scope.launch {
+                                                val message = client.archiveGatewaySession(sessionPath)
+                                                refresh()
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    message,
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
                                     }
                                 )
                             }
@@ -2397,7 +2451,9 @@ fun GatewaySessionsHeader(
     onLaunchHub: () -> Unit,
     onLaunchColab: () -> Unit,
     onJoinCollab: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    showAllSessions: Boolean = false,
+    onToggleShowAll: (() -> Unit)? = null
 ) {
     Column(
         modifier = Modifier
@@ -2467,6 +2523,41 @@ fun GatewaySessionsHeader(
             enabled = !joiningCollab,
             onClick = onJoinCollab
         )
+        if (onToggleShowAll != null) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { if (showAllSessions) onToggleShowAll() },
+                    border = BorderStroke(if (!showAllSessions) 2.dp else 1.dp, Color(0xFF111111)),
+                    shape = RoundedCornerShape(4.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        if (!showAllSessions) "[*] OMPK LANES" else "[ ] OMPK LANES",
+                        color = Color(0xFF111111),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                OutlinedButton(
+                    onClick = { if (!showAllSessions) onToggleShowAll() },
+                    border = BorderStroke(if (showAllSessions) 2.dp else 1.dp, Color(0xFF111111)),
+                    shape = RoundedCornerShape(4.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        if (showAllSessions) "[*] ALL SESSIONS" else "[ ] ALL SESSIONS",
+                        color = Color(0xFF111111),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(10.dp))
         OutlinedTextField(
             value = filterText,
@@ -2512,6 +2603,335 @@ fun GatewaySessionsStatus(message: String) {
 }
 
 @Composable
+fun GatewayOpsPane(
+    client: VoiceAgentClient,
+    prefs: AppPreferences,
+    modifier: Modifier = Modifier
+) {
+    var route by remember { mutableStateOf<com.example.api.GatewayRoute?>(null) }
+    var slots by remember { mutableStateOf<List<com.example.api.GatewayRouteSlot>>(emptyList()) }
+    var inventory by remember { mutableStateOf<com.example.api.AgentInventory?>(null) }
+    var opsStatus by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    val events = remember { mutableStateListOf<com.example.api.GatewayEvent>() }
+    var eventStreamConnected by remember { mutableStateOf(false) }
+    var eventStreamDetail by remember { mutableStateOf("Connecting…") }
+    val scope = rememberCoroutineScope()
+
+    fun refresh() {
+        if (loading) return
+        loading = true
+        scope.launch {
+            route = client.getRoute()
+            slots = client.getRouteSlots() ?: emptyList()
+            inventory = client.getAgentInventory()
+            loading = false
+        }
+    }
+
+    LaunchedEffect(prefs.targetIpAddress, prefs.remoteToken) { refresh() }
+
+    DisposableEffect(prefs.targetIpAddress, prefs.remoteToken) {
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val stream = client.openEventStream(
+            onEvent = { event ->
+                handler.post {
+                    events.add(0, event)
+                    while (events.size > 100) events.removeAt(events.size - 1)
+                }
+            },
+            onStateChange = { connected, detail ->
+                handler.post {
+                    eventStreamConnected = connected
+                    eventStreamDetail = detail
+                }
+            }
+        )
+        onDispose { stream.stop() }
+    }
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(bottom = 12.dp)
+    ) {
+        item(key = "ops-routing") {
+            GatewayOpsCard(title = "ROUTING", trailing = {
+                OutlinedButton(
+                    onClick = { refresh() },
+                    enabled = !loading,
+                    border = BorderStroke(1.dp, Color(0xFF111111)),
+                    shape = RoundedCornerShape(4.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text("REFRESH", color = Color(0xFF111111), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                }
+            }) {
+                val currentRoute = route
+                if (currentRoute == null) {
+                    GatewayOpsMutedLine(if (loading) "Loading route…" else "Route status unavailable on this gateway.")
+                } else {
+                    GatewayOpsMutedLine("Default target: ${currentRoute.defaultTarget ?: "current session"}")
+                    GatewayOpsMutedLine("Current session: ${currentRoute.currentSession ?: "unknown"}")
+                    Spacer(modifier = Modifier.height(6.dp))
+                    if (currentRoute.availableTargets.isEmpty()) {
+                        GatewayOpsMutedLine("No named targets available.")
+                    } else {
+                        currentRoute.availableTargets.forEach { target ->
+                            val active = target == currentRoute.defaultTarget || (currentRoute.defaultTarget == null && target == currentRoute.currentSession)
+                            Text(
+                                text = "${if (active) "[*]" else "[ ]"} $target",
+                                color = Color(0xFF111111),
+                                fontSize = 12.sp,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .clickable {
+                                        scope.launch {
+                                            val (message, updated) = client.setRoute(target)
+                                            opsStatus = message
+                                            if (updated != null) route = updated
+                                            prefs.codexSessionName = target
+                                        }
+                                    }
+                                    .padding(horizontal = 4.dp, vertical = 7.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                val (message, updated) = client.setRoute("")
+                                opsStatus = message
+                                if (updated != null) route = updated
+                            }
+                        },
+                        border = BorderStroke(1.dp, Color(0xFF111111)),
+                        shape = RoundedCornerShape(4.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("USE CURRENT SESSION", color = Color(0xFF111111), fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    }
+                }
+                if (opsStatus.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    GatewayOpsMutedLine(opsStatus)
+                }
+            }
+        }
+
+        item(key = "ops-slots") {
+            GatewayOpsCard(title = "ROUTE SLOTS") {
+                if (slots.isEmpty()) {
+                    GatewayOpsMutedLine(if (loading) "Loading slots…" else "No compact route slots reported.")
+                } else {
+                    slots.forEach { slot ->
+                        val detail = when (slot.status) {
+                            "mapped" -> slot.sessionName ?: "unknown"
+                            "ambiguous" -> "ambiguous: ${slot.labels.joinToString(", ")}"
+                            else -> "unassigned"
+                        }
+                        Text(
+                            text = "PK${slot.family} → $detail",
+                            color = Color(0xFF111111),
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(vertical = 3.dp)
+                        )
+                        if (slot.status == "mapped" && slot.labels.isNotEmpty()) {
+                            GatewayOpsMutedLine("say: ${slot.labels.joinToString(", ")}")
+                        }
+                    }
+                }
+            }
+        }
+
+        item(key = "ops-agents") {
+            GatewayOpsCard(title = "DISCOVERED AGENTS") {
+                val agentInventory = inventory
+                if (agentInventory == null) {
+                    GatewayOpsMutedLine(if (loading) "Scanning agents…" else "Agent discovery unavailable on this gateway.")
+                } else {
+                    if (agentInventory.running.isEmpty() && agentInventory.recent.isEmpty()) {
+                        GatewayOpsMutedLine("No running or recent agents found on the host.")
+                    }
+                    if (agentInventory.running.isNotEmpty()) {
+                        GatewayOpsMutedLine("RUNNING — tap to target")
+                        agentInventory.running.forEach { agent ->
+                            GatewayOpsRow(
+                                title = agent.target,
+                                subtitle = listOfNotNull(agent.provider, agent.cwd ?: agent.cwdBasename).joinToString(" | "),
+                                onClick = {
+                                    scope.launch {
+                                        val (message, updated) = client.setRoute(agent.target)
+                                        opsStatus = message
+                                        if (updated != null) route = updated
+                                        prefs.codexSessionName = agent.target
+                                    }
+                                }
+                            )
+                        }
+                    }
+                    if (agentInventory.recent.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        GatewayOpsMutedLine("RECENT SESSIONS — tap to mount workspace")
+                        agentInventory.recent.take(10).forEach { session ->
+                            GatewayOpsRow(
+                                title = session.title ?: session.path.substringAfterLast('/').substringAfterLast('\\'),
+                                subtitle = listOfNotNull(session.provider, session.cwd ?: session.cwdBasename).joinToString(" | "),
+                                onClick = {
+                                    val cwd = session.cwd
+                                    if (!cwd.isNullOrBlank()) {
+                                        prefs.workspacePath = cwd
+                                        opsStatus = "Workspace mounted: $cwd"
+                                    } else {
+                                        opsStatus = "Session has no recorded workspace."
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item(key = "ops-events") {
+            GatewayOpsCard(title = "EVENTS", trailing = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (eventStreamConnected) Color(0xFF22C55E) else Color(0xFFC97E1A))
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        eventStreamDetail,
+                        color = Color(0xFF555555),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }) {
+                if (events.isEmpty()) {
+                    GatewayOpsMutedLine("No session events yet. Voice and admin actions on the host appear here live.")
+                } else {
+                    events.forEach { event ->
+                        val time = if (event.ts > 0L) {
+                            java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(event.ts))
+                        } else {
+                            "--:--:--"
+                        }
+                        Column(modifier = Modifier.padding(vertical = 3.dp)) {
+                            Text(
+                                text = "$time ${event.source}/${event.kind}",
+                                color = Color(0xFF111111),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (event.summary.isNotBlank()) {
+                                Text(
+                                    text = event.summary,
+                                    color = Color(0xFF555555),
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GatewayOpsCard(
+    title: String,
+    trailing: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, Color(0xFFB8B8B8), RoundedCornerShape(4.dp))
+            .background(Color.White, RoundedCornerShape(4.dp))
+            .padding(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(title, color = Color(0xFF111111), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            trailing?.invoke()
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        content()
+    }
+}
+
+@Composable
+private fun GatewayOpsMutedLine(text: String) {
+    Text(
+        text = text,
+        color = Color(0xFF555555),
+        fontSize = 10.sp,
+        fontFamily = FontFamily.Monospace,
+        lineHeight = 14.sp,
+        modifier = Modifier.padding(vertical = 1.dp)
+    )
+}
+
+@Composable
+private fun GatewayOpsRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(3.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 4.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = title,
+            color = Color(0xFF111111),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (subtitle.isNotBlank()) {
+            Text(
+                text = subtitle,
+                color = Color(0xFF555555),
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
 fun GatewayHubCommandButton(
     text: String,
     enabled: Boolean,
@@ -2552,7 +2972,10 @@ fun GatewaySessionRow(
     onUse: () -> Unit,
     onResume: (() -> Unit)? = null,
     onRemove: (() -> Unit)? = null,
-    onRouteOmpSession: ((String) -> Unit)? = null
+    onRouteOmpSession: ((String) -> Unit)? = null,
+    onRename: ((String) -> Unit)? = null,
+    onAlias: ((String) -> Unit)? = null,
+    onArchive: (() -> Unit)? = null
 ) {
     val isRouteCapable = entry.isRouteCapableIn(dashboard)
     val isSelectedFile = prefs.selectedGatewaySessionPath.isNotBlank() && prefs.selectedGatewaySessionPath == entry.canonicalSessionPath
@@ -2654,6 +3077,7 @@ fun GatewaySessionRow(
                 }
                 if (!isRouteCapable) item { GatewaySessionBadge("workspace only", Color(0xFF6E665A)) }
                 if (entry.resumable) item { GatewaySessionBadge("resumable", Color(0xFF2E7D52)) }
+                if (entry.stale) item { GatewaySessionBadge("stale", Color(0xFF6E665A)) }
             }
 
             if (!ompRoutePath.isNullOrBlank() && onRouteOmpSession != null) {
@@ -2742,6 +3166,16 @@ fun GatewaySessionRow(
                                 fontWeight = FontWeight.Bold
                             )
                         }
+                        if (onArchive != null) {
+                            OutlinedButton(
+                                onClick = onArchive,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+                                modifier = Modifier.height(34.dp),
+                                border = BorderStroke(1.dp, Color(0xFF111111))
+                            ) {
+                                Text("Archive", color = Color(0xFF111111), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                         if (onRemove != null) {
                             OutlinedButton(
                                 onClick = onRemove,
@@ -2759,6 +3193,64 @@ fun GatewaySessionRow(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(if (pendingRemove) "Confirm" else "Remove", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    if (onRename != null || onAlias != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        var manageText by remember(gatewaySessionKey(entry)) { mutableStateOf("") }
+                        OutlinedTextField(
+                            value = manageText,
+                            onValueChange = { manageText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("New name or wake alias", fontSize = 11.sp, fontFamily = FontFamily.Monospace) },
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, color = Color(0xFF111111), fontFamily = FontFamily.Monospace),
+                            shape = RoundedCornerShape(4.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF111111),
+                                unfocusedBorderColor = Color(0xFFB8B8B8),
+                                cursorColor = Color(0xFF111111),
+                                focusedTextColor = Color(0xFF111111),
+                                unfocusedTextColor = Color(0xFF111111)
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (onRename != null) {
+                                OutlinedButton(
+                                    onClick = {
+                                        val value = manageText.trim()
+                                        if (value.isNotEmpty()) {
+                                            onRename(value)
+                                            manageText = ""
+                                        }
+                                    },
+                                    enabled = manageText.isNotBlank(),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+                                    modifier = Modifier.height(34.dp),
+                                    border = BorderStroke(1.dp, Color(0xFF111111))
+                                ) {
+                                    Text("Rename", color = Color(0xFF111111), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            if (onAlias != null) {
+                                OutlinedButton(
+                                    onClick = {
+                                        val value = manageText.trim()
+                                        if (value.isNotEmpty()) {
+                                            onAlias(value)
+                                            manageText = ""
+                                        }
+                                    },
+                                    enabled = manageText.isNotBlank(),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+                                    modifier = Modifier.height(34.dp),
+                                    border = BorderStroke(1.dp, Color(0xFF111111))
+                                ) {
+                                    Text("Add alias", color = Color(0xFF111111), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
@@ -2845,11 +3337,12 @@ data class GatewayAgentHubGroup(
 fun buildGatewayAgentHubGroups(
     dashboard: GatewaySessionDashboard,
     currentWorkspace: String,
-    query: String
+    query: String,
+    ompOnly: Boolean = true
 ): List<GatewayAgentHubGroup> {
     val normalizedQuery = query.trim().lowercase()
     val visibleSessions = dashboard.sessions
-        .filter { entry -> gatewaySessionIsOmpLane(entry) }
+        .filter { entry -> !ompOnly || gatewaySessionIsOmpLane(entry) }
         .filter { entry -> normalizedQuery.isBlank() || gatewaySessionMatches(entry, dashboard, normalizedQuery) }
     val currentKey = gatewayFolderKey(currentWorkspace)
     return visibleSessions
@@ -3232,6 +3725,8 @@ fun SettingsTabContent(
     var workspaceEntries by remember { mutableStateOf<List<com.example.api.WorkspaceEntry>>(emptyList()) }
     var workspaceParent by remember { mutableStateOf<String?>(null) }
     var workspaceLoading by remember { mutableStateOf(false) }
+    var filePreview by remember { mutableStateOf<com.example.api.WorkspaceFilePreview?>(null) }
+    var filePreviewLoading by remember { mutableStateOf(false) }
     var connectionTesting by remember { mutableStateOf(false) }
     var connectionReport by remember { mutableStateOf<com.example.api.ConnectionTestReport?>(null) }
     val scope = rememberCoroutineScope()
@@ -3759,31 +4254,67 @@ fun SettingsTabContent(
                     if (workspaceLoading) {
                         Text(text = "Loading folders...", color = Color(0xFF6E665A), fontSize = 11.sp)
                     }
-                    workspaceEntries.take(12).forEach { entry ->
-                        Text(
-                            text = entry.name,
-                            color = Color(0xFFC2542F),
-                            fontSize = 12.sp,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    scope.launch {
-                                        workspaceLoading = true
-                                        val listing = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                            com.example.api.VoiceAgentClient(context, prefs).listWorkspace(entry.path)
+                    if (filePreviewLoading) {
+                        Text(text = "Loading file preview...", color = Color(0xFF6E665A), fontSize = 11.sp)
+                    }
+                    workspaceEntries.take(24).forEach { entry ->
+                        if (entry.isFile) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (!filePreviewLoading) {
+                                            scope.launch {
+                                                filePreviewLoading = true
+                                                filePreview = com.example.api.VoiceAgentClient(context, prefs).readWorkspaceFile(entry.path)
+                                                filePreviewLoading = false
+                                            }
                                         }
-                                        if (listing != null) {
-                                            workspacePath = listing.current
-                                            workspaceParent = listing.parent
-                                            workspaceEntries = listing.entries
-                                            prefs.workspacePath = listing.current
-                                            onConfigChanged()
-                                        }
-                                        workspaceLoading = false
                                     }
-                                }
-                                .padding(vertical = 6.dp)
-                        )
+                                    .padding(vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = entry.name,
+                                    color = Color(0xFF211C16),
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = formatWorkspaceFileSize(entry.size),
+                                    color = Color(0xFF6E665A),
+                                    fontSize = 10.sp
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "${entry.name}/",
+                                color = Color(0xFFC2542F),
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        scope.launch {
+                                            workspaceLoading = true
+                                            val listing = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                com.example.api.VoiceAgentClient(context, prefs).listWorkspace(entry.path)
+                                            }
+                                            if (listing != null) {
+                                                workspacePath = listing.current
+                                                workspaceParent = listing.parent
+                                                workspaceEntries = listing.entries
+                                                prefs.workspacePath = listing.current
+                                                onConfigChanged()
+                                            }
+                                            workspaceLoading = false
+                                        }
+                                    }
+                                    .padding(vertical = 6.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -4077,6 +4608,100 @@ fun SettingsTabContent(
                                 uncheckedTrackColor = Color(0xFFF4F1E9)
                             )
                         )
+                    }
+                }
+            }
+        }
+    }
+
+    filePreview?.let { preview ->
+        WorkspaceFileViewerDialog(preview = preview, onDismiss = { filePreview = null })
+    }
+}
+
+fun formatWorkspaceFileSize(size: Long?): String = when {
+    size == null -> ""
+    size >= 1_048_576L -> "%.1f MB".format(size / 1_048_576.0)
+    size >= 1_024L -> "%.1f KB".format(size / 1_024.0)
+    else -> "$size B"
+}
+
+@Composable
+fun WorkspaceFileViewerDialog(
+    preview: com.example.api.WorkspaceFilePreview,
+    onDismiss: () -> Unit
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.85f),
+            color = Color(0xFFFFFFFF),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = preview.name.ifBlank { preview.path.substringAfterLast('/').substringAfterLast('\\') }.ifBlank { "File" },
+                            color = Color(0xFF211C16),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = listOfNotNull(
+                                preview.path.takeIf { it.isNotBlank() },
+                                formatWorkspaceFileSize(preview.size.takeIf { it > 0L }).takeIf { it.isNotBlank() }
+                            ).joinToString(" · "),
+                            color = Color(0xFF6E665A),
+                            fontSize = 10.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Close", color = Color(0xFFC2542F), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                when {
+                    preview.error != null -> {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(preview.error, color = Color(0xFFB3261E), fontSize = 12.sp)
+                    }
+                    preview.binary -> {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Binary file — no preview available.", color = Color(0xFF6E665A), fontSize = 12.sp)
+                    }
+                    else -> {
+                        if (preview.truncated) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("Preview shows the first 512 KB of this file.", color = Color(0xFFC97E1A), fontSize = 10.sp)
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .border(1.dp, Color(0xFFE3DCCC), RoundedCornerShape(8.dp))
+                                .background(Color(0xFFFAF8F2), RoundedCornerShape(8.dp))
+                                .padding(10.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = preview.content.ifBlank { "(empty file)" },
+                                color = Color(0xFF211C16),
+                                fontSize = 11.sp,
+                                lineHeight = 16.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
                     }
                 }
             }
