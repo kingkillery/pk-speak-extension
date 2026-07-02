@@ -2,6 +2,8 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.api.GatewayRoute
+import com.example.api.GatewayRouteUpdate
 import com.example.api.GatewaySessionDashboard
 import com.example.api.GatewaySessionEntry
 import com.example.data.AppPreferences
@@ -129,5 +131,80 @@ class GatewaySessionSelectionTest {
     ).flatMap { it.sessions }.map { it.name }.toSet()
 
     assertEquals(setOf("OMP lane", "Background lane"), names)
+  }
+
+  @Test
+  fun buildGatewayAgentHubGroups_allSessionsModeIncludesNonOmpLanes() {
+    val dashboard = GatewaySessionDashboard(
+      current = "Main",
+      sessions = listOf(
+        GatewaySessionEntry(
+          name = "OMP lane",
+          sessionPath = "C:\\Users\\prest\\.omp\\agent\\sessions\\lane.jsonl",
+          workingDirectory = "C:\\dev\\pi-speak-extension",
+          source = "oh-my-pk"
+        ),
+        GatewaySessionEntry(
+          name = "Codex session",
+          sessionPath = "C:\\Users\\prest\\.codex\\session.jsonl",
+          workingDirectory = "C:\\dev\\pi-speak-extension",
+          provider = "codex"
+        )
+      )
+    )
+
+    val names = buildGatewayAgentHubGroups(
+      dashboard = dashboard,
+      currentWorkspace = "C:\\dev\\pi-speak-extension",
+      query = "",
+      ompOnly = false
+    ).flatMap { it.sessions }.map { it.name }.toSet()
+
+    assertEquals(setOf("OMP lane", "Codex session"), names)
+  }
+
+  @Test
+  fun applyGatewayRouteUpdateToPrefs_ignoresRejectedRouteUpdates() {
+    applyGatewayRouteUpdateToPrefs(
+      GatewayRouteUpdate(
+        message = "Unknown target.",
+        route = GatewayRoute(defaultTarget = "ExistingTarget", currentSession = "Main"),
+        ok = false
+      ),
+      "unknown-agent",
+      prefs
+    )
+
+    assertEquals("ExistingTarget", prefs.codexSessionName)
+  }
+
+  @Test
+  fun applyGatewayRouteUpdateToPrefs_usesConfirmedDefaultTarget() {
+    applyGatewayRouteUpdateToPrefs(
+      GatewayRouteUpdate(
+        message = "Route updated.",
+        route = GatewayRoute(defaultTarget = "CanonicalTarget", currentSession = "Main"),
+        ok = true
+      ),
+      "alias-target",
+      prefs
+    )
+
+    assertEquals("CanonicalTarget", prefs.codexSessionName)
+  }
+
+  @Test
+  fun applyGatewayRouteUpdateToPrefs_clearRouteFallsBackToCurrentSession() {
+    applyGatewayRouteUpdateToPrefs(
+      GatewayRouteUpdate(
+        message = "Route cleared.",
+        route = GatewayRoute(defaultTarget = null, currentSession = "Main"),
+        ok = true
+      ),
+      "",
+      prefs
+    )
+
+    assertEquals("Main", prefs.codexSessionName)
   }
 }

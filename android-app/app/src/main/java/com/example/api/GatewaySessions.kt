@@ -40,6 +40,8 @@ data class GatewaySessionEntry(
     val isReady: Boolean = false,
     val activity: String? = null,
     val aliases: List<String> = emptyList(),
+    val archived: Boolean = false,
+    val stale: Boolean = false,
     val kind: String? = null,
     val source: String? = null,
     val model: String? = null,

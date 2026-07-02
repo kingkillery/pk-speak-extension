@@ -76,6 +76,15 @@ android {
   testOptions { unitTests { isIncludeAndroidResources = true } }
 }
 
+// Pin Robolectric unit tests to JDK 21 so SDK 36 sandboxes are stable in Gradle, CI, and IDE runs.
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+  javaLauncher.set(
+    javaToolchains.launcherFor {
+      languageVersion.set(org.gradle.jvm.toolchain.JavaLanguageVersion.of(21))
+    }
+  )
+}
+
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.
 secrets {
