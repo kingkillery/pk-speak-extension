@@ -18,6 +18,7 @@ import { readExecutionPlans, readExecutionTraces } from "./conversation-executio
 import type { SessionDashboard, CompactRouteSlot } from "./session-routing.js";
 import type { AgentDiscoverySnapshot } from "./agent-discovery.js";
 import { getPiSpeakConfigDir } from "./setup-config.js";
+import { buildHerdrSnapshot, readHerdrPane, sendHerdrAgent, sendHerdrPane, type HerdrAgentSendPayload, type HerdrPaneReadResult, type HerdrPaneSendPayload, type HerdrSnapshot } from "./herdr-client.js";
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
@@ -252,6 +253,10 @@ export type ControlServerOptions = {
 	onOmpSelectSession?: (clientKey: string, sessionPath: string | null) => { ok: boolean; error?: string } | void;
 	onOmpGetSelectedSession?: (clientKey: string) => string | null;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
+	getHerdrSnapshot?: () => Promise<HerdrSnapshot>;
+	readHerdrPane?: (paneId: string | undefined, lines: number | undefined) => Promise<HerdrPaneReadResult>;
+	sendHerdrPane?: (payload: HerdrPaneSendPayload | undefined) => Promise<ControlActionResult>;
+	sendHerdrAgent?: (payload: HerdrAgentSendPayload | undefined) => Promise<ControlActionResult>;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 	onRealtimeConnection?: (ws: WebSocket) => void;
 	onBrainstorm?: (
@@ -373,6 +378,10 @@ export class ControlServer {
 	private readonly onOmpGetSelectedSession?: ControlServerOptions["onOmpGetSelectedSession"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
 	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
+	private readonly getHerdrSnapshot: NonNullable<ControlServerOptions["getHerdrSnapshot"]>;
+	private readonly readHerdrPane: NonNullable<ControlServerOptions["readHerdrPane"]>;
+	private readonly sendHerdrPane: NonNullable<ControlServerOptions["sendHerdrPane"]>;
+	private readonly sendHerdrAgent: NonNullable<ControlServerOptions["sendHerdrAgent"]>;
 	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
 	private readonly onBrainstorm?: ControlServerOptions["onBrainstorm"];
 	private wss?: WebSocketServer;
@@ -418,6 +427,10 @@ export class ControlServer {
 		this.onOmpSelectSession = options.onOmpSelectSession;
 		this.onOmpGetSelectedSession = options.onOmpGetSelectedSession;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
+		this.getHerdrSnapshot = options.getHerdrSnapshot || (() => buildHerdrSnapshot());
+		this.readHerdrPane = options.readHerdrPane || ((paneId, lines) => readHerdrPane(paneId, lines));
+		this.sendHerdrPane = options.sendHerdrPane || ((payload) => sendHerdrPane(payload));
+		this.sendHerdrAgent = options.sendHerdrAgent || ((payload) => sendHerdrAgent(payload));
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
 		this.onBrainstorm = options.onBrainstorm;
@@ -700,6 +713,32 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/herdr") {
+			this.writeJson(res, 200, { ok: true, herdr: await this.getHerdrSnapshot() });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/herdr/pane/read") {
+			const linesParam = url.searchParams.get("lines");
+			const lines = linesParam ? Number.parseInt(linesParam, 10) : undefined;
+			const result = await this.readHerdrPane(url.searchParams.get("paneId") || undefined, lines);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/herdr/pane/send") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = await this.sendHerdrPane(payload as HerdrPaneSendPayload | undefined);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/herdr/agent/send") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = await this.sendHerdrAgent(payload as HerdrAgentSendPayload | undefined);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
 		if (req.method === "GET" && url.pathname === "/v1/commands") {
 			this.writeJson(res, 200, {
 				ok: true,
@@ -1292,6 +1331,10 @@ export class ControlServer {
 				warpTab: "/v1/warp/tab",
 				warpTabConfig: "/v1/warp/tab-config",
 				warpPsmuxSession: "/v1/warp/psmux/session",
+				herdr: "/v1/herdr",
+				herdrPaneRead: "/v1/herdr/pane/read",
+				herdrPaneSend: "/v1/herdr/pane/send",
+				herdrAgentSend: "/v1/herdr/agent/send",
 				warpPsmuxWindow: "/v1/warp/psmux/window",
 			},
 			capabilities: [
@@ -1316,6 +1359,7 @@ export class ControlServer {
 				"event-stream",
 				"warp-control",
 				"psmux-control",
+				"herdr-control",
 			],
 			agent: status.agent
 				? {

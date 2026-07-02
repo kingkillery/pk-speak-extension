@@ -95,6 +95,10 @@ async function withServer(overrides = {}, fn) {
 		onOmpSelectSession: overrides.onOmpSelectSession,
 		onOmpGetSelectedSession: overrides.onOmpGetSelectedSession,
 		getDiscoveredAgents: overrides.getDiscoveredAgents,
+		getHerdrSnapshot: overrides.getHerdrSnapshot,
+		readHerdrPane: overrides.readHerdrPane,
+		sendHerdrPane: overrides.sendHerdrPane,
+		sendHerdrAgent: overrides.sendHerdrAgent,
 		tailSessionEvents: overrides.tailSessionEvents,
 	});
 	const runtime = await server.start();
@@ -1303,6 +1307,105 @@ test("agents endpoint returns structured running agents and recent session paths
 		assert.equal(body.running[0].cwdBasename, "pi-speak-extension");
 		assert.equal(body.recent[0].sessionId, "abc123");
 	});
+});
+
+test("discovery descriptor advertises Herdr control endpoints", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/.well-known/pi-speak",
+			headers: { Host: "tailnet.example" },
+		});
+		assert.equal(response.statusCode, 200);
+		const descriptor = response.json();
+		assert.equal(descriptor.endpoints.herdr, "/v1/herdr");
+		assert.equal(descriptor.endpoints.herdrPaneRead, "/v1/herdr/pane/read");
+		assert.equal(descriptor.endpoints.herdrPaneSend, "/v1/herdr/pane/send");
+		assert.equal(descriptor.endpoints.herdrAgentSend, "/v1/herdr/agent/send");
+		assert.ok(descriptor.capabilities.includes("herdr-control"));
+	});
+});
+
+test("Herdr snapshot endpoint returns workspaces panes and agents", async () => {
+	await withServer({
+		getHerdrSnapshot: () => ({
+			available: true,
+			executable: "herdr",
+			workspaces: [{ id: "w1", label: "pi-speak" }],
+			panes: [{ pane_id: "w1:p1", label: "agent" }],
+			agents: [{ pane_id: "w1:p1", state: "working" }],
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/herdr",
+			method: "GET",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		const body = response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.herdr.available, true);
+		assert.equal(body.herdr.workspaces[0].label, "pi-speak");
+		assert.equal(body.herdr.panes[0].pane_id, "w1:p1");
+		assert.equal(body.herdr.agents[0].state, "working");
+	});
+});
+
+test("Herdr pane read endpoint forwards pane id and line count", async () => {
+	await withServer({
+		readHerdrPane: (paneId, lines) => ({ ok: true, message: `read:${paneId}:${lines}`, paneId, text: "recent output" }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/herdr/pane/read?paneId=w1%3Ap2&lines=25",
+			method: "GET",
+			headers: { Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 200);
+		const body = response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "read:w1:p2:25");
+		assert.equal(body.text, "recent output");
+	});
+});
+
+test("Herdr send endpoints forward pane and agent payloads", async () => {
+	const seen = [];
+	await withServer({
+		sendHerdrPane: (payload) => {
+			seen.push({ kind: "pane", payload });
+			return { ok: true, message: "pane sent" };
+		},
+		sendHerdrAgent: (payload) => {
+			seen.push({ kind: "agent", payload });
+			return { ok: true, message: "agent sent" };
+		},
+	}, async (port) => {
+		const pane = await request({
+			port,
+			path: "/v1/herdr/pane/send",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ paneId: "w1:p2", text: "npm test", submit: true }),
+		});
+		assert.equal(pane.statusCode, 200);
+		assert.equal(pane.json().message, "pane sent");
+
+		const agent = await request({
+			port,
+			path: "/v1/herdr/agent/send",
+			method: "POST",
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ agentId: "w1:p2", text: "continue" }),
+		});
+		assert.equal(agent.statusCode, 200);
+		assert.equal(agent.json().message, "agent sent");
+	});
+	assert.deepEqual(seen, [
+		{ kind: "pane", payload: { paneId: "w1:p2", text: "npm test", submit: true } },
+		{ kind: "agent", payload: { agentId: "w1:p2", text: "continue" } },
+	]);
 });
 
 test("event stream endpoint returns SSE headers and initial data", async () => {

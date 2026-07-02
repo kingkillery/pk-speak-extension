@@ -7,6 +7,7 @@ import { homedir, networkInterfaces, platform, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
 import { ControlServer, type ControlActionResult, type ControlServerState, type GatewayAgentProvider, type RemoteSlashCommand, type SessionLaunchPayload, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
+import { sendHerdrPane } from "./herdr-client.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type ConversationExecutionPlan, type ConversationReducerSummary, type RemoteTurnResult, type TurnProgressEvent, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
@@ -1139,7 +1140,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getRoutingStatus = () => ({
 		defaultTarget: remoteDefaultTarget,
 		currentSession: pi.getSessionName() || undefined,
-		availableTargets: getKnownTargets(),
+		availableTargets: [...getKnownTargets(), ...(remoteDefaultTarget?.startsWith("herdr:") ? [remoteDefaultTarget] : [])],
 	});
 
 	const setRoutingTarget = (target?: string): ControlActionResult => {
@@ -1147,6 +1148,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (!trimmed) {
 			syncRemoteState({ defaultTarget: undefined }, true);
 			return { ok: true, message: "Remote target cleared. New turns stay on the current session." };
+		}
+		if (trimmed.startsWith("herdr:")) {
+			syncRemoteState({ defaultTarget: trimmed }, true);
+			return { ok: true, message: `Remote target set to ${trimmed}.` };
 		}
 		const match = resolveSessionByName(trimmed);
 		if (!match) {
@@ -1474,6 +1479,20 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 
 		const desiredTarget = targetName?.trim() || remoteDefaultTarget;
+		if (desiredTarget?.startsWith("herdr:")) {
+			const paneId = desiredTarget.slice("herdr:".length).trim();
+			const result = await sendHerdrPane({ paneId, text: trimmed, submit: true });
+			const replyText = result.ok ? `Sent turn to Herdr pane ${paneId}.` : `Herdr turn failed: ${result.message}`;
+			appendExecutionTrace({
+				ts: Date.now(),
+				source,
+				rawText: trimmed,
+				targetName: desiredTarget,
+				outcome: result.ok ? "dispatch-success" : "dispatch-failed",
+				replyText,
+			});
+			return { replyText, transcript, warnings: result.ok ? warnings : [...(warnings || []), result.message] };
+		}
 		const isVoiceInput = source === "http-voice" || source === "telegram-voice";
 		const directBackend: GatewayAgentProvider = agentProvider || (
 			agentProviderConfig.provider === "codex" || agentProviderConfig.provider === "claude" || agentProviderConfig.provider === "oh-my-pk"
