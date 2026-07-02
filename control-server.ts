@@ -19,6 +19,10 @@ import type { SessionDashboard, CompactRouteSlot } from "./session-routing.js";
 import type { AgentDiscoverySnapshot } from "./agent-discovery.js";
 import { getPiSpeakConfigDir } from "./setup-config.js";
 import { buildHerdrSnapshot, readHerdrPane, sendHerdrAgent, sendHerdrPane, type HerdrAgentSendPayload, type HerdrPaneReadResult, type HerdrPaneSendPayload, type HerdrSnapshot } from "./herdr-client.js";
+import { createDiskFallbackBinding } from "./herdr-agent-hub-disk.js";
+import { AgentHubGateway, type AgentHubBinding } from "./herdr-agent-hub-gateway.js";
+import { parseHubAgentId, parseHubChatRequest, parseHubKillConfirm } from "./herdr-agent-hub-schema.js";
+import { buildOhMyPiAgentHubDashboardCached } from "./agent-hub-dashboard.js";
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
@@ -258,6 +262,7 @@ export type ControlServerOptions = {
 	sendHerdrPane?: (payload: HerdrPaneSendPayload | undefined) => Promise<ControlActionResult>;
 	sendHerdrAgent?: (payload: HerdrAgentSendPayload | undefined) => Promise<ControlActionResult>;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
+	agentHub?: AgentHubBinding;
 	onRealtimeConnection?: (ws: WebSocket) => void;
 	onBrainstorm?: (
 		buffer: Buffer,
@@ -388,6 +393,7 @@ export class ControlServer {
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
+	private readonly agentHubGateway: AgentHubGateway;
 	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
@@ -433,6 +439,7 @@ export class ControlServer {
 		this.sendHerdrAgent = options.sendHerdrAgent || ((payload) => sendHerdrAgent(payload));
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
+		this.agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
 		this.onBrainstorm = options.onBrainstorm;
 	}
 
@@ -734,6 +741,62 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/herdr/agents") {
+			const snapshot = await this.agentHubGateway.snapshot();
+			this.writeJson(res, 200, { ok: true, generatedAtMs: Date.now(), ...snapshot });
+			return;
+		}
+
+		{
+			const agentMatch = /^\/v1\/herdr\/agent\/([^/]+)(?:\/(chat|revive|kill))?$/.exec(url.pathname);
+			if (agentMatch) {
+				const id = parseHubAgentId(decodeURIComponent(agentMatch[1] ?? ""));
+				if (!id) {
+					this.writeJson(res, 400, { ok: false, code: "bad_id", error: "Malformed agent id." });
+					return;
+				}
+				const action = agentMatch[2];
+				if (req.method === "GET" && !action) {
+					const lines = parsePositiveInt(url.searchParams.get("lines"), 80);
+					const agent = await this.agentHubGateway.detail(id, Math.min(lines, 500));
+					if (!agent) { this.writeJson(res, 404, { ok: false, code: "not_found", error: `Unknown agent: ${id}` }); return; }
+					this.writeJson(res, 200, { ok: true, agent });
+					return;
+				}
+				if (req.method === "POST" && action === "chat") {
+					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+					const parsed = parseHubChatRequest(payload, getPrimaryHeaderValue(req.headers["x-pi-speak-idempotency-key"]));
+					if (!parsed) { this.writeJson(res, 400, { ok: false, code: "bad_request", error: "Body must be { text } (non-empty, <=8192 chars)." }); return; }
+					const result = await this.agentHubGateway.chat(id, parsed.text, parsed.idempotencyKey);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+				if (req.method === "POST" && action === "revive") {
+					const result = await this.agentHubGateway.revive(id);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+				if (req.method === "POST" && action === "kill") {
+					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+					const confirm = parseHubKillConfirm(payload ?? undefined);
+					const result = await this.agentHubGateway.kill(id, confirm?.confirmToken);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+			}
+		}
+
+		{
+			const streamMatch = /^\/v1\/herdr\/stream\/([^/]+)$/.exec(url.pathname);
+			if (req.method === "GET" && streamMatch) {
+				const id = parseHubAgentId(decodeURIComponent(streamMatch[1] ?? ""));
+				if (!id) { this.writeJson(res, 400, { ok: false, code: "bad_id", error: "Malformed agent id." }); return; }
+				const fromByte = parseNonNegativeInt(url.searchParams.get("fromByte"), 0);
+				// SSE: long-lived stream — don't apply REQUEST_TIMEOUT_MS here.
+				await this.agentHubGateway.stream(id, res, fromByte);
+				return;
+			}
+		}
 		if (req.method === "POST" && url.pathname === "/v1/herdr/agent/send") {
 			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 			const result = await this.sendHerdrAgent(payload as HerdrAgentSendPayload | undefined);
@@ -1336,6 +1399,9 @@ export class ControlServer {
 				herdrPaneRead: "/v1/herdr/pane/read",
 				herdrPaneSend: "/v1/herdr/pane/send",
 				herdrAgentSend: "/v1/herdr/agent/send",
+				herdrAgents: "/v1/herdr/agents",
+				herdrAgent: "/v1/herdr/agent/:id",
+				herdrStream: "/v1/herdr/stream/:id",
 				warpPsmuxWindow: "/v1/warp/psmux/window",
 			},
 			capabilities: [
@@ -1357,10 +1423,9 @@ export class ControlServer {
 				"route-slots",
 				"session-mutations",
 				"agent-discovery",
-				"event-stream",
-				"warp-control",
 				"psmux-control",
 				"herdr-control",
+				"agent-hub",
 			],
 			agent: status.agent
 				? {
