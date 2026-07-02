@@ -183,7 +183,7 @@ test("validateOmpSelection accepts a real in-roots session, rejects bad ones, al
 		mkdirSync(projectDir, { recursive: true });
 		const realPath = join(projectDir, "2026-06-23T000000_s.jsonl");
 		writeFileSync(realPath, `${JSON.stringify({ type: "session", id: "s" })}\n`);
-		const env = { PI_SPEAK_OH_MY_PI_SESSIONS_ROOT: root };
+		const env = { PI_SPEAK_OH_MY_PK_SESSIONS_ROOT: root };
 
 		// Deselect is always ok.
 		assert.deepEqual(validateOmpSelection(null, env), { ok: true });
@@ -196,7 +196,7 @@ test("validateOmpSelection accepts a real in-roots session, rejects bad ones, al
 		// Outside configured roots → rejected.
 		const outside = validateOmpSelection(join(tmp, "elsewhere", "x.jsonl"), env);
 		assert.equal(outside.ok, false);
-		assert.match(outside.error, /outside the configured oh-my-pi roots/);
+		assert.match(outside.error, /outside the configured oh-my-pk roots/);
 
 		// Under roots but does not exist → rejected.
 		const missing = validateOmpSelection(join(projectDir, "gone.jsonl"), env);

@@ -171,7 +171,7 @@ function createExecutionProviderDecision(
 		preferShared,
 		sharedProvider: provider,
 		fallbackProvider,
-		// omp resume selection is handled per-client upstream in runTextTurn/runVoiceTurn;
+		// ompk resume selection is handled per-client upstream in runTextTurn/runVoiceTurn;
 		// the route path only runs when no selection short-circuited, so none here.
 		ompSessionPath: undefined,
 	});
@@ -315,10 +315,10 @@ async function runTextTurn(
 	if (!prompt) return { replyText: "Send a message first." };
 	const localSlashResult = handleHeadlessSlashCommand(prompt, { model, cwd, agentProvider });
 	if (localSlashResult) return localSlashResult;
-	// Per-client omp resume selection. An explicit non-omp agentProvider/target on
+	// Per-client ompk resume selection. An explicit non-ompk agentProvider/target on
 	// this turn overrides the sticky selection (one-off to another backend).
 	const selectedOmp = ompSelection.get(clientKey);
-	const explicitOverride = (agentProvider && agentProvider !== "oh-my-pi") || !!target;
+	const explicitOverride = (agentProvider && agentProvider !== "oh-my-pk") || !!target;
 	if (selectedOmp && !explicitOverride) {
 		const workingDirectory = cwd || getDefaultAgentCwd();
 		const resumeProvider = createOmpResumeProvider(agentConfig.ompBin, workingDirectory, selectedOmp, process.env);
@@ -414,7 +414,7 @@ async function runCodingAgentTurn(
 	try {
 		replyText = await collectAgentResponse(activeProvider, prompt, options);
 	} catch (error) {
-		// When the caller owns failure handling (e.g. an explicit omp resume
+		// When the caller owns failure handling (e.g. an explicit ompk resume
 		// selection), surface the error to the user instead of silently answering
 		// from an unrelated fallback backend (review H3).
 		if (onPrimaryFailure) {
@@ -518,10 +518,10 @@ async function runVoiceTurn(
 			],
 		};
 	}
-	// Honor this client's omp selection for voice too (parity with text), unless an
-	// explicit non-omp provider/target overrides it for this turn.
+	// Honor this client's ompk selection for voice too (parity with text), unless an
+	// explicit non-ompk provider/target overrides it for this turn.
 	const selectedOmp = ompSelection.get(clientKey);
-	const explicitOverride = (agentProvider && agentProvider !== "oh-my-pi") || !!target;
+	const explicitOverride = (agentProvider && agentProvider !== "oh-my-pk") || !!target;
 	const result = selectedOmp && !explicitOverride
 		? await runTextTurn(transcript, includeAudio, cwd, transcript, target, agentProvider, model, clientKey)
 		: await runRoutedVoiceTextTurn(transcript, includeAudio, cwd, transcript, progress, target, agentProvider, model);
@@ -554,7 +554,7 @@ async function runRoutedVoiceTextTurn(
 	// When using Gemini Live as the agent, skip the reducer entirely. Gemini handles
 	// routing naturally via the run_coding_task function call.
 	if (agentConfig.provider === "gemini-live" && includeAudio) {
-		addProgress(progress, "route", "Voice route: Gemini Live with oh-my-pi tool.");
+		addProgress(progress, "route", "Voice route: Gemini Live with oh-my-pk tool.");
 		const toolHandler: import("./gemini-live-turn.js").GeminiToolHandler = async (name, args) => {
 			if (name === "run_coding_task") {
 				const taskResult = await runCodingAgentTurn(
@@ -641,7 +641,7 @@ async function runRoutedVoiceTextTurn(
 }
 
 function isRunnableVoiceBackend(backend: ExecutionBackend | GatewayProviderOverride): backend is GatewayProviderOverride {
-	return backend === "pi" || backend === "codex" || backend === "claude" || backend === "oh-my-pi";
+	return backend === "pi" || backend === "codex" || backend === "claude" || backend === "oh-my-pk";
 }
 
 async function runTextTurnWithProgress(
@@ -747,7 +747,7 @@ function buildRecentSessionDashboard(): SessionDashboard {
 		storePath: "recent CLI sessions",
 		sessions,
 	};
-	// oh-my-pi background agents are the primary surface of the app; merge them in
+	// oh-my-pk background agents are the primary surface of the app; merge them in
 	// (cached, stale-while-revalidate) so they appear over Tailscale, not just in
 	// the in-terminal extension.
 	const merged = mergeOhMyPiAgentHubSessionsCached(base);
@@ -840,11 +840,15 @@ function launchDetachedCli(command: string, args: string[], cwd: string, title: 
 }
 
 function resolveOhMyPiCommand(): string {
-	return process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
+	return process.env.PI_SPEAK_OH_MY_PK_BIN?.trim()
+		|| process.env.OMPK_BIN?.trim()
+		|| process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
 		|| process.env.OMP_BIN?.trim()
+		|| resolveWindowsNpmShim("ompk.cmd")
+		|| resolveWindowsNpmShim("ompk")
 		|| resolveWindowsNpmShim("omp.cmd")
 		|| resolveWindowsNpmShim("omp")
-		|| "omp";
+		|| "ompk";
 }
 
 function launchOhMyPiAgent(argv: string[], cwd: string) {
@@ -887,7 +891,7 @@ function archiveOrRecoverSession(sessionPath: string, action: "archive" | "recov
 	const trimmed = sessionPath?.trim();
 	if (!trimmed) return { ok: false, message: "sessionPath is required." };
 
-	// oh-my-pi lanes carry an in-file backgroundInstance.status; flip it in place.
+	// oh-my-pk lanes carry an in-file backgroundInstance.status; flip it in place.
 	if (isOhMyPiSessionPath(trimmed)) {
 		const result = action === "recover"
 			? recoverOhMyPiBackgroundSession(trimmed)
@@ -1067,8 +1071,8 @@ ${text}
 			return {
 				ok: true,
 				message: built.mode === "hub"
-					? `Launching Oh-my-pi Agent Hub in ${launched.cwd}.`
-					: `Launching Oh-my-pi agent in ${launched.cwd}.`,
+					? `Launching Oh-my-pk Agent Hub in ${launched.cwd}.`
+					: `Launching Oh-my-pk agent in ${launched.cwd}.`,
 				command: launched.command,
 				argv: launched.argv,
 				cwd: launched.cwd,

@@ -199,7 +199,7 @@ private fun BooxRoot(
         )
     }
 
-    // Hub visibility is part of cockpit UX (peek the gateway dashboard including oh-my-pi
+    // Hub visibility is part of cockpit UX (peek the gateway dashboard including oh-my-pk
     // background lanes). It does NOT add a "send to lane" button -- read-only by design.
     var showHub by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
@@ -1393,7 +1393,7 @@ private fun LiveButton(
     }
 }
 
-// ─── Hub pane: read-only gateway session dashboard including oh-my-pi lanes ─
+// ─── Hub pane: read-only gateway session dashboard including oh-my-pk lanes ─
 private sealed class BooxHubUiState {
     data object Idle : BooxHubUiState()
     data object Loading : BooxHubUiState()
@@ -1441,7 +1441,7 @@ private fun HubPane(
             .padding(8.dp)
     ) {
         Text(
-            text = "OMP AGENT HUB (read-only)",
+            text = "OMPK AGENT HUB (read-only)",
             color = Ink,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
@@ -1449,23 +1449,23 @@ private fun HubPane(
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
-            text = "Persistent oh-my-pi sessions on the host. " +
+            text = "Persistent oh-my-pk sessions on the host. " +
                 "Tap ROUTE TURNS HERE on a session to direct voice/text turns into it. " +
-                "LAUNCH OMP HUB starts a new background session.",
+                "LAUNCH OMPK HUB starts a new background session.",
             color = Color(0xFF555555),
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        // ─── Launch OMP Hub (EPD-friendly: bordered, monospace, no animation) ─
+        // ─── Launch OMPK Hub (EPD-friendly: bordered, monospace, no animation) ─
         OutlinedButton(
             onClick = {
                 if (launching) return@OutlinedButton
                 launching = true
-                launchStatus = "Launching OMP hub..."
+                launchStatus = "Launching OMPK hub..."
                 // Launching the hub also routes turns to it.
-                prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+                prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
                 scope.launch {
                     launchStatus = client.launchOmpHub()
                     launching = false
@@ -1476,7 +1476,7 @@ private fun HubPane(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Text(
-                text = if (launching) "LAUNCHING..." else "LAUNCH OMP HUB",
+                text = if (launching) "LAUNCHING..." else "LAUNCH OMPK HUB",
                 color = Ink,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
@@ -1643,7 +1643,7 @@ private fun HubLoadedContent(
     onSelectSession: (String) -> Unit,
 ) {
     val byKind = remember(dashboard) { groupSessionsByKind(dashboard.sessions) }
-    val isOhMyPiGroupEmpty = byKind["oh-my-pi"].isNullOrEmpty()
+    val isOhMyPkGroupEmpty = byKind["oh-my-pk"].isNullOrEmpty()
     if (dashboard.sessions.isEmpty()) {
         Text(
             text = "No sessions reported by gateway.",
@@ -1657,9 +1657,9 @@ private fun HubLoadedContent(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // This is the OMP Agent Hub: surface ONLY oh-my-pi background agent lanes. codex/remote/
+        // This is the OMPK Agent Hub: surface ONLY oh-my-pk background agent lanes. codex/remote/
         // other gateway sessions are intentionally hidden here. Read-only -- no "drive lane" button.
-        val order = listOf("oh-my-pi")
+        val order = listOf("oh-my-pk")
         for (kind in order) {
             val entries = byKind[kind].orEmpty()
             if (entries.isEmpty()) continue
@@ -1682,10 +1682,10 @@ private fun HubLoadedContent(
                 )
             }
         }
-        if (isOhMyPiGroupEmpty) {
+        if (isOhMyPkGroupEmpty) {
             item(key = "omp-empty") {
                 Text(
-                    text = "No oh-my-pi background lanes running. Start one on the host (oh-my-pi 'agent mode') and it will appear here.",
+                    text = "No oh-my-pk background lanes running. Start one on the host (oh-my-pk agent mode) and it will appear here.",
                     color = Color(0xFF555555),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -1786,7 +1786,7 @@ private fun HubSessionRow(
 }
 
 private fun kindLabel(kind: String): String = when (kind) {
-    "oh-my-pi" -> "AGENT (oh-my-pi background lanes)"
+    "oh-my-pk" -> "AGENT (oh-my-pk background lanes)"
     "codex" -> "CODEX"
     "remote" -> "REMOTE"
     else -> "OTHER"
@@ -1796,8 +1796,9 @@ private fun groupSessionsByKind(sessions: List<GatewaySessionEntry>): Map<String
     val out = mutableMapOf<String, MutableList<GatewaySessionEntry>>()
     for (entry in sessions) {
         val key = when {
-            entry.source.equals("oh-my-pi", ignoreCase = true) -> "oh-my-pi"
-            entry.kind.equals("background", ignoreCase = true) -> "oh-my-pi"
+            entry.source.equals("oh-my-pk", ignoreCase = true) -> "oh-my-pk"
+            entry.source.equals("oh-my-pi", ignoreCase = true) -> "oh-my-pk"
+            entry.kind.equals("background", ignoreCase = true) -> "oh-my-pk"
             entry.provider.equals("codex", ignoreCase = true) -> "codex"
             entry.provider.equals("remote", ignoreCase = true) -> "remote"
             else -> "other"
@@ -1815,10 +1816,11 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
     var token by remember { mutableStateOf(prefs.remoteToken) }
     var session by remember { mutableStateOf(prefs.codexSessionName) }
     var agent by remember { mutableStateOf(prefs.activeAgent) }
-    val ompAgent = "Gateway OMP (oh-my-pi)"
+    val ompAgent = "Gateway OMPK (oh-my-pk)"
+    val legacyOmpAgent = "Gateway OMP (oh-my-pi)"
     // Remember what to fall back to when OMP routing is switched off.
     var previousAgent by remember {
-        mutableStateOf(if (agent == ompAgent) "Local Codex (Pi)" else agent.ifBlank { "Local Codex (Pi)" })
+        mutableStateOf(if (agent == ompAgent || agent == legacyOmpAgent) "Local Codex (Pi)" else agent.ifBlank { "Local Codex (Pi)" })
     }
     var showProgress by remember { mutableStateOf(prefs.showTurnProgress) }
     var speakProgress by remember { mutableStateOf(prefs.speakTurnProgress) }
@@ -1927,14 +1929,14 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
             }
         }
 
-        // Sends agentProvider="oh-my-pi" with each turn so the gateway runs omp -p --auto-approve.
-        // This is stateless (a fresh omp process per turn), not the same as routing into a running Hub session.
+        // Sends agentProvider="oh-my-pk" with each turn so the gateway runs ompk -p --auto-approve.
+        // This is stateless (a fresh ompk process per turn), not the same as routing into a running Hub session.
         ToggleRow(
-            label = "Send turns via oh-my-pi (stateless)",
-            value = agent == ompAgent,
+            label = "Send turns via oh-my-pk (stateless)",
+            value = agent == ompAgent || agent == legacyOmpAgent,
         ) { on ->
             if (on) {
-                if (agent != ompAgent) previousAgent = agent.ifBlank { "Local Codex (Pi)" }
+                if (agent != ompAgent && agent != legacyOmpAgent) previousAgent = agent.ifBlank { "Local Codex (Pi)" }
                 agent = ompAgent
             } else {
                 agent = previousAgent.ifBlank { "Local Codex (Pi)" }
@@ -1947,7 +1949,7 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
                     prefs.targetIpAddress = gateway.trim()
                     prefs.remoteToken = token.trim()
                     prefs.codexSessionName = session.trim()
-                    prefs.activeAgent = agent.trim()
+                    prefs.activeAgent = if (agent.trim() == legacyOmpAgent) ompAgent else agent.trim()
                     prefs.showTurnProgress = showProgress
                     prefs.speakTurnProgress = speakProgress
                     savedHint = true

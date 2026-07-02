@@ -76,14 +76,18 @@ function launchDetachedCli(command: string, args: string[], cwd: string, title: 
 }
 
 function resolveOhMyPiCommand(): string {
-	return process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
+	return process.env.PI_SPEAK_OH_MY_PK_BIN?.trim()
+		|| process.env.OMPK_BIN?.trim()
+		|| process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
 		|| process.env.OMP_BIN?.trim()
+		|| resolveWindowsNpmShim("ompk.cmd")
+		|| resolveWindowsNpmShim("ompk")
 		|| resolveWindowsNpmShim("omp.cmd")
 		|| resolveWindowsNpmShim("omp")
-		|| "omp";
+		|| "ompk";
 }
 
-// Spawn an omp agent with stdout captured (NOT detached) so progress can be
+// Spawn an ompk agent with stdout captured (NOT detached) so progress can be
 // narrated. Used only on the NON_BLOCKING path; the detached fire-and-forget
 // launch via onSessionLaunch is unchanged.
 function spawnNarratedOmp(prompt: string, cwd: string) {
@@ -583,7 +587,7 @@ async function startNewSession(
 				},
 				{
 					name: "launch_agent",
-					description: "Launches a new oh-my-pi background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'.",
+					description: "Launches a new oh-my-pk background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'.",
 					parameters: {
 						type: "OBJECT",
 						properties: {
@@ -929,7 +933,7 @@ async function startNewSession(
 					const hubOnly = call.args?.hubOnly as boolean | undefined;
 					const targetNode = call.args?.targetNode as string | undefined;
 					if (activeSession.nonBlockingEnabled && prompt && !hubOnly && !targetNode) {
-						// Narrated launch: spawn omp with captured stdout and stream progress
+						// Narrated launch: spawn ompk with captured stdout and stream progress
 						// into the conversation. Deferred (NON_BLOCKING) so the loop stays live.
 						deferToolResponse = true;
 						try {

@@ -64,14 +64,14 @@ class GatewaySessionSelectionTest {
   }
 
   @Test
-  fun gatewaySessionOmpRoutePath_onlyResolvesOmpBackgroundLanes() {
+  fun gatewaySessionOmpRoutePath_onlyResolvesOmpkBackgroundLanes() {
     assertEquals(
       "C:\\Users\\prest\\.omp\\agent\\sessions\\lane.jsonl",
       gatewaySessionOmpRoutePath(
         GatewaySessionEntry(
           name = "OMP lane",
           sessionPath = "C:\\Users\\prest\\.omp\\agent\\sessions\\lane.jsonl",
-          source = "oh-my-pi"
+          source = "oh-my-pk"
         )
       )
     )
@@ -97,7 +97,7 @@ class GatewaySessionSelectionTest {
   }
 
   @Test
-  fun buildGatewayAgentHubGroups_filtersToOmpBackgroundLanes() {
+  fun buildGatewayAgentHubGroups_filtersToOmpkBackgroundLanes() {
     val dashboard = GatewaySessionDashboard(
       current = "Main",
       sessions = listOf(
@@ -105,7 +105,7 @@ class GatewaySessionSelectionTest {
           name = "OMP lane",
           sessionPath = "C:\\Users\\prest\\.omp\\agent\\sessions\\lane.jsonl",
           workingDirectory = "C:\\dev\\pi-speak-extension",
-          source = "oh-my-pi"
+          source = "oh-my-pk"
         ),
         GatewaySessionEntry(
           name = "Background lane",

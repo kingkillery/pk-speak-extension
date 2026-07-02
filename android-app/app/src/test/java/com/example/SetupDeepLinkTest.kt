@@ -72,7 +72,7 @@ class SetupDeepLinkTest {
       agentProvider = "claude",
       agentModel = "gpt-test",
       workspaceRoot = "C:\\dev",
-      workspacePath = "C:\\dev\\Desktop-Projects\\oh-my-pi-fork"
+      workspacePath = "C:\\dev\\Desktop-Projects\\oh-my-pk-fork"
     )
 
     applySetupDeepLink(prefs, setup)
@@ -85,11 +85,11 @@ class SetupDeepLinkTest {
     assertEquals("Gateway Claude (Claude Code)", prefs.activeAgent)
     assertEquals("gpt-test", prefs.agentModel)
     assertEquals("C:\\dev", prefs.workspaceRoot)
-    assertEquals("C:\\dev\\Desktop-Projects\\oh-my-pi-fork", prefs.workspacePath)
+    assertEquals("C:\\dev\\Desktop-Projects\\oh-my-pk-fork", prefs.workspacePath)
   }
 
   @Test
-  fun applySetupDeepLink_mapsOhMyPiProviderToOmpAgent() {
+  fun applySetupDeepLink_mapsOhMyPkProviderToOmpkAgent() {
     val prefs = AppPreferences(context)
     val setup = SetupDeepLink(
       baseUrl = "http://100.93.214.66:8767",
@@ -105,6 +105,6 @@ class SetupDeepLinkTest {
 
     applySetupDeepLink(prefs, setup)
 
-    assertEquals("Gateway OMP (oh-my-pi)", prefs.activeAgent)
+    assertEquals("Gateway OMPK (oh-my-pk)", prefs.activeAgent)
   }
 }

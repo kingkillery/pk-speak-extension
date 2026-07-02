@@ -1,4 +1,4 @@
-// Per-client oh-my-pi resume-session selection.
+// Per-client oh-my-pk resume-session selection.
 //
 // Replaces the previous process-global `activeOmpSessionPath`, which leaked one
 // client's selection into every other client's turns on a multi-client gateway

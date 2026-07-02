@@ -225,9 +225,9 @@ class VoiceAgentClientConnectionTest {
     servers.add(server)
     prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
     prefs.remoteToken = "secret-token"
-    prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+    prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
     prefs.codexSessionName = "main"
-    prefs.workspacePath = "C:\\dev\\Desktop-Projects\\oh-my-pi-fork"
+    prefs.workspacePath = "C:\\dev\\Desktop-Projects\\oh-my-pk-fork"
     prefs.agentModel = "gpt-test"
     val client = VoiceAgentClient(context, prefs)
 
@@ -235,9 +235,9 @@ class VoiceAgentClientConnectionTest {
 
     assertEquals("model received", result.replyText)
     assertEquals("secret-token", seenToken)
-    assertTrue(seenBody.contains("\"agentProvider\":\"oh-my-pi\""))
+    assertTrue(seenBody.contains("\"agentProvider\":\"oh-my-pk\""))
     assertTrue(seenBody.contains("\"target\":\"main\""))
-    assertTrue(seenBody.contains("\"cwd\":\"C:\\\\dev\\\\Desktop-Projects\\\\oh-my-pi-fork\""))
+    assertTrue(seenBody.contains("\"cwd\":\"C:\\\\dev\\\\Desktop-Projects\\\\oh-my-pk-fork\""))
     assertTrue(seenBody.contains("\"model\":\"gpt-test\""))
   }
 
@@ -270,7 +270,7 @@ class VoiceAgentClientConnectionTest {
                 "activity": "idle",
                 "aliases": ["one", "ready"],
                 "kind": "background",
-                "source": "oh-my-pi",
+                "source": "oh-my-pk",
                 "model": "gpt-5",
                 "role": "reviewer",
                 "createdAt": 1782208800000,
@@ -318,7 +318,7 @@ class VoiceAgentClientConnectionTest {
     assertEquals(listOf("one", "ready"), session.aliases)
     assertEquals("C:\\dev\\Ready", session.displayCwd)
     assertEquals("background", session.kind)
-    assertEquals("oh-my-pi", session.source)
+    assertEquals("oh-my-pk", session.source)
     assertEquals("gpt-5", session.model)
     assertEquals("reviewer", session.role)
     assertEquals(1782208800000, session.createdAt)

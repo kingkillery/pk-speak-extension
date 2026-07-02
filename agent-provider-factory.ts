@@ -7,14 +7,15 @@ import { resolveWindowsPiNodeCommand } from "./agent-discovery.js";
 import { runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { ResumedGatewayTarget } from "./headless-gateway-routing.js";
 
-// Whether omp invocations should pass --no-extensions. Default OFF: the original
+// Whether ompk invocations should pass --no-extensions. Default OFF: the original
 // npm auto-update failure (pi-speak-pk@latest) was fixed by removing that package
 // from pi settings, so blanket-disabling extensions would needlessly strip local
 // extension capabilities a session may rely on (review M2). Opt back in with
-// PI_SPEAK_OMP_NO_EXTENSIONS=1 if a broken extension resurfaces. Applied to BOTH
-// fresh and resume omp providers so behavior is consistent (review M1).
+// PI_SPEAK_OMPK_NO_EXTENSIONS=1 if a broken extension resurfaces. The old
+// PI_SPEAK_OMP_NO_EXTENSIONS name is still honored. Applied to BOTH fresh and
+// resume ompk providers so behavior is consistent (review M1).
 export function ompExtensionArgs(env: NodeJS.ProcessEnv = process.env): string[] {
-	const raw = (env.PI_SPEAK_OMP_NO_EXTENSIONS || "").trim().toLowerCase();
+	const raw = (env.PI_SPEAK_OMPK_NO_EXTENSIONS || env.PI_SPEAK_OMP_NO_EXTENSIONS || "").trim().toLowerCase();
 	return raw === "1" || raw === "true" || raw === "yes" ? ["--no-extensions"] : [];
 }
 
@@ -56,7 +57,7 @@ export function createInitialAgentProviders(options: AgentProviderFactoryOptions
 	if (providerName === "claude") {
 		return { provider: createClaudeProvider(options, cwd) };
 	}
-	if (providerName === "oh-my-pi") {
+	if (providerName === "oh-my-pk") {
 		return { provider: createOmpAgentProvider(options.config.ompBin, cwd, options.env) };
 	}
 	if (providerName === "pi") {
@@ -66,7 +67,7 @@ export function createInitialAgentProviders(options: AgentProviderFactoryOptions
 }
 
 export function createTurnAgentProvider(input: TurnAgentProviderInput): TurnAgentProviderDecision {
-	if (input.ompSessionPath && input.backend === "oh-my-pi") {
+	if (input.ompSessionPath && input.backend === "oh-my-pk") {
 		return {
 			provider: createOmpResumeProvider(input.config.ompBin, input.cwd || resolveAgentWorkspace(input), input.ompSessionPath, input.env),
 			stopAfterTurn: true,
@@ -116,7 +117,7 @@ function createCodingAgentProviders(options: AgentProviderFactoryOptions, cwd: s
 	const backend = normalizeRunnableAgentProviderName(env.PI_SPEAK_AGENT_BACKEND || env.PI_SPEAK_CODING_AGENT) || "codex";
 	if (backend === "pi") return { provider: createPiProvider(options, cwd) };
 	if (backend === "claude") return { provider: createClaudeProvider(options, cwd) };
-	if (backend === "oh-my-pi") return { provider: createOmpAgentProvider(options.config.ompBin, cwd, options.env) };
+	if (backend === "oh-my-pk") return { provider: createOmpAgentProvider(options.config.ompBin, cwd, options.env) };
 	return createCodexProviders(options, cwd);
 }
 
@@ -130,7 +131,7 @@ function createCodexProviders(options: AgentProviderFactoryOptions, cwd: string)
 function createProviderForBackend(options: AgentProviderFactoryOptions, backend: RunnableAgentProviderName, cwd: string): AgentProvider {
 	if (backend === "pi") return createPiProvider(options, cwd);
 	if (backend === "claude") return createClaudeProvider(options, cwd);
-	if (backend === "oh-my-pi") return createOmpAgentProvider(options.config.ompBin, cwd, options.env);
+	if (backend === "oh-my-pk") return createOmpAgentProvider(options.config.ompBin, cwd, options.env);
 	return createCodexProvider(options, cwd);
 }
 
@@ -183,7 +184,7 @@ class PiCliProvider implements AgentProvider {
 }
 
 class OmpCliProvider implements AgentProvider {
-	readonly name = "oh-my-pi" as const;
+	readonly name = "oh-my-pk" as const;
 	constructor(private readonly ompBin: string, private readonly cwd: string, private readonly env?: NodeJS.ProcessEnv) {}
 
 	async *sendPrompt(prompt: string, options: AgentPromptOptions = {}) {
@@ -194,7 +195,7 @@ class OmpCliProvider implements AgentProvider {
 		args.push("--auto-approve", prompt);
 		const text = await runCli(this.ompBin, args, {
 			cwd,
-			name: "oh-my-pi",
+			name: "oh-my-pk",
 			env: this.env,
 		});
 		if (text) yield { type: "text" as const, text };
@@ -202,7 +203,7 @@ class OmpCliProvider implements AgentProvider {
 }
 
 class OmpResumeProvider implements AgentProvider {
-	readonly name = "oh-my-pi" as const;
+	readonly name = "oh-my-pk" as const;
 	constructor(
 		private readonly ompBin: string,
 		private readonly cwd: string,
@@ -218,7 +219,7 @@ class OmpResumeProvider implements AgentProvider {
 		args.push("--auto-approve", prompt);
 		const text = await runCli(this.ompBin, args, {
 			cwd,
-			name: "oh-my-pi-resume",
+			name: "oh-my-pk-resume",
 			env: this.env,
 		});
 		if (text) yield { type: "text" as const, text };

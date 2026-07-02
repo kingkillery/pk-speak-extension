@@ -2207,8 +2207,8 @@ fun GatewaySessionsPane(
             onLaunchHub = {
                 if (!launchingHub) {
                     launchingHub = true
-                    launchStatus = "Launching OMP hub..."
-                    prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+                    launchStatus = "Launching OMPK hub..."
+                    prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
                     scope.launch {
                         launchStatus = client.launchOmpHub()
                         launchingHub = false
@@ -2244,7 +2244,7 @@ fun GatewaySessionsPane(
                                 launchStatus = "Couldn't open collab link: ${e.message}"
                             }
                         } else {
-                            launchStatus = "No active collab. Run /collab in the OMP hub on the host."
+                            launchStatus = "No active collab. Run /collab in the OMPK hub on the host."
                         }
                         joiningCollab = false
                     }
@@ -2279,7 +2279,7 @@ fun GatewaySessionsPane(
                 )
                 if (groups.isEmpty()) {
                     GatewaySessionsStatus(
-                        if (filterText.isBlank()) "No oh-my-pi background lanes found."
+                        if (filterText.isBlank()) "No oh-my-pk background lanes found."
                         else "No sessions match \"$filterText\"."
                     )
                 } else {
@@ -2363,7 +2363,7 @@ fun GatewaySessionsPane(
                                             scope.launch {
                                                 val message = client.selectOmpSession(sessionPath)
                                                 selectedOmpSessionPath = sessionPath
-                                                prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+                                                prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
                                                 onRemoteSessionSelected(entry, currentState.dashboard)
                                                 launchStatus = message
                                                 refresh()
@@ -2413,10 +2413,10 @@ fun GatewaySessionsHeader(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("OMP AGENT HUB", color = Color(0xFF111111), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                Text("OMPK AGENT HUB", color = Color(0xFF111111), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    "Persistent oh-my-pi sessions on the host. Route voice/text turns into a lane or launch a new hub.",
+                    "Persistent oh-my-pk sessions on the host. Route voice/text turns into a lane or launch a new hub.",
                     color = Color(0xFF555555),
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
@@ -2430,7 +2430,7 @@ fun GatewaySessionsHeader(
                     val dashboard = state.dashboard
                     val ompLaneCount = dashboard.sessions.count { gatewaySessionIsOmpLane(it) }
                     Text(
-                        "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | OMP lanes: $ompLaneCount",
+                        "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | OMPK lanes: $ompLaneCount",
                         color = Color(0xFF555555),
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
@@ -2451,7 +2451,7 @@ fun GatewaySessionsHeader(
         }
         Spacer(modifier = Modifier.height(8.dp))
         GatewayHubCommandButton(
-            text = if (launchingHub) "LAUNCHING..." else "LAUNCH OMP HUB",
+            text = if (launchingHub) "LAUNCHING..." else "LAUNCH OMPK HUB",
             enabled = !launchingHub,
             onClick = onLaunchHub
         )
@@ -2882,8 +2882,10 @@ fun gatewaySessionKey(entry: GatewaySessionEntry): String =
         ?: entry.name.ifBlank { "session-${entry.hashCode()}" }
 
 fun gatewaySessionIsOmpLane(entry: GatewaySessionEntry): Boolean =
-    entry.source.equals("oh-my-pi", ignoreCase = true) ||
+    entry.source.equals("oh-my-pk", ignoreCase = true) ||
+        entry.source.equals("oh-my-pi", ignoreCase = true) ||
         entry.kind.equals("background", ignoreCase = true) ||
+        entry.provider.equals("oh-my-pk", ignoreCase = true) ||
         entry.provider.equals("oh-my-pi", ignoreCase = true)
 
 fun gatewaySessionOmpRoutePath(entry: GatewaySessionEntry): String? {
@@ -2943,7 +2945,8 @@ fun gatewaySessionSubtitle(entry: GatewaySessionEntry, dashboard: GatewaySession
 }
 
 fun gatewaySessionSourceLabel(entry: GatewaySessionEntry): String? = when (entry.source) {
-    "oh-my-pi" -> "Oh-my-pi"
+    "oh-my-pk" -> "Oh-my-pk"
+    "oh-my-pi" -> "Oh-my-pk"
     else -> entry.source?.takeIf { it.isNotBlank() }
 }
 
@@ -3234,7 +3237,7 @@ fun SettingsTabContent(
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    val agents = listOf("Local Codex (Pi)", "Gateway OMP (oh-my-pi)", "Gateway Claude (Claude Code)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
+    val agents = listOf("Local Codex (Pi)", "Gateway OMPK (oh-my-pk)", "Gateway Claude (Claude Code)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
     val workspacePresets = listOf(
         "C:/Dev" to AppPreferences.DEFAULT_WORKSPACE_PATH,
         "SPWR Daily" to AppPreferences.SPWR_DAILY_WORKSPACE_PATH

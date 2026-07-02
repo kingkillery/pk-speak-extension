@@ -28,11 +28,11 @@ export type OhMyPiAgentHubSubagent = {
 export type OhMyPiBackgroundSessionEntry = SessionDashboardEntry & {
 	path: string;
 	sessionPath: string;
-	provider: "oh-my-pi";
+	provider: "oh-my-pk";
 	resumable: true;
 	resumeCommand: string[];
 	kind: "background";
-	source: "oh-my-pi";
+	source: "oh-my-pk";
 	model?: string;
 	role?: string;
 	createdAt?: number;
@@ -43,7 +43,7 @@ export type OhMyPiBackgroundSessionEntry = SessionDashboardEntry & {
 export type OhMyPiAgentHubDashboard = Omit<SessionDashboard, "sessions"> & {
 	sessions: OhMyPiBackgroundSessionEntry[];
 	scannedRoots: string[];
-	source: "oh-my-pi";
+	source: "oh-my-pk";
 	generatedAt: number;
 };
 
@@ -55,14 +55,20 @@ export type BuildOhMyPiAgentHubDashboardOptions = {
 
 export function defaultOhMyPiSessionRoots(env: NodeJS.ProcessEnv = process.env): string[] {
 	const configuredRoots = [
+		...splitConfiguredRoots(env.PI_SPEAK_OH_MY_PK_SESSIONS_ROOT),
 		...splitConfiguredRoots(env.PI_SPEAK_OH_MY_PI_SESSIONS_ROOT),
 		...splitConfiguredRoots(env.PI_SPEAK_AGENT_HUB_SESSIONS_ROOT),
 	];
-	const agentDirs = [env.PI_CODING_AGENT_DIR?.trim(), env.PI_SPEAK_OH_MY_PI_AGENT_DIR?.trim()]
+	const agentDirs = [
+		env.PI_CODING_AGENT_DIR?.trim(),
+		env.PI_SPEAK_OH_MY_PK_AGENT_DIR?.trim(),
+		env.PI_SPEAK_OH_MY_PI_AGENT_DIR?.trim(),
+	]
 		.filter((value): value is string => !!value);
 	return dedupeStrings([
 		...configuredRoots,
 		...agentDirs.map((dir) => join(dir, "sessions")),
+		join(homedir(), ".ompk", "agent", "sessions"),
 		join(homedir(), ".omp", "agent", "sessions"),
 	]);
 }
@@ -78,12 +84,12 @@ export function buildOhMyPiAgentHubDashboard(
 		.filter((entry): entry is OhMyPiBackgroundSessionEntry => entry !== undefined)
 		.sort((left, right) => (right.lastActivity ?? 0) - (left.lastActivity ?? 0));
 	return {
-		current: "oh-my-pi",
+		current: "oh-my-pk",
 		ready: [],
 		storePath: roots.length === 1 ? roots[0] : roots.join(delimiter),
 		sessions,
 		scannedRoots,
-		source: "oh-my-pi",
+		source: "oh-my-pk",
 		generatedAt: now(),
 	};
 }
@@ -216,10 +222,10 @@ function parseBackgroundSessionFile(sessionPath: string): OhMyPiBackgroundSessio
 		name: backgroundInstance.name,
 		path: sessionPath,
 		sessionPath,
-		provider: "oh-my-pi",
+		provider: "oh-my-pk",
 		sessionId: header.id,
 		resumable: true,
-		resumeCommand: ["omp", "--resume", header.id],
+		resumeCommand: ["ompk", "--resume", header.id],
 		workingDirectory: header.cwd,
 		cwd: header.cwd,
 		current: false,
@@ -229,7 +235,7 @@ function parseBackgroundSessionFile(sessionPath: string): OhMyPiBackgroundSessio
 		activity,
 		aliases: [],
 		kind: "background",
-		source: "oh-my-pi",
+		source: "oh-my-pk",
 		model: backgroundInstance.model,
 		role: backgroundInstance.role,
 		createdAt,

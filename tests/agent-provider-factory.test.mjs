@@ -25,12 +25,16 @@ test("omp resume provider rejects on a failing CLI — feeds runCodingAgentTurn'
 
 test("ompExtensionArgs defaults OFF (M2: no blanket capability stripping)", () => {
 	assert.deepEqual(ompExtensionArgs({}), []);
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMPK_NO_EXTENSIONS: "" }), []);
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMPK_NO_EXTENSIONS: "0" }), []);
 	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "" }), []);
 	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "0" }), []);
 	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "false" }), []);
 });
 
 test("ompExtensionArgs opts in via env (M1: consistent across providers)", () => {
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMPK_NO_EXTENSIONS: "1" }), ["--no-extensions"]);
+	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMPK_NO_EXTENSIONS: "true" }), ["--no-extensions"]);
 	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "1" }), ["--no-extensions"]);
 	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "true" }), ["--no-extensions"]);
 	assert.deepEqual(ompExtensionArgs({ PI_SPEAK_OMP_NO_EXTENSIONS: "YES" }), ["--no-extensions"]);
@@ -67,41 +71,47 @@ test("agent provider factory honors coding backend override for ElevenLabs mode"
 	assert.equal(created.fallbackProvider, undefined);
 });
 
-test("agent provider factory creates an oh-my-pi provider when configured", () => {
+test("agent provider factory creates an oh-my-pk provider when configured", () => {
 	const created = createInitialAgentProviders({
-		config: { ...baseConfig, provider: "oh-my-pi" },
+		config: { ...baseConfig, provider: "oh-my-pk" },
 		env: {},
 		cwd: "C:\\repo",
 	});
-	assert.equal(created.provider.name, "oh-my-pi");
+	assert.equal(created.provider.name, "oh-my-pk");
 	assert.equal(created.fallbackProvider, undefined);
 });
 
-test("agent provider factory resolves oh-my-pi coding backend from the omp alias", () => {
+test("agent provider factory resolves oh-my-pk coding backend from new and legacy aliases", () => {
 	const created = createInitialAgentProviders({
+		config: { ...baseConfig, provider: "elevenlabs" },
+		env: { PI_SPEAK_AGENT_BACKEND: "ompk" },
+		cwd: "C:\\repo",
+	});
+	assert.equal(created.provider.name, "oh-my-pk");
+	const legacy = createInitialAgentProviders({
 		config: { ...baseConfig, provider: "elevenlabs" },
 		env: { PI_SPEAK_AGENT_BACKEND: "omp" },
 		cwd: "C:\\repo",
 	});
-	assert.equal(created.provider.name, "oh-my-pi");
+	assert.equal(legacy.provider.name, "oh-my-pk");
 	assert.equal(created.fallbackProvider, undefined);
 });
 
-test("agent provider factory creates a fresh oh-my-pi provider for the routed backend", () => {
+test("agent provider factory creates a fresh oh-my-pk provider for the routed backend", () => {
 	const fresh = createTurnAgentProvider({
 		config: baseConfig,
 		env: {},
-		backend: "oh-my-pi",
+		backend: "oh-my-pk",
 		cwd: "C:\\repo",
 	});
-	assert.equal(fresh.provider.name, "oh-my-pi");
+	assert.equal(fresh.provider.name, "oh-my-pk");
 	assert.equal(fresh.stopAfterTurn, true);
 	assert.equal(fresh.source, "fresh");
 });
 
-test("createOmpAgentProvider returns a provider named oh-my-pi", () => {
+test("createOmpAgentProvider returns a provider named oh-my-pk", () => {
 	const provider = createOmpAgentProvider("omp-test", "C:\\repo", {});
-	assert.equal(provider.name, "oh-my-pi");
+	assert.equal(provider.name, "oh-my-pk");
 	assert.equal(typeof provider.sendPrompt, "function");
 });
 

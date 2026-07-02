@@ -80,6 +80,13 @@ type SessionWakeAliasState = {
 	aliases: Record<string, string>; // alias -> sessionPath
 };
 
+function normalizeGatewayProviderOverride(value: string | undefined): GatewayAgentProvider | undefined {
+	const normalized = (value || "").trim().toLowerCase();
+	if (normalized === "pi" || normalized === "codex" || normalized === "claude") return normalized;
+	if (normalized === "oh-my-pk" || normalized === "ompk" || normalized === "oh-my-pi" || normalized === "omp") return "oh-my-pk";
+	return undefined;
+}
+
 type RemoteState = ControlServerState & {
 	defaultTarget?: string;
 };
@@ -616,11 +623,15 @@ function getErrorMessage(error: unknown) {
 }
 
 function resolveOhMyPiCommand() {
-	return process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
+	return process.env.PI_SPEAK_OH_MY_PK_BIN?.trim()
+		|| process.env.OMPK_BIN?.trim()
+		|| process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
 		|| process.env.OMP_BIN?.trim()
+		|| resolveWindowsNpmShim("ompk.cmd")
+		|| resolveWindowsNpmShim("ompk")
 		|| resolveWindowsNpmShim("omp.cmd")
 		|| resolveWindowsNpmShim("omp")
-		|| "omp";
+		|| "ompk";
 }
 
 function launchOhMyPiResume(sessionArg: string, cwd: string) {
@@ -711,7 +722,7 @@ function launchSessionTarget(payload: SessionLaunchPayload, source: SessionEvent
 		}
 		const launched = launchOhMyPiAgent(built.argv, built.cwd);
 		appendSessionEvent("sess.launch", source, {
-			provider: "oh-my-pi",
+			provider: "oh-my-pk",
 			mode: built.mode,
 			argv: launched.argv,
 			cwd: launched.cwd,
@@ -720,8 +731,8 @@ function launchSessionTarget(payload: SessionLaunchPayload, source: SessionEvent
 		return {
 			ok: true,
 			message: built.mode === "hub"
-				? `Launching Oh-my-pi Agent Hub in ${launched.cwd}.`
-				: `Launching Oh-my-pi agent in ${launched.cwd}.`,
+				? `Launching Oh-my-pk Agent Hub in ${launched.cwd}.`
+				: `Launching Oh-my-pk agent in ${launched.cwd}.`,
 			command: launched.command,
 			argv: launched.argv,
 			cwd: launched.cwd,
@@ -848,7 +859,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			? codexAgentProvider
 			: agentProviderConfig.provider === "claude"
 				? claudeAgentProvider
-				: agentProviderConfig.provider === "oh-my-pi"
+				: agentProviderConfig.provider === "oh-my-pk"
 					? ompAgentProvider
 					: piAgentProvider;
 	let forceSpeechPromptNextTurn = false;
@@ -1465,7 +1476,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const desiredTarget = targetName?.trim() || remoteDefaultTarget;
 		const isVoiceInput = source === "http-voice" || source === "telegram-voice";
 		const directBackend: GatewayAgentProvider = agentProvider || (
-			agentProviderConfig.provider === "codex" || agentProviderConfig.provider === "claude" || agentProviderConfig.provider === "oh-my-pi"
+			agentProviderConfig.provider === "codex" || agentProviderConfig.provider === "claude" || agentProviderConfig.provider === "oh-my-pk"
 				? agentProviderConfig.provider
 				: "pi"
 		);
@@ -1496,11 +1507,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 				? "dispatch-codex"
 				: directBackend === "claude"
 					? "dispatch-claude"
-					: directBackend === "oh-my-pi"
-						? "dispatch-oh-my-pi"
+					: directBackend === "oh-my-pk"
+						? "dispatch-oh-my-pk"
 						: "dispatch-pi",
 			confidence: 1,
-			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : directBackend === "claude" ? "Claude" : directBackend === "oh-my-pi" ? "Oh-my-pi" : "Pi"}; voice-only router bypassed.`,
+			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : directBackend === "claude" ? "Claude" : directBackend === "oh-my-pk" ? "Oh-my-pk" : "Pi"}; voice-only router bypassed.`,
 			actionForSeed: trimmed,
 		};
 		const reducer = isVoiceInput
@@ -1754,7 +1765,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			executionProvider = claudeAgentProvider;
 		} else if (executionPlan.backend === "pi") {
 			executionProvider = piAgentProvider;
-		} else if (executionPlan.backend === "oh-my-pi") {
+		} else if (executionPlan.backend === "oh-my-pk") {
 			executionProvider = getActiveOmpProvider();
 		} else {
 			const reason = `Execution route \"${executionPlan.backend}\" is a placeholder and cannot run this turn yet.`;
@@ -1836,12 +1847,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 			} catch (error) {
 				const reason = `Failed to run remote turn: ${getErrorMessage(error)}`;
 				diagnostics.lastErrors.remote = reason;
-				// H3 parity: a failed omp --resume (stale/archived path) clears the
+				// H3 parity: a failed ompk --resume (stale/archived path) clears the
 				// selection so we don't keep running the broken resume every turn.
-				if (executionPlan.backend === "oh-my-pi" && ompSelection.get(undefined)) {
+				if (executionPlan.backend === "oh-my-pk" && ompSelection.get(undefined)) {
 					ompSelection.select(undefined, null);
-					appendSessionEvent("sess.omp-select-cleared", "admin", { reason });
-					lastCtx?.ui?.notify?.("Cleared the omp session selection after a resume failure.", "warning");
+					appendSessionEvent("sess.ompk-select-cleared", "admin", { reason });
+					lastCtx?.ui?.notify?.("Cleared the ompk session selection after a resume failure.", "warning");
 				}
 				const failedMs = Date.now() - (startedWithAgent || Date.now());
 				agentRunMs = failedMs;
@@ -2663,19 +2674,20 @@ export default function speakExtension(pi: ExtensionAPI) {
 				},
 				getCompactRouteSlots: () => buildCompactRouteSlots({ sessions: sessionRegistry, aliases: sessionWakeAliases }),
 				onSessionResume: (payload) => {
-					const provider = payload.provider?.trim().toLowerCase();
-					if (provider && provider !== "oh-my-pi") {
-						return { ok: false, message: `Resume is not available for provider "${provider}".` };
+					const rawProvider = payload.provider?.trim();
+					const provider = normalizeGatewayProviderOverride(rawProvider);
+					if (rawProvider && provider !== "oh-my-pk") {
+						return { ok: false, message: `Resume is not available for provider "${rawProvider}".` };
 					}
 					const sessionArg = payload.sessionId?.trim() || payload.sessionPath?.trim();
 					if (!sessionArg) return { ok: false, message: "Session id or path is required." };
 					const cwd = payload.cwd?.trim() || DEFAULT_AGENT_CWD || process.cwd();
 					try {
 						const command = launchOhMyPiResume(sessionArg, cwd);
-						appendSessionEvent("sess.resume", "admin", { provider: "oh-my-pi", session: sessionArg, cwd, command });
-						return { ok: true, message: `Launching Oh-my-pi resume for ${sessionArg}.` };
+						appendSessionEvent("sess.resume", "admin", { provider: "oh-my-pk", session: sessionArg, cwd, command });
+						return { ok: true, message: `Launching Oh-my-pk resume for ${sessionArg}.` };
 					} catch (error) {
-						return { ok: false, message: `Oh-my-pi resume failed: ${getErrorMessage(error)}` };
+						return { ok: false, message: `Oh-my-pk resume failed: ${getErrorMessage(error)}` };
 					}
 				},
 				onSessionLaunch: (payload) => launchSessionTarget(payload, "admin"),
@@ -2685,12 +2697,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 					// via notify/log instead of an HTTP 400. Deselect (null) always allowed.
 					const validation = validateOmpSelection(sessionPath);
 					if (!validation.ok) {
-						appendSessionEvent("sess.omp-select-rejected", "admin", { sessionPath, error: validation.error });
-						lastCtx?.ui?.notify?.(`Can't select omp session: ${validation.error}`, "error");
+						appendSessionEvent("sess.ompk-select-rejected", "admin", { sessionPath, error: validation.error });
+						lastCtx?.ui?.notify?.(`Can't select ompk session: ${validation.error}`, "error");
 						return validation;
 					}
 					ompSelection.select(undefined, sessionPath);
-					appendSessionEvent("sess.omp-select", "admin", { sessionPath });
+					appendSessionEvent("sess.ompk-select", "admin", { sessionPath });
 					return { ok: true };
 				},
 				onOmpGetSelectedSession: () => ompSelection.get(undefined),
@@ -2730,7 +2742,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					if (!Object.values(sessionRegistry).includes(sessionPath) && lastCtx?.sessionManager?.getSessionFile?.() !== sessionPath) {
 						const archived = archiveOhMyPiBackgroundSession(sessionPath);
 						if (archived.ok) {
-							appendSessionEvent("sess.remove", "admin", { provider: "oh-my-pi", path: sessionPath, archived: true });
+							appendSessionEvent("sess.remove", "admin", { provider: "oh-my-pk", path: sessionPath, archived: true });
 							return { ok: true, message: archived.message, route: getRoutingStatus() };
 						}
 						return { ok: false, message: "Unknown session path." };
@@ -3181,7 +3193,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				}
 				const launchTarget = rest.toLowerCase().replace(/\s+/g, " ").trim();
 				const payload: SessionLaunchPayload = { cwd: DEFAULT_AGENT_CWD || process.cwd() };
-				if (["hub", "agent hub", "omp hub", "oh-my-pi hub"].includes(launchTarget)) {
+				if (["hub", "agent hub", "ompk hub", "oh-my-pk hub", "omp hub", "oh-my-pi hub"].includes(launchTarget)) {
 					payload.hubOnly = true;
 				} else if (
 					["colab", "google colab", "colab workspace", "colab deploy", "colab launch"].includes(launchTarget)

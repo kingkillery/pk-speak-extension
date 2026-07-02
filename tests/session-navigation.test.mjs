@@ -77,7 +77,7 @@ test("enrichDashboardWithWorkspaces hides archived paths and marks stale", () =>
 	assert.ok(Array.isArray(result.workspaces) && result.workspaces.length >= 1);
 });
 
-test("archive then recover round-trips an oh-my-pi background lane", () => {
+test("archive then recover round-trips an oh-my-pk background lane", () => {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-nav-"));
 	try {
 		const sessionsRoot = join(tmp, "sessions");
@@ -94,7 +94,7 @@ test("archive then recover round-trips an oh-my-pi background lane", () => {
 				backgroundInstance: { name: "scout", status: "active", model: "gpt-5" },
 			})}\n`,
 		);
-		const env = { PI_SPEAK_OH_MY_PI_SESSIONS_ROOT: sessionsRoot };
+		const env = { PI_SPEAK_OH_MY_PK_SESSIONS_ROOT: sessionsRoot };
 
 		const archived = archiveOhMyPiBackgroundSession(sessionPath, env);
 		assert.equal(archived.ok, true);
@@ -126,7 +126,7 @@ test("recover rejects a non-archived lane", () => {
 				backgroundInstance: { name: "scout", status: "active", model: "gpt-5" },
 			})}\n`,
 		);
-		const result = recoverOhMyPiBackgroundSession(sessionPath, { PI_SPEAK_OH_MY_PI_SESSIONS_ROOT: sessionsRoot });
+		const result = recoverOhMyPiBackgroundSession(sessionPath, { PI_SPEAK_OH_MY_PK_SESSIONS_ROOT: sessionsRoot });
 		assert.equal(result.ok, false);
 		assert.match(result.message, /not an archived/);
 	} finally {

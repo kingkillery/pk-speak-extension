@@ -79,7 +79,7 @@ export type RemoteSlashCommand = {
 	source?: "extension" | "prompt" | "skill" | "builtin";
 };
 
-export type GatewayAgentProvider = "pi" | "codex" | "claude" | "oh-my-pi";
+export type GatewayAgentProvider = "pi" | "codex" | "claude" | "oh-my-pk";
 export type ControlAgentProvider = GatewayAgentProvider | "gemini" | "gemini-live" | "elevenlabs" | "9router";
 
 export type ControlServerStatus = {
@@ -248,7 +248,7 @@ export type ControlServerOptions = {
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionArchive?: (body: SessionArchivePayload) => Promise<ControlActionResult> | ControlActionResult;
-	/** Select (sessionPath) or deselect (null) the omp resume session for a client. */
+	/** Select (sessionPath) or deselect (null) the ompk resume session for a client. */
 	onOmpSelectSession?: (clientKey: string, sessionPath: string | null) => { ok: boolean; error?: string } | void;
 	onOmpGetSelectedSession?: (clientKey: string) => string | null;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
@@ -915,25 +915,25 @@ export class ControlServer {
 			return;
 		}
 
-		if (req.method === "POST" && url.pathname === "/v1/omp/select-session") {
+		if (req.method === "POST" && (url.pathname === "/v1/ompk/select-session" || url.pathname === "/v1/omp/select-session")) {
 			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 			const rawPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
 			const explicitClient = typeof payload?.clientId === "string" ? payload.clientId : undefined;
 			const clientKey = this.clientKey(req, explicitClient);
-			// Empty sessionPath (or clear:true) deselects this client's omp session,
+			// Empty sessionPath (or clear:true) deselects this client's ompk session,
 			// returning it to normal backend routing.
 			const clear = payload?.clear === true || rawPath.length === 0;
 			const sessionPath = clear ? null : rawPath;
 			const result = this.onOmpSelectSession?.(clientKey, sessionPath);
 			if (result && result.ok === false) {
-				this.writeJson(res, 400, { ok: false, error: result.error || "Invalid omp session." });
+				this.writeJson(res, 400, { ok: false, error: result.error || "Invalid ompk session." });
 				return;
 			}
 			this.writeJson(res, 200, { ok: true, sessionPath, cleared: clear });
 			return;
 		}
 
-		if (req.method === "GET" && url.pathname === "/v1/omp/selected-session") {
+		if (req.method === "GET" && (url.pathname === "/v1/ompk/selected-session" || url.pathname === "/v1/omp/selected-session")) {
 			const clientKey = this.clientKey(req, url.searchParams.get("clientId") || undefined);
 			const sessionPath = this.onOmpGetSelectedSession?.(clientKey) ?? null;
 			this.writeJson(res, 200, { ok: true, sessionPath });
@@ -1363,7 +1363,7 @@ export class ControlServer {
 		if (agentProvider === "pi"
 			|| agentProvider === "codex"
 			|| agentProvider === "claude"
-			|| agentProvider === "oh-my-pi"
+			|| agentProvider === "oh-my-pk"
 			|| agentProvider === "elevenlabs"
 			|| agentProvider === "gemini"
 			|| agentProvider === "gemini-live") {
@@ -1598,7 +1598,7 @@ export class ControlServer {
 			|| getBearerToken(getPrimaryHeaderValue(req.headers.authorization));
 	}
 
-	// Stable per-client key for scoping per-client state (e.g. omp session
+	// Stable per-client key for scoping per-client state (e.g. ompk session
 	// selection). An explicit `clientId` (header or body) wins; otherwise derive
 	// from remote address + presented token so distinct devices/tokens are
 	// distinct clients. Mirrors the rate-limit bucket key.
@@ -2035,7 +2035,7 @@ function parseRemoteTurnMode(value: string | null | undefined) {
 function parseAgentProviderOverride(value: string | null | undefined): GatewayAgentProvider | undefined {
 	const normalized = (value || "").trim().toLowerCase();
 	if (normalized === "pi" || normalized === "codex" || normalized === "claude") return normalized;
-	if (normalized === "oh-my-pi" || normalized === "omp") return "oh-my-pi";
+	if (normalized === "oh-my-pk" || normalized === "ompk" || normalized === "oh-my-pi" || normalized === "omp") return "oh-my-pk";
 	return undefined;
 }
 

@@ -149,7 +149,7 @@ export type GeminiToolHandler = (name: string, args: Record<string, unknown>) =>
 
 const OMP_FUNCTION_DECLARATION = {
 	name: "run_coding_task",
-	description: "Execute a coding/system task via the oh-my-pi agent. Use for file ops, code generation, running tests, reading files, or any concrete action. Returns the agent's text output.",
+	description: "Execute a coding/system task via the oh-my-pk agent. Use for file ops, code generation, running tests, reading files, or any concrete action. Returns the agent's text output.",
 	parameters: {
 		type: Type.OBJECT,
 		properties: {

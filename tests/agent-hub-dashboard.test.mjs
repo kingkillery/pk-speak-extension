@@ -13,7 +13,7 @@ function jsonLine(value) {
 	return `${JSON.stringify(value)}\n`;
 }
 
-test("buildOhMyPiAgentHubDashboard exposes active Oh-my-pi background lanes", () => {
+test("buildOhMyPiAgentHubDashboard exposes active Oh-my-pk background lanes", () => {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-agent-hub-"));
 	try {
 		// Given
@@ -60,7 +60,7 @@ test("buildOhMyPiAgentHubDashboard exposes active Oh-my-pi background lanes", ()
 		});
 
 		// Then
-		assert.equal(dashboard.current, "oh-my-pi");
+		assert.equal(dashboard.current, "oh-my-pk");
 		assert.deepEqual(dashboard.ready, []);
 		assert.equal(dashboard.storePath, sessionsRoot);
 		assert.equal(dashboard.sessions.length, 1);
@@ -68,13 +68,13 @@ test("buildOhMyPiAgentHubDashboard exposes active Oh-my-pi background lanes", ()
 		assert.equal(lane.name, "api-worker");
 		assert.equal(lane.path, activeSession);
 		assert.equal(lane.sessionPath, activeSession);
-		assert.equal(lane.provider, "oh-my-pi");
+		assert.equal(lane.provider, "oh-my-pk");
 		assert.equal(lane.sessionId, "api-session");
 		assert.equal(lane.resumable, true);
-		assert.deepEqual(lane.resumeCommand, ["omp", "--resume", "api-session"]);
+		assert.deepEqual(lane.resumeCommand, ["ompk", "--resume", "api-session"]);
 		assert.equal(lane.workingDirectory, "C:\\dev\\repo");
 		assert.equal(lane.kind, "background");
-		assert.equal(lane.source, "oh-my-pi");
+		assert.equal(lane.source, "oh-my-pk");
 		assert.equal(lane.model, "gpt-5");
 		assert.equal(lane.role, "reviewer");
 		assert.equal(lane.activity, "background session - gpt-5");
@@ -134,13 +134,13 @@ test("mergeOhMyPiAgentHubSessions appends background lanes without replacing rou
 		assert.equal(merged.sessions.length, 2);
 		assert.equal(merged.sessions[0].name, "Ready");
 		assert.equal(merged.sessions[1].name, "scout");
-		assert.equal(merged.sessions[1].source, "oh-my-pi");
+		assert.equal(merged.sessions[1].source, "oh-my-pk");
 	} finally {
 		rmSync(tmp, { recursive: true, force: true });
 	}
 });
 
-test("archiveOhMyPiBackgroundSession drops an Oh-my-pi lane from later scans", () => {
+test("archiveOhMyPiBackgroundSession drops an Oh-my-pk lane from later scans", () => {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-agent-hub-"));
 	try {
 		// Given
@@ -161,7 +161,7 @@ test("archiveOhMyPiBackgroundSession drops an Oh-my-pi lane from later scans", (
 		assert.equal(buildOhMyPiAgentHubDashboard({ sessionsRoots: [sessionsRoot] }).sessions.length, 1);
 
 		// When
-		const result = archiveOhMyPiBackgroundSession(sessionPath, { PI_SPEAK_OH_MY_PI_SESSIONS_ROOT: sessionsRoot });
+		const result = archiveOhMyPiBackgroundSession(sessionPath, { PI_SPEAK_OH_MY_PK_SESSIONS_ROOT: sessionsRoot });
 
 		// Then
 		assert.equal(result.ok, true);

@@ -1,5 +1,11 @@
 # Wiki Log
 
+## 2026-07-02 - vault: oh-my-pk harness rebrand note
+
+- Added the project note `Projects/pi-speak-extension/OH_MY_PK_HARNESS_REBRAND.md` in `C:\dev\Desktop-Projects\Helpful-Docs-Prompts\VAULTS-OBSIDIAN\designandbuilding-vault`.
+- Used direct filesystem writes because Obsidian MCP transport was unavailable in this session.
+- Recorded the canonical `oh-my-pk` / `ompk` harness naming, compatibility aliases, verification results, and ADB device status.
+
 ## 2026-05-07 - skill: installed map-codebase in pk-skills1
 
 - Installed `map-codebase` under `C:\Users\prest\.agents\skills1\pk-skills1`.

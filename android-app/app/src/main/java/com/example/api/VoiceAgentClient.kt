@@ -1087,7 +1087,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 put("sessionPath", sessionPath)
             }.toString().toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
-                .url("${gatewayBaseUrl()}/v1/omp/select-session")
+                .url("${gatewayBaseUrl()}/v1/ompk/select-session")
                 .header("X-Pi-Speak-Token", prefs.remoteToken)
                 .post(requestBody)
                 .build()
@@ -1110,7 +1110,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     suspend fun getSelectedOmpSession(): String? {
         return withContext(Dispatchers.IO) {
             val request = Request.Builder()
-                .url("${gatewayBaseUrl()}/v1/omp/selected-session")
+                .url("${gatewayBaseUrl()}/v1/ompk/selected-session")
                 .header("X-Pi-Speak-Token", prefs.remoteToken)
                 .get()
                 .build()
@@ -1155,7 +1155,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     }
 
     /**
-     * Asks the gateway to launch (or focus) the OMP Agent Hub. POSTs hubOnly=true to
+     * Asks the gateway to launch (or focus) the OMPK Agent Hub. POSTs hubOnly=true to
      * /v1/sessions/launch and returns a human-readable result string. Mirrors the
      * cancelTurn()/resumeGatewaySession() request style.
      */
@@ -1177,13 +1177,13 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                     val body = response.body?.string() ?: "{}"
                     val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
                     if (!response.isSuccessful || !json.optBoolean("ok", false)) {
-                        return@withContext json.optString("error", json.optString("message", "OMP hub launch failed: ${response.code}"))
+                        return@withContext json.optString("error", json.optString("message", "OMPK hub launch failed: ${response.code}"))
                     }
-                    json.optString("message", "OMP hub launched.")
+                    json.optString("message", "OMPK hub launched.")
                 }
             } catch (e: Exception) {
-                Log.e("VoiceAgent", "OMP hub launch failed", e)
-                "OMP hub launch failed: ${shortError(e)}"
+                Log.e("VoiceAgent", "OMPK hub launch failed", e)
+                "OMPK hub launch failed: ${shortError(e)}"
             }
         }
     }
@@ -1591,7 +1591,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         "Gateway Claude (Claude Code)" -> "claude"
         "Gateway Voice (ElevenLabs)" -> "elevenlabs"
         "Gateway Gemini (Vertex AI)" -> "gemini"
-        "Gateway OMP (oh-my-pi)" -> "oh-my-pi"
+        "Gateway OMPK (oh-my-pk)", "Gateway OMP (oh-my-pi)" -> "oh-my-pk"
         else -> "codex"
     }
 

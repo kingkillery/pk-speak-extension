@@ -30,7 +30,7 @@ export function validateOmpSelection(
 		const resolvedRoot = resolve(root);
 		return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + sep);
 	});
-	if (!inRoots) return { ok: false, error: "Session path is outside the configured oh-my-pi roots." };
+	if (!inRoots) return { ok: false, error: "Session path is outside the configured oh-my-pk roots." };
 	if (!existsSync(path)) return { ok: false, error: "Session file does not exist (it may have been archived or removed)." };
 	return { ok: true };
 }
@@ -56,12 +56,12 @@ export function archiveOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.
 
 	const lines = raw.split(/\r?\n/);
 	const header = parseRecord(lines[0] ?? "");
-	if (!header || header.type !== "session") return { ok: false, message: "Session file is not an Oh-my-pi session." };
+	if (!header || header.type !== "session") return { ok: false, message: "Session file is not an Oh-my-pk session." };
 
 	const current = Object.prototype.hasOwnProperty.call(header, "backgroundInstance")
 		? normalizeActiveBackgroundInstance(header.backgroundInstance)
 		: findLatestActiveBackgroundInstance(lines);
-	if (!current) return { ok: false, message: "Session is not an active Oh-my-pi background lane." };
+	if (!current) return { ok: false, message: "Session is not an active Oh-my-pk background lane." };
 
 	const archived = { ...current, status: "archived" };
 	header.backgroundInstance = archived;
@@ -98,12 +98,12 @@ export function recoverOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.
 
 	const lines = raw.split(/\r?\n/);
 	const header = parseRecord(lines[0] ?? "");
-	if (!header || header.type !== "session") return { ok: false, message: "Session file is not an Oh-my-pi session." };
+	if (!header || header.type !== "session") return { ok: false, message: "Session file is not an Oh-my-pk session." };
 
 	const archived = Object.prototype.hasOwnProperty.call(header, "backgroundInstance")
 		? normalizeArchivedBackgroundInstance(header.backgroundInstance)
 		: findLatestArchivedBackgroundInstance(lines);
-	if (!archived) return { ok: false, message: "Session is not an archived Oh-my-pi background lane." };
+	if (!archived) return { ok: false, message: "Session is not an archived Oh-my-pk background lane." };
 
 	const active = { ...archived, status: "active" as const };
 	header.backgroundInstance = active;

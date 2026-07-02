@@ -780,7 +780,7 @@ test("turn routes accept an explicit agent provider override", async () => {
 });
 
 
-test("turn routes normalize the oh-my-pi agent provider override and its omp alias", async () => {
+test("turn routes normalize the oh-my-pk agent provider override and legacy aliases", async () => {
 	const seen = [];
 	await withServer({
 		onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider) => {
@@ -801,10 +801,10 @@ test("turn routes normalize the oh-my-pi agent provider override and its omp ali
 				Authorization: "Bearer secret-token",
 				"Content-Type": "application/json",
 			},
-			body: JSON.stringify({ text: "run it", audio: false, agentProvider: "oh-my-pi" }),
+			body: JSON.stringify({ text: "run it", audio: false, agentProvider: "oh-my-pk" }),
 		});
 		assert.equal(canonical.statusCode, 200);
-		assert.equal(canonical.json().replyText, "provider:oh-my-pi");
+		assert.equal(canonical.json().replyText, "provider:oh-my-pk");
 
 		const alias = await request({
 			port,
@@ -815,10 +815,24 @@ test("turn routes normalize the oh-my-pi agent provider override and its omp ali
 				Authorization: "Bearer secret-token",
 				"Content-Type": "application/json",
 			},
-			body: JSON.stringify({ text: "run it", audio: false, agentProvider: "omp" }),
+			body: JSON.stringify({ text: "run it", audio: false, agentProvider: "ompk" }),
 		});
 		assert.equal(alias.statusCode, 200);
-		assert.equal(alias.json().replyText, "provider:oh-my-pi");
+		assert.equal(alias.json().replyText, "provider:oh-my-pk");
+
+		const legacyAlias = await request({
+			port,
+			path: "/v1/turn/text",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ text: "run it", audio: false, agentProvider: "omp" }),
+		});
+		assert.equal(legacyAlias.statusCode, 200);
+		assert.equal(legacyAlias.json().replyText, "provider:oh-my-pk");
 
 		const voiceAlias = await request({
 			port,
@@ -832,13 +846,14 @@ test("turn routes normalize the oh-my-pi agent provider override and its omp ali
 			body: "fake-wav",
 		});
 		assert.equal(voiceAlias.statusCode, 200);
-		assert.equal(voiceAlias.json().replyText, "voice-provider:oh-my-pi");
+		assert.equal(voiceAlias.json().replyText, "voice-provider:oh-my-pk");
 	});
 
 	assert.deepEqual(seen, [
-		{ text: "run it", agentProvider: "oh-my-pi" },
-		{ text: "run it", agentProvider: "oh-my-pi" },
-		{ voice: true, agentProvider: "oh-my-pi" },
+		{ text: "run it", agentProvider: "oh-my-pk" },
+		{ text: "run it", agentProvider: "oh-my-pk" },
+		{ text: "run it", agentProvider: "oh-my-pk" },
+		{ voice: true, agentProvider: "oh-my-pk" },
 	]);
 });
 
@@ -1548,7 +1563,7 @@ test("workspace file API rejects Windows reserved device names", async () => {
 	}
 });
 
-test("omp select/selected endpoints isolate selections per client and support deselect", async () => {
+test("ompk select/selected endpoints isolate selections per client and support legacy path aliases", async () => {
 	const { OmpSelectionStore } = await import("../dist/omp-selection.js");
 	const store = new OmpSelectionStore();
 	await withServer({
@@ -1557,14 +1572,14 @@ test("omp select/selected endpoints isolate selections per client and support de
 	}, async (port) => {
 		const select = (client, sessionPath) => request({
 			port,
-			path: "/v1/omp/select-session",
+			path: "/v1/ompk/select-session",
 			method: "POST",
 			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json", "x-pi-speak-client": client },
 			body: JSON.stringify(sessionPath === null ? { clear: true } : { sessionPath }),
 		});
 		const selected = (client) => request({
 			port,
-			path: "/v1/omp/selected-session",
+			path: "/v1/ompk/selected-session",
 			headers: { Authorization: "Bearer secret-token", "x-pi-speak-client": client },
 		});
 
@@ -1583,10 +1598,16 @@ test("omp select/selected endpoints isolate selections per client and support de
 		assert.equal(clearRes.cleared, true);
 		assert.equal((await (await selected("A")).json()).sessionPath, null);
 		assert.equal((await (await selected("B")).json()).sessionPath, "/omp/b.jsonl");
+		const legacySelected = await request({
+			port,
+			path: "/v1/omp/selected-session",
+			headers: { Authorization: "Bearer secret-token", "x-pi-speak-client": "B" },
+		});
+		assert.equal((await legacySelected.json()).sessionPath, "/omp/b.jsonl");
 	});
 });
 
-test("omp select-session surfaces validation failure as 400 (review H2)", async () => {
+test("ompk select-session surfaces validation failure as 400 (review H2)", async () => {
 	await withServer({
 		onOmpSelectSession: (_clientKey, sessionPath) => {
 			if (sessionPath && !sessionPath.startsWith("/valid/")) {
@@ -1597,7 +1618,7 @@ test("omp select-session surfaces validation failure as 400 (review H2)", async 
 	}, async (port) => {
 		const bad = await request({
 			port,
-			path: "/v1/omp/select-session",
+			path: "/v1/ompk/select-session",
 			method: "POST",
 			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json", "x-pi-speak-client": "c" },
 			body: JSON.stringify({ sessionPath: "/stale/gone.jsonl" }),
@@ -1607,7 +1628,7 @@ test("omp select-session surfaces validation failure as 400 (review H2)", async 
 
 		const good = await request({
 			port,
-			path: "/v1/omp/select-session",
+			path: "/v1/ompk/select-session",
 			method: "POST",
 			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json", "x-pi-speak-client": "c" },
 			body: JSON.stringify({ sessionPath: "/valid/ok.jsonl" }),
@@ -1618,7 +1639,7 @@ test("omp select-session surfaces validation failure as 400 (review H2)", async 
 		// Deselect must never be rejected by validation.
 		const clear = await request({
 			port,
-			path: "/v1/omp/select-session",
+			path: "/v1/ompk/select-session",
 			method: "POST",
 			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json", "x-pi-speak-client": "c" },
 			body: JSON.stringify({ clear: true }),

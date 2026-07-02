@@ -1577,7 +1577,7 @@ if (typeof document !== "undefined") {
 		saveSettings();
 	});
 	els.launchOmpHub?.addEventListener("click", () => {
-		void launchSession({ hubOnly: true }, "Launching OMP hub...");
+		void launchSession({ hubOnly: true }, "Launching OMPK hub...");
 	});
 	els.launchColab?.addEventListener("click", () => {
 		void launchSession({ targetNode: "colab" }, "Launching Colab...");
