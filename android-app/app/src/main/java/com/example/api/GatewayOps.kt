@@ -16,6 +16,12 @@ data class GatewayRoute(
     val availableTargets: List<String> = emptyList()
 )
 
+data class GatewayRouteUpdate(
+    val message: String,
+    val route: GatewayRoute? = null,
+    val ok: Boolean = false
+)
+
 data class GatewayRouteSlot(
     val family: String,
     val sessionName: String? = null,

@@ -1237,10 +1237,10 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     }
 
     /** Sets the gateway default route target. An empty target clears it (use current session). */
-    suspend fun setRoute(target: String): Pair<String, GatewayRoute?> {
+    suspend fun setRoute(target: String): GatewayRouteUpdate {
         return withContext(Dispatchers.IO) {
             val baseUrl = gatewayBaseUrl()
-            if (baseUrl.isBlank()) return@withContext ("No gateway URL is configured." to null)
+            if (baseUrl.isBlank()) return@withContext GatewayRouteUpdate("No gateway URL is configured.")
             val request = Request.Builder()
                 .url("$baseUrl/v1/route")
                 .header("X-Pi-Speak-Token", prefs.remoteToken)
@@ -1254,11 +1254,15 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                         "message",
                         if (response.isSuccessful) "Route updated." else "Route update failed: ${response.code}"
                     )
-                    message to parseGatewayRoute(json)
+                    GatewayRouteUpdate(
+                        message = message,
+                        route = parseGatewayRoute(json),
+                        ok = response.isSuccessful && json.optBoolean("ok", response.isSuccessful)
+                    )
                 }
             } catch (e: Exception) {
                 Log.e("VoiceAgent", "Route update failed", e)
-                ("Route update failed: ${shortError(e)}" to null)
+                GatewayRouteUpdate("Route update failed: ${shortError(e)}")
             }
         }
     }

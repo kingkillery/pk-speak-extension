@@ -58,6 +58,7 @@ import com.example.api.GatewaySessionDashboard
 import com.example.api.GatewaySessionEntry
 import com.example.api.GatewaySessionErrorKind
 import com.example.api.GatewaySessionException
+import com.example.api.GatewayRouteUpdate
 import com.example.api.VoiceAgentClient
 import com.example.api.RemoteSlashCommand
 import com.example.audio.StreamingPcmPlayer
@@ -2692,10 +2693,10 @@ fun GatewayOpsPane(
                                     .clip(RoundedCornerShape(3.dp))
                                     .clickable {
                                         scope.launch {
-                                            val (message, updated) = client.setRoute(target)
-                                            opsStatus = message
-                                            if (updated != null) route = updated
-                                            prefs.codexSessionName = target
+                                            val update = client.setRoute(target)
+                                            opsStatus = update.message
+                                            update.route?.let { route = it }
+                                            applyGatewayRouteUpdateToPrefs(update, target, prefs)
                                         }
                                     }
                                     .padding(horizontal = 4.dp, vertical = 7.dp)
@@ -2706,9 +2707,10 @@ fun GatewayOpsPane(
                     OutlinedButton(
                         onClick = {
                             scope.launch {
-                                val (message, updated) = client.setRoute("")
-                                opsStatus = message
-                                if (updated != null) route = updated
+                                val update = client.setRoute("")
+                                opsStatus = update.message
+                                update.route?.let { route = it }
+                                applyGatewayRouteUpdateToPrefs(update, "", prefs)
                             }
                         },
                         border = BorderStroke(1.dp, Color(0xFF111111)),
@@ -2771,10 +2773,10 @@ fun GatewayOpsPane(
                                 subtitle = listOfNotNull(agent.provider, agent.cwd ?: agent.cwdBasename).joinToString(" | "),
                                 onClick = {
                                     scope.launch {
-                                        val (message, updated) = client.setRoute(agent.target)
-                                        opsStatus = message
-                                        if (updated != null) route = updated
-                                        prefs.codexSessionName = agent.target
+                                        val update = client.setRoute(agent.target)
+                                        opsStatus = update.message
+                                        update.route?.let { route = it }
+                                        applyGatewayRouteUpdateToPrefs(update, agent.target, prefs)
                                     }
                                 }
                             )
@@ -3487,6 +3489,19 @@ fun applyGatewaySessionSelection(
     if (entry.isRouteCapableIn(dashboard) && entry.name.isNotBlank()) {
         prefs.codexSessionName = entry.name
     }
+}
+
+fun applyGatewayRouteUpdateToPrefs(
+    update: GatewayRouteUpdate,
+    requestedTarget: String,
+    prefs: AppPreferences
+) {
+    if (!update.ok) return
+    val nextTarget = update.route?.defaultTarget?.takeIf { it.isNotBlank() }
+        ?: update.route?.currentSession?.takeIf { it.isNotBlank() }
+        ?: requestedTarget.takeIf { it.isNotBlank() }
+        ?: return
+    prefs.codexSessionName = nextTarget
 }
 
 @Composable
