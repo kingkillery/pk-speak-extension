@@ -21,7 +21,8 @@ interface RealtimeVoiceSessionListener {
     fun onInterrupt()
     fun onToolStart(name: String)
     fun onToolComplete(name: String, output: String)
-    fun onApprovalRequired(approvalId: String, command: String, reason: String)
+    fun onApprovalRequired(approvalId: String, command: String, reason: String, cwd: String, timeoutMs: Int)
+    fun onApprovalResolved(approvalId: String)
     fun onError(message: String)
     fun onDisconnected()
 }
@@ -184,8 +185,16 @@ class RealtimeVoiceSession(
                     listener.onApprovalRequired(
                         json.optString("approvalId", ""),
                         json.optString("command", ""),
-                        json.optString("reason", "")
+                        json.optString("reason", ""),
+                        json.optString("cwd", ""),
+                        json.optInt("timeoutMs", 0)
                     )
+                }
+                "tool_approval_resolved" -> {
+                    val approvalId = json.optString("approvalId", "")
+                    if (approvalId.isNotBlank()) {
+                        listener.onApprovalResolved(approvalId)
+                    }
                 }
                 "reconnecting" -> {
                     Log.d(TAG, "Server reported reconnecting, serverSequenceId=$seqId")

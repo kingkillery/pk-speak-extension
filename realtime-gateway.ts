@@ -583,13 +583,14 @@ async function startNewSession(
 				},
 				{
 					name: "launch_agent",
-					description: "Launches a new oh-my-pi background agent, optionally with a prompt and working directory, or opens the agent hub.",
+					description: "Launches a new oh-my-pi background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'.",
 					parameters: {
 						type: "OBJECT",
 						properties: {
 							prompt: { type: "STRING", description: "Optional task prompt for the new agent. Omit to open the agent hub." },
 							cwd: { type: "STRING", description: "Optional working directory for the agent." },
-							hubOnly: { type: "BOOLEAN", description: "If true, just open the agent hub instead of launching a prompted agent." }
+							hubOnly: { type: "BOOLEAN", description: "If true, just open the agent hub instead of launching a prompted agent." },
+							targetNode: { type: "STRING", description: "Optional launch target. Use 'colab' to deploy the workspace to Colab." }
 						}
 					},
 					...(nonBlockingEnabled ? { behavior: Behavior.NON_BLOCKING } : {}),
@@ -922,29 +923,30 @@ async function startNewSession(
 									} else {
 										outputText = JSON.stringify({ ok: false, error: "Session dashboard is not available." });
 									}
-								} else if (call.name === "launch_agent") {
-									const prompt = call.args?.prompt as string | undefined;
-									const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd();
-									const hubOnly = call.args?.hubOnly as boolean | undefined;
-									if (activeSession.nonBlockingEnabled && prompt && !hubOnly) {
-										// Narrated launch: spawn omp with captured stdout and stream progress
-										// into the conversation. Deferred (NON_BLOCKING) so the loop stays live.
-										deferToolResponse = true;
-										try {
-											const child = spawnNarratedOmp(prompt, cwd);
-											void runWithProgressNarration(activeSession, toolCall, child);
-											sendToClient(activeSession, { type: "tool_progress", name: call.name, message: "Launching agent…" }, false);
-										} catch (err: any) {
-											sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
-												scheduling: FunctionResponseScheduling.INTERRUPT,
-											});
-										}
-									} else if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
-										const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly });
-										outputText = JSON.stringify(result);
-									} else {
-										outputText = JSON.stringify({ ok: false, error: "Session launch is not available." });
-									}
+				} else if (call.name === "launch_agent") {
+					const prompt = call.args?.prompt as string | undefined;
+					const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd();
+					const hubOnly = call.args?.hubOnly as boolean | undefined;
+					const targetNode = call.args?.targetNode as string | undefined;
+					if (activeSession.nonBlockingEnabled && prompt && !hubOnly && !targetNode) {
+						// Narrated launch: spawn omp with captured stdout and stream progress
+						// into the conversation. Deferred (NON_BLOCKING) so the loop stays live.
+						deferToolResponse = true;
+						try {
+							const child = spawnNarratedOmp(prompt, cwd);
+							void runWithProgressNarration(activeSession, toolCall, child);
+							sendToClient(activeSession, { type: "tool_progress", name: call.name, message: "Launching agent…" }, false);
+						} catch (err: any) {
+							sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
+								scheduling: FunctionResponseScheduling.INTERRUPT,
+							});
+						}
+					} else if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
+						const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly, targetNode });
+						outputText = JSON.stringify(result);
+					} else {
+						outputText = JSON.stringify({ ok: false, error: "Session launch is not available." });
+					}
 								} else if (call.name === "archive_session") {
 									const sessionPath = call.args?.sessionPath as string;
 									const action = (call.args?.action as string) === "recover" ? "recover" : "archive";

@@ -50,7 +50,14 @@ async function main() {
 		return;
 	}
 	if (command === "gateway" || command === "serve") {
-		await runNodeScript(join(DIST_DIR, "headless-gateway.js"), argv.slice(1));
+		const gatewayArgs = argv.slice(1);
+		const liveMode = gatewayArgs.includes("--live");
+		const passthrough = gatewayArgs.filter((arg) => arg !== "--live");
+		await runNodeScript(
+			join(DIST_DIR, "headless-gateway.js"),
+			passthrough,
+			liveMode ? { AGENT_PROVIDER: "gemini-live" } : undefined,
+		);
 		return;
 	}
 	if (command === "tray") {
@@ -84,7 +91,7 @@ function printHelp() {
 		"  speak       Speak text from args or stdin using configured TTS",
 		"  wrap        Run a CLI command and speak start/finish notices",
 		"  brainstorm  Transcribe brainstorm audio using WhisperX and structure it",
-		"  gateway     Start the headless phone/control gateway",
+		"  gateway     Start the headless phone/control gateway (add --live for Gemini Live barge-in)",
 		"  tray        Start the Windows tray controller and gateway",
 		"  mobile      Print the Android setup/download QR",
 		"  admin       Open the sessions admin pane",
@@ -539,25 +546,39 @@ async function readStdin() {
 
 async function playAudioFile(filePath: string, options: { allowOpenFallback?: boolean } = {}): Promise<"played" | "opened" | "skipped"> {
 	if (process.platform === "win32") {
+		// Prefer a headless CLI player when available (ffplay/mpg123/mpv). It is far more
+		// reliable than the WPF MediaPlayer fallback, which fails on headless/agent shells.
+		const winPlayer = getWindowsAudioPlayer();
+		if (winPlayer) {
+			try {
+				await runProcess(winPlayer, getAudioPlayerArgs(winPlayer, filePath));
+				return "played";
+			} catch {
+				// Fall through to the PowerShell MediaPlayer method below.
+			}
+		}
 		try {
-			await runProcess("powershell.exe", [
-				"-NoProfile",
-				"-Sta",
-				"-Command",
+			await runProcess(
+				"powershell.exe",
 				[
-					"$ErrorActionPreference = 'Stop'",
-					"$path = (Resolve-Path -LiteralPath $args[0]).Path",
-					"Add-Type -AssemblyName PresentationCore",
-					"$player = New-Object System.Windows.Media.MediaPlayer",
-					"$player.Open([Uri]::new($path))",
-					"$player.Play()",
-					"$limit = (Get-Date).AddSeconds(120)",
-					"while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $limit) { Start-Sleep -Milliseconds 50 }",
-					"if ($player.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 250) } else { Start-Sleep -Seconds 2 }",
-					"$player.Close()",
-				].join("; "),
-				filePath,
-			]);
+					"-NoProfile",
+					"-Sta",
+					"-Command",
+					[
+						"$ErrorActionPreference = 'Stop'",
+						"$path = (Resolve-Path -LiteralPath $env:PK_SPEAK_AUDIO_PATH).Path",
+						"Add-Type -AssemblyName PresentationCore",
+						"$player = New-Object System.Windows.Media.MediaPlayer",
+						"$player.Open([Uri]::new($path))",
+						"$player.Play()",
+						"$limit = (Get-Date).AddSeconds(120)",
+						"while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $limit) { Start-Sleep -Milliseconds 50 }",
+						"if ($player.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 250) } else { Start-Sleep -Seconds 2 }",
+						"$player.Close()",
+					].join("; "),
+				],
+				{ env: { ...process.env, PK_SPEAK_AUDIO_PATH: filePath } },
+			);
 			return "played";
 		} catch (error) {
 			if (options.allowOpenFallback) {
@@ -573,7 +594,7 @@ async function playAudioFile(filePath: string, options: { allowOpenFallback?: bo
 		console.warn("pk-speak playback skipped: no headless audio player found. Use --allow-open-fallback to open the audio file with the OS default app.");
 		return "skipped";
 	}
-	await runProcess(command, getUnixAudioPlayerArgs(command, filePath));
+	await runProcess(command, getAudioPlayerArgs(command, filePath));
 	return command === "xdg-open" ? "opened" : "played";
 }
 
@@ -585,21 +606,34 @@ function getUnixAudioPlayer(allowOpenFallback?: boolean) {
 	return allowOpenFallback ? "xdg-open" : undefined;
 }
 
-function getUnixAudioPlayerArgs(command: string, filePath: string) {
+function getWindowsAudioPlayer() {
+	for (const command of ["ffplay", "mpg123", "mpv"]) {
+		if (existsOnPath(command)) return command;
+	}
+	return undefined;
+}
+
+function getAudioPlayerArgs(command: string, filePath: string) {
 	if (command === "ffplay") return ["-nodisp", "-autoexit", "-loglevel", "quiet", filePath];
+	if (command === "mpv") return ["--no-video", "--really-quiet", filePath];
 	return [filePath];
 }
 
 function existsOnPath(command: string) {
-	const pathDirs = (process.env.PATH || "").split(process.platform === "win32" ? ";" : ":");
-	return pathDirs.some((dir) => dir && existsSync(join(dir, command)));
+	const isWin = process.platform === "win32";
+	const pathDirs = (process.env.PATH || "").split(isWin ? ";" : ":");
+	const exts = isWin
+		? [...(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").map((ext) => ext.trim()).filter(Boolean), ""]
+		: [""];
+	return pathDirs.some((dir) => dir && exts.some((ext) => existsSync(join(dir, command + ext))));
 }
 
-function runProcess(command: string, args: string[]) {
+function runProcess(command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}) {
 	return new Promise<void>((resolve, reject) => {
 		const child = spawn(command, args, {
 			stdio: "ignore",
 			windowsHide: true,
+			env: options.env ?? process.env,
 		});
 		child.on("error", reject);
 		child.on("close", (code) => {
@@ -736,13 +770,13 @@ function commandLabel(command: string) {
 	return parts[parts.length - 1] || cleaned || "command";
 }
 
-async function runNodeScript(scriptPath: string, args: string[]) {
+async function runNodeScript(scriptPath: string, args: string[], envExtras?: NodeJS.ProcessEnv) {
 	if (!existsSync(scriptPath)) {
 		throw new Error(`Command target not found: ${scriptPath}`);
 	}
 	const child = spawn(process.execPath, [scriptPath, ...args], {
 		cwd: process.cwd(),
-		env: buildPiSpeakEnv(),
+		env: { ...buildPiSpeakEnv(), ...(envExtras ?? {}) },
 		stdio: "inherit",
 		windowsHide: false,
 	});

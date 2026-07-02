@@ -16,6 +16,8 @@ npm test         # Run tests
 | `docs/VOICE_SESSION_BRIDGE.md` | Natural-language bridge for wake phrases and session targeting |
 | `docs/SESSION_OPERATIONS.md` | Focused operator guide for `/sess`, wake aliases, and the `/sess ui` management pane |
 | `index.ts` | Extension entrypoint, command registration, state management |
+| `server-app.ts` | `pi-speak-server` — one-command desktop app: ensures the gateway, opens the loopback-only `/connect` pairing window (Edge app mode), `--install-shortcut` for Desktop/Start Menu |
+| `pairing.ts` | Shared pairing primitives: persistent install auth token (`%LOCALAPPDATA%/pi-speak/http-token`) + phone-facing base-URL discovery (Tailscale-first); used by the control server, tray, and server app |
 | `voice-routing.ts` | Normalized route matching, compact numeric route families, and conflict helpers |
 | `session-routing.ts` | Session naming, alias helpers, summaries, removal helpers, and the `buildSessionDashboard` selector shared with the pane |
 | `session-routing-store.ts` | Durable routing persistence |

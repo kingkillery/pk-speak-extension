@@ -23,6 +23,7 @@
     "pk-speak": "dist/pk-speak.js",
     "pi-speak-admin": "dist/ui/admin.js",
     "pi-speak-tray": "dist/persistent-tray.js",
+    "pi-speak-server": "dist/server-app.js",
     "pi-speak-gateway": "dist/headless-gateway.js",
     "pi-speak-gemini-live-smoke": "dist/gemini-live-smoke.js",
     "pi-speak-qr": "scripts/qr-setup.mjs"
@@ -63,7 +64,7 @@
     "react": "^19.2.5"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public"

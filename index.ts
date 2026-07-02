@@ -3,10 +3,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { networkInterfaces, platform, tmpdir } from "node:os";
+import { homedir, networkInterfaces, platform, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
-import { ControlServer, type ControlActionResult, type ControlServerState, type GatewayAgentProvider, type RemoteSlashCommand, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
+import { ControlServer, type ControlActionResult, type ControlServerState, type GatewayAgentProvider, type RemoteSlashCommand, type SessionLaunchPayload, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type ConversationExecutionPlan, type ConversationReducerSummary, type RemoteTurnResult, type TurnProgressEvent, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
@@ -28,7 +28,7 @@ import {
 	setWakeAlias,
 } from "./session-routing.js";
 import { mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
-import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv, validateOmpSelection } from "./agent-hub-actions.js";
+import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, validateOmpSelection } from "./agent-hub-actions.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
@@ -151,7 +151,10 @@ const DEFAULT_REMOTE_AUTH_TOKEN = process.env.PI_SPEAK_HTTP_TOKEN || getOrCreate
 const TAILSCALE_APPSERVER_IP = "100.76.136.91";
 const TAILSCALE_MAC_IP = "100.76.176.119";
 const DEFAULT_BLUETOOTH_IP = "192.168.44.1";
-const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim() || process.env.AGENT_WORKSPACE?.trim() || "";
+const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
+const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim()
+	|| process.env.AGENT_WORKSPACE?.trim()
+	|| (platform() === "win32" ? DEFAULT_WINDOWS_WORKSPACE : "");
 const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "speak",
@@ -170,9 +173,23 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "sess",
 		description: "Manage named sessions, wake aliases, slot lanes, and routing summaries",
-		usage: "/sess [new|switch|rename|edit|alias|remove|list|name|wake|slots|ui|export] <args>",
-		examples: ["/sess", "/sess slots", "/sess wake one", "/sess switch one"],
+		usage: "/sess [new|switch|rename|edit|alias|remove|launch|list|name|wake|slots|ui|export] <args>",
+		examples: ["/sess", "/sess slots", "/sess launch colab", "/sess switch one"],
 		source: "extension",
+	},
+	{
+		name: "skills",
+		description: "List and search installed agent skills from the generated Codex skill index",
+		usage: "/skills [list|search <query>|show <name>]",
+		examples: ["/skills", "/skills search android", "/skills show android-development"],
+		source: "builtin",
+	},
+	{
+		name: "model",
+		description: "Show the gateway default model and the model override sent by this app",
+		usage: "/model",
+		examples: ["/model"],
+		source: "builtin",
 	},
 	{
 		name: "phone",
@@ -234,6 +251,107 @@ function getInstallAuthTokenPath() {
 		|| process.env.APPDATA && join(process.env.APPDATA, "pi-speak")
 		|| join(process.cwd(), ".pi-speak");
 	return join(base, "http-token");
+}
+
+type SkillIndexEntry = {
+	name: string;
+	summary: string;
+	source?: string;
+	path?: string;
+};
+
+function readSkillIndexEntries(): SkillIndexEntry[] {
+	const skillIndexPath = join(homedir(), ".codex", "skill-index.md");
+	let raw = "";
+	try {
+		raw = readFileSync(skillIndexPath, "utf8");
+	} catch {
+		return [];
+	}
+	return raw
+		.split(/\r?\n## /)
+		.slice(1)
+		.map((section) => {
+			const lines = section.split(/\r?\n/);
+			const name = (lines.shift() || "").trim();
+			const summaryLines: string[] = [];
+			let source: string | undefined;
+			let path: string | undefined;
+			let readingSummary = true;
+			for (const line of lines) {
+				if (line.startsWith("- ")) readingSummary = false;
+				if (readingSummary) {
+					const cleaned = line.replace(/^>\s?-?\s?/, "").trim();
+					if (cleaned) summaryLines.push(cleaned);
+				}
+				if (line.startsWith("- source:")) source = line.slice("- source:".length).trim();
+				if (line.startsWith("- path:")) path = line.slice("- path:".length).trim();
+			}
+			return {
+				name,
+				summary: summaryLines.join(" ").trim(),
+				source,
+				path,
+			};
+		})
+		.filter((entry) => entry.name && entry.path);
+}
+
+function formatSkillEntry(entry: SkillIndexEntry) {
+	const summary = entry.summary || entry.source || "No summary in the generated index.";
+	return `/${entry.name} - ${summary}`;
+}
+
+function handleSkillsSlashCommand(args: string[]): string {
+	const entries = readSkillIndexEntries();
+	if (entries.length === 0) {
+		return "No generated skill index was found at ~/.codex/skill-index.md. Run the skill index refresh, then try /skills again.";
+	}
+	const action = (args[0] || "list").toLowerCase();
+	if (action === "show") {
+		const name = args.slice(1).join(" ").trim().toLowerCase();
+		if (!name) return "Usage: /skills show <name>";
+		const entry = entries.find((candidate) => candidate.name.toLowerCase() === name);
+		if (!entry) return `No installed skill named "${name}" was found. Try /skills search ${name}.`;
+		return [
+			`Skill: ${entry.name}`,
+			entry.summary || "No summary in the generated index.",
+			entry.source ? `Source: ${entry.source}` : undefined,
+			entry.path ? `Path: ${entry.path}` : undefined,
+		].filter(Boolean).join("\n");
+	}
+	const query = action === "search" ? args.slice(1).join(" ").trim().toLowerCase() : "";
+	const matches = query
+		? entries.filter((entry) => `${entry.name} ${entry.summary} ${entry.source || ""}`.toLowerCase().includes(query))
+		: entries;
+	const shown = matches.slice(0, 12);
+	const header = query
+		? `Skills matching "${query}" (${shown.length}/${matches.length} shown):`
+		: `Installed skills (${shown.length}/${entries.length} shown):`;
+	return [header, ...shown.map(formatSkillEntry)].join("\n");
+}
+
+function handleGatewaySlashCommand(
+	trimmed: string,
+	options: { model?: string; defaultModel?: string; cwd?: string; agentProvider?: GatewayAgentProvider },
+): RemoteTurnResult | undefined {
+	if (!trimmed.startsWith("/")) return undefined;
+	const [rawCommand, ...args] = trimmed.slice(1).split(/\s+/);
+	const command = rawCommand.toLowerCase();
+	if (command === "skills") {
+		return { replyText: handleSkillsSlashCommand(args) };
+	}
+	if (command === "model") {
+		return {
+			replyText: [
+				`App model override: ${options.model || "server default"}.`,
+				`Gateway default model: ${options.defaultModel || "not set"}.`,
+				`Provider: ${options.agentProvider || "auto"}.`,
+				options.cwd ? `Working directory: ${options.cwd}.` : undefined,
+			].filter(Boolean).join("\n"),
+		};
+	}
+	return undefined;
 }
 
 const SPEECH_MODE_PROMPT = `Activate CodeChat mode for this conversation.
@@ -376,6 +494,7 @@ function buildRemoteSetupUrls(
 	mode: "tailscale" | "bluetooth" = "tailscale",
 	agentProvider?: string,
 	defaultTarget?: string,
+	agentModel?: string,
 ) {
 	const publicBase = PUBLIC_REMOTE_BASE_URL ? normalizeBaseUrl(PUBLIC_REMOTE_BASE_URL) : "";
 	const fallbackBase = getDefaultTailscaleBaseUrl(port);
@@ -404,9 +523,14 @@ function buildRemoteSetupUrls(
 		if (agentProvider) {
 			params.set("agent_provider", agentProvider);
 		}
+		if (agentModel) {
+			params.set("agent_model", agentModel);
+		}
 		if (defaultTarget) {
 			params.set("default_target", defaultTarget);
 		}
+		params.set("workspace_root", DEFAULT_AGENT_CWD || process.cwd());
+		params.set("workspace_path", DEFAULT_AGENT_CWD || process.cwd());
 		return `pi-speak://setup?${params.toString()}`;
 	});
 	return { baseUrls, browserUrls, setupPageUrls, downloadUrls, appSetupUrls };
@@ -525,6 +649,86 @@ function launchOhMyPiAgent(argv: string[], cwd: string) {
 	});
 	child.unref();
 	return { command, argv, cwd };
+}
+
+function launchColabDeployment(cwd: string) {
+	const plan = buildColabLaunchPlan({ cwd }, cwd);
+	if (!plan.ok) return plan;
+	const child = spawn(plan.command, plan.argv, {
+		cwd: plan.cwd,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: false,
+		shell: plan.shell,
+	});
+	child.unref();
+	return plan;
+}
+
+function launchSessionTarget(payload: SessionLaunchPayload, source: SessionEventSource = "admin"): ControlActionResult {
+	const fallbackCwd = payload.cwd?.trim()
+		|| DEFAULT_AGENT_CWD
+		|| process.cwd();
+	const built = buildOhMyPiLaunchArgv({
+		cwd: payload.cwd,
+		prompt: payload.prompt,
+		model: payload.model,
+		provider: payload.provider,
+		sessionDir: payload.sessionDir,
+		hubOnly: payload.hubOnly,
+		targetNode: payload.targetNode,
+	}, fallbackCwd);
+	if (!built.ok) {
+		return { ok: false, message: built.message };
+	}
+	try {
+		if (built.targetNode === "colab") {
+			const launched = launchColabDeployment(built.cwd);
+			if (!launched.ok) return { ok: false, message: launched.message };
+			appendSessionEvent("sess.launch", source, {
+				provider: "colab",
+				targetNode: "colab",
+				mode: "colab",
+				runId: launched.runId,
+				session: launched.session,
+				target: launched.target,
+				argv: launched.argv,
+				cwd: launched.cwd,
+				command: launched.command,
+			});
+			return {
+				ok: true,
+				message: `Launching Colab deployment ${launched.runId} for ${launched.cwd}.`,
+				command: launched.command,
+				commandPreview: launched.commandPreview,
+				argv: launched.argv,
+				cwd: launched.cwd,
+				runId: launched.runId,
+				session: launched.session,
+				target: launched.target,
+				targetNode: "colab",
+			};
+		}
+		const launched = launchOhMyPiAgent(built.argv, built.cwd);
+		appendSessionEvent("sess.launch", source, {
+			provider: "oh-my-pi",
+			mode: built.mode,
+			argv: launched.argv,
+			cwd: launched.cwd,
+			command: launched.command,
+		});
+		return {
+			ok: true,
+			message: built.mode === "hub"
+				? `Launching Oh-my-pi Agent Hub in ${launched.cwd}.`
+				: `Launching Oh-my-pi agent in ${launched.cwd}.`,
+			command: launched.command,
+			argv: launched.argv,
+			cwd: launched.cwd,
+		};
+	} catch (error) {
+		return { ok: false, message: `Session launch failed: ${getErrorMessage(error)}` };
+	}
 }
 
 function getTelegramBotToken(state?: PhoneBridgeState) {
@@ -847,7 +1051,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getSessCompletions = (prefix: string) => {
 		const trimmed = prefix.trimStart();
 		const complete = (value: string, label = value) => ({ value, label });
-		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "list", "name", "wake", "slots", "ui", "export"];
+		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "launch", "list", "name", "wake", "slots", "ui", "export"];
 		if (!trimmed) return top.map((value) => complete(value));
 		const firstSpace = trimmed.indexOf(" ");
 		if (firstSpace === -1) return top.filter((value) => value.startsWith(trimmed.toLowerCase())).map((value) => complete(value));
@@ -871,6 +1075,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 				const targetPrefix = rest.slice("remove ".length);
 				return targets.filter((value) => value.toLowerCase().startsWith(targetPrefix.toLowerCase())).map((value) => complete(`confirm remove ${value}`, `confirm remove ${value}`));
 			}
+		}
+		if (sub === "launch") {
+			const launchOptions = ["colab", "hub"];
+			const launchPrefix = rest.trim().toLowerCase();
+			return launchOptions
+				.filter((value) => value.startsWith(launchPrefix))
+				.map((value) => complete(`launch ${value}`, `launch ${value}`));
 		}
 		if (sub === "alias") {
 			const aliasSub = rest.trimStart();
@@ -1206,7 +1417,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const runAgentPrompt = async (
 		prompt: string,
-		options: { mode?: "turn" | "steer" | "followUp"; timeoutMs?: number; cwd?: string } = {},
+		options: { mode?: "turn" | "steer" | "followUp"; timeoutMs?: number; cwd?: string; model?: string } = {},
 		agentProviderOverride?: AgentProvider,
 	) => {
 		const provider = agentProviderOverride || getAgentProvider();
@@ -1215,7 +1426,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 		const replyText = await collectAgentResponse(provider, prompt, {
 			mode: options.mode,
-			model: agentProviderConfig.model,
+			model: options.model || agentProviderConfig.model,
 			cwd: options.cwd || DEFAULT_AGENT_CWD || undefined,
 			timeoutMs: options.timeoutMs ?? PHONE_TURN_WAIT_TIMEOUT_MS,
 			instructions: SPEECH_MODE_PROMPT,
@@ -1235,6 +1446,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		cwd?: string,
 		mode: "auto" | "live" = "auto",
 		agentProvider?: GatewayAgentProvider,
+		model?: string,
 	): Promise<RemoteTurnResult> => {
 		const trimmed = text.trim();
 		if (!trimmed) {
@@ -1257,6 +1469,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 				? agentProviderConfig.provider
 				: "pi"
 		);
+		const localSlashResult = handleGatewaySlashCommand(trimmed, {
+			model,
+			defaultModel: agentProviderConfig.model,
+			cwd: cwd || DEFAULT_AGENT_CWD || undefined,
+			agentProvider: directBackend,
+		});
+		if (localSlashResult) return { ...localSlashResult, transcript };
 		const directSummary: ConversationReducerSummary = {
 			goal: trimmed,
 			actionItems: [trimmed],
@@ -1606,7 +1825,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				startedWithAgent = Date.now();
 				replyText = await runAgentPrompt(
 					reducer.promptForAgent,
-					{ timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS, cwd },
+					{ timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS, cwd, model },
 					executionProvider,
 				);
 				agentRunMs = Date.now() - startedWithAgent;
@@ -1760,10 +1979,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 		cwd?: string,
 		mode: "auto" | "live" = "auto",
 		agentProvider?: GatewayAgentProvider,
+		model?: string,
 	) => {
 		diagnostics.recentTimings.lastRemoteSource = source;
 		return await remoteTurnManager.enqueue(source, async () =>
-			await executePhoneTurn(source, text, transcript, wantAudio, timings, providers, warnings, targetName, cwd, mode, agentProvider),
+			await executePhoneTurn(source, text, transcript, wantAudio, timings, providers, warnings, targetName, cwd, mode, agentProvider, model),
 		);
 	};
 
@@ -1971,7 +2191,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const token = runtime?.authToken || remoteState.authToken || "";
 		const current = status.currentSession || "current session";
 		const route = status.defaultTarget || current;
-		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode, agentProviderConfig.provider, route);
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode, agentProviderConfig.provider, route, agentProviderConfig.model);
 		const phoneSetupUrl = urls.setupPageUrls[0] || "";
 		const nativeSetupUrl = urls.appSetupUrls[0] || "";
 		const downloadUrl = urls.downloadUrls[0] || "";
@@ -2006,7 +2226,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			return false;
 		}
 		const route = status.defaultTarget || status.currentSession;
-		const urls = buildRemoteSetupUrls(status.host, status.port, token, "tailscale", agentProviderConfig.provider, route);
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, "tailscale", agentProviderConfig.provider, route, agentProviderConfig.model);
 		const baseUrl = urls.baseUrls[0] || getDefaultTailscaleBaseUrl(status.port);
 		const profile = getSetupProfileForBaseUrl(baseUrl);
 		const tray = await startRemoteTray({
@@ -2353,7 +2573,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				onSpeakAction: (action, value) => handleSpeakAction(action, value, lastCtx),
 				onPhoneAction: (action) => handlePhoneAction(action, lastCtx),
 				getSlashCommands: () => REMOTE_SLASH_COMMANDS,
-				onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider) => {
+				onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider, model) => {
 					try {
 						return await enqueuePhoneTurn(
 							"http-text",
@@ -2367,6 +2587,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							cwd,
 							mode,
 							agentProvider,
+							model,
 						);
 					} catch (error) {
 						const reason = getErrorMessage(error);
@@ -2378,7 +2599,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 						};
 					}
 				},
-				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, mode, agentProvider) => {
+				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, mode, agentProvider, model) => {
 					try {
 						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
@@ -2397,6 +2618,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							cwd,
 							mode,
 							agentProvider,
+							model,
 						);
 					} catch (error) {
 						diagnostics.lastErrors.stt = getErrorMessage(error);
@@ -2444,7 +2666,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					}
 					const sessionArg = payload.sessionId?.trim() || payload.sessionPath?.trim();
 					if (!sessionArg) return { ok: false, message: "Session id or path is required." };
-					const cwd = payload.cwd?.trim() || process.cwd();
+					const cwd = payload.cwd?.trim() || DEFAULT_AGENT_CWD || process.cwd();
 					try {
 						const command = launchOhMyPiResume(sessionArg, cwd);
 						appendSessionEvent("sess.resume", "admin", { provider: "oh-my-pi", session: sessionArg, cwd, command });
@@ -2453,44 +2675,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 						return { ok: false, message: `Oh-my-pi resume failed: ${getErrorMessage(error)}` };
 					}
 				},
-				onSessionLaunch: (payload) => {
-					const fallbackCwd = payload.cwd?.trim()
-						|| process.env.AGENT_CWD?.trim()
-						|| process.env.AGENT_WORKSPACE?.trim()
-						|| process.cwd();
-					const built = buildOhMyPiLaunchArgv({
-						cwd: payload.cwd,
-						prompt: payload.prompt,
-						model: payload.model,
-						provider: payload.provider,
-						sessionDir: payload.sessionDir,
-						hubOnly: payload.hubOnly,
-					}, fallbackCwd);
-					if (!built.ok) {
-						return { ok: false, message: built.message };
-					}
-					try {
-						const launched = launchOhMyPiAgent(built.argv, built.cwd);
-						appendSessionEvent("sess.launch", "admin", {
-							provider: "oh-my-pi",
-							mode: built.mode,
-							argv: launched.argv,
-							cwd: launched.cwd,
-							command: launched.command,
-						});
-						return {
-							ok: true,
-							message: built.mode === "hub"
-								? `Launching Oh-my-pi Agent Hub in ${launched.cwd}.`
-								: `Launching Oh-my-pi agent in ${launched.cwd}.`,
-							command: launched.command,
-							argv: launched.argv,
-							cwd: launched.cwd,
-						};
-					} catch (error) {
-						return { ok: false, message: `Oh-my-pi launch failed: ${getErrorMessage(error)}` };
-					}
-				},
+				onSessionLaunch: (payload) => launchSessionTarget(payload, "admin"),
 				onOmpSelectSession: (_clientKey, sessionPath) => {
 					// Local single-user extension: one selection (default bucket) matching
 					// getActiveOmpProvider(). Same shared validation as the gateway, surfaced
@@ -2986,6 +3171,28 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (sub === "launch") {
+				if (!rest) {
+					ctx.ui.notify("Usage: /sess launch [colab|hub|<agent prompt>]", "error");
+					return;
+				}
+				const launchTarget = rest.toLowerCase().replace(/\s+/g, " ").trim();
+				const payload: SessionLaunchPayload = { cwd: DEFAULT_AGENT_CWD || process.cwd() };
+				if (["hub", "agent hub", "omp hub", "oh-my-pi hub"].includes(launchTarget)) {
+					payload.hubOnly = true;
+				} else if (
+					["colab", "google colab", "colab workspace", "colab deploy", "colab launch"].includes(launchTarget)
+					|| launchTarget.startsWith("colab ")
+				) {
+					payload.targetNode = "colab";
+				} else {
+					payload.prompt = rest;
+				}
+				const result = launchSessionTarget(payload, source);
+				notifyAudible(ctx, result.message, result.ok ? "info" : "error", source === "voice" ? result.message : undefined);
+				return;
+			}
+
 			if (sub === "new") {
 				const name = rest || `session-${Date.now()}`;
 				const conflictText = getSessionRouteConflictText(name, ctx);
@@ -3284,7 +3491,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|list|name|wake|slots|ui|export] <args>", "error");
+			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|launch|list|name|wake|slots|ui|export] <args>", "error");
 	};
 
 	pi.registerCommand("sess", {

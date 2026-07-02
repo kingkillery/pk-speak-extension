@@ -182,15 +182,44 @@ export type OhMyPiLaunchOptions = {
 	provider?: string;
 	sessionDir?: string;
 	hubOnly?: boolean;
+	targetNode?: string;
 };
 
+export type LaunchTargetNode = "colab";
+
 export type OhMyPiLaunchArgvResult =
-	| { ok: true; argv: string[]; cwd: string; mode: "launch" | "hub" }
+	| { ok: true; argv: string[]; cwd: string; mode: "launch" | "hub"; targetNode?: string }
+	| { ok: false; message: string };
+
+export type ColabLaunchOptions = {
+	cwd?: string;
+	runId?: string;
+	session?: string;
+	target?: string;
+	command?: string;
+};
+
+export type ColabLaunchPlanResult =
+	| {
+		ok: true;
+		command: string;
+		argv: string[];
+		cwd: string;
+		runId: string;
+		session: string;
+		target: string;
+		commandPreview: string;
+		shell: boolean;
+	}
 	| { ok: false; message: string };
 
 const MAX_PROMPT_LENGTH = 4096;
 const MAX_MODEL_LENGTH = 128;
 const MAX_PROVIDER_LENGTH = 128;
+const MAX_TARGET_NODE_LENGTH = 64;
+const MAX_RUN_ID_LENGTH = 128;
+const MAX_COLAB_SESSION_LENGTH = 128;
+const MAX_COLAB_TARGET_LENGTH = 256;
 const MAX_PATH_LENGTH = 1024;
 const MAX_CWD_LENGTH = 1024;
 const NUL_CHAR_CODE = 0;
@@ -230,6 +259,77 @@ function normalizeOptionalString(
 	return trimmed;
 }
 
+export function normalizeLaunchTargetNode(value: unknown): LaunchTargetNode | undefined | { error: string } {
+	const targetNode = normalizeOptionalString(value, MAX_TARGET_NODE_LENGTH, "targetNode");
+	if (targetNode === undefined) return undefined;
+	if (typeof targetNode === "object") return targetNode;
+	const normalized = targetNode.toLowerCase();
+	if (normalized === "colab") return "colab";
+	return { error: `Invalid targetNode: unsupported target "${targetNode}".` };
+}
+
+function resolveColabLaunchCommand(env: NodeJS.ProcessEnv = process.env) {
+	const configured = env.PI_SPEAK_COLAB_LAUNCH_BIN?.trim()
+		|| env.MESH_SYNC_BIN?.trim()
+		|| "";
+	if (configured) return configured;
+	const appData = env.APPDATA?.trim();
+	return appData ? `${appData}\\Antigravity\\bin\\mesh-sync.cmd` : "mesh-sync";
+}
+
+function quotePreviewArg(value: string) {
+	if (!/[\s"]/u.test(value)) return value;
+	return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+export function buildColabLaunchPlan(
+	options: ColabLaunchOptions,
+	fallbackCwd: string,
+	env: NodeJS.ProcessEnv = process.env,
+	now: () => number = Date.now,
+): ColabLaunchPlanResult {
+	const cwdNormalized = normalizeOptionalString(options.cwd, MAX_CWD_LENGTH, "cwd");
+	if (cwdNormalized && typeof cwdNormalized === "object" && "error" in cwdNormalized) {
+		return { ok: false, message: cwdNormalized.error };
+	}
+	const cwd = resolve(cwdNormalized ?? fallbackCwd);
+
+	const runIdNormalized = normalizeOptionalString(options.runId, MAX_RUN_ID_LENGTH, "runId");
+	if (runIdNormalized && typeof runIdNormalized === "object" && "error" in runIdNormalized) {
+		return { ok: false, message: runIdNormalized.error };
+	}
+	const sessionNormalized = normalizeOptionalString(options.session, MAX_COLAB_SESSION_LENGTH, "session");
+	if (sessionNormalized && typeof sessionNormalized === "object" && "error" in sessionNormalized) {
+		return { ok: false, message: sessionNormalized.error };
+	}
+	const targetNormalized = normalizeOptionalString(options.target, MAX_COLAB_TARGET_LENGTH, "target");
+	if (targetNormalized && typeof targetNormalized === "object" && "error" in targetNormalized) {
+		return { ok: false, message: targetNormalized.error };
+	}
+	const commandNormalized = normalizeOptionalString(options.command, MAX_PATH_LENGTH, "command");
+	if (commandNormalized && typeof commandNormalized === "object" && "error" in commandNormalized) {
+		return { ok: false, message: commandNormalized.error };
+	}
+
+	const runId = runIdNormalized ?? `colab-${now()}`;
+	const session = sessionNormalized ?? "mesh-colab";
+	const target = targetNormalized ?? "/content/workspace";
+	const command = commandNormalized ?? resolveColabLaunchCommand(env);
+	const argv = ["colab-deploy", cwd, "--run-id", runId, "--session", session, "--target", target];
+	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+	return {
+		ok: true,
+		command,
+		argv,
+		cwd,
+		runId,
+		session,
+		target,
+		commandPreview: [command, ...argv].map(quotePreviewArg).join(" "),
+		shell,
+	};
+}
+
 export function buildOhMyPiLaunchArgv(
 	options: OhMyPiLaunchOptions,
 	fallbackCwd: string,
@@ -240,7 +340,13 @@ export function buildOhMyPiLaunchArgv(
 	}
 	const cwd = resolve(cwdNormalized ?? fallbackCwd);
 
+	const targetNode = normalizeLaunchTargetNode(options.targetNode);
+	if (targetNode && typeof targetNode === "object" && "error" in targetNode) {
+		return { ok: false, message: targetNode.error };
+	}
+
 	if (options.hubOnly) {
+		if (targetNode) return { ok: false, message: "Invalid launch: hubOnly cannot be combined with targetNode." };
 		return { ok: true, argv: ["bg"], cwd, mode: "hub" };
 	}
 
@@ -281,5 +387,5 @@ export function buildOhMyPiLaunchArgv(
 
 	if (prompt) argv.push("--", prompt);
 
-	return { ok: true, argv, cwd, mode: "launch" };
+	return { ok: true, argv, cwd, mode: "launch", targetNode };
 }

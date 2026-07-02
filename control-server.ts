@@ -3,10 +3,11 @@ import { closeSync, createReadStream, existsSync, mkdirSync, opendirSync, openSy
 import { readFile, rm } from "node:fs/promises";
 import dgram, { type Socket as UdpSocket } from "node:dgram";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { basename, dirname, join, parse, resolve } from "node:path";
-import { hostname, networkInterfaces, platform } from "node:os";
+import { hostname, platform } from "node:os";
 import QRCode from "qrcode";
+import { getOrCreateInstallAuthToken, getReachableBaseUrls, isTailscaleIpv4, pickPhoneFacingBaseUrl } from "./pairing.js";
 import Bonjour from "bonjour-service";
 import { WebSocketServer, WebSocket } from "ws";
 import "./realtime-types.js";
@@ -17,6 +18,8 @@ import { readExecutionPlans, readExecutionTraces } from "./conversation-executio
 import type { SessionDashboard, CompactRouteSlot } from "./session-routing.js";
 import type { AgentDiscoverySnapshot } from "./agent-discovery.js";
 import { getPiSpeakConfigDir } from "./setup-config.js";
+
+const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
 export type ControlServerState = {
 
@@ -60,6 +63,7 @@ export type SessionLaunchPayload = {
 	provider?: string;
 	sessionDir?: string;
 	hubOnly?: boolean;
+	targetNode?: string;
 };
 
 export type SessionArchivePayload = {
@@ -76,7 +80,7 @@ export type RemoteSlashCommand = {
 };
 
 export type GatewayAgentProvider = "pi" | "codex" | "claude" | "oh-my-pi";
-export type ControlAgentProvider = GatewayAgentProvider | "gemini" | "gemini-live" | "elevenlabs";
+export type ControlAgentProvider = GatewayAgentProvider | "gemini" | "gemini-live" | "elevenlabs" | "9router";
 
 export type ControlServerStatus = {
 	agent?: {
@@ -221,6 +225,7 @@ export type ControlServerOptions = {
 		cwd?: string,
 		mode?: "auto" | "live",
 		agentProvider?: GatewayAgentProvider,
+		model?: string,
 		clientKey?: string,
 	) => Promise<RemoteTurnResult>;
 	onVoiceTurn: (
@@ -231,6 +236,7 @@ export type ControlServerOptions = {
 		cwd?: string,
 		mode?: "auto" | "live",
 		agentProvider?: GatewayAgentProvider,
+		model?: string,
 		clientKey?: string,
 	) => Promise<RemoteTurnResult>;
 	onTurnCancel?: () => Promise<ControlActionResult> | ControlActionResult;
@@ -373,6 +379,7 @@ export class ControlServer {
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
+	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
 		udpEnabled: false,
@@ -563,6 +570,7 @@ export class ControlServer {
 				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 				return;
 			}
+			this.recordRemoteClient(req, url);
 			const id = decodeURIComponent(url.pathname.slice("/v1/audio/".length));
 			await this.handleAudioRequest(id, res);
 			return;
@@ -572,6 +580,7 @@ export class ControlServer {
 			this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 			return;
 		}
+		this.recordRemoteClient(req, url);
 
 		const rateLimitError = this.checkRateLimit(req, url, localRequest);
 		if (rateLimitError) {
@@ -599,6 +608,18 @@ export class ControlServer {
 						allowedOrigins: [...this.allowedOrigins],
 					},
 					discovery: { ...this.discoveryDiagnostics },
+				},
+			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/pairing/status") {
+			this.writeJson(res, 200, {
+				ok: true,
+				lastRemoteClient: this.lastRemoteClient ?? null,
+				gateway: {
+					port: this.state.port ?? DEFAULT_PORT,
+					authRequired: !!this.state.authToken,
 				},
 			});
 			return;
@@ -825,6 +846,7 @@ export class ControlServer {
 				provider: "string",
 				sessionDir: "string",
 				hubOnly: "boolean",
+				targetNode: "string",
 			};
 			for (const [field, expected] of Object.entries(fieldTypes)) {
 				if (payload[field] !== undefined && typeof payload[field] !== expected) {
@@ -838,7 +860,8 @@ export class ControlServer {
 			const provider = typeof payload.provider === "string" ? payload.provider : undefined;
 			const sessionDir = typeof payload.sessionDir === "string" ? payload.sessionDir : undefined;
 			const hubOnly = typeof payload.hubOnly === "boolean" ? payload.hubOnly : undefined;
-			const result = await this.onSessionLaunch({ cwd, prompt, model, provider, sessionDir, hubOnly });
+			const targetNode = typeof payload.targetNode === "string" ? payload.targetNode : undefined;
+			const result = await this.onSessionLaunch({ cwd, prompt, model, provider, sessionDir, hubOnly, targetNode });
 			this.writeJson(res, result.ok ? 200 : 400, result);
 			return;
 		}
@@ -971,7 +994,8 @@ export class ControlServer {
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
 			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
+			const model = parseModelOverride(url.searchParams.get("model"));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -993,7 +1017,8 @@ export class ControlServer {
 			const target = typeof payload?.target === "string" ? payload.target.trim() || undefined : undefined;
 			const cwd = getLaunchCwdFromPayload(payload);
 			const agentProvider = parseAgentProviderOverride(typeof payload?.agentProvider === "string" ? payload.agentProvider : undefined);
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, typeof payload?.clientId === "string" ? payload.clientId : undefined)));
+			const model = parseModelOverride(typeof payload?.model === "string" ? payload.model : undefined);
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, typeof payload?.clientId === "string" ? payload.clientId : undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -1010,7 +1035,8 @@ export class ControlServer {
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
 			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
-			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
+			const model = parseModelOverride(url.searchParams.get("model"));
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -1052,6 +1078,18 @@ export class ControlServer {
 
 		if (url.pathname === "/" || url.pathname === "/app") {
 			this.redirect(res, "/app/");
+			return true;
+		}
+
+		if (url.pathname === "/connect" || url.pathname === "/connect/") {
+			// The connect page renders the pairing QR (which embeds the auth token),
+			// so it is strictly loopback-only: the desktop window on this machine.
+			const remote = normalizeRemoteAddress(req.socket.remoteAddress || "");
+			if (!isLoopback(remote) || !isLoopbackHost(url.hostname)) {
+				this.writeJson(res, 403, { ok: false, error: "The connect page is only available on this machine (open http://127.0.0.1 locally)." });
+				return true;
+			}
+			await this.handleConnectPage(req, url, res);
 			return true;
 		}
 
@@ -1246,6 +1284,7 @@ export class ControlServer {
 				workspaceFile: "/v1/workspace/file",
 				collabLink: "/v1/collab-link",
 				sessions: "/v1/sessions",
+				sessionLaunch: "/v1/sessions/launch",
 				slots: "/v1/sessions/slots",
 				agents: "/v1/agents",
 				events: "/v1/events",
@@ -1264,6 +1303,8 @@ export class ControlServer {
 				"workspace-browse",
 				"workspace-file-read",
 				"collab-link",
+				"session-launch",
+				"colab-launch",
 				"turn-cancel",
 				"progress-events",
 				"pwa",
@@ -1280,6 +1321,7 @@ export class ControlServer {
 				? {
 					provider: status.agent.provider,
 					configuredProvider: status.agent.configuredProvider,
+					model: status.agent.model,
 					capabilities: status.agent.capabilities,
 				}
 				: undefined,
@@ -1314,10 +1356,14 @@ export class ControlServer {
 		if (defaultTarget) {
 			setupParams.set("default_target", defaultTarget);
 		}
+		if (status.agent?.model) {
+			setupParams.set("agent_model", status.agent.model);
+		}
 		const agentProvider = status.agent?.provider;
 		if (agentProvider === "pi"
 			|| agentProvider === "codex"
 			|| agentProvider === "claude"
+			|| agentProvider === "oh-my-pi"
 			|| agentProvider === "elevenlabs"
 			|| agentProvider === "gemini"
 			|| agentProvider === "gemini-live") {
@@ -1344,6 +1390,49 @@ export class ControlServer {
 			apkQrSvg,
 			status,
 			apkAvailable: existsSync(ANDROID_APK_PATH),
+		}));
+	}
+
+	/**
+	 * Desktop pairing page (loopback-only). Shows the pi-speak://setup QR with the
+	 * phone-facing base URL + persistent token, and live "phone connected" status
+	 * polled from /v1/pairing/status. This is the window `pi-speak-server` opens.
+	 */
+	private async handleConnectPage(req: IncomingMessage, url: URL, res: ServerResponse) {
+		const port = this.state.port ?? DEFAULT_PORT;
+		const token = this.state.authToken || "";
+		const status = this.getStatus();
+		const phoneBaseUrl = pickPhoneFacingBaseUrl(port);
+		const profileName = url.searchParams.get("profile_name")
+			|| process.env.PI_SPEAK_PROFILE_NAME?.trim()
+			|| (hostname() || "Pi Speak");
+		const setupParams = new URLSearchParams({
+			base_url: phoneBaseUrl,
+			machine_id: getStableServerId(),
+			profile_name: profileName,
+			connection_mode: isTailscaleHostname(new URL(phoneBaseUrl).hostname) ? "tailscale" : "manual",
+			workspace_root: getWorkspaceRoot(),
+			workspace_path: getDefaultWorkspacePath(),
+		});
+		if (token) setupParams.set("token", token);
+		const defaultTarget = status.remote.defaultTarget || status.remote.currentSession || "";
+		if (defaultTarget) setupParams.set("default_target", defaultTarget);
+		const appSetupUrl = `pi-speak://setup?${setupParams.toString()}`;
+		const setupPageUrl = new URL(`/setup${token ? `?token=${encodeURIComponent(token)}` : ""}`, phoneBaseUrl).toString();
+		const apkUrl = new URL("/download/pi-speak.apk", phoneBaseUrl).toString();
+		const qrSvg = await QRCode.toString(appSetupUrl, { type: "svg", errorCorrectionLevel: "M", margin: 2, width: 300 });
+		res.statusCode = 200;
+		res.setHeader("Content-Type", "text/html; charset=utf-8");
+		res.setHeader("Cache-Control", "no-store");
+		res.end(renderConnectHtml({
+			profileName,
+			phoneBaseUrl,
+			appSetupUrl,
+			setupPageUrl,
+			apkUrl,
+			apkAvailable: existsSync(ANDROID_APK_PATH),
+			reachableUrls: getReachableBaseUrls(port),
+			qrSvg,
 		}));
 	}
 
@@ -1430,6 +1519,19 @@ export class ControlServer {
 			return true;
 		}
 		return false;
+	}
+
+	private recordRemoteClient(req: IncomingMessage, url: URL) {
+		// Pairing-status polls are how UIs *observe* connection state; they must
+		// never count as the phone activity they are trying to detect.
+		if (url.pathname === "/v1/pairing/status") return;
+		const remote = normalizeRemoteAddress(req.socket.remoteAddress || "");
+		if (!remote || isLoopback(remote)) return;
+		this.lastRemoteClient = {
+			at: Date.now(),
+			agent: getPrimaryHeaderValue(req.headers["user-agent"]) || undefined,
+			address: remote,
+		};
 	}
 
 	private isAuthorized(req: IncomingMessage, url: URL, allowQueryToken: boolean) {
@@ -1817,7 +1919,7 @@ function createPsmuxWindow(payload: Record<string, unknown> | undefined): Contro
 }
 
 function openWarpTab(payload: Record<string, unknown> | undefined): ControlActionResult {
-	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined) || process.cwd();
+	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined) || getDefaultWorkspacePath();
 	const newWindow = payload?.newWindow === true;
 	const scheme = getWarpUriScheme();
 	const action = newWindow ? "new_window" : "new_tab";
@@ -1937,6 +2039,12 @@ function parseAgentProviderOverride(value: string | null | undefined): GatewayAg
 	return undefined;
 }
 
+function parseModelOverride(value: string | null | undefined): string | undefined {
+	const trimmed = (value || "").trim();
+	if (!trimmed || trimmed.length > 160 || /[\s\x00-\x1f\x7f]/.test(trimmed)) return undefined;
+	return trimmed;
+}
+
 function isTruthy(value: string | null) {
 	if (!value) return false;
 	return !["0", "false", "off", "no"].includes(value.toLowerCase());
@@ -1964,6 +2072,100 @@ function isLocalRequest(req: IncomingMessage, url: URL) {
 function isLoopbackHost(hostname: string) {
 	const normalized = (hostname || "").toLowerCase();
 	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function renderConnectHtml({
+	profileName,
+	phoneBaseUrl,
+	appSetupUrl,
+	setupPageUrl,
+	apkUrl,
+	apkAvailable,
+	reachableUrls,
+	qrSvg,
+}: {
+	profileName: string;
+	phoneBaseUrl: string;
+	appSetupUrl: string;
+	setupPageUrl: string;
+	apkUrl: string;
+	apkAvailable: boolean;
+	reachableUrls: string[];
+	qrSvg: string;
+}): string {
+	const reachableRows = reachableUrls
+		.map((entry) => `<code>${escapeHtml(entry)}</code>`)
+		.join(" ");
+	return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Speak — Connect your phone</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
+main { max-width: 640px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: #8b949e; font-size: 14px; margin: 0 0 24px; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; }
+.qr { display: flex; justify-content: center; margin: 20px 0; }
+.qr > div { background: #ffffff; padding: 14px; border-radius: 10px; line-height: 0; }
+.status { display: flex; align-items: center; gap: 10px; font-size: 15px; margin: 4px 0 12px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: #d29922; animation: pulse 1.6s ease-in-out infinite; }
+.dot.ok { background: #3fb950; animation: none; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.meta { font-size: 13px; color: #8b949e; overflow-wrap: anywhere; margin: 6px 0; }
+code { background: #0d1117; border: 1px solid #30363d; padding: 2px 6px; border-radius: 5px; font-size: 12px; }
+button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+button:hover { border-color: #8b949e; }
+.steps { font-size: 14px; color: #c9d1d9; padding-left: 18px; margin: 0 0 8px; }
+.steps li { margin: 4px 0; }
+.footer { font-size: 12px; color: #6e7681; margin-top: 20px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Connect your phone</h1>
+<p class="sub">${escapeHtml(profileName)} &middot; ${escapeHtml(phoneBaseUrl)}</p>
+<section class="panel">
+<div class="status"><span class="dot" id="dot"></span><span id="statusText">Waiting for your phone&hellip;</span></div>
+<ol class="steps">
+<li>Install the Pi Speak app on your Android phone${apkAvailable ? ` (<a href="${escapeHtml(apkUrl)}" style="color:#58a6ff">APK</a>)` : ""}.</li>
+<li>Scan this QR code with the phone camera.</li>
+<li>Tap the <code>pi-speak://</code> link — the app configures itself and connects.</li>
+</ol>
+<div class="qr"><div>${qrSvg}</div></div>
+<p class="meta"><strong>No camera?</strong> Open <code id="setupUrl">${escapeHtml(setupPageUrl)}</code> on the phone <button onclick="copySetup()">Copy link</button></p>
+<p class="meta"><strong>Reachable at:</strong> ${reachableRows || "<code>no LAN/Tailscale address found</code>"}</p>
+</section>
+<p class="footer">This page (and the token inside the QR) is only served to this machine. Keep this window open to see when the phone connects.</p>
+</main>
+<script>
+var loadedAt = Date.now();
+function copySetup() {
+	var text = document.getElementById("setupUrl").textContent;
+	if (navigator.clipboard) { navigator.clipboard.writeText(text); }
+}
+function poll() {
+	fetch("/v1/pairing/status", { cache: "no-store" })
+		.then(function (res) { return res.json(); })
+		.then(function (data) {
+			var client = data && data.lastRemoteClient;
+			if (client && client.at >= loadedAt) {
+				document.getElementById("dot").className = "dot ok";
+				document.getElementById("statusText").textContent =
+					"Phone connected (" + (client.address || "remote") + ")";
+			}
+		})
+		.catch(function () {});
+}
+setInterval(poll, 2000);
+poll();
+</script>
+</body>
+</html>`;
 }
 
 function resolveRemoteAppDir() {
@@ -2122,6 +2324,7 @@ function getWorkspaceRoot() {
 function getDefaultWorkspacePath() {
 	return process.env.AGENT_CWD?.trim()
 		|| process.env.AGENT_WORKSPACE?.trim()
+		|| (platform() === "win32" ? DEFAULT_WINDOWS_WORKSPACE : "")
 		|| process.cwd();
 }
 
@@ -2322,61 +2525,10 @@ function readCollabLink(): CollabLinkSnapshot {
 	}
 }
 
-function getOrCreateInstallAuthToken() {
-	const tokenFile = getInstallAuthTokenPath();
-	try {
-		const existing = readFileSync(tokenFile, "utf8").trim();
-		if (existing.length >= 24) return existing;
-	} catch {
-		// Generate below.
-	}
-	const token = randomBytes(32).toString("base64url");
-	try {
-		mkdirSync(dirname(tokenFile), { recursive: true });
-		writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
-	} catch {
-		// Keep the server usable even when the config directory is read-only.
-	}
-	return token;
-}
-
-function getInstallAuthTokenPath() {
-	const base = process.env.PI_SPEAK_CONFIG_DIR
-		|| process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "pi-speak")
-		|| process.env.APPDATA && join(process.env.APPDATA, "pi-speak")
-		|| join(process.cwd(), ".pi-speak");
-	return join(base, "http-token");
-}
-
 function getStableServerId() {
 	const explicit = process.env.PI_SPEAK_SERVER_ID?.trim();
 	if (explicit) return explicit;
 	return hostname() || "pi-speak";
-}
-
-function getReachableBaseUrls(port: number) {
-	const urls: string[] = [];
-	for (const entries of Object.values(networkInterfaces())) {
-		for (const entry of entries || []) {
-			if (entry.family !== "IPv4" || entry.internal) continue;
-			if (!isPrivateLanIpv4(entry.address) && !isTailscaleIpv4(entry.address)) continue;
-			urls.push(`http://${entry.address}:${port}/`);
-		}
-	}
-	return [...new Set(urls)];
-}
-
-function isPrivateLanIpv4(address: string) {
-	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
-	const [a, b] = parts;
-	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
-}
-
-function isTailscaleIpv4(address: string) {
-	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
-	return parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
 }
 
 function safeStatDirectory(path: string) {

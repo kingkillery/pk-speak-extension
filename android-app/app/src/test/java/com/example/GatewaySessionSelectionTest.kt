@@ -6,6 +6,7 @@ import com.example.api.GatewaySessionDashboard
 import com.example.api.GatewaySessionEntry
 import com.example.data.AppPreferences
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -60,5 +61,73 @@ class GatewaySessionSelectionTest {
     assertEquals("ExistingTarget", prefs.codexSessionName)
     assertEquals("C:\\dev\\Desktop-Projects\\pi-speak-extension", prefs.workspacePath)
     assertEquals("C:\\Users\\prest\\.codex\\saved.jsonl", prefs.selectedGatewaySessionPath)
+  }
+
+  @Test
+  fun gatewaySessionOmpRoutePath_onlyResolvesOmpBackgroundLanes() {
+    assertEquals(
+      "C:\\Users\\prest\\.omp\\agent\\sessions\\lane.jsonl",
+      gatewaySessionOmpRoutePath(
+        GatewaySessionEntry(
+          name = "OMP lane",
+          sessionPath = "C:\\Users\\prest\\.omp\\agent\\sessions\\lane.jsonl",
+          source = "oh-my-pi"
+        )
+      )
+    )
+    assertEquals(
+      "C:\\Users\\prest\\.omp\\agent\\sessions\\background.jsonl",
+      gatewaySessionOmpRoutePath(
+        GatewaySessionEntry(
+          name = "Background lane",
+          path = "C:\\Users\\prest\\.omp\\agent\\sessions\\background.jsonl",
+          kind = "background"
+        )
+      )
+    )
+    assertNull(
+      gatewaySessionOmpRoutePath(
+        GatewaySessionEntry(
+          name = "Codex session",
+          sessionPath = "C:\\Users\\prest\\.codex\\session.jsonl",
+          provider = "codex"
+        )
+      )
+    )
+  }
+
+  @Test
+  fun buildGatewayAgentHubGroups_filtersToOmpBackgroundLanes() {
+    val dashboard = GatewaySessionDashboard(
+      current = "Main",
+      sessions = listOf(
+        GatewaySessionEntry(
+          name = "OMP lane",
+          sessionPath = "C:\\Users\\prest\\.omp\\agent\\sessions\\lane.jsonl",
+          workingDirectory = "C:\\dev\\pi-speak-extension",
+          source = "oh-my-pi"
+        ),
+        GatewaySessionEntry(
+          name = "Background lane",
+          path = "C:\\Users\\prest\\.omp\\agent\\sessions\\background.jsonl",
+          cwd = "C:\\dev\\pi-speak-extension",
+          kind = "background"
+        ),
+        GatewaySessionEntry(
+          name = "Codex session",
+          sessionPath = "C:\\Users\\prest\\.codex\\session.jsonl",
+          workingDirectory = "C:\\dev\\pi-speak-extension",
+          provider = "codex"
+        )
+      )
+    )
+
+    val names = buildGatewayAgentHubGroups(
+      dashboard = dashboard,
+      currentWorkspace = "C:\\dev\\pi-speak-extension",
+      query = ""
+    ).flatMap { it.sessions }.map { it.name }.toSet()
+
+    assertEquals(setOf("OMP lane", "Background lane"), names)
   }
 }

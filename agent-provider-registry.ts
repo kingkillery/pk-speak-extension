@@ -94,6 +94,13 @@ const AGENT_PROVIDER_SPECS: Record<AgentProviderName, AgentProviderSpec> = {
 		capabilities: { ...BASE_CAPABILITIES },
 		canResumeSession: () => false,
 	},
+	"9router": {
+		name: "9router",
+		displayName: "9Router",
+		aliases: ["9router", "nine-router", "nine router"],
+		capabilities: { ...BASE_CAPABILITIES, routing: false, steering: false, resumableSessions: false },
+		canResumeSession: () => false,
+	},
 };
 
 export function normalizeAgentProviderName(value: string | undefined): AgentProviderName | undefined {

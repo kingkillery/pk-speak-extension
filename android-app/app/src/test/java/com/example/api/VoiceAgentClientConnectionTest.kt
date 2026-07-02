@@ -210,6 +210,38 @@ class VoiceAgentClientConnectionTest {
   }
 
   @Test
+  fun sendTextTurnDetailed_postsOmpProviderWorkspaceAndModel() = kotlinx.coroutines.runBlocking {
+    var seenBody = ""
+    var seenToken = ""
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/turn/text") { exchange ->
+      seenToken = exchange.requestHeaders.getFirst("X-Pi-Speak-Token") ?: ""
+      seenBody = exchange.requestBody.bufferedReader().use { it.readText() }
+      val body = """{"replyText":"model received"}""".toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "secret-token"
+    prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+    prefs.codexSessionName = "main"
+    prefs.workspacePath = "C:\\dev\\Desktop-Projects\\oh-my-pi-fork"
+    prefs.agentModel = "gpt-test"
+    val client = VoiceAgentClient(context, prefs)
+
+    val result = client.sendTextTurnDetailed("/model")
+
+    assertEquals("model received", result.replyText)
+    assertEquals("secret-token", seenToken)
+    assertTrue(seenBody.contains("\"agentProvider\":\"oh-my-pi\""))
+    assertTrue(seenBody.contains("\"target\":\"main\""))
+    assertTrue(seenBody.contains("\"cwd\":\"C:\\\\dev\\\\Desktop-Projects\\\\oh-my-pi-fork\""))
+    assertTrue(seenBody.contains("\"model\":\"gpt-test\""))
+  }
+
+  @Test
   fun getSessionDashboard_parsesWrapperAndFullSessionEntry() = kotlinx.coroutines.runBlocking {
     var seenToken = ""
     val server = startSessionsServer(
@@ -379,6 +411,33 @@ class VoiceAgentClientConnectionTest {
     assertTrue(seenBody.contains(""""sessionId":"abc123""""))
     assertTrue(seenBody.contains(""""sessionPath":"C:\\Users\\prest\\.codex\\ready.jsonl""""))
     assertTrue(seenBody.contains(""""cwd":"C:\\dev\\Ready""""))
+  }
+
+  @Test
+  fun launchColabWorkspace_postsTargetNodeAndWorkspace() = kotlinx.coroutines.runBlocking {
+    var seenBody = ""
+    var seenToken = ""
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/sessions/launch") { exchange ->
+      seenToken = exchange.requestHeaders.getFirst("X-Pi-Speak-Token") ?: ""
+      seenBody = exchange.requestBody.bufferedReader().use { it.readText() }
+      val body = """{"ok":true,"message":"Launching Colab deployment colab-test."}""".toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "secret-token"
+    prefs.workspacePath = "C:\\dev\\Desktop-Projects\\pi-speak-extension"
+    val client = VoiceAgentClient(context, prefs)
+
+    val message = client.launchColabWorkspace()
+
+    assertEquals("Launching Colab deployment colab-test.", message)
+    assertEquals("secret-token", seenToken)
+    assertTrue(seenBody.contains(""""targetNode":"colab""""))
+    assertTrue(seenBody.contains(""""cwd":"C:\\dev\\Desktop-Projects\\pi-speak-extension""""))
   }
 
   private fun startGatewayServer(

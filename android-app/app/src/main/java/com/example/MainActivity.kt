@@ -32,7 +32,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -59,9 +58,8 @@ import com.example.api.GatewaySessionErrorKind
 import com.example.api.GatewaySessionException
 import com.example.api.VoiceAgentClient
 import com.example.api.RemoteSlashCommand
-import com.example.api.RealtimeControlMessage
-import com.example.api.RealtimeVoiceClient
-import com.example.api.RealtimeListener
+import com.example.audio.StreamingPcmPlayer
+import com.example.audio.StreamingPcmRecorder
 import com.example.audio.AudioHelper
 import com.example.audio.TtsHelper
 import com.example.data.AppPreferences
@@ -170,7 +168,6 @@ fun PiSpeakConsoleScreen(
         )
     }
     val context = androidx.compose.ui.platform.LocalContext.current
-    val realtimeClient = remember { com.example.api.RealtimeVoiceClient(context, prefs) }
 
     // Synchronize agent state
     LaunchedEffect(selectedAgent) {
@@ -301,8 +298,7 @@ fun PiSpeakConsoleScreen(
                         prefs = prefs,
                         client = client,
                         runtimeState = studioState,
-                        appScope = scope,
-                        realtimeClient = realtimeClient
+                        appScope = scope
                     )
                     "sessions" -> SessionsTabContent(
                         client = client,
@@ -332,7 +328,6 @@ fun PiSpeakConsoleScreen(
                     )
                     "settings" -> SettingsTabContent(
                         prefs = prefs,
-                        realtimeClient = realtimeClient,
                         onConfigChanged = {
                             codexSessionName = prefs.codexSessionName
                             selectedAgent = prefs.activeAgent
@@ -802,8 +797,7 @@ fun StudioTabContent(
     prefs: AppPreferences,
     client: VoiceAgentClient,
     runtimeState: StudioRuntimeState,
-    appScope: CoroutineScope,
-    realtimeClient: com.example.api.RealtimeVoiceClient
+    appScope: CoroutineScope
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val permissionState = rememberPermissionState(permission = Manifest.permission.RECORD_AUDIO)
@@ -811,55 +805,16 @@ fun StudioTabContent(
     val state = runtimeState
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
 
-    LaunchedEffect(realtimeClient) {
-        realtimeClient.listener = object : com.example.api.RealtimeListener {
-            override fun onTranscript(text: String) {
-                state.transcription = text
-            }
+    // ─── Live (Gemini realtime) session state ────────────────────────────
+    val liveSessionRef = remember { mutableStateOf<RealtimeVoiceSession?>(null) }
+    val liveRecorderRef = remember { mutableStateOf<StreamingPcmRecorder?>(null) }
+    val livePlayerRef = remember { mutableStateOf<StreamingPcmPlayer?>(null) }
 
-            override fun onTextReply(text: String) {
-                state.latestReply = text
-            }
-
-            override fun onInterrupt() {
-                state.latestReply = "Interrupted"
-            }
-
-            override fun onTerminalApprovalRequired(message: RealtimeControlMessage) {
-                val approvalId = message.approvalId ?: return
-                state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
-                state.pendingTerminalApprovals.add(
-                    TerminalApprovalPrompt(
-                        approvalId = approvalId,
-                        command = message.command.orEmpty(),
-                        cwd = message.cwd.orEmpty(),
-                        reason = message.reason.orEmpty(),
-                        timeoutMs = message.timeoutMs ?: 0
-                    )
-                )
-                state.latestReply = "Terminal approval needed."
-            }
-
-            override fun onTerminalApprovalResolved(approvalId: String) {
-                state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
-            }
-
-            override fun onError(message: String) {
-                state.latestReply = "Realtime error: $message"
-            }
-
-            override fun onStatusChanged(connected: Boolean) {
-                state.isRealtimeConnected = connected
-            }
-        }
-    }
-
-    DisposableEffect(realtimeClient) {
+    DisposableEffect(Unit) {
         onDispose {
-            if (state.isRealtimeActive) {
-                state.isRealtimeActive = false
-                realtimeClient.stop()
-            }
+            liveRecorderRef.value?.stop()
+            liveSessionRef.value?.disconnect()
+            livePlayerRef.value?.stop()
         }
     }
 
@@ -941,6 +896,138 @@ fun StudioTabContent(
                 state.connectionBannerText = reconnect.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
             }
         }
+    }
+
+    fun stopLiveSession() {
+        liveRecorderRef.value?.stop()
+        liveSessionRef.value?.disconnect()
+        livePlayerRef.value?.stop()
+        liveSessionRef.value = null
+        liveRecorderRef.value = null
+        livePlayerRef.value = null
+        state.isRealtimeActive = false
+        state.isRealtimeConnected = false
+        state.pendingTerminalApprovals.clear()
+    }
+
+    fun startLiveSession() {
+        val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+        val player = StreamingPcmPlayer()
+        val recorder = StreamingPcmRecorder(context)
+        val session = RealtimeVoiceSession(
+            prefs = prefs,
+            listener = object : RealtimeVoiceSessionListener {
+                override fun onConnected(sessionId: String) {
+                    player.start()
+                    try {
+                        recorder.start { seqId, pcm ->
+                            liveSessionRef.value?.sendAudioChunk(seqId, pcm)
+                            // Client-side VAD barge-in: interrupt assistant speech when the
+                            // user starts talking over it (configurable in Settings).
+                            if (player.isPlaying && sharedPrefs.getBoolean("vad_enabled", true)) {
+                                val threshold = sharedPrefs.getFloat("vad_threshold", 1500f).toInt()
+                                if (pcmPeakAmplitude(pcm) > threshold) {
+                                    liveSessionRef.value?.sendInterrupt()
+                                    player.stop()
+                                    player.start()
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        scope.launch {
+                            appendChat("system", "[live] Mic failed to start: ${e.message}")
+                        }
+                    }
+                    scope.launch {
+                        state.isRealtimeConnected = true
+                        appendChat("system", "[live] Connected: $sessionId")
+                    }
+                }
+
+                override fun onAudioChunk(seqId: Int, pcm: ByteArray) {
+                    player.write(seqId, pcm)
+                }
+
+                override fun onTranscript(text: String) {
+                    scope.launch { state.transcription = text }
+                }
+
+                override fun onInterrupt() {
+                    player.stop()
+                    player.start()
+                }
+
+                override fun onToolStart(name: String) {
+                    scope.launch { appendChat("system", "[tool] $name") }
+                }
+
+                override fun onToolComplete(name: String, output: String) {
+                    scope.launch { appendChat("system", "[tool done] $name: ${output.take(200)}") }
+                }
+
+                override fun onApprovalRequired(
+                    approvalId: String,
+                    command: String,
+                    reason: String,
+                    cwd: String,
+                    timeoutMs: Int
+                ) {
+                    scope.launch {
+                        state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
+                        state.pendingTerminalApprovals.add(
+                            TerminalApprovalPrompt(
+                                approvalId = approvalId,
+                                command = command,
+                                cwd = cwd,
+                                reason = reason,
+                                timeoutMs = timeoutMs
+                            )
+                        )
+                        state.latestReply = "Terminal approval needed."
+                    }
+                }
+
+                override fun onApprovalResolved(approvalId: String) {
+                    scope.launch {
+                        state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
+                    }
+                }
+
+                override fun onError(message: String) {
+                    scope.launch {
+                        state.latestReply = "Realtime error: $message"
+                        appendChat("system", "[live error] $message")
+                        recorder.stop()
+                        player.stop()
+                        liveSessionRef.value = null
+                        liveRecorderRef.value = null
+                        livePlayerRef.value = null
+                        state.isRealtimeActive = false
+                        state.isRealtimeConnected = false
+                    }
+                }
+
+                override fun onDisconnected() {
+                    scope.launch {
+                        if (state.isRealtimeActive) {
+                            appendChat("system", "[live] Disconnected.")
+                            recorder.stop()
+                            player.stop()
+                        }
+                        liveSessionRef.value = null
+                        liveRecorderRef.value = null
+                        livePlayerRef.value = null
+                        state.isRealtimeActive = false
+                        state.isRealtimeConnected = false
+                    }
+                }
+            }
+        )
+        liveSessionRef.value = session
+        liveRecorderRef.value = recorder
+        livePlayerRef.value = player
+        state.isRealtimeActive = true
+        session.connect()
     }
 
     fun stopCurrentTurn() {
@@ -1204,10 +1291,12 @@ fun StudioTabContent(
                             TerminalApprovalCard(
                                 approval = approval,
                                 onApprove = {
-                                    realtimeClient.approveTerminalCommand(approval.approvalId)
+                                    liveSessionRef.value?.approveTerminal(approval.approvalId)
+                                    state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
                                 },
                                 onReject = {
-                                    realtimeClient.rejectTerminalCommand(approval.approvalId)
+                                    liveSessionRef.value?.rejectTerminal(approval.approvalId)
+                                    state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
                                 }
                             )
                         }
@@ -1568,7 +1657,7 @@ fun StudioTabContent(
         }
 
         val canSend = state.textInputState.trim().isNotEmpty() && !state.isProcessing
-        val quickCommands = listOf("/sess status", "/sess slots", "/sess ui", "/remote status", "/speak status")
+        val quickCommands = listOf("/sess status", "/sess slots", "/skills", "/model", "/remote status", "/speak status")
         LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1667,7 +1756,9 @@ fun StudioTabContent(
                                     .background(Color(0xFFC2542F))
                                     .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
                                     .clickable {
-                                        realtimeClient.interrupt()
+                                        liveSessionRef.value?.sendInterrupt()
+                                        livePlayerRef.value?.stop()
+                                        livePlayerRef.value?.start()
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
@@ -1687,8 +1778,7 @@ fun StudioTabContent(
                                     .background(Color(0xFF2E7D52))
                                     .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
                                     .clickable {
-                                        state.isRealtimeActive = false
-                                        realtimeClient.stop()
+                                        stopLiveSession()
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
@@ -1712,8 +1802,7 @@ fun StudioTabContent(
                                         if (!permissionState.status.isGranted) {
                                             permissionState.launchPermissionRequest()
                                         } else {
-                                            state.isRealtimeActive = true
-                                            startRealtimeClientWithVadAndResilience(realtimeClient, context, audioHelper)
+                                            startLiveSession()
                                         }
                                     },
                                 contentAlignment = Alignment.Center
@@ -2007,27 +2096,33 @@ fun SessionsTabContent(
                 .padding(top = 12.dp, bottom = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Button(
+            OutlinedButton(
                 onClick = { selectedPane = "gateway" },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedPane == "gateway") Color(0xFF2E7D52) else Color(0xFFE9E3D6),
-                    contentColor = if (selectedPane == "gateway") Color.White else Color(0xFF211C16)
-                ),
+                border = BorderStroke(if (selectedPane == "gateway") 2.dp else 1.dp, Color(0xFF111111)),
                 modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(10.dp)
+                shape = RoundedCornerShape(4.dp)
             ) {
-                Text("Agent Hub", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (selectedPane == "gateway") "[*] AGENT HUB" else "[ ] AGENT HUB",
+                    color = Color(0xFF111111),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
             }
-            Button(
+            OutlinedButton(
                 onClick = { selectedPane = "history" },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedPane == "history") Color(0xFF2E7D52) else Color(0xFFE9E3D6),
-                    contentColor = if (selectedPane == "history") Color.White else Color(0xFF211C16)
-                ),
+                border = BorderStroke(if (selectedPane == "history") 2.dp else 1.dp, Color(0xFF111111)),
                 modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(10.dp)
+                shape = RoundedCornerShape(4.dp)
             ) {
-                Text("Turn History", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    if (selectedPane == "history") "[*] TURN HISTORY" else "[ ] TURN HISTORY",
+                    color = Color(0xFF111111),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
             }
         }
 
@@ -2059,6 +2154,11 @@ fun GatewaySessionsPane(
     var state by remember { mutableStateOf<GatewaySessionsUiState>(GatewaySessionsUiState.Idle) }
     var filterText by remember { mutableStateOf("") }
     var pendingRemoveKey by remember { mutableStateOf<String?>(null) }
+    var launchStatus by remember { mutableStateOf("") }
+    var launchingHub by remember { mutableStateOf(false) }
+    var launchingColab by remember { mutableStateOf(false) }
+    var joiningCollab by remember { mutableStateOf(false) }
+    var selectedOmpSessionPath by remember { mutableStateOf<String?>(null) }
     val expandedLanes = remember { mutableStateMapOf<String, Boolean>() }
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -2084,6 +2184,7 @@ fun GatewaySessionsPane(
 
     LaunchedEffect(prefs.targetIpAddress, prefs.remoteToken) {
         refresh()
+        selectedOmpSessionPath = client.getSelectedOmpSession()
     }
 
     LaunchedEffect(pendingRemoveKey) {
@@ -2100,8 +2201,68 @@ fun GatewaySessionsPane(
             state = state,
             filterText = filterText,
             onFilterTextChange = { filterText = it },
+            launchingHub = launchingHub,
+            launchingColab = launchingColab,
+            joiningCollab = joiningCollab,
+            onLaunchHub = {
+                if (!launchingHub) {
+                    launchingHub = true
+                    launchStatus = "Launching OMP hub..."
+                    prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+                    scope.launch {
+                        launchStatus = client.launchOmpHub()
+                        launchingHub = false
+                        refresh()
+                    }
+                }
+            },
+            onLaunchColab = {
+                if (!launchingColab) {
+                    launchingColab = true
+                    launchStatus = "Launching Colab..."
+                    scope.launch {
+                        launchStatus = client.launchColabWorkspace(prefs.workspacePath)
+                        launchingColab = false
+                        refresh()
+                    }
+                }
+            },
+            onJoinCollab = {
+                if (!joiningCollab) {
+                    joiningCollab = true
+                    launchStatus = "Checking collab..."
+                    scope.launch {
+                        val collab = client.getCollabLink()
+                        if (collab.active && !collab.webLink.isNullOrBlank()) {
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(collab.webLink)).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                                launchStatus = "Opening collab in browser..."
+                            } catch (e: Exception) {
+                                launchStatus = "Couldn't open collab link: ${e.message}"
+                            }
+                        } else {
+                            launchStatus = "No active collab. Run /collab in the OMP hub on the host."
+                        }
+                        joiningCollab = false
+                    }
+                }
+            },
             onRefresh = { refresh() }
         )
+        if (launchStatus.isNotBlank()) {
+            Text(
+                text = launchStatus,
+                color = Color(0xFF111111),
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp)
+            )
+        }
 
         when (val currentState = state) {
             GatewaySessionsUiState.Idle,
@@ -2118,7 +2279,7 @@ fun GatewaySessionsPane(
                 )
                 if (groups.isEmpty()) {
                     GatewaySessionsStatus(
-                        if (filterText.isBlank()) "No background sessions found."
+                        if (filterText.isBlank()) "No oh-my-pi background lanes found."
                         else "No sessions match \"$filterText\"."
                     )
                 } else {
@@ -2144,6 +2305,7 @@ fun GatewaySessionsPane(
                                     prefs = prefs,
                                     expanded = expanded,
                                     pendingRemove = pendingRemoveKey == laneKey,
+                                    selectedOmpSessionPath = selectedOmpSessionPath,
                                     onToggleExpanded = {
                                         expandedLanes[laneKey] = !expanded
                                     },
@@ -2195,6 +2357,23 @@ fun GatewaySessionsPane(
                                         }
                                     } else {
                                         null
+                                    },
+                                    onRouteOmpSession = gatewaySessionOmpRoutePath(entry)?.let {
+                                        { sessionPath ->
+                                            scope.launch {
+                                                val message = client.selectOmpSession(sessionPath)
+                                                selectedOmpSessionPath = sessionPath
+                                                prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+                                                onRemoteSessionSelected(entry, currentState.dashboard)
+                                                launchStatus = message
+                                                refresh()
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    message,
+                                                    android.widget.Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
                                     }
                                 )
                             }
@@ -2212,67 +2391,106 @@ fun GatewaySessionsHeader(
     state: GatewaySessionsUiState,
     filterText: String,
     onFilterTextChange: (String) -> Unit,
+    launchingHub: Boolean,
+    launchingColab: Boolean,
+    joiningCollab: Boolean,
+    onLaunchHub: () -> Unit,
+    onLaunchColab: () -> Unit,
+    onJoinCollab: () -> Unit,
     onRefresh: () -> Unit
 ) {
-    Surface(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(bottom = 10.dp),
-        color = Color(0xFFFFFFFF),
-        shape = RoundedCornerShape(14.dp),
-        border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+            .padding(bottom = 10.dp)
+            .border(1.dp, Color(0xFFB8B8B8), RoundedCornerShape(4.dp))
+            .background(Color.White, RoundedCornerShape(4.dp))
+            .padding(10.dp)
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("AGENT HUB", color = Color(0xFFC2542F), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text("Gateway: ${prefs.targetIpAddress.ifBlank { "not configured" }}", color = Color(0xFF211C16), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("Target: ${prefs.codexSessionName}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("Workspace: ${prefs.workspacePath}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (state is GatewaySessionsUiState.Loaded) {
-                        val dashboard = state.dashboard
-                        Text(
-                            "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | Lanes: ${dashboard.sessions.size}",
-                            color = Color(0xFF6E665A),
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-                IconButton(
-                    onClick = onRefresh,
-                    enabled = state !is GatewaySessionsUiState.Loading
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Refresh,
-                        contentDescription = "Refresh sessions",
-                        tint = Color(0xFF211C16)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("OMP AGENT HUB", color = Color(0xFF111111), fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    "Persistent oh-my-pi sessions on the host. Route voice/text turns into a lane or launch a new hub.",
+                    color = Color(0xFF555555),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 14.sp
+                )
+                Spacer(modifier = Modifier.height(5.dp))
+                Text("Gateway: ${prefs.targetIpAddress.ifBlank { "(no gateway)" }}", color = Color(0xFF111111), fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Target: ${prefs.codexSessionName.ifBlank { "default" }}", color = Color(0xFF111111), fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Workspace: ${prefs.workspacePath}", color = Color(0xFF555555), fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (state is GatewaySessionsUiState.Loaded) {
+                    val dashboard = state.dashboard
+                    val ompLaneCount = dashboard.sessions.count { gatewaySessionIsOmpLane(it) }
+                    Text(
+                        "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | OMP lanes: $ompLaneCount",
+                        color = Color(0xFF555555),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(10.dp))
-            OutlinedTextField(
-                value = filterText,
-                onValueChange = onFilterTextChange,
-                modifier = Modifier.fillMaxWidth(),
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Filled.Search,
-                        contentDescription = null,
-                        tint = Color(0xFF6E665A)
-                    )
-                },
-                placeholder = { Text("Filter sessions, paths, aliases", fontSize = 12.sp) },
-                singleLine = true,
-                textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, color = Color(0xFF211C16))
-            )
+            OutlinedButton(
+                onClick = onRefresh,
+                enabled = state !is GatewaySessionsUiState.Loading,
+                border = BorderStroke(1.dp, Color(0xFF111111)),
+                shape = RoundedCornerShape(4.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)
+            ) {
+                Text("REFRESH", color = Color(0xFF111111), fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            }
         }
+        Spacer(modifier = Modifier.height(8.dp))
+        GatewayHubCommandButton(
+            text = if (launchingHub) "LAUNCHING..." else "LAUNCH OMP HUB",
+            enabled = !launchingHub,
+            onClick = onLaunchHub
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        GatewayHubCommandButton(
+            text = if (launchingColab) "LAUNCHING..." else "LAUNCH COLAB",
+            enabled = !launchingColab,
+            onClick = onLaunchColab
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        GatewayHubCommandButton(
+            text = if (joiningCollab) "JOINING..." else "JOIN COLLAB",
+            enabled = !joiningCollab,
+            onClick = onJoinCollab
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        OutlinedTextField(
+            value = filterText,
+            onValueChange = onFilterTextChange,
+            modifier = Modifier.fillMaxWidth(),
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Filled.Search,
+                    contentDescription = null,
+                    tint = Color(0xFF555555)
+                )
+            },
+            placeholder = { Text("Filter sessions, paths, aliases", fontSize = 12.sp, fontFamily = FontFamily.Monospace) },
+            singleLine = true,
+            textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, color = Color(0xFF111111), fontFamily = FontFamily.Monospace),
+            shape = RoundedCornerShape(4.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color(0xFF111111),
+                unfocusedBorderColor = Color(0xFFB8B8B8),
+                cursorColor = Color(0xFF111111),
+                focusedTextColor = Color(0xFF111111),
+                unfocusedTextColor = Color(0xFF111111)
+            )
+        )
     }
 }
 
@@ -2294,16 +2512,47 @@ fun GatewaySessionsStatus(message: String) {
 }
 
 @Composable
+fun GatewayHubCommandButton(
+    text: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 44.dp),
+        border = BorderStroke(1.dp, Color(0xFF111111)),
+        shape = RoundedCornerShape(4.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = Color(0xFF111111),
+            disabledContentColor = Color(0xFF555555)
+        )
+    ) {
+        Text(
+            text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace
+        )
+    }
+}
+
+@Composable
 fun GatewaySessionRow(
     entry: GatewaySessionEntry,
     dashboard: GatewaySessionDashboard,
     prefs: AppPreferences,
     expanded: Boolean,
     pendingRemove: Boolean,
+    selectedOmpSessionPath: String?,
     onToggleExpanded: () -> Unit,
     onUse: () -> Unit,
     onResume: (() -> Unit)? = null,
-    onRemove: (() -> Unit)? = null
+    onRemove: (() -> Unit)? = null,
+    onRouteOmpSession: ((String) -> Unit)? = null
 ) {
     val isRouteCapable = entry.isRouteCapableIn(dashboard)
     val isSelectedFile = prefs.selectedGatewaySessionPath.isNotBlank() && prefs.selectedGatewaySessionPath == entry.canonicalSessionPath
@@ -2311,21 +2560,29 @@ fun GatewaySessionRow(
     val isCurrent = entry.isCurrentIn(dashboard)
     val isReady = entry.isReadyIn(dashboard)
     val statusText = gatewaySessionStatusText(entry, dashboard)
-    val statusColor = gatewaySessionStatusColor(statusText)
-    val borderColor = when {
-        isSelectedTarget -> Color(0xFF2E7D52)
-        isSelectedFile -> Color(0xFFC2542F)
-        isReady -> Color(0xFFC97E1A)
-        else -> Color(0xFFE3DCCC)
+    val statusGlyph = when {
+        isCurrent -> "[+]"
+        isReady -> "[+]"
+        entry.activity.equals("busy", ignoreCase = true) -> "[*]"
+        entry.activity.equals("idle", ignoreCase = true) -> "[~]"
+        entry.activity.isNullOrBlank() -> "[ ]"
+        else -> "[!]"
     }
+    val statusBorderWeight = if (isCurrent || isReady) 2.dp else 1.dp
+    val borderColor = when {
+        isSelectedTarget || isSelectedFile || isReady || isCurrent -> Color(0xFF111111)
+        else -> Color(0xFFE2E2E2)
+    }
+    val ompRoutePath = gatewaySessionOmpRoutePath(entry)
+    val isOmpRouteSelected = !ompRoutePath.isNullOrBlank() && ompRoutePath == selectedOmpSessionPath
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = if (isCurrent) Color(0xFFFDFBF5) else Color.White,
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(1.dp, borderColor)
+        color = if (isOmpRouteSelected) Color(0xFFE8E8E8) else Color.White,
+        shape = RoundedCornerShape(4.dp),
+        border = BorderStroke(if (isOmpRouteSelected || isSelectedTarget || isSelectedFile) 2.dp else 1.dp, borderColor)
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(modifier = Modifier.padding(8.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2336,37 +2593,39 @@ fun GatewaySessionRow(
                 Icon(
                     imageVector = if (expanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
                     contentDescription = if (expanded) "Collapse session lane" else "Expand session lane",
-                    tint = Color(0xFF6E665A),
+                    tint = Color(0xFF555555),
                     modifier = Modifier.size(22.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = entry.name.ifBlank { "Unnamed session" },
-                        color = Color(0xFF211C16),
-                        fontSize = 14.sp,
+                        color = Color(0xFF111111),
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(3.dp))
                     Text(
                         text = gatewaySessionSubtitle(entry, dashboard),
-                        color = Color(0xFF6E665A),
-                        fontSize = 12.sp,
-                        maxLines = 1,
+                        color = Color(0xFF555555),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
                 Text(
-                    text = statusText,
-                    color = statusColor,
+                    text = "$statusGlyph $statusText",
+                    color = Color(0xFF111111),
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
                     modifier = Modifier
-                        .background(statusColor.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
-                        .border(1.dp, statusColor.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .border(statusBorderWeight, Color(0xFF111111), RoundedCornerShape(2.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
                 )
             }
 
@@ -2395,6 +2654,25 @@ fun GatewaySessionRow(
                 }
                 if (!isRouteCapable) item { GatewaySessionBadge("workspace only", Color(0xFF6E665A)) }
                 if (entry.resumable) item { GatewaySessionBadge("resumable", Color(0xFF2E7D52)) }
+            }
+
+            if (!ompRoutePath.isNullOrBlank() && onRouteOmpSession != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = { onRouteOmpSession(ompRoutePath) },
+                    border = BorderStroke(if (isOmpRouteSelected) 2.dp else 1.dp, Color(0xFF111111)),
+                    shape = RoundedCornerShape(3.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (isOmpRouteSelected) "[*] ROUTING TURNS HERE" else "[ ] ROUTE TURNS HERE",
+                        color = Color(0xFF111111),
+                        fontSize = 11.sp,
+                        fontWeight = if (isOmpRouteSelected) FontWeight.Bold else FontWeight.Normal,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
             }
 
             AnimatedVisibility(visible = expanded) {
@@ -2437,7 +2715,7 @@ fun GatewaySessionRow(
                         Button(
                             onClick = onResume ?: onUse,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (onResume != null || isRouteCapable) Color(0xFF2E7D52) else Color(0xFFC2542F),
+                                containerColor = Color(0xFF111111),
                                 contentColor = Color.White
                             ),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 5.dp),
@@ -2454,9 +2732,15 @@ fun GatewaySessionRow(
                         OutlinedButton(
                             onClick = onUse,
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 5.dp),
-                            modifier = Modifier.height(34.dp)
+                            modifier = Modifier.height(34.dp),
+                            border = BorderStroke(1.dp, Color(0xFF111111))
                         ) {
-                            Text(if (isRouteCapable) "Target" else "Mount", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                if (isRouteCapable) "Target" else "Mount",
+                                color = Color(0xFF111111),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                         if (onRemove != null) {
                             OutlinedButton(
@@ -2464,9 +2748,9 @@ fun GatewaySessionRow(
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
                                 modifier = Modifier.height(34.dp),
                                 colors = ButtonDefaults.outlinedButtonColors(
-                                    contentColor = if (pendingRemove) Color(0xFFB3261E) else Color(0xFF6E665A)
+                                    contentColor = Color(0xFF111111)
                                 ),
-                                border = BorderStroke(1.dp, if (pendingRemove) Color(0xFFB3261E) else Color(0xFFE3DCCC))
+                                border = BorderStroke(if (pendingRemove) 2.dp else 1.dp, Color(0xFF111111))
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.Delete,
@@ -2497,9 +2781,10 @@ fun GatewayAgentHubFolderHeader(group: GatewayAgentHubGroup) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = group.label,
-                    color = Color(0xFF211C16),
-                    fontSize = 13.sp,
+                    color = Color(0xFF111111),
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -2510,17 +2795,19 @@ fun GatewayAgentHubFolderHeader(group: GatewayAgentHubGroup) {
             }
             Text(
                 text = group.cwd.ifBlank { "unknown workspace" },
-                color = Color(0xFF8A8174),
+                color = Color(0xFF555555),
                 fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
         Text(
             text = "${group.sessions.size} ${if (group.sessions.size == 1) "lane" else "lanes"}",
-            color = Color(0xFF6E665A),
+            color = Color(0xFF111111),
             fontSize = 11.sp,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace
         )
     }
 }
@@ -2531,14 +2818,16 @@ fun GatewaySessionDetailLine(label: String, value: String) {
     Column(modifier = Modifier.padding(bottom = 6.dp)) {
         Text(
             text = label.uppercase(),
-            color = Color(0xFFC2542F),
+            color = Color(0xFF111111),
             fontSize = 9.sp,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace
         )
         Text(
             text = value,
-            color = Color(0xFF6E665A),
+            color = Color(0xFF555555),
             fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
@@ -2559,9 +2848,9 @@ fun buildGatewayAgentHubGroups(
     query: String
 ): List<GatewayAgentHubGroup> {
     val normalizedQuery = query.trim().lowercase()
-    val visibleSessions = dashboard.sessions.filter { entry ->
-        normalizedQuery.isBlank() || gatewaySessionMatches(entry, dashboard, normalizedQuery)
-    }
+    val visibleSessions = dashboard.sessions
+        .filter { entry -> gatewaySessionIsOmpLane(entry) }
+        .filter { entry -> normalizedQuery.isBlank() || gatewaySessionMatches(entry, dashboard, normalizedQuery) }
     val currentKey = gatewayFolderKey(currentWorkspace)
     return visibleSessions
         .groupBy { gatewayFolderKey(it.displayCwd) }
@@ -2591,6 +2880,16 @@ fun gatewaySessionKey(entry: GatewaySessionEntry): String =
     entry.canonicalSessionPath?.takeIf { it.isNotBlank() }
         ?: entry.sessionId?.takeIf { it.isNotBlank() }
         ?: entry.name.ifBlank { "session-${entry.hashCode()}" }
+
+fun gatewaySessionIsOmpLane(entry: GatewaySessionEntry): Boolean =
+    entry.source.equals("oh-my-pi", ignoreCase = true) ||
+        entry.kind.equals("background", ignoreCase = true) ||
+        entry.provider.equals("oh-my-pi", ignoreCase = true)
+
+fun gatewaySessionOmpRoutePath(entry: GatewaySessionEntry): String? {
+    if (!gatewaySessionIsOmpLane(entry)) return null
+    return entry.canonicalSessionPath?.takeIf { it.isNotBlank() }
+}
 
 fun gatewaySessionMatches(entry: GatewaySessionEntry, dashboard: GatewaySessionDashboard, query: String): Boolean {
     val fields = listOfNotNull(
@@ -2624,22 +2923,15 @@ fun gatewaySessionStatusText(entry: GatewaySessionEntry, dashboard: GatewaySessi
     entry.isCurrentIn(dashboard) -> "current"
     entry.isReadyIn(dashboard) -> "ready"
     entry.activity.equals("busy", ignoreCase = true) -> "running"
-    entry.source == "oh-my-pi" || entry.kind == "background" -> "parked"
+    gatewaySessionIsOmpLane(entry) -> "parked"
     entry.resumable -> "parked"
     else -> entry.activity ?: "saved"
-}
-
-fun gatewaySessionStatusColor(status: String): Color = when (status.lowercase()) {
-    "current", "idle" -> Color(0xFF2E7D52)
-    "ready", "running", "busy" -> Color(0xFFC97E1A)
-    "parked", "saved" -> Color(0xFF6E665A)
-    else -> Color(0xFF6E665A)
 }
 
 fun gatewaySessionSubtitle(entry: GatewaySessionEntry, dashboard: GatewaySessionDashboard): String {
     val kind = when {
         entry.isCurrentIn(dashboard) -> "current session"
-        entry.source == "oh-my-pi" || entry.kind == "background" -> "background agent"
+        gatewaySessionIsOmpLane(entry) -> "background agent"
         else -> "background session"
     }
     val cwd = gatewayFolderLabel(entry.displayCwd)
@@ -2657,16 +2949,20 @@ fun gatewaySessionSourceLabel(entry: GatewaySessionEntry): String? = when (entry
 
 @Composable
 fun GatewaySessionBadge(text: String, color: Color) {
+    val borderWidth = when (color) {
+        Color(0xFF2E7D52), Color(0xFFC97E1A) -> 2.dp
+        else -> 1.dp
+    }
     Text(
         text = text,
-        color = color,
+        color = Color(0xFF111111),
         fontSize = 9.sp,
         fontWeight = FontWeight.Bold,
+        fontFamily = FontFamily.Monospace,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier
-            .background(color.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
-            .border(1.dp, color.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+            .border(borderWidth, Color(0xFFB8B8B8), RoundedCornerShape(2.dp))
             .padding(horizontal = 6.dp, vertical = 3.dp)
     )
 }
@@ -2914,7 +3210,6 @@ fun LocalTurnHistoryPane(
 @Composable
 fun SettingsTabContent(
     prefs: AppPreferences,
-    realtimeClient: com.example.api.RealtimeVoiceClient,
     onConfigChanged: () -> Unit
 ) {
     var agentType by remember(prefs.activeAgent) { mutableStateOf(prefs.activeAgent) }
@@ -2926,6 +3221,7 @@ fun SettingsTabContent(
     var targetIpAddress by remember(prefs.targetIpAddress) { mutableStateOf(prefs.targetIpAddress) }
     var remoteToken by remember(prefs.remoteToken) { mutableStateOf(prefs.remoteToken) }
     var connectionMode by remember(prefs.connectionMode) { mutableStateOf(prefs.connectionMode) }
+    var agentModel by remember(prefs.agentModel) { mutableStateOf(prefs.agentModel) }
     var showTurnProgress by remember(prefs.showTurnProgress) { mutableStateOf(prefs.showTurnProgress) }
     var speakTurnProgress by remember(prefs.speakTurnProgress) { mutableStateOf(prefs.speakTurnProgress) }
     var workspaceRoot by remember(prefs.workspaceRoot) { mutableStateOf(prefs.workspaceRoot) }
@@ -2938,7 +3234,11 @@ fun SettingsTabContent(
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    val agents = listOf("Local Codex (Pi)", "Gateway Claude (Claude Code)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
+    val agents = listOf("Local Codex (Pi)", "Gateway OMP (oh-my-pi)", "Gateway Claude (Claude Code)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
+    val workspacePresets = listOf(
+        "C:/Dev" to AppPreferences.DEFAULT_WORKSPACE_PATH,
+        "SPWR Daily" to AppPreferences.SPWR_DAILY_WORKSPACE_PATH
+    )
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -3245,6 +3545,28 @@ fun SettingsTabContent(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
+                    Text(text = "Agent Model", color = Color(0xFF6E665A), fontSize = 11.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = agentModel,
+                        onValueChange = {
+                            agentModel = it
+                            prefs.agentModel = it
+                            onConfigChanged()
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFFC2542F),
+                            unfocusedBorderColor = Color(0xFFE3DCCC),
+                            focusedTextColor = Color(0xFF211C16),
+                            unfocusedTextColor = Color(0xFF211C16)
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Server default", color = Color(0xFF6E665A)) },
+                        singleLine = true
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     // Gateway IP Address
                     Text(text = "Local Gateway URL host", color = Color(0xFF6E665A), fontSize = 11.sp)
                     Spacer(modifier = Modifier.height(4.dp))
@@ -3285,6 +3607,57 @@ fun SettingsTabContent(
                         placeholder = { Text(workspaceRoot, color = Color(0xFF6E665A)) }
                     )
                     Spacer(modifier = Modifier.height(8.dp))
+                    Text(text = "Workspace Presets", color = Color(0xFF6E665A), fontSize = 11.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        workspacePresets.forEach { (label, path) ->
+                            val selected = workspacePath.equals(path, ignoreCase = true)
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        workspaceRoot = path
+                                        workspacePath = path
+                                        prefs.workspaceRoot = path
+                                        prefs.workspacePath = path
+                                        onConfigChanged()
+                                    },
+                                color = if (selected) Color(0xFFF4F1E9) else Color(0x22B8AF9A),
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, if (selected) Color(0xFFC2542F) else Color(0xFFE3DCCC))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 48.dp)
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = selected,
+                                        onClick = {
+                                            workspaceRoot = path
+                                            workspacePath = path
+                                            prefs.workspaceRoot = path
+                                            prefs.workspacePath = path
+                                            onConfigChanged()
+                                        },
+                                        colors = RadioButtonDefaults.colors(
+                                            selectedColor = Color(0xFFC2542F),
+                                            unselectedColor = Color(0xFF6E665A)
+                                        )
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(label, color = Color(0xFF211C16), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        Text(path, color = Color(0xFF6E665A), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         TextButton(
                             onClick = {
@@ -3449,7 +3822,6 @@ fun SettingsTabContent(
                                 aecVal.value = it
                                 context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
                                     .edit().putBoolean("aec_enabled", it).apply()
-                                setupAecNs(realtimeClient, aecVal.value, nsVal.value)
                             },
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color(0xFFC2542F),
@@ -3475,7 +3847,6 @@ fun SettingsTabContent(
                                 nsVal.value = it
                                 context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
                                     .edit().putBoolean("ns_enabled", it).apply()
-                                setupAecNs(realtimeClient, aecVal.value, nsVal.value)
                             },
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color(0xFFC2542F),
@@ -4343,149 +4714,15 @@ fun DiscoveryTabContent(
     }
 }
 
-// Custom WebSocket implementation to intercept outgoing client audio bytes for VAD triggers
-class VadWebSocketWrapper(
-    private val delegate: okhttp3.WebSocket,
-    private val onSendBytes: (okio.ByteString) -> Unit
-) : okhttp3.WebSocket {
-    override fun request(): okhttp3.Request = delegate.request()
-    override fun queueSize(): Long = delegate.queueSize()
-    override fun cancel() = delegate.cancel()
-    
-    override fun close(code: Int, reason: String?): Boolean {
-        return delegate.close(code, reason)
+/** Peak |amplitude| of little-endian 16-bit mono PCM; used for live-mode VAD barge-in. */
+private fun pcmPeakAmplitude(pcm: ByteArray): Int {
+    var peak = 0
+    var i = 0
+    while (i + 1 < pcm.size) {
+        val sample = (((pcm[i + 1].toInt() and 0xFF) shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toInt()
+        val magnitude = if (sample < 0) -sample else sample
+        if (magnitude > peak) peak = magnitude
+        i += 2
     }
-    
-    override fun send(text: String): Boolean {
-        return delegate.send(text)
-    }
-    
-    override fun send(bytes: okio.ByteString): Boolean {
-        onSendBytes(bytes)
-        return delegate.send(bytes)
-    }
-}
-
-fun setupAecNs(realtimeClient: com.example.api.RealtimeVoiceClient, aecEnabled: Boolean, nsEnabled: Boolean) {
-    try {
-        val audioRecordField = com.example.api.RealtimeVoiceClient::class.java.getDeclaredField("audioRecord")
-        audioRecordField.isAccessible = true
-        val audioRecord = audioRecordField.get(realtimeClient) as? android.media.AudioRecord
-        if (audioRecord != null) {
-            val sessionId = audioRecord.audioSessionId
-            android.util.Log.i("AecNsSetup", "Applying AEC=$aecEnabled, NS=$nsEnabled on sessionId=$sessionId")
-            
-            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
-                val aec = android.media.audiofx.AcousticEchoCanceler.create(sessionId)
-                if (aec != null) {
-                    aec.enabled = aecEnabled
-                    android.util.Log.i("AecNsSetup", "AcousticEchoCanceler set enabled to $aecEnabled")
-                } else {
-                    android.util.Log.w("AecNsSetup", "Failed to create AcousticEchoCanceler")
-                }
-            } else {
-                android.util.Log.w("AecNsSetup", "AcousticEchoCanceler is not available on this device")
-            }
-
-            if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
-                val ns = android.media.audiofx.NoiseSuppressor.create(sessionId)
-                if (ns != null) {
-                    ns.enabled = nsEnabled
-                    android.util.Log.i("AecNsSetup", "NoiseSuppressor set enabled to $nsEnabled")
-                } else {
-                    android.util.Log.w("AecNsSetup", "Failed to create NoiseSuppressor")
-                }
-            } else {
-                android.util.Log.w("AecNsSetup", "NoiseSuppressor is not available on this device")
-            }
-        } else {
-            android.util.Log.d("AecNsSetup", "audioRecord is null, AEC/NS setup deferred")
-        }
-    } catch (e: Exception) {
-        android.util.Log.e("AecNsSetup", "Error setting up AEC/NS via reflection", e)
-    }
-}
-
-fun startRealtimeClientWithVadAndResilience(
-    realtimeClient: com.example.api.RealtimeVoiceClient,
-    context: android.content.Context,
-    audioHelper: AudioHelper
-) {
-    realtimeClient.start()
-    
-    // Wrap WebSocket to intercept outgoing audio bytes for VAD
-    try {
-        val wsField = com.example.api.RealtimeVoiceClient::class.java.getDeclaredField("webSocket")
-        wsField.isAccessible = true
-        val originalWs = wsField.get(realtimeClient) as? okhttp3.WebSocket
-        if (originalWs != null && originalWs !is VadWebSocketWrapper) {
-            val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
-            val wrapper = VadWebSocketWrapper(originalWs) { bytes ->
-                val vadEnabled = sharedPrefs.getBoolean("vad_enabled", true)
-                if (vadEnabled) {
-                    val threshold = sharedPrefs.getFloat("vad_threshold", 1500f).toDouble()
-                    val byteArray = bytes.toByteArray()
-                    
-                    // Calculate peak amplitude
-                    var peak = 0.0
-                    val numSamples = byteArray.size / 2
-                    for (i in 0 until numSamples) {
-                        val sample = ((byteArray[2 * i + 1].toInt() and 0xFF) shl 8) or (byteArray[2 * i].toInt() and 0xFF)
-                        val shortSample = Math.abs(sample.toShort().toInt())
-                        if (shortSample > peak) {
-                            peak = shortSample.toDouble()
-                        }
-                    }
-                    
-                    val now = System.currentTimeMillis()
-                    if (peak > threshold) {
-                        VadState.lastSpeechTime = now
-                        if (!VadState.isUserSpeaking) {
-                            VadState.isUserSpeaking = true
-                            android.util.Log.i("VAD", "Speech detected! Peak=$peak > Threshold=$threshold. Triggering barge-in.")
-                            realtimeClient.interrupt()
-                            audioHelper.stopPlayback()
-                        }
-                    } else {
-                        if (VadState.isUserSpeaking && (now - VadState.lastSpeechTime > VadState.silenceDebounceMs)) {
-                            VadState.isUserSpeaking = false
-                            android.util.Log.i("VAD", "Silence detected. Resetting speech state.")
-                        }
-                    }
-                }
-            }
-            wsField.set(realtimeClient, wrapper)
-            android.util.Log.i("VAD", "Successfully wrapped RealtimeVoiceClient WebSocket with VAD wrapper")
-        }
-    } catch (e: Exception) {
-        android.util.Log.e("VAD", "Failed to wrap webSocket for VAD", e)
-    }
-
-    // Trigger AEC/NS setup asynchronously when audioRecord is initialized
-    val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
-    scope.launch {
-        for (i in 1..40) { // 40 * 50ms = 2s max wait
-            try {
-                val audioRecordField = com.example.api.RealtimeVoiceClient::class.java.getDeclaredField("audioRecord")
-                audioRecordField.isAccessible = true
-                val audioRecord = audioRecordField.get(realtimeClient) as? android.media.AudioRecord
-                if (audioRecord != null) {
-                    val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
-                    val aec = sharedPrefs.getBoolean("aec_enabled", true)
-                    val ns = sharedPrefs.getBoolean("ns_enabled", true)
-                    setupAecNs(realtimeClient, aec, ns)
-                    break
-                }
-            } catch (e: Exception) {
-                // ignore
-            }
-            delay(50)
-        }
-    }
-}
-
-object VadState {
-    var isUserSpeaking = false
-    var lastSpeechTime = 0L
-    const val silenceDebounceMs = 800L
+    return peak
 }

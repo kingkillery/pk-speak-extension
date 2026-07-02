@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { ControlServer, type ControlActionResult, type ControlServerStatus, type SessionResumePayload } from "./control-server.js";
+import { ControlServer, type ControlActionResult, type ControlServerStatus, type RemoteSlashCommand, type SessionResumePayload } from "./control-server.js";
 import { applyPiSpeakSetupConfig } from "./setup-config.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { createInitialAgentProviders, createOmpResumeProvider, createTurnAgentProvider } from "./agent-provider-factory.js";
@@ -23,16 +23,16 @@ import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.
 import { shutdownLocalSttWorker, transcribeAudioBuffer, transcribeWithWhisperX } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
-import { archiveOhMyPiBackgroundSession, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
+import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
 import { defaultOhMyPiSessionRoots, mergeOhMyPiAgentHubSessionsCached } from "./agent-hub-dashboard.js";
 import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashboardEntry } from "./session-routing.js";
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { OmpSelectionStore } from "./omp-selection.js";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath, sep as pathSep } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 
 applyPiSpeakSetupConfig();
 
@@ -42,6 +42,31 @@ const state = {
 	port: Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10),
 	authToken: process.env.PI_SPEAK_HTTP_TOKEN || "",
 };
+
+const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
+
+function getDefaultAgentCwd(): string {
+	return process.env.AGENT_CWD?.trim()
+		|| process.env.AGENT_WORKSPACE?.trim()
+		|| (process.platform === "win32" ? DEFAULT_WINDOWS_WORKSPACE : process.cwd());
+}
+
+const HEADLESS_SLASH_COMMANDS: RemoteSlashCommand[] = [
+	{
+		name: "skills",
+		description: "List and search installed agent skills from the generated Codex skill index",
+		usage: "/skills [list|search <query>|show <name>]",
+		examples: ["/skills", "/skills search android", "/skills show android-development"],
+		source: "builtin",
+	},
+	{
+		name: "model",
+		description: "Show the gateway default model and the model override sent by this app",
+		usage: "/model",
+		examples: ["/model"],
+		source: "builtin",
+	},
+];
 
 const agentConfig = resolveAgentProviderConfig({
 	...process.env,
@@ -117,7 +142,7 @@ function resolveTurnRoute(target?: string, cwd?: string, agentProvider?: Gateway
 		resumedTargets,
 	});
 	const providerName = normalizeGatewayProviderOverride(agentProvider) || resumed?.provider;
-	const workingDirectory = cwd || resumed?.cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
+	const workingDirectory = cwd || resumed?.cwd || getDefaultAgentCwd();
 	if (!providerName) {
 		return { cwd: workingDirectory, target: resumed, stopProvider: false };
 	}
@@ -152,6 +177,106 @@ function createExecutionProviderDecision(
 	});
 }
 
+type SkillIndexEntry = {
+	name: string;
+	summary: string;
+	source?: string;
+	path?: string;
+};
+
+function readSkillIndexEntries(): SkillIndexEntry[] {
+	let raw = "";
+	try {
+		raw = readFileSync(join(homedir(), ".codex", "skill-index.md"), "utf8");
+	} catch {
+		return [];
+	}
+	return raw
+		.split(/\r?\n## /)
+		.slice(1)
+		.map((section) => {
+			const lines = section.split(/\r?\n/);
+			const name = (lines.shift() || "").trim();
+			const summaryLines: string[] = [];
+			let source: string | undefined;
+			let path: string | undefined;
+			let readingSummary = true;
+			for (const line of lines) {
+				if (line.startsWith("- ")) readingSummary = false;
+				if (readingSummary) {
+					const cleaned = line.replace(/^>\s?-?\s?/, "").trim();
+					if (cleaned) summaryLines.push(cleaned);
+				}
+				if (line.startsWith("- source:")) source = line.slice("- source:".length).trim();
+				if (line.startsWith("- path:")) path = line.slice("- path:".length).trim();
+			}
+			return {
+				name,
+				summary: summaryLines.join(" ").trim(),
+				source,
+				path,
+			};
+		})
+		.filter((entry) => entry.name && entry.path);
+}
+
+function formatSkillEntry(entry: SkillIndexEntry) {
+	const summary = entry.summary || entry.source || "No summary in the generated index.";
+	return `/${entry.name} - ${summary}`;
+}
+
+function handleSkillsSlashCommand(args: string[]): string {
+	const entries = readSkillIndexEntries();
+	if (entries.length === 0) {
+		return "No generated skill index was found at ~/.codex/skill-index.md. Run the skill index refresh, then try /skills again.";
+	}
+	const action = (args[0] || "list").toLowerCase();
+	if (action === "show") {
+		const name = args.slice(1).join(" ").trim().toLowerCase();
+		if (!name) return "Usage: /skills show <name>";
+		const entry = entries.find((candidate) => candidate.name.toLowerCase() === name);
+		if (!entry) return `No installed skill named "${name}" was found. Try /skills search ${name}.`;
+		return [
+			`Skill: ${entry.name}`,
+			entry.summary || "No summary in the generated index.",
+			entry.source ? `Source: ${entry.source}` : undefined,
+			entry.path ? `Path: ${entry.path}` : undefined,
+		].filter(Boolean).join("\n");
+	}
+	const query = action === "search" ? args.slice(1).join(" ").trim().toLowerCase() : "";
+	const matches = query
+		? entries.filter((entry) => `${entry.name} ${entry.summary} ${entry.source || ""}`.toLowerCase().includes(query))
+		: entries;
+	const shown = matches.slice(0, 12);
+	const header = query
+		? `Skills matching "${query}" (${shown.length}/${matches.length} shown):`
+		: `Installed skills (${shown.length}/${entries.length} shown):`;
+	return [header, ...shown.map(formatSkillEntry)].join("\n");
+}
+
+function handleHeadlessSlashCommand(
+	trimmed: string,
+	options: { model?: string; cwd?: string; agentProvider?: GatewayProviderOverride },
+): RemoteTurnResult | undefined {
+	if (!trimmed.startsWith("/")) return undefined;
+	const [rawCommand, ...args] = trimmed.slice(1).split(/\s+/);
+	const command = rawCommand.toLowerCase();
+	if (command === "skills") {
+		return { replyText: handleSkillsSlashCommand(args) };
+	}
+	if (command === "model") {
+		return {
+			replyText: [
+				`App model override: ${options.model || "server default"}.`,
+				`Gateway default model: ${agentConfig.model || "not set"}.`,
+				`Provider: ${options.agentProvider || agentConfig.provider}.`,
+				`Working directory: ${options.cwd || getDefaultAgentCwd()}.`,
+			].join("\n"),
+		};
+	}
+	return undefined;
+}
+
 async function runWithTurnRoute(
 	prompt: string,
 	includeAudio: boolean,
@@ -159,6 +284,7 @@ async function runWithTurnRoute(
 	transcript?: string,
 	audioProvider?: TtsProvider,
 	progress: TurnProgressEvent[] = [],
+	model?: string,
 ): Promise<RemoteTurnResult> {
 	try {
 		if (route.target) {
@@ -167,7 +293,7 @@ async function runWithTurnRoute(
 		if (route.providerName) {
 			addProgress(progress, "route", `Using ${route.providerName} provider for this turn.`);
 		}
-		return await runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript, audioProvider, progress, route.providerOverride);
+		return await runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript, audioProvider, progress, route.providerOverride, undefined, model);
 	} finally {
 		if (route.stopProvider) {
 			await Promise.resolve(route.providerOverride?.stop?.()).catch(() => {});
@@ -182,16 +308,19 @@ async function runTextTurn(
 	transcript?: string,
 	target?: string,
 	agentProvider?: GatewayProviderOverride,
+	model?: string,
 	clientKey?: string,
 ): Promise<RemoteTurnResult> {
 	const prompt = text.trim();
 	if (!prompt) return { replyText: "Send a message first." };
+	const localSlashResult = handleHeadlessSlashCommand(prompt, { model, cwd, agentProvider });
+	if (localSlashResult) return localSlashResult;
 	// Per-client omp resume selection. An explicit non-omp agentProvider/target on
 	// this turn overrides the sticky selection (one-off to another backend).
 	const selectedOmp = ompSelection.get(clientKey);
 	const explicitOverride = (agentProvider && agentProvider !== "oh-my-pi") || !!target;
 	if (selectedOmp && !explicitOverride) {
-		const workingDirectory = cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd();
+		const workingDirectory = cwd || getDefaultAgentCwd();
 		const resumeProvider = createOmpResumeProvider(agentConfig.ompBin, workingDirectory, selectedOmp, process.env);
 		return runCodingAgentTurn(
 			prompt,
@@ -202,6 +331,7 @@ async function runTextTurn(
 			[],
 			resumeProvider,
 			() => { ompSelection.select(clientKey, null); },
+			model,
 		);
 	}
 	const route = resolveTurnRoute(target, cwd, agentProvider);
@@ -212,10 +342,12 @@ async function runTextTurn(
 			route,
 			transcript,
 			agentConfig.provider === "elevenlabs" ? "elevenlabs" : undefined,
+			[],
+			model,
 		);
 	}
 	if (agentConfig.provider === "elevenlabs") {
-		const result = await runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript, "elevenlabs");
+		const result = await runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript, "elevenlabs", [], undefined, undefined, model);
 		return result;
 	}
 	if (agentConfig.provider === "gemini-live") {
@@ -227,6 +359,11 @@ async function runTextTurn(
 					false,
 					route.cwd,
 					transcript,
+					undefined,
+					[],
+					undefined,
+					undefined,
+					model,
 				);
 				return taskResult.replyText || "Task completed with no text output.";
 			}
@@ -250,7 +387,7 @@ async function runTextTurn(
 			warnings: [...(result.warnings || []), ...(audio.warnings || [])],
 		};
 	}
-	return runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript);
+	return runCodingAgentTurn(prompt, includeAudio, route.cwd, transcript, undefined, [], undefined, undefined, model);
 }
 
 async function runCodingAgentTurn(
@@ -262,10 +399,11 @@ async function runCodingAgentTurn(
 	progress: TurnProgressEvent[] = [],
 	providerOverride?: AgentProvider,
 	onPrimaryFailure?: (error: unknown) => void,
+	model?: string,
 ): Promise<RemoteTurnResult> {
 	const options = {
-		model: agentConfig.model,
-		cwd: cwd || process.env.AGENT_CWD || process.env.AGENT_WORKSPACE || process.cwd(),
+		model: model || agentConfig.model,
+		cwd: cwd || getDefaultAgentCwd(),
 	};
 	const startedAt = Date.now();
 	const initialProvider = providerOverride || provider;
@@ -333,6 +471,7 @@ async function runVoiceTurn(
 	cwd?: string,
 	target?: string,
 	agentProvider?: GatewayProviderOverride,
+	model?: string,
 	clientKey?: string,
 ): Promise<RemoteTurnResult> {
 	const startedAt = Date.now();
@@ -384,8 +523,8 @@ async function runVoiceTurn(
 	const selectedOmp = ompSelection.get(clientKey);
 	const explicitOverride = (agentProvider && agentProvider !== "oh-my-pi") || !!target;
 	const result = selectedOmp && !explicitOverride
-		? await runTextTurn(transcript, includeAudio, cwd, transcript, target, agentProvider, clientKey)
-		: await runRoutedVoiceTextTurn(transcript, includeAudio, cwd, transcript, progress, target, agentProvider);
+		? await runTextTurn(transcript, includeAudio, cwd, transcript, target, agentProvider, model, clientKey)
+		: await runRoutedVoiceTextTurn(transcript, includeAudio, cwd, transcript, progress, target, agentProvider, model);
 	return {
 		...result,
 		timings: {
@@ -408,6 +547,7 @@ async function runRoutedVoiceTextTurn(
 	progress: TurnProgressEvent[] = [],
 	target?: string,
 	agentProvider?: GatewayProviderOverride,
+	model?: string,
 ): Promise<RemoteTurnResult> {
 	const route = resolveTurnRoute(target, cwd, agentProvider);
 
@@ -424,6 +564,9 @@ async function runRoutedVoiceTextTurn(
 					transcript,
 					undefined,
 					[],
+					undefined,
+					undefined,
+					model,
 				);
 				return taskResult.replyText || "Task completed with no text output.";
 			}
@@ -442,7 +585,7 @@ async function runRoutedVoiceTextTurn(
 	addProgress(progress, "route", plan.userProgress || `Voice route: ${plan.routeClass || "fast"} via ${plan.backend}.`);
 	if (!reduction.dispatch || !plan.dispatch || !isRunnableVoiceBackend(plan.backend)) {
 		// Not a routable coding task — still let the agent respond conversationally.
-		const fallback = await runCodingAgentTurn(text, includeAudio, route.cwd, transcript, undefined, progress);
+		const fallback = await runCodingAgentTurn(text, includeAudio, route.cwd, transcript, undefined, progress, undefined, undefined, model);
 		return {
 			...fallback,
 			reducer: reduction.summary,
@@ -483,6 +626,7 @@ async function runRoutedVoiceTextTurn(
 		transcript,
 		undefined,
 		progress,
+		model,
 	);
 	return {
 		...result,
@@ -497,7 +641,7 @@ async function runRoutedVoiceTextTurn(
 }
 
 function isRunnableVoiceBackend(backend: ExecutionBackend | GatewayProviderOverride): backend is GatewayProviderOverride {
-	return backend === "pi" || backend === "codex" || backend === "claude";
+	return backend === "pi" || backend === "codex" || backend === "claude" || backend === "oh-my-pi";
 }
 
 async function runTextTurnWithProgress(
@@ -661,7 +805,7 @@ function resumeStoredSession(payload: SessionResumePayload): ControlActionResult
 	if (!routeTarget) {
 		return { ok: false, message: `Provider ${session.provider} can be launched but cannot be routed by this gateway.` };
 	}
-	launchDetachedCli(executable, args, session.cwd || payload.cwd || process.cwd(), `${session.provider} resume`);
+	launchDetachedCli(executable, args, session.cwd || payload.cwd || getDefaultAgentCwd(), `${session.provider} resume`);
 	resumedTargets.set(routeTarget.target, routeTarget);
 	routing.defaultTarget = routeTarget.target;
 	refreshRoutingTargets();
@@ -715,6 +859,20 @@ function launchOhMyPiAgent(argv: string[], cwd: string) {
 	});
 	child.unref();
 	return { command, argv, cwd };
+}
+
+function launchColabDeployment(cwd: string) {
+	const plan = buildColabLaunchPlan({ cwd }, cwd);
+	if (!plan.ok) return plan;
+	const child = spawn(plan.command, plan.argv, {
+		cwd: plan.cwd,
+		detached: true,
+		stdio: "ignore",
+		windowsHide: false,
+		shell: plan.shell,
+	});
+	child.unref();
+	return plan;
 }
 
 function isOhMyPiSessionPath(sessionPath: string): boolean {
@@ -786,8 +944,9 @@ server = new ControlServer({
 	onMonoAction: (action) => ok(`Mono ${action} is unavailable in tray gateway mode.`),
 	onSpeakAction: (action) => ok(`Speak ${action} is unavailable in tray gateway mode.`),
 	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
-	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider, clientKey) => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider, clientKey),
-	onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, _mode, agentProvider, clientKey) => runVoiceTurn(buffer, mimeType, includeAudio, cwd, target, agentProvider, clientKey),
+	getSlashCommands: () => HEADLESS_SLASH_COMMANDS,
+	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider, model, clientKey) => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider, model, clientKey),
+	onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, _mode, agentProvider, model, clientKey) => runVoiceTurn(buffer, mimeType, includeAudio, cwd, target, agentProvider, model, clientKey),
 	onBrainstorm: async (buffer, mimeType, cwd) => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-speak-brainstorm-"));
 		const extension = mimeType?.includes("webm") ? ".webm"
@@ -828,11 +987,11 @@ Provide the output in clean, formatted Markdown.`;
 
 			const formatted = await collectAgentResponse(provider, prompt, {
 				model: agentConfig.model,
-				cwd: cwd || process.cwd(),
+				cwd: cwd || getDefaultAgentCwd(),
 			});
 			
 			// 3. Save to disk in the current workspace directory under "brainstorming"
-			const targetDir = join(cwd || process.cwd(), "brainstorming");
+			const targetDir = join(cwd || getDefaultAgentCwd(), "brainstorming");
 			if (!existsSync(targetDir)) {
 				mkdirSync(targetDir, { recursive: true });
 			}
@@ -874,9 +1033,7 @@ ${text}
 		archiveOrRecoverSession(payload.sessionPath ?? "", payload.action === "recover" ? "recover" : "archive"),
 	onSessionLaunch: (payload) => {
 		const fallbackCwd = payload.cwd?.trim()
-			|| process.env.AGENT_CWD?.trim()
-			|| process.env.AGENT_WORKSPACE?.trim()
-			|| process.cwd();
+			|| getDefaultAgentCwd();
 		const built = buildOhMyPiLaunchArgv({
 			cwd: payload.cwd,
 			prompt: payload.prompt,
@@ -884,11 +1041,28 @@ ${text}
 			provider: payload.provider,
 			sessionDir: payload.sessionDir,
 			hubOnly: payload.hubOnly,
+			targetNode: payload.targetNode,
 		}, fallbackCwd);
 		if (!built.ok) {
 			return { ok: false, message: built.message };
 		}
 		try {
+			if (built.targetNode === "colab") {
+				const launched = launchColabDeployment(built.cwd);
+				if (!launched.ok) return { ok: false, message: launched.message };
+				return {
+					ok: true,
+					message: `Launching Colab deployment ${launched.runId} for ${launched.cwd}.`,
+					command: launched.command,
+					commandPreview: launched.commandPreview,
+					argv: launched.argv,
+					cwd: launched.cwd,
+					runId: launched.runId,
+					session: launched.session,
+					target: launched.target,
+					targetNode: "colab",
+				};
+			}
 			const launched = launchOhMyPiAgent(built.argv, built.cwd);
 			return {
 				ok: true,
@@ -901,7 +1075,7 @@ ${text}
 			};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			return { ok: false, message: `Oh-my-pi launch failed: ${message}` };
+			return { ok: false, message: `Session launch failed: ${message}` };
 		}
 	},
 	getDiscoveredAgents: () => discoverAgentInventoryCached(),

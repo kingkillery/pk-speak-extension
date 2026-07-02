@@ -57,6 +57,15 @@ class AppPreferencesConnectionTest {
   }
 
   @Test
+  fun defaultWorkspacePath_usesDevWorkspacePreset() {
+    val prefs = AppPreferences(context)
+
+    assertEquals(AppPreferences.DEFAULT_WORKSPACE_PATH, prefs.workspaceRoot)
+    assertEquals(AppPreferences.DEFAULT_WORKSPACE_PATH, prefs.workspacePath)
+    assertEquals("C:\\Users\\Prest\\Desktop\\SPWR-DAILY\\Interconnection-Dash-2026", AppPreferences.SPWR_DAILY_WORKSPACE_PATH)
+  }
+
+  @Test
   fun selectedGatewaySessionPath_persistsSeparatelyFromTargetAndWorkspace() {
     val prefs = AppPreferences(context)
     prefs.codexSessionName = "Main-Project-Alpha"

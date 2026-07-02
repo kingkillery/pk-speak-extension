@@ -1,4 +1,4 @@
-export type AgentProviderName = "pi" | "codex" | "claude" | "oh-my-pi" | "gemini" | "gemini-live" | "elevenlabs";
+export type AgentProviderName = "pi" | "codex" | "claude" | "oh-my-pi" | "gemini" | "gemini-live" | "elevenlabs" | "9router";
 
 export type AgentPromptMode = "turn" | "steer" | "followUp";
 

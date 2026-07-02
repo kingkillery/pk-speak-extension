@@ -39,6 +39,8 @@ class StreamingPcmRecorder(private val context: Context) {
 
     @Volatile private var recorder: AudioRecord? = null
     @Volatile private var readThread: Thread? = null
+    @Volatile private var echoCanceler: android.media.audiofx.AcousticEchoCanceler? = null
+    @Volatile private var noiseSuppressor: android.media.audiofx.NoiseSuppressor? = null
 
     val isRecording: Boolean
         get() = active.get()
@@ -83,6 +85,7 @@ class StreamingPcmRecorder(private val context: Context) {
         }
 
         recorder = audioRecord
+        applyAudioEffects(audioRecord)
         audioRecord.startRecording()
         Log.d(TAG, "Recording started (bufferBytes=$bufferBytes)")
 
@@ -134,9 +137,57 @@ class StreamingPcmRecorder(private val context: Context) {
             Log.e(TAG, "Error releasing AudioRecord", e)
         }
 
+        releaseAudioEffects()
         recorder = null
         readThread = null
         Log.d(TAG, "Recording stopped")
+    }
+
+    /**
+     * Attaches platform AEC/NS effects to the AudioRecord session when enabled in
+     * `pi_speak_prefs` ("aec_enabled" / "ns_enabled", both default true) and supported
+     * by the device. Replaces the old reflection-based wiring in MainActivity.
+     */
+    private fun applyAudioEffects(audioRecord: AudioRecord) {
+        val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", Context.MODE_PRIVATE)
+        val aecEnabled = sharedPrefs.getBoolean("aec_enabled", true)
+        val nsEnabled = sharedPrefs.getBoolean("ns_enabled", true)
+        val sessionId = audioRecord.audioSessionId
+        try {
+            if (aecEnabled && android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = android.media.audiofx.AcousticEchoCanceler.create(sessionId)?.also {
+                    it.enabled = true
+                    Log.d(TAG, "AEC attached to session $sessionId")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to attach AEC", e)
+        }
+        try {
+            if (nsEnabled && android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = android.media.audiofx.NoiseSuppressor.create(sessionId)?.also {
+                    it.enabled = true
+                    Log.d(TAG, "NS attached to session $sessionId")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to attach NS", e)
+        }
+    }
+
+    private fun releaseAudioEffects() {
+        try {
+            echoCanceler?.release()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing AEC", e)
+        }
+        try {
+            noiseSuppressor?.release()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing NS", e)
+        }
+        echoCanceler = null
+        noiseSuppressor = null
     }
 
     /**

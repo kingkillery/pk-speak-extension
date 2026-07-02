@@ -137,6 +137,8 @@ if (typeof document !== "undefined") {
 		tokenInput: document.getElementById("token-input"),
 		saveToken: document.getElementById("save-token-button"),
 		clearToken: document.getElementById("clear-token-button"),
+		launchOmpHub: document.getElementById("launch-omp-hub-button"),
+		launchColab: document.getElementById("launch-colab-button"),
 		rememberToken: document.getElementById("remember-token-toggle"),
 		audioToggle: document.getElementById("audio-toggle"),
 		autoplayToggle: document.getElementById("autoplay-toggle"),
@@ -1294,6 +1296,22 @@ if (typeof document !== "undefined") {
 		}
 	}
 
+	async function launchSession(body, pendingMessage) {
+		captureSettings();
+		if (state.launchPath.trim()) body.cwd = state.launchPath.trim();
+		setStatus(pendingMessage);
+		try {
+			const payload = await apiFetch("/v1/sessions/launch", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			setStatus(payload && payload.message ? payload.message : "Launch started.");
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+		}
+	}
+
 	function pickMimeType() {
 		if (!window.MediaRecorder) return "";
 		const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
@@ -1557,6 +1575,12 @@ if (typeof document !== "undefined") {
 	els.launchPathInput?.addEventListener("change", () => {
 		captureSettings();
 		saveSettings();
+	});
+	els.launchOmpHub?.addEventListener("click", () => {
+		void launchSession({ hubOnly: true }, "Launching OMP hub...");
+	});
+	els.launchColab?.addEventListener("click", () => {
+		void launchSession({ targetNode: "colab" }, "Launching Colab...");
 	});
 	els.rememberToken?.addEventListener("change", () => {
 		captureSettings();

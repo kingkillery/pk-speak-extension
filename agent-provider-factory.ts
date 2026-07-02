@@ -188,7 +188,11 @@ class OmpCliProvider implements AgentProvider {
 
 	async *sendPrompt(prompt: string, options: AgentPromptOptions = {}) {
 		const cwd = options.cwd || this.cwd;
-		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, ...ompExtensionArgs(this.env), "--auto-approve", prompt], {
+		const args = ["-p", "--cwd", cwd, ...ompExtensionArgs(this.env)];
+		const model = options.model?.trim();
+		if (model) args.push("--model", model);
+		args.push("--auto-approve", prompt);
+		const text = await runCli(this.ompBin, args, {
 			cwd,
 			name: "oh-my-pi",
 			env: this.env,
@@ -208,7 +212,11 @@ class OmpResumeProvider implements AgentProvider {
 
 	async *sendPrompt(prompt: string, options: AgentPromptOptions = {}) {
 		const cwd = options.cwd || this.cwd;
-		const text = await runCli(this.ompBin, ["-p", "--cwd", cwd, ...ompExtensionArgs(this.env), "--resume", this.sessionPath, "--auto-approve", prompt], {
+		const args = ["-p", "--cwd", cwd, ...ompExtensionArgs(this.env), "--resume", this.sessionPath];
+		const model = options.model?.trim();
+		if (model) args.push("--model", model);
+		args.push("--auto-approve", prompt);
+		const text = await runCli(this.ompBin, args, {
 			cwd,
 			name: "oh-my-pi-resume",
 			env: this.env,

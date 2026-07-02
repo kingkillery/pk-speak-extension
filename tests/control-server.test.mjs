@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
 import dgram from "node:dgram";
@@ -11,11 +11,11 @@ process.env.PI_SPEAK_HTTP_AUDIO_CLEANUP_MS = "25";
 
 const { ControlServer } = await import("../dist/control-server.js");
 
-function request({ port, path = "/", method = "GET", headers = {}, body }) {
+function request({ port, path = "/", method = "GET", headers = {}, body, host = "127.0.0.1" }) {
 	return new Promise((resolve, reject) => {
 		const req = http.request(
 			{
-				host: "127.0.0.1",
+				host,
 				port,
 				path,
 				method,
@@ -198,6 +198,9 @@ test("public health and discovery descriptor do not expose auth token", async ()
 		assert.equal(descriptor.pairing.tokenDelivery, "setup-qr-only");
 		assert.equal(descriptor.security.publicDiscoveryIncludesToken, false);
 		assert.equal(descriptor.endpoints.cancelTurn, "/v1/turn/cancel");
+		assert.equal(descriptor.endpoints.sessionLaunch, "/v1/sessions/launch");
+		assert.ok(descriptor.capabilities.includes("session-launch"));
+		assert.ok(descriptor.capabilities.includes("colab-launch"));
 		assert.doesNotMatch(discovery.body, /secret-token|P-K-Haxx1!/);
 	});
 });
@@ -679,12 +682,12 @@ test("turn routes accept an explicit launch cwd", async () => {
 test("turn routes accept an explicit agent provider override", async () => {
 	const seen = [];
 	await withServer({
-		onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider) => {
-			seen.push({ text, includeAudio, target, cwd, mode, agentProvider });
+		onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider, model) => {
+			seen.push({ text, includeAudio, target, cwd, mode, agentProvider, model });
 			return { replyText: "ok" };
 		},
-		onVoiceTurn: async (_buffer, _mimeType, includeAudio, target, cwd, mode, agentProvider) => {
-			seen.push({ includeAudio, target, cwd, mode, agentProvider });
+		onVoiceTurn: async (_buffer, _mimeType, includeAudio, target, cwd, mode, agentProvider, model) => {
+			seen.push({ includeAudio, target, cwd, mode, agentProvider, model });
 			return { replyText: "ok" };
 		},
 	}, async (port) => {
@@ -697,13 +700,13 @@ test("turn routes accept an explicit agent provider override", async () => {
 				Authorization: "Bearer secret-token",
 				"Content-Type": "application/json",
 			},
-			body: JSON.stringify({ text: "hello", audio: false, agentProvider: "codex" }),
+			body: JSON.stringify({ text: "hello", audio: false, agentProvider: "codex", model: "gpt-test" }),
 		});
 		assert.equal(textResponse.statusCode, 200);
 
 		const textGetResponse = await request({
 			port,
-			path: "/v1/turn/text?text=hello&audio=0&agentProvider=pi",
+			path: "/v1/turn/text?text=hello&audio=0&agentProvider=pi&model=gpt-get",
 			method: "GET",
 			headers: {
 				Host: "tailnet.example",
@@ -714,7 +717,7 @@ test("turn routes accept an explicit agent provider override", async () => {
 
 		const voiceResponse = await request({
 			port,
-			path: "/v1/turn/voice?audio=0&agentProvider=pi",
+			path: "/v1/turn/voice?audio=0&agentProvider=pi&model=gpt-voice",
 			method: "POST",
 			headers: {
 				Host: "tailnet.example",
@@ -746,6 +749,7 @@ test("turn routes accept an explicit agent provider override", async () => {
 		cwd: undefined,
 		mode: "auto",
 		agentProvider: "codex",
+		model: "gpt-test",
 	});
 	assert.deepEqual(seen[1], {
 		text: "hello",
@@ -754,6 +758,7 @@ test("turn routes accept an explicit agent provider override", async () => {
 		cwd: undefined,
 		mode: "auto",
 		agentProvider: "pi",
+		model: "gpt-get",
 	});
 	assert.deepEqual(seen[2], {
 		includeAudio: false,
@@ -761,6 +766,7 @@ test("turn routes accept an explicit agent provider override", async () => {
 		cwd: undefined,
 		mode: "auto",
 		agentProvider: "pi",
+		model: "gpt-voice",
 	});
 	assert.deepEqual(seen[3], {
 		text: "resume this in claude",
@@ -769,6 +775,7 @@ test("turn routes accept an explicit agent provider override", async () => {
 		cwd: undefined,
 		mode: "auto",
 		agentProvider: "claude",
+		model: undefined,
 	});
 });
 
@@ -1029,6 +1036,55 @@ test("session launch endpoint invokes callback and forwards fields", async () =>
 	});
 });
 
+test("session launch endpoint invokes callback and forwards targetNode", async () => {
+	await withServer({
+		onSessionLaunch: async (payload) => ({
+			ok: true,
+			message: `targetNode=${payload.targetNode}`,
+			argv: ["colab"],
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/launch",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				cwd: "C:\\dev\\repo",
+				targetNode: "colab",
+			}),
+		});
+		assert.equal(response.statusCode, 200);
+		const body = await response.json();
+		assert.equal(body.ok, true);
+		assert.equal(body.message, "targetNode=colab");
+		assert.deepEqual(body.argv, ["colab"]);
+	});
+});
+
+test("session launch endpoint rejects wrong-typed targetNode", async () => {
+	await withServer({
+		onSessionLaunch: async () => ({ ok: true, message: "unreachable" }),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/sessions/launch",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ targetNode: 42 }),
+		});
+		assert.equal(response.statusCode, 400);
+		const body = await response.json();
+		assert.equal(body.ok, false);
+		assert.match(body.error, /targetNode must be a string/);
+	});
+});
 test("session launch endpoint forwards hubOnly true to the callback", async () => {
 	await withServer({
 		onSessionLaunch: async (payload) => ({
@@ -1371,10 +1427,11 @@ test("workspace APIs list directories, read files, and guard the root", async ()
 	}
 });
 
-test("default workspace root is confined to the agent cwd", async () => {
+test("default workspace root is confined to the platform default workspace", async () => {
 	const authHeaders = { "X-Pi-Speak-Token": "secret-token" };
-	// Unset every override so getDefaultWorkspacePath() falls back to process.cwd(),
-	// proving the default root is the project dir rather than the filesystem/drive root.
+	const expectedDefaultPath = process.platform === "win32" ? "C:\\Dev" : process.cwd();
+	// Unset every override so getDefaultWorkspacePath() uses the platform default,
+	// proving the default root is a bounded workspace rather than the filesystem/drive root.
 	await withTemporaryEnv("PI_SPEAK_WORKSPACE_ROOT", undefined, async () =>
 		withTemporaryEnv("AGENT_CWD", undefined, async () =>
 			withTemporaryEnv("AGENT_WORKSPACE", undefined, async () =>
@@ -1388,9 +1445,9 @@ test("default workspace root is confined to the agent cwd", async () => {
 					const payload = listing.json();
 					assert.equal(payload.ok, true);
 					assert.equal(payload.workspace.root, payload.workspace.defaultPath);
-					assert.equal(payload.workspace.root, process.cwd());
+					assert.equal(payload.workspace.root, expectedDefaultPath);
 
-					// A file outside the default project root must not be readable through the
+					// A file outside the default workspace root must not be readable through the
 					// authenticated file API; the confinement returns 403, not the file body.
 					const outsideDir = mkdtempSync(join(tmpdir(), "pi-speak-outside-"));
 					const outsidePath = join(outsideDir, "secret.txt");
@@ -1568,5 +1625,69 @@ test("omp select-session surfaces validation failure as 400 (review H2)", async 
 		});
 		assert.equal(clear.statusCode, 200);
 		assert.equal((await clear.json()).cleared, true);
+	});
+});
+
+function firstExternalIpv4() {
+	for (const entries of Object.values(networkInterfaces())) {
+		for (const entry of entries || []) {
+			if (entry.family === "IPv4" && !entry.internal) return entry.address;
+		}
+	}
+	return null;
+}
+
+test("GET /connect serves the pairing page on loopback without a token", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({ port, path: "/connect" });
+		assert.equal(response.statusCode, 200);
+		assert.match(response.headers["content-type"], /text\/html/);
+		assert.ok(response.body.includes("Connect your phone"));
+		// The no-camera fallback link must carry the auth token for one-scan setup.
+		assert.ok(response.body.includes("token=secret-token"));
+		// Live status wiring polls the pairing endpoint.
+		assert.ok(response.body.includes("/v1/pairing/status"));
+	});
+});
+
+test("GET /v1/pairing/status stays null for loopback-only traffic", async () => {
+	await withServer({}, async (port) => {
+		// Loopback authed traffic must NOT count as a phone connection.
+		const status = await request({ port, path: "/v1/status", headers: { "X-Pi-Speak-Token": "secret-token" } });
+		assert.equal(status.statusCode, 200);
+		const pairing = await request({ port, path: "/v1/pairing/status" });
+		assert.equal(pairing.statusCode, 200);
+		const payload = pairing.json();
+		assert.equal(payload.ok, true);
+		assert.equal(payload.lastRemoteClient, null);
+		assert.equal(payload.gateway.authRequired, true);
+	});
+});
+
+test("non-loopback clients cannot read /connect but do mark pairing activity", async (t) => {
+	const externalIp = firstExternalIpv4();
+	if (!externalIp) {
+		t.skip("no non-internal IPv4 interface available");
+		return;
+	}
+	await withServer({ state: { host: "0.0.0.0" } }, async (port) => {
+		// The connect page (it embeds the token QR) must be refused off-loopback.
+		const connect = await request({ port, host: externalIp, path: "/connect" });
+		assert.equal(connect.statusCode, 403);
+
+		// Pairing status polls from remote must not self-record...
+		const poll = await request({ port, host: externalIp, path: "/v1/pairing/status", headers: { "X-Pi-Speak-Token": "secret-token" } });
+		assert.equal(poll.statusCode, 200);
+		let pairing = (await request({ port, path: "/v1/pairing/status" })).json();
+		assert.equal(pairing.lastRemoteClient, null);
+
+		// ...but a real authed call (what the app does at setup) must.
+		const before = Date.now();
+		const status = await request({ port, host: externalIp, path: "/v1/status", headers: { "X-Pi-Speak-Token": "secret-token" } });
+		assert.equal(status.statusCode, 200);
+		pairing = (await request({ port, path: "/v1/pairing/status" })).json();
+		assert.ok(pairing.lastRemoteClient, "expected lastRemoteClient to be recorded");
+		assert.ok(pairing.lastRemoteClient.at >= before);
+		assert.equal(pairing.lastRemoteClient.address, externalIp);
 	});
 });

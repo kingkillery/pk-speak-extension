@@ -1036,9 +1036,19 @@ private fun BooxCockpit(
                                         approvalId: String,
                                         command: String,
                                         reason: String,
+                                        cwd: String,
+                                        timeoutMs: Int,
                                     ) {
                                         scope.launch {
                                             approvalDialogState = Triple(approvalId, command, reason)
+                                        }
+                                    }
+
+                                    override fun onApprovalResolved(approvalId: String) {
+                                        scope.launch {
+                                            if (approvalDialogState?.first == approvalId) {
+                                                approvalDialogState = null
+                                            }
                                         }
                                     }
 
@@ -1416,6 +1426,7 @@ private fun HubPane(
 ) {
     var launchStatus by remember { mutableStateOf("") }
     var launching by remember { mutableStateOf(false) }
+    var launchingColab by remember { mutableStateOf(false) }
     var joiningCollab by remember { mutableStateOf(false) }
     var selectedOmpSessionPath by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
@@ -1466,6 +1477,29 @@ private fun HubPane(
         ) {
             Text(
                 text = if (launching) "LAUNCHING..." else "LAUNCH OMP HUB",
+                color = Ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        OutlinedButton(
+            onClick = {
+                if (launchingColab) return@OutlinedButton
+                launchingColab = true
+                launchStatus = "Launching Colab..."
+                scope.launch {
+                    launchStatus = client.launchColabWorkspace(prefs.workspacePath)
+                    launchingColab = false
+                }
+            },
+            border = BorderStroke(1.dp, Ink),
+            shape = RoundedCornerShape(4.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = if (launchingColab) "LAUNCHING..." else "LAUNCH COLAB",
                 color = Ink,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,

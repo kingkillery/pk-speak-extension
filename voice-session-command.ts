@@ -47,6 +47,17 @@ export function parseVoiceSlashCommand(text: string): VoiceSlashCommandMatch | u
 	const recoverTarget = matchPrefixedValue(normalized, ["recover session ", "restore session ", "unarchive session "]);
 	if (recoverTarget) return { kind: "slash-command", command: `/sess recover ${recoverTarget}` };
 
+	if (hasExactMatch(normalized, [
+		"launch colab",
+		"launch google colab",
+		"launch colab workspace",
+		"deploy to colab",
+		"start colab",
+		"start google colab",
+	])) {
+		return { kind: "slash-command", command: "/sess launch colab" };
+	}
+
 	const launchAgent = matchPrefixedValue(normalized, ["launch agent ", "launch omp agent ", "start agent ", "new agent "]);
 	if (launchAgent) return { kind: "slash-command", command: `/sess launch ${launchAgent}` };
 

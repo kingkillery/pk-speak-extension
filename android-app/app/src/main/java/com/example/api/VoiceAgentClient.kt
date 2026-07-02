@@ -367,6 +367,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             put("text", text)
             put("audio", prefs.autoSpeakEnabled)
             put("cwd", prefs.workspacePath)
+            prefs.agentModel.trim().takeIf { it.isNotBlank() }?.let { put("model", it) }
         }.toString().toRequestBody("application/json".toMediaType())
 
         val request = Request.Builder()
@@ -424,7 +425,8 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
 
     private fun callLocalGatewayVoiceDetailed(audioFile: File): GatewayTurnResult {
         val audioParam = if (prefs.autoSpeakEnabled) "1" else "0"
-        val gatewayUrl = "${gatewayBaseUrl()}/v1/turn/voice?audio=$audioParam&target=${urlParam(prefs.codexSessionName)}&agentProvider=${urlParam(activeGatewayProvider())}&cwd=${urlParam(prefs.workspacePath)}"
+        val modelParam = prefs.agentModel.trim().takeIf { it.isNotBlank() }?.let { "&model=${urlParam(it)}" } ?: ""
+        val gatewayUrl = "${gatewayBaseUrl()}/v1/turn/voice?audio=$audioParam&target=${urlParam(prefs.codexSessionName)}&agentProvider=${urlParam(activeGatewayProvider())}&cwd=${urlParam(prefs.workspacePath)}$modelParam"
         Log.d("VoiceAgent", "POST voice turn to gateway: $gatewayUrl")
         
         val requestBody = audioFile.asRequestBody(recordingMimeType(audioFile).toMediaType())
@@ -1163,6 +1165,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             if (baseUrl.isBlank()) return@withContext "No gateway URL is configured."
             val requestBody = JSONObject().apply {
                 put("hubOnly", true)
+                put("cwd", prefs.workspacePath)
             }.toString().toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
                 .url("$baseUrl/v1/sessions/launch")
@@ -1181,6 +1184,35 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             } catch (e: Exception) {
                 Log.e("VoiceAgent", "OMP hub launch failed", e)
                 "OMP hub launch failed: ${shortError(e)}"
+            }
+        }
+    }
+
+    suspend fun launchColabWorkspace(cwd: String = prefs.workspacePath): String {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext "No gateway URL is configured."
+            val requestBody = JSONObject().apply {
+                put("cwd", cwd)
+                put("targetNode", "colab")
+            }.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("$baseUrl/v1/sessions/launch")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(requestBody)
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                        return@withContext json.optString("error", json.optString("message", "Colab launch failed: ${response.code}"))
+                    }
+                    json.optString("message", "Colab launch started.")
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "Colab launch failed", e)
+                "Colab launch failed: ${shortError(e)}"
             }
         }
     }
