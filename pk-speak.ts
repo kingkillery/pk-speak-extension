@@ -123,7 +123,7 @@ function printDoctor() {
 	console.log(`Package root: ${ROOT}`);
 	console.log(`Agent provider: ${config.agentProvider || process.env.AGENT_PROVIDER || "codex"}`);
 	console.log(`Voice router: ${config.executionRouterMode || process.env.PI_SPEAK_EXECUTION_ROUTER_MODE || "auto"}`);
-	console.log(`TTS provider: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "edge"}`);
+	console.log(`TTS provider: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "auto"}`);
 	console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ env: process.env, config }))}`);
 	console.log(`ElevenLabs key: ${elevenLabsEnv.summary}`);
 	if (elevenLabsEnv.warning) console.log(`Warning: ${elevenLabsEnv.warning}`);
@@ -312,7 +312,7 @@ function printWrapHelp() {
 		"",
 		"Options:",
 		"  --label <name>             Friendly name to say",
-		"  --provider <auto|edge|elevenlabs|openai|sag|higgs|stable-audio|legacy>",
+		"  --provider <auto|edge|gemini|elevenlabs|openai|sag|higgs|stable-audio|legacy>",
 		"  --cwd <path>               Working directory for the command",
 		"  --shell                    Run through the platform shell",
 		"  --capture                  Mirror and classify stdout/stderr",
@@ -342,7 +342,7 @@ function printSpeakHelp() {
 		"Speaks text from command arguments or stdin using the saved pk-speak TTS setup.",
 		"",
 		"Options:",
-		"  --provider <auto|edge|elevenlabs|openai|sag|legacy>",
+		"  --provider <auto|edge|gemini|elevenlabs|openai|sag|higgs|stable-audio|legacy>",
 		"  --output <path>       Write audio to a file",
 		"  --no-play             Synthesize only; do not play audio",
 		"  --allow-open-fallback  If hidden playback fails, open the file with the OS default app",
@@ -512,6 +512,7 @@ function normalizeTtsProvider(value: string | undefined): TtsProvider | undefine
 		|| normalized === "edge"
 		|| normalized === "openai"
 		|| normalized === "elevenlabs"
+		|| normalized === "gemini"
 		|| normalized === "sag"
 		|| normalized === "higgs"
 		|| normalized === "stable-audio"

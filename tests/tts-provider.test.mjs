@@ -58,6 +58,20 @@ test("edge provider can be selected from the bundled dependency", async () => {
 	});
 });
 
+test("gemini provider uses Gemini 3.1 Flash TTS by default", async () => {
+	await withEnv({
+		PI_SPEAK_TTS_PROVIDER: "gemini",
+		GOOGLE_API_KEY: "test-gemini-key",
+		PI_SPEAK_GEMINI_TTS_MODEL: undefined,
+	}, async () => {
+		assert.equal(tts.resolveTtsProvider(), "gemini");
+		const diagnostics = tts.getTtsDiagnostics();
+		assert.equal(diagnostics.providers.gemini.available, true);
+		assert.equal(diagnostics.providers.gemini.model, "gemini-3.1-flash-tts-preview");
+		assert.equal(JSON.stringify(diagnostics).includes("test-gemini-key"), false);
+	});
+});
+
 test("sanitizeForSpeech strips markdown, code, links, and emoji for every runtime", () => {
 	const input = [
 		"# Heading",
@@ -216,6 +230,39 @@ test("stable-audio writes generated prompt audio through the gradio provider hoo
 		});
 	} finally {
 		tts.testOverrides.synthesizeStableAudio = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("gemini writes speech through the provider hook and exposes wav mime", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-gemini-tts-"));
+	const outputPath = join(tempDir, "gemini.mp3");
+	let seenText = "";
+	try {
+		const wavHeader = Buffer.alloc(44);
+		wavHeader.write("RIFF", 0, "ascii");
+		wavHeader.write("WAVE", 8, "ascii");
+		tts.testOverrides.synthesizeGemini = async (text, path) => {
+			seenText = text;
+			await writeFile(path, wavHeader);
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "gemini",
+			GOOGLE_API_KEY: "test-gemini-key",
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			const result = await tts.synthesizeToFile({
+				text: "spoken by gemini",
+				outputPath,
+				state: { provider: "gemini", rewriteEnabled: false },
+			});
+			assert.equal(result.provider, "gemini");
+			assert.equal(seenText, "spoken by gemini");
+			assert.equal(tts.getAudioMimeType(outputPath), "audio/wav");
+		});
+	} finally {
+		tts.testOverrides.synthesizeGemini = null;
 		await rm(tempDir, { recursive: true, force: true });
 	}
 });

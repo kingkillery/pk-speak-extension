@@ -3239,6 +3239,12 @@ fun SettingsTabContent(
         "C:/Dev" to AppPreferences.DEFAULT_WORKSPACE_PATH,
         "SPWR Daily" to AppPreferences.SPWR_DAILY_WORKSPACE_PATH
     )
+    val modelPresets = listOf(
+        "Gemini 3.1 Live" to "gemini-3.1-flash-live-preview",
+        "Gemini 3.5 Flash" to "gemini-3.5-flash",
+        "Server default" to "",
+        "Legacy 2.5 Live" to "gemini-live-2.5-flash-native-audio"
+    )
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -3564,6 +3570,53 @@ fun SettingsTabContent(
                         placeholder = { Text("Server default", color = Color(0xFF6E665A)) },
                         singleLine = true
                     )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(text = "Model Presets", color = Color(0xFF6E665A), fontSize = 11.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        modelPresets.forEach { (label, model) ->
+                            val selected = if (model.isBlank()) agentModel.isBlank() else agentModel.equals(model, ignoreCase = true)
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        agentModel = model
+                                        prefs.agentModel = model
+                                        onConfigChanged()
+                                    },
+                                color = if (selected) Color(0xFFF4F1E9) else Color(0x22B8AF9A),
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, if (selected) Color(0xFFC2542F) else Color(0xFFE3DCCC))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 48.dp)
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = selected,
+                                        onClick = {
+                                            agentModel = model
+                                            prefs.agentModel = model
+                                            onConfigChanged()
+                                        },
+                                        colors = RadioButtonDefaults.colors(
+                                            selectedColor = Color(0xFFC2542F),
+                                            unselectedColor = Color(0xFF6E665A)
+                                        )
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(label, color = Color(0xFF211C16), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        Text(if (model.isBlank()) "Gateway default" else model, color = Color(0xFF6E665A), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(12.dp))
 

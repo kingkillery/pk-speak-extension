@@ -4,16 +4,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RemoteTurnResult } from "./remote-turn-manager.js";
 
-const DEFAULT_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025";
-// Vertex AI does not expose the developer-API native-audio preview name. The
-// half-cascade Live model below is the one that resolves over Vertex BidiGenerateContent.
-const DEFAULT_VERTEX_LIVE_MODEL = "gemini-live-2.5-flash";
-const DEFAULT_TEXT_MODEL = "gemini-2.5-flash";
+const DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview";
+const DEFAULT_VERTEX_LIVE_MODEL = "gemini-3.1-flash-live-preview";
+const DEFAULT_TEXT_MODEL = "gemini-3.5-flash";
 const DEFAULT_TIMEOUT_MS = 45000;
 // Vertex Live (BidiGenerateContent) wants v1beta1; the developer API wants v1beta.
 const DEFAULT_VERTEX_API_VERSION = "v1beta1";
 // Vertex serves Gemini Live publisher models from the `global` location, not regional ones.
 const DEFAULT_VERTEX_LIVE_LOCATION = "global";
+
+export const GEMINI_LIVE_MODEL_OPTIONS = [
+	"gemini-3.1-flash-live-preview",
+	"gemini-live-2.5-flash-native-audio",
+	"gemini-2.5-flash-native-audio-preview-12-2025",
+] as const;
+
+export const GEMINI_TEXT_MODEL_OPTIONS = [
+	"gemini-3.5-flash",
+	"gemini-3.1-flash-lite",
+	"gemini-2.5-flash",
+] as const;
+
+export const GEMINI_TTS_MODEL_OPTIONS = [
+	"gemini-3.1-flash-tts-preview",
+] as const;
 
 type GeminiBackend = "developer-api" | "vertex";
 

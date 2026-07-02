@@ -64,9 +64,10 @@ Package split details are in [docs/PACKAGE_SPLIT.md](./docs/PACKAGE_SPLIT.md).
 If you do nothing else, `auto` provider selection will try available backends in this order:
 
 1. `legacy` via `speak11`
-2. `elevenlabs`
-3. `openai`
-4. `edge`
+2. `gemini`
+3. `elevenlabs`
+4. `openai`
+5. `edge`
 
 If an earlier auto-selected backend fails at synthesis time, Pi now falls through to the next available provider instead of stopping on the first failure.
 
@@ -180,11 +181,12 @@ Use `pk-speak speak` when you want any command, hook, or coding agent to talk wi
 ```text
 pk-speak speak "Tests passed"
 git status --short | pk-speak speak --provider edge
+pk-speak speak --provider gemini "Gemini TTS is ready."
 pk-speak speak --provider sag "I need approval on this command."
 pk-speak speak --no-play --output reply.mp3 "Saved an audio artifact."
 ```
 
-It reads text from arguments or stdin, uses the saved setup profile, and supports `auto`, `edge`, `elevenlabs`, `openai`, `sag`, and `legacy` providers. Use `--dry-run` to inspect what would be spoken without synthesizing audio.
+It reads text from arguments or stdin, uses the saved setup profile, and supports `auto`, `edge`, `gemini`, `elevenlabs`, `openai`, `sag`, and `legacy` providers. Use `--dry-run` to inspect what would be spoken without synthesizing audio.
 
 ### Wrap Any CLI Agent
 
@@ -212,7 +214,7 @@ set PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
 set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
 set GOOGLE_CLOUD_LOCATION=us-central1
 gcloud auth application-default login
-pi-speak-gemini-live-smoke --model gemini-2.5-flash-native-audio-preview-12-2025 --modality audio
+pi-speak-gemini-live-smoke --modality audio
 ```
 
 To run the tray/headless gateway through ElevenLabs voice, backed by Vertex AI Gemini text reasoning:
@@ -237,7 +239,6 @@ set AGENT_PROVIDER=gemini-live
 set PI_SPEAK_GEMINI_BACKEND=vertex
 set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
 set GOOGLE_CLOUD_LOCATION=us-central1
-set PI_SPEAK_GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
 pi-speak-gateway
 ```
 
@@ -270,6 +271,7 @@ Common examples:
 /speak test
 /speak providers
 /speak provider edge
+/speak provider gemini
 /speak provider openai
 /speak provider elevenlabs
 /speak rewrite on
@@ -394,7 +396,7 @@ There are six main subsystems:
    The extension entrypoint. Registers commands, persists state, owns wake-word routing, and coordinates TTS, STT, Telegram, and HTTP control.
 
 2. `tts.ts`
-   Multi-provider speech synthesis. Supports `legacy`, `edge`, `openai`, `elevenlabs`, and `auto`.
+   Multi-provider speech synthesis. Supports `legacy`, `edge`, `gemini`, `openai`, `elevenlabs`, `sag`, `higgs`, `stable-audio`, and `auto`.
 
 3. `stt.ts` and `listener/stt_worker.py`
    Remote voice transcription for uploaded audio. `auto` prefers OpenAI when an API key is present, otherwise a warm local `faster-whisper` worker process.
@@ -662,7 +664,7 @@ AGENT_MODEL=
 PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex|claude
 AGENT_CWD=
 AGENT_WORKSPACE=
-PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
+PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|gemini|openai|elevenlabs|sag|higgs|stable-audio
 PI_SPEAK_REWRITE_ENABLED=true|false
 PI_SPEAK_WAKE_PHRASE=PK
 PI_SPEAK_MONO_ACTIVITY_TIMEOUT=15
@@ -712,8 +714,11 @@ PI_SPEAK_GEMINI_BACKEND=vertex
 PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
 GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
 GOOGLE_CLOUD_LOCATION=us-central1
-PI_SPEAK_GEMINI_TEXT_MODEL=gemini-2.5-flash
-PI_SPEAK_GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+PI_SPEAK_GEMINI_TEXT_MODEL=gemini-3.5-flash
+PI_SPEAK_GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
+PI_SPEAK_TTS_PROVIDER=gemini
+PI_SPEAK_GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview
+PI_SPEAK_GEMINI_TTS_VOICE=Kore
 ```
 
 Run `gcloud auth application-default login` on the machine hosting the tray/gateway, or set `PI_SPEAK_VERTEX_API_KEY` to a Vertex AI API key. Enable the Vertex AI API on the Cloud project.
@@ -804,7 +809,7 @@ Check:
 ```text
 /speak status
 /speak providers
-/speak provider edge
+/speak provider gemini
 ```
 
 ### Telegram pairing is stuck

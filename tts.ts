@@ -1,11 +1,12 @@
+import { GoogleGenAI } from "@google/genai";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, delimiter, join } from "node:path";
 import { withAbortTimeout } from "./request-timeout.js";
 
-export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs" | "sag" | "higgs" | "stable-audio";
+export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs" | "gemini" | "sag" | "higgs" | "stable-audio";
 
 export type SpeakRuntimeState = {
 	enabled?: boolean;
@@ -33,6 +34,8 @@ export const DEFAULT_LEGACY_VOICE = "adam";
 export const DEFAULT_EDGE_VOICE = process.env.PI_SPEAK_EDGE_VOICE || "en-US-AriaNeural";
 export const DEFAULT_OPENAI_VOICE = process.env.PI_SPEAK_OPENAI_VOICE || "alloy";
 export const DEFAULT_OPENAI_MODEL = process.env.PI_SPEAK_OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+export const DEFAULT_GEMINI_TTS_MODEL = process.env.PI_SPEAK_GEMINI_TTS_MODEL || "gemini-3.1-flash-tts-preview";
+export const DEFAULT_GEMINI_TTS_VOICE = process.env.PI_SPEAK_GEMINI_TTS_VOICE || "Kore";
 export const DEFAULT_ELEVENLABS_VOICE_ID =
 	process.env.PI_SPEAK_ELEVENLABS_VOICE_ID || "pNInz6obpgDQGcFmaJgB";
 export const DEFAULT_ELEVENLABS_MODEL_ID =
@@ -101,6 +104,49 @@ function throwIfAborted(signal?: AbortSignal) {
 function getOpenAiAudioKey() {
 	// Require a dedicated key for audio TTS — avoid consuming the general LLM key
 	return process.env.PI_SPEAK_OPENAI_KEY || process.env.VOICE_TOOLS_OPENAI_KEY || "";
+}
+
+function getGeminiTtsApiKey() {
+	return process.env.PI_SPEAK_GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || "";
+}
+
+function getGeminiTtsVertexConfig() {
+	const project = process.env.GOOGLE_CLOUD_PROJECT?.trim() || process.env.GCLOUD_PROJECT?.trim() || process.env.PI_SPEAK_VERTEX_PROJECT?.trim();
+	const location = process.env.GOOGLE_CLOUD_LOCATION?.trim() || process.env.GOOGLE_CLOUD_REGION?.trim() || process.env.PI_SPEAK_VERTEX_LOCATION?.trim();
+	if (!project || !location) return undefined;
+	return { project, location };
+}
+
+function hasGeminiTtsAuth() {
+	return !!(getGeminiTtsApiKey() || process.env.PI_SPEAK_VERTEX_API_KEY || getGeminiTtsVertexConfig());
+}
+
+function createGeminiTtsClient() {
+	const apiKey = getGeminiTtsApiKey();
+	if (apiKey) {
+		return new GoogleGenAI({
+			apiKey,
+			apiVersion: process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta",
+		});
+	}
+	const vertex = getGeminiTtsVertexConfig();
+	if (vertex) {
+		return new GoogleGenAI({
+			vertexai: true,
+			project: vertex.project,
+			location: vertex.location,
+			apiVersion: process.env.PI_SPEAK_VERTEX_API_VERSION || "v1beta1",
+		});
+	}
+	const vertexApiKey = process.env.PI_SPEAK_VERTEX_API_KEY?.trim();
+	if (vertexApiKey) {
+		return new GoogleGenAI({
+			vertexai: true,
+			apiKey: vertexApiKey,
+			apiVersion: process.env.PI_SPEAK_VERTEX_API_VERSION || "v1beta1",
+		});
+	}
+	throw new Error("Gemini TTS requires GOOGLE_API_KEY, GEMINI_API_KEY, or Vertex AI configuration.");
 }
 
 function getSagCommand() {
@@ -215,6 +261,8 @@ function isProviderAvailable(provider: Exclude<TtsProvider, "auto">) {
 			return !!process.env.ELEVENLABS_API_KEY;
 		case "openai":
 			return !!getOpenAiAudioKey();
+		case "gemini":
+			return hasGeminiTtsAuth();
 		case "sag":
 			return hasSag() && !!process.env.ELEVENLABS_API_KEY;
 		case "edge":
@@ -232,6 +280,7 @@ export function resolveTtsProvider(state?: SpeakRuntimeState): Exclude<TtsProvid
 		if (isProviderAvailable(configured)) return configured;
 	}
 	if (hasLegacySpeak11()) return "legacy";
+	if (hasGeminiTtsAuth()) return "gemini";
 	if (process.env.ELEVENLABS_API_KEY) return "elevenlabs";
 	if (getOpenAiAudioKey()) return "openai";
 	return "edge";
@@ -316,6 +365,8 @@ export function describeTtsProvider(state?: SpeakRuntimeState) {
 			return `edge (${DEFAULT_EDGE_VOICE})`;
 		case "openai":
 			return `openai (${DEFAULT_OPENAI_MODEL}/${DEFAULT_OPENAI_VOICE})`;
+		case "gemini":
+			return `gemini (${DEFAULT_GEMINI_TTS_MODEL}/${DEFAULT_GEMINI_TTS_VOICE})`;
 		case "elevenlabs":
 			return `elevenlabs (${DEFAULT_ELEVENLABS_VOICE_ID})`;
 		case "sag":
@@ -345,6 +396,12 @@ export function getTtsDiagnostics(state?: SpeakRuntimeState) {
 				available: !!getOpenAiAudioKey(),
 				model: DEFAULT_OPENAI_MODEL,
 				voice: DEFAULT_OPENAI_VOICE,
+			},
+			gemini: {
+				available: hasGeminiTtsAuth(),
+				model: DEFAULT_GEMINI_TTS_MODEL,
+				voice: DEFAULT_GEMINI_TTS_VOICE,
+				vertexConfigured: !!(process.env.PI_SPEAK_VERTEX_API_KEY || getGeminiTtsVertexConfig()),
 			},
 			elevenlabs: {
 				available: !!process.env.ELEVENLABS_API_KEY,
@@ -477,6 +534,103 @@ async function synthesizeOpenAI(text: string, outputPath: string, signal?: Abort
 	}
 	const audio = Buffer.from(await response.arrayBuffer());
 	await writeFile(outputPath, audio);
+}
+
+type GeminiAudioOutput = {
+	data: string;
+	mimeType?: string;
+	channels?: number;
+	sampleRate?: number;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
+
+function getGeminiAudioOutput(value: unknown): GeminiAudioOutput | undefined {
+	const record = asRecord(value);
+	if (!record) return undefined;
+	const data = typeof record.data === "string" ? record.data : undefined;
+	if (!data) return undefined;
+	const channels = typeof record.channels === "number" ? record.channels : undefined;
+	const sampleRate = typeof record.sample_rate === "number"
+		? record.sample_rate
+		: typeof record.sampleRate === "number"
+			? record.sampleRate
+			: undefined;
+	return {
+		data,
+		mimeType: typeof record.mime_type === "string"
+			? record.mime_type
+			: typeof record.mimeType === "string"
+				? record.mimeType
+				: undefined,
+		channels,
+		sampleRate,
+	};
+}
+
+function extractGeminiAudioOutput(interaction: unknown): GeminiAudioOutput {
+	const record = asRecord(interaction);
+	const direct = getGeminiAudioOutput(record?.output_audio);
+	if (direct) return direct;
+	const outputs = record?.outputs;
+	if (Array.isArray(outputs)) {
+		for (const output of outputs) {
+			const audio = getGeminiAudioOutput(output);
+			if (audio) return audio;
+		}
+	}
+	throw new Error("Gemini TTS response did not include audio data");
+}
+
+function wavFromPcm(pcm: Buffer, channels = 1, sampleRate = 24000, bitsPerSample = 16) {
+	const header = Buffer.alloc(44);
+	const byteRate = sampleRate * channels * bitsPerSample / 8;
+	const blockAlign = channels * bitsPerSample / 8;
+	header.write("RIFF", 0, "ascii");
+	header.writeUInt32LE(36 + pcm.length, 4);
+	header.write("WAVE", 8, "ascii");
+	header.write("fmt ", 12, "ascii");
+	header.writeUInt32LE(16, 16);
+	header.writeUInt16LE(1, 20);
+	header.writeUInt16LE(channels, 22);
+	header.writeUInt32LE(sampleRate, 24);
+	header.writeUInt32LE(byteRate, 28);
+	header.writeUInt16LE(blockAlign, 32);
+	header.writeUInt16LE(bitsPerSample, 34);
+	header.write("data", 36, "ascii");
+	header.writeUInt32LE(pcm.length, 40);
+	return Buffer.concat([header, pcm]);
+}
+
+async function synthesizeGemini(text: string, outputPath: string, signal?: AbortSignal) {
+	throwIfAborted(signal);
+	const client = createGeminiTtsClient();
+	const interaction = await withAbortTimeout(
+		(requestSignal) =>
+			client.interactions.create({
+				model: DEFAULT_GEMINI_TTS_MODEL,
+				input: text,
+				response_format: { type: "audio" },
+				generation_config: {
+					speech_config: [
+						{ voice: DEFAULT_GEMINI_TTS_VOICE },
+					],
+				},
+			}, {
+				signal: requestSignal,
+				timeout: Number.parseInt(process.env.PI_SPEAK_GEMINI_TTS_TIMEOUT_MS || "30000", 10),
+			}),
+		signal,
+	);
+	const audio = extractGeminiAudioOutput(interaction);
+	const bytes = Buffer.from(audio.data, "base64");
+	const isWav = audio.mimeType === "audio/wav" && bytes.subarray(0, 4).toString("ascii") === "RIFF";
+	await writeFile(
+		outputPath,
+		isWav ? bytes : wavFromPcm(bytes, audio.channels || 1, audio.sampleRate || 24000),
+	);
 }
 
 async function synthesizeElevenLabs(text: string, outputPath: string, signal?: AbortSignal) {
@@ -839,6 +993,7 @@ export function abortAllActiveTTS() {
 export const testOverrides = {
 	synthesizeElevenLabs: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
 	synthesizeEdge: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
+	synthesizeGemini: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
 	synthesizeHiggs: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
 	synthesizeStableAudio: null as (null | ((text: string, outputPath: string, signal?: AbortSignal) => Promise<void>)),
 };
@@ -893,6 +1048,13 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 				case "openai":
 					await synthesizeOpenAI(spokenText, options.outputPath, localController.signal);
 					break;
+				case "gemini":
+					if (testOverrides.synthesizeGemini) {
+						await testOverrides.synthesizeGemini(spokenText, options.outputPath, localController.signal);
+					} else {
+						await synthesizeGemini(spokenText, options.outputPath, localController.signal);
+					}
+					break;
 				case "elevenlabs":
 					if (testOverrides.synthesizeElevenLabs) {
 						await testOverrides.synthesizeElevenLabs(spokenText, options.outputPath, localController.signal);
@@ -921,7 +1083,7 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 					throw new Error(`Unsupported TTS provider: ${provider satisfies never}`);
 			}
 		} catch (error) {
-			if (provider === "openai" || provider === "elevenlabs" || provider === "sag" || provider === "higgs" || provider === "stable-audio") {
+			if (provider === "openai" || provider === "gemini" || provider === "elevenlabs" || provider === "sag" || provider === "higgs" || provider === "stable-audio") {
 				console.warn(`[TTS Fallback] Primary provider '${provider}' failed: ${getErrorMessage(error)}. Falling back to 'edge' TTS. Metrics: { timestamp: ${Date.now()}, originalProvider: "${provider}", targetProvider: "edge", error: "${getErrorMessage(error)}" }`);
 				if (testOverrides.synthesizeEdge) {
 					await testOverrides.synthesizeEdge(spokenText, options.outputPath, localController.signal);
@@ -947,6 +1109,12 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 }
 
 export function getAudioMimeType(filePath: string) {
+	try {
+		const header = readFileSync(filePath, { flag: "r" }).subarray(0, 12);
+		if (header.subarray(0, 4).toString("ascii") === "RIFF" && header.subarray(8, 12).toString("ascii") === "WAVE") {
+			return "audio/wav";
+		}
+	} catch {}
 	const lower = basename(filePath).toLowerCase();
 	if (lower.endsWith(".ogg") || lower.endsWith(".oga")) return "audio/ogg";
 	if (lower.endsWith(".wav")) return "audio/wav";

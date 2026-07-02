@@ -351,7 +351,7 @@ async function runTextTurn(
 		return result;
 	}
 	if (agentConfig.provider === "gemini-live") {
-		if (!includeAudio) return await runGeminiTextTurn(prompt);
+		if (!includeAudio) return await runGeminiTextTurn(prompt, { model });
 		const toolHandler: import("./gemini-live-turn.js").GeminiToolHandler = async (name, args) => {
 			if (name === "run_coding_task") {
 				const taskResult = await runCodingAgentTurn(
@@ -369,10 +369,10 @@ async function runTextTurn(
 			}
 			return `Unknown tool: ${name}`;
 		};
-		return await runGeminiLiveTurn(prompt, { toolHandler });
+		return await runGeminiLiveTurn(prompt, { model, toolHandler });
 	}
 	if (agentConfig.provider === "gemini") {
-		const result = await runGeminiTextTurn(prompt);
+		const result = await runGeminiTextTurn(prompt, { model });
 		if (!includeAudio) return {
 			...result,
 			providers: { ...result.providers, agent: "gemini" },
@@ -572,7 +572,7 @@ async function runRoutedVoiceTextTurn(
 			}
 			return `Unknown tool: ${name}`;
 		};
-		const geminiResult = await runGeminiLiveTurn(text, { toolHandler });
+		const geminiResult = await runGeminiLiveTurn(text, { model, toolHandler });
 		return {
 			...geminiResult,
 			transcript: transcript ?? geminiResult.transcript,

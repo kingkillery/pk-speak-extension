@@ -136,7 +136,7 @@ const REMOTE_STATE_TYPE = "remote-control-state";
 const SESSION_REGISTRY_TYPE = "session-registry";
 const SESSION_WAKE_ALIAS_TYPE = "session-wake-aliases";
 const SESSION_REMOVE_CONFIRM_TTL_MS = Number.parseInt(process.env.PI_SPEAK_SESSION_REMOVE_CONFIRM_TTL_MS || "120000", 10);
-const AVAILABLE_TTS_PROVIDERS: TtsProvider[] = ["auto", "legacy", "edge", "openai", "elevenlabs", "sag", "higgs", "stable-audio"];
+const AVAILABLE_TTS_PROVIDERS: TtsProvider[] = ["auto", "legacy", "gemini", "elevenlabs", "openai", "edge", "sag", "higgs", "stable-audio"];
 const MONO_KEEP_ALIVE_SECONDS = Number.parseFloat(
 	process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || process.env.MONO_ACTIVITY_TIMEOUT || "15",
 );
@@ -1797,7 +1797,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (mode === "live" && wantAudio && isGeminiLiveConfigured()) {
 			try {
 				const liveStartedAt = Date.now();
-				const liveResult = await runGeminiLiveTurn(reducer.promptForAgent, { timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS });
+				const liveResult = await runGeminiLiveTurn(reducer.promptForAgent, {
+					model,
+					timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS,
+				});
 				agentRunMs = Date.now() - liveStartedAt;
 				replyText = liveResult.replyText;
 				usedLiveMode = true;
@@ -3734,6 +3737,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				"provider auto",
 				"provider legacy",
 				"provider edge",
+				"provider gemini",
 				"provider openai",
 				"provider elevenlabs",
 				"rewrite on",

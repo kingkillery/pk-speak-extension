@@ -31,7 +31,7 @@ npm test         # Run tests
 | `ui/hooks/useSessionStore.ts` | Pane polling hook + pure `pollTick` helpers |
 | `ui/selectors.ts` | Pane read-side bridge over `buildSessionDashboard` |
 | `voice-session-command.ts` | Natural spoken session-command parsing |
-| `tts.ts` | Multi-provider TTS (edge, openai, elevenlabs, legacy) |
+| `tts.ts` | Multi-provider TTS (edge, gemini, openai, elevenlabs, legacy) |
 | `stt.ts` | Remote voice transcription |
 | `phone-bridge.ts` | Telegram transport |
 | `control-server.ts` | HTTP API + mobile web app server |
@@ -43,13 +43,14 @@ npm test         # Run tests
 
 Auto-resolution order:
 1. `legacy` — local speak11 (requires Python deps)
-2. `elevenlabs` — requires `ELEVENLABS_API_KEY`
-3. `openai` — requires `PI_SPEAK_OPENAI_KEY` (dedicated, not general LLM key)
-4. `edge` — works immediately (bundled `node-edge-tts`)
+2. `gemini` — requires Google API key or Vertex AI configuration
+3. `elevenlabs` — requires `ELEVENLABS_API_KEY`
+4. `openai` — requires `PI_SPEAK_OPENAI_KEY` (dedicated, not general LLM key)
+5. `edge` — works immediately (bundled `node-edge-tts`)
 
 ## Important Patterns
 
-- **API keys for audio**: Use dedicated keys (`PI_SPEAK_OPENAI_KEY`, `ELEVENLABS_API_KEY`) not the general LLM keys
+- **API keys for audio**: Use dedicated keys (`PI_SPEAK_OPENAI_KEY`, `ELEVENLABS_API_KEY`) or Google Gemini/Vertex credentials for Gemini TTS
 - **Edge TTS**: Bundled via `node-edge-tts`, no external deps needed
 - **Local voice (`/mono`)**: Requires Python stack with `faster-whisper`, `sounddevice`, `numpy`
 - **Wake sensitivity**: Use `PI_SPEAK_WAKE_SENSITIVITY=low|medium|high` as the main operator control for how forgiving `PK` activation should be; use the lower-level fuzzy and compact env vars only as overrides
