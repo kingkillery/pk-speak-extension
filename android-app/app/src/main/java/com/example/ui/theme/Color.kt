@@ -2,26 +2,26 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Warm "paper" palette inspired by the Claude mobile aesthetic.
-val Canvas = Color(0xFFF4F1E9) // warm cream app background
-val SurfacePaper = Color(0xFFFFFFFF) // cards, pills, composer
-val SurfaceSubtle = Color(0xFFF0ECE2) // inset / secondary fills
-val SurfaceMuted = Color(0xFFE9E3D6) // pressed / muted chips
-val SelectedFill = Color(0xFFEDE7DB) // selected nav row pill
+// Minimal computer-connection palette inspired by OpenAI/Codex mobile surfaces.
+val Canvas = Color(0xFFF7F7F4) // quiet off-white app background
+val SurfacePaper = Color(0xFFFFFFFF) // primary cards, composer, sheets
+val SurfaceSubtle = Color(0xFFF1F1EE) // secondary panels and empty states
+val SurfaceMuted = Color(0xFFE6E6E1) // disabled controls and pressed chips
+val SelectedFill = Color(0xFFEDEDEA) // selected nav row pill
 
-val Ink = Color(0xFF211C16) // primary text (warm near-black)
-val InkMuted = Color(0xFF6E665A) // secondary text
-val Line = Color(0xFFE3DCCC) // hairline borders
+val Ink = Color(0xFF171717) // primary text
+val InkMuted = Color(0xFF6B6B66) // secondary text
+val Line = Color(0xFFE1E1DC) // quiet dividers and borders
 
-// Accent: terracotta / rust (matches the send button + "New chat").
-val Accent = Color(0xFFC2542F)
+// Accent stays monochrome; live connection state carries the color.
+val Accent = Color(0xFF171717)
 val OnAccent = Color(0xFFFFFFFF)
-val AccentSoft = Color(0xFFFBF1EC)
+val AccentSoft = Color(0xFFF1F1EE)
 
-val Success = Color(0xFF2E7D52)
-val SuccessSoft = Color(0xFFDCEEE0)
-val Warn = Color(0xFFC97E1A)
-val Error = Color(0xFFB3261E)
+val Success = Color(0xFF147A4A)
+val SuccessSoft = Color(0xFFE2F4EA)
+val Warn = Color(0xFF9A6A16)
+val Error = Color(0xFFB42318)
 
 // Back-compat aliases (older references expect these names).
 val Surface = Canvas

@@ -66,6 +66,7 @@ import com.example.ui.theme.InkMuted
 import com.example.ui.theme.Line
 import com.example.ui.theme.SelectedFill
 import com.example.ui.theme.Success
+import com.example.ui.theme.SuccessSoft
 import com.example.ui.theme.SurfaceMuted
 import com.example.ui.theme.SurfacePaper
 import com.example.ui.theme.SurfaceSubtle
@@ -405,41 +406,93 @@ internal fun StudioIdleState(
     gatewayStatus: String,
     modifier: Modifier = Modifier,
 ) {
+    val voiceHint = if (transmissionMode == "PTT") "Hold to talk" else "Tap to talk"
     Column(
-        modifier = modifier.padding(horizontal = 8.dp),
-        horizontalAlignment = Alignment.Start,
+        modifier = modifier
+            .padding(horizontal = 14.dp)
+            .fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("Agent cockpit ready", color = Ink, style = MaterialTheme.typography.headlineMedium)
-        Spacer(modifier = Modifier.height(8.dp))
+        ConnectionGlyph(gatewayStatus = gatewayStatus)
+        Spacer(modifier = Modifier.height(24.dp))
         Text(
-            text = "Talk, type, or send a command. Pi Speak will route the turn to the selected coding session and keep the reply here.",
+            text = "Connected to your computer",
+            color = Ink,
+            style = MaterialTheme.typography.headlineMedium,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = "Speak naturally. Pi Speak sends each turn to the selected coding session and keeps the thread here.",
             color = InkMuted,
             style = MaterialTheme.typography.bodyMedium,
             lineHeight = 22.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.widthIn(max = 320.dp),
         )
-        Spacer(modifier = Modifier.height(18.dp))
-        IdleHintRow("Gateway", gatewayStatus.ifBlank { "Checking" })
-        IdleHintRow("Target", targetSession.ifBlank { "Default session" })
-        IdleHintRow("Voice", if (transmissionMode == "PTT") "Hold Talk to record, release to send" else "Tap Talk to start or stop recording")
-        Spacer(modifier = Modifier.height(18.dp))
-        Surface(color = AccentSoft, shape = RoundedCornerShape(18.dp), border = BorderStroke(1.dp, Line)) {
-            Text(
-                text = "Try /sess status, /model, or ask for the next code change.",
-                color = Ink,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                modifier = Modifier.padding(14.dp),
-            )
+        Spacer(modifier = Modifier.height(26.dp))
+        Surface(
+            color = SurfaceSubtle,
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, Line),
+            modifier = Modifier.widthIn(max = 340.dp),
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                IdleHintRow("Gateway", gatewayStatus.ifBlank { "Checking" })
+                IdleHintRow("Target", targetSession.ifBlank { "Default session" })
+                IdleHintRow("Voice", voiceHint)
+            }
         }
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "Try /sess status or ask for the next code change.",
+            color = InkMuted,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.widthIn(max = 300.dp),
+        )
+    }
+}
+
+@Composable
+private fun ConnectionGlyph(gatewayStatus: String) {
+    val connected = gatewayStatus.equals("Connected", ignoreCase = true)
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(118.dp)) {
+        Box(
+            modifier = Modifier
+                .size(118.dp)
+                .clip(CircleShape)
+                .background(SurfaceSubtle)
+                .border(BorderStroke(1.dp, Line), CircleShape),
+        )
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(SurfacePaper)
+                .border(BorderStroke(1.dp, Line), RoundedCornerShape(22.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("⌘", color = Ink, fontSize = 30.sp, fontWeight = FontWeight.Medium)
+        }
+        Surface(
+            color = if (connected) SuccessSoft else SurfaceMuted,
+            shape = CircleShape,
+            border = BorderStroke(1.dp, if (connected) Success else Line),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .size(30.dp),
+        ) {}
     }
 }
 
 @Composable
 private fun IdleHintRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.Top) {
-        Text(label, color = Accent, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(72.dp))
-        Text(value, color = Ink, fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.weight(1f))
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = InkMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(70.dp))
+        Text(value, color = Ink, fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
     }
 }
 

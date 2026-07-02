@@ -3,24 +3,25 @@
 Source: `DESIGN.md` (repo root), added 2026-07-02 as part of the Android redesign effort.
 
 ## Product posture
-Pi Speak Android is framed as an "operator cockpit" for remote coding agents — fast voice turns, gateway health, session routing, background-agent awareness. Calm field console, not a generic chat UI.
+Pi Speak Android is now framed as a calm mobile connection surface for coding agents — closer to the OpenAI Codex mobile app connected to a computer than an admin dashboard. The desired feel is minimal, premium, sparse, and confidence-building.
 
-## Palette (standard build — warm paper + terracotta accent)
+## Palette (standard build — quiet off-white + monochrome accent)
 | Token | Hex | Use |
 |---|---:|---|
-| `Canvas` | `#F4F1E9` | App background |
+| `Canvas` | `#F7F7F4` | App background |
 | `SurfacePaper` | `#FFFFFF` | Composer, sheets, primary panels |
-| `SurfaceSubtle` | `#F0ECE2` | Inset panels, assistant/progress bubbles |
-| `SurfaceMuted` | `#E9E3D6` | Disabled controls, pressed fills |
-| `SelectedFill` | `#EDE7DB` | Selected nav row, quick command chips |
-| `Ink` | `#211C16` | Primary text |
-| `InkMuted` | `#6E665A` | Secondary text, labels |
-| `Line` | `#E3DCCC` | Hairline borders |
-| `Accent` | `#C2542F` | Primary send/record actions |
-| `AccentSoft` | `#FBF1EC` | User messages, soft accent fills |
-| `Success` | `#2E7D52` | Connected/live success (paired with text) |
-| `Warn` | `#C97E1A` | Reconnecting/wait state (paired with text) |
-| `Error` | `#B3261E` | Errors/destructive actions (paired with text) |
+| `SurfaceSubtle` | `#F1F1EE` | Inset panels, empty-state glyphs |
+| `SurfaceMuted` | `#E6E6E1` | Disabled controls, pressed fills |
+| `SelectedFill` | `#EDEDEA` | Selected nav row, quick command chips |
+| `Ink` | `#171717` | Primary text and monochrome accent |
+| `InkMuted` | `#6B6B66` | Secondary text, labels |
+| `Line` | `#E1E1DC` | Hairline borders |
+| `Accent` | `#171717` | Primary send/record actions |
+| `AccentSoft` | `#F1F1EE` | User messages, soft accent fills |
+| `Success` | `#147A4A` | Connected/live success (paired with text) |
+| `SuccessSoft` | `#E2F4EA` | Connected status dot fill |
+| `Warn` | `#9A6A16` | Reconnecting/wait state (paired with text) |
+| `Error` | `#B42318` | Errors/destructive actions (paired with text) |
 
 Boox/e-ink build is a separate palette: pure ink/paper/chrome greys only, color is never the sole status signal.
 
@@ -40,7 +41,7 @@ Boox/e-ink build is a separate palette: pure ink/paper/chrome greys only, color 
 ## Named components (design contract → implementation)
 - `HeaderSection`: compact command bar, menu affordance, centered destination title, gateway status chip, configure action. (Reworked in `MainActivity.kt` as part of this redesign — see git diff 2026-07-02.)
 - `PiSpeakDrawer`: warm paper nav sheet, selected row fill, profile footer.
-- `StudioTabContent`: cockpit screen — status strip, conversation panel, quick command chips, composer. Implementation extracted into `StudioComposables.kt` (see `wiki/concepts/studio-composables-structure.md`).
+- `StudioTabContent`: cockpit screen — status strip, conversation panel, quick command chips, composer. `StudioIdleState` should center the connected-to-computer story: glyph, headline, short explanation, compact Gateway/Target/Voice card, quiet command hint. Implementation lives in `StudioComposables.kt` (see `wiki/concepts/studio-composables-structure.md`).
 - `ConnectionErrorBanner`: dark error strip, blocking gateway failures only.
 - `GatewaySessionRow`: session/agent lane row; status badges pair color with text.
 

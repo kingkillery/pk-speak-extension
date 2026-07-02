@@ -14,20 +14,21 @@ Pulls the Studio tab's cockpit composables out of the monolithic `MainActivity.k
       - `MessageActions(message, isPlaying, ...)` — play/replay controls.
     - `TranscriptStream(text)` — live partial-transcript display.
     - `TurnProgress(progressText, showTurnProgress, stopStatusText, onStopCurrentTurn)`
-    - `StudioIdleState(transmissionMode, targetSession, gatewayStatus, modifier)` — **new empty state** shown when there's no conversation yet; replaces whatever blank/placeholder state existed before the redesign.
-      - `IdleHintRow(label, value)` — key/value hint rows inside the idle state.
+    - `StudioIdleState(transmissionMode, targetSession, gatewayStatus, modifier)` — minimal connected-to-computer empty state shown when there's no conversation yet.
+      - `ConnectionGlyph(gatewayStatus)` — centered computer/command glyph with connected status dot.
+      - `IdleHintRow(label, value)` — key/value rows inside the Gateway/Target/Voice card.
   - `StudioComposer(...)` (`@OptIn(ExperimentalPermissionsApi)`, private) — input row: text field + record/send controls.
     - `StudioComposerActions(...)` — button cluster (live session start/stop, record trigger, stop-and-send, send text).
       - `StudioPillButton(text, textColor, backgroundColor, onClick)` — shared pill-shaped action button.
 
-## Notable new concept: `StudioIdleState`
-Empty-state composable satisfying the DESIGN.md interaction rule "Empty states should tell the operator what to do next" — shows transmission mode, target session, and gateway status as hint rows via `IdleHintRow` instead of a blank panel.
+## Notable concept: `StudioIdleState`
+Empty-state composable satisfying the updated design direction: minimal, premium, OpenAI Codex-mobile-like connection to a computer. It centers a connection glyph, uses the headline "Connected to your computer", explains the routing in one short sentence, and keeps Gateway/Target/Voice details in a compact secondary card.
 
 ## Relationship to MainActivity.kt
 `MainActivity.kt` shrank from a much larger single file (net -1151 lines in this diff) by delegating Studio-tab rendering to this file. `HeaderConnectionStateTest.kt` received a small follow-up diff (+3/-3), suggesting a minor rename/signature touch-up tied to the `HeaderSection` rework rather than a full behavior change — worth a quick confirm read before merge.
 
 ## Status
-Structure captured 2026-07-02 while `MainActivity.kt`/`StudioComposables.kt` changes are still uncommitted (git status: `M` MainActivity.kt, `??` StudioComposables.kt). Re-check after the redesign lands to confirm the tree above still matches and update this page rather than leaving it stale.
+Updated 2026-07-02 after commit `4bbb3ea` and the follow-up minimal idle-state redesign. Re-check after the next Android visual pass to confirm screenshot/test coverage still matches.
 
 ## Update (pass 3, 2026-07-02) — extraction pattern generalized
 The `MainActivity.kt` split is not limited to Studio. By pass 3, `MainActivity.kt` dropped from ~4941 to 2245 lines as two more tab-composable files appeared:

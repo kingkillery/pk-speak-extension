@@ -1,5 +1,11 @@
 # Wiki Log
 
+## 2026-07-02 - design: minimal connected-to-computer idle state
+
+- User clarified the visual target after commit `4bbb3ea`: Android should feel more minimal/beautiful, like the OpenAI Codex mobile app connected to the computer, not merely a decomposed admin cockpit.
+- Updated `DESIGN.md`, `Color.kt`, `StudioIdleState`, `StudioIdleStateScreenshotTest`, and the Roborazzi golden to reflect a quieter off-white + monochrome palette, centered connection glyph, "Connected to your computer" headline, compact Gateway/Target/Voice card, and shorter voice hints (`Hold to talk` / `Tap to talk`).
+- Verified with `:app:testStandardDebugUnitTest --tests "com.example.StudioIdleStateScreenshotTest"`, recorded via `:app:recordRoborazziStandardDebug --tests "com.example.StudioIdleStateScreenshotTest"`, and visually inspected the new screenshot as PASS with minor non-blocking notes (glyph could become a more literal computer/device icon later).
+
 ## 2026-07-02T(pass6, final) - maintenance: Android redesign stable, wrapping watch loop
 
 - State unchanged from pass 5: same `MainActivity.kt` diff (-3709/+540 vs base, +6 vs pass5 from our own wiki edits, no source drift), same `SessionsComposables.kt`/`SettingsComposables.kt`/`StudioComposables.kt`/`StudioIdleStateScreenshotTest.kt`/screenshot png, same `HeaderConnectionStateTest.kt` +3/-3 diff, `DESIGN.md` still untracked. No new commits beyond `218ed8a` (herdr-agent-hub landed at pass 5). Android redesign has now held steady across 3 consecutive passes (~15 minutes) with no further churn — concept pages (`android-design-system.md`, `studio-composables-structure.md`) should be reliable as-is for the main agent to reference.

@@ -36,10 +36,10 @@ class StudioIdleStateScreenshotTest {
       }
     }
 
-    composeTestRule.onNodeWithText("Agent cockpit ready").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Connected to your computer").assertIsDisplayed()
     composeTestRule.onNodeWithText("Connected").assertIsDisplayed()
     composeTestRule.onNodeWithText("Main-Project-Alpha").assertIsDisplayed()
-    composeTestRule.onNodeWithText("Hold Talk to record, release to send").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Hold to talk").assertIsDisplayed()
 
     composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/studio_idle_state.png")
   }
@@ -57,7 +57,7 @@ class StudioIdleStateScreenshotTest {
       }
     }
 
-    composeTestRule.onNodeWithText("Tap Talk to start or stop recording").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Tap to talk").assertIsDisplayed()
     composeTestRule.onNodeWithText("Default session").assertIsDisplayed()
     composeTestRule.onNodeWithText("Checking").assertIsDisplayed()
   }
