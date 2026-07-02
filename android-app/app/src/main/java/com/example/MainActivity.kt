@@ -2623,10 +2623,13 @@ fun GatewayOpsPane(
         if (loading) return
         loading = true
         scope.launch {
-            route = client.getRoute()
-            slots = client.getRouteSlots() ?: emptyList()
-            inventory = client.getAgentInventory()
-            loading = false
+            try {
+                route = client.getRoute()
+                slots = client.getRouteSlots() ?: emptyList()
+                inventory = client.getAgentInventory()
+            } finally {
+                loading = false
+            }
         }
     }
 

@@ -43,6 +43,9 @@ class GatewayEventStream(
     fun stop() {
         stopped = true
         activeCall?.cancel()
+        thread?.interrupt()
+        client.dispatcher.executorService.shutdown()
+        client.connectionPool.evictAll()
     }
 
     private fun runLoop() {
@@ -100,6 +103,8 @@ class GatewayEventStream(
             } catch (e: Exception) {
                 if (stopped) break
                 Log.d("GatewayEventStream", "Event stream dropped: ${e.message}")
+            } finally {
+                if (activeCall === call) activeCall = null
             }
             if (stopped) break
             onStateChange(false, "Reconnecting…")
@@ -107,6 +112,8 @@ class GatewayEventStream(
             try {
                 Thread.sleep((2000L * attempt).coerceAtMost(15_000L))
             } catch (_: InterruptedException) {
+                if (stopped) break
+                Thread.currentThread().interrupt()
                 break
             }
         }
