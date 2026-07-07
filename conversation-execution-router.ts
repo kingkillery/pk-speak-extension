@@ -480,7 +480,13 @@ function detectSignalRoute(summary: ConversationReducerSummary): RouteSignal | u
 		return {
 			backend: "defer",
 			reason: "defer",
-			confidence: Math.max(0.1, 0.05),
+			// Weak defer signal (plain "later"/"hold" keywords, not an explicit defer
+			// phrase): keep it deliberately low but reflect the reducer's actual
+			// confidence rather than a hard-coded constant. The previous
+			// `Math.max(0.1, 0.05)` was always 0.1 — a typo that discarded
+			// summary.confidence (every sibling weak route uses it), surfacing
+			// meaningless telemetry on this branch.
+			confidence: Math.max(0.1, summary.confidence),
 			rationale: `I detected follow-up/defer intent (${defer.slice(0, 2).join(", ")}).`,
 		};
 	}
