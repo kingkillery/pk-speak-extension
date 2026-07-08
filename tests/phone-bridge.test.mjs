@@ -158,3 +158,21 @@ test("telegram bridge locks out and rotates the code after repeated bad link att
 		globalThis.fetch = originalFetch;
 	}
 });
+
+test("resetLink clears an active lockout so the freshly-issued code works immediately", () => {
+	// Regression: rotateLinkCode() is shared by the auto-lockout path and this
+	// manual reset/unpair path. A prior bug left linkLockoutUntil set after a
+	// manual reset, silently rejecting the brand-new code the status message
+	// says is ready to use.
+	const bridge = new TelegramPhoneBridge({
+		token: "test-token",
+		state: { enabled: false, linkCode: "123456", linkLockoutUntil: Date.now() + 5 * 60 * 1000 },
+		getStatusText: () => "",
+		onStateChange: () => {},
+		onTextTurn: async () => ({ replyText: "" }),
+		onVoiceBuffer: async () => ({ replyText: "" }),
+	});
+	assert.ok(bridge.getStatus().linkLockoutUntil > Date.now());
+	bridge.resetLink();
+	assert.equal(bridge.getStatus().linkLockoutUntil, undefined);
+});

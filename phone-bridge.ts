@@ -98,6 +98,7 @@ export class TelegramPhoneBridge {
 			lastPollAt: this.lastPollAt,
 			consecutivePollFailures: this.consecutivePollFailures,
 			lastError: this.lastError,
+			linkLockoutUntil: this.linkLockoutUntil,
 		};
 	}
 
@@ -109,11 +110,13 @@ export class TelegramPhoneBridge {
 
 	// Issue a fresh link code and reset the brute-force counters. Used on manual
 	// reset/unpair and whenever a code expires or is burned by too many failed
-	// attempts.
+	// attempts. Clears any active lockout — a freshly-issued code must be usable
+	// immediately, not blocked by a lockout window from the code it replaced.
 	private rotateLinkCode() {
 		this.linkCode = generateLinkCode();
 		this.linkCodeIssuedAt = Date.now();
 		this.linkAttempts = 0;
+		this.linkLockoutUntil = undefined;
 		this.onStateChange(this.getStatePatch());
 	}
 
@@ -168,8 +171,11 @@ export class TelegramPhoneBridge {
 			} else if (text.startsWith("/link ")) {
 				this.linkAttempts += 1;
 				if (this.linkAttempts >= MAX_LINK_ATTEMPTS) {
-					this.linkLockoutUntil = now + LINK_LOCKOUT_MS;
+					// rotateLinkCode() clears linkLockoutUntil (it's also used for a plain
+					// manual reset), so the lockout must be set AFTER it runs, not before.
 					this.rotateLinkCode();
+					this.linkLockoutUntil = now + LINK_LOCKOUT_MS;
+					this.onStateChange(this.getStatePatch());
 					await this.sendMessage(chatId, "Too many attempts. Link code has been reset — check /phone code for the new code.");
 				} else {
 					this.onStateChange(this.getStatePatch());

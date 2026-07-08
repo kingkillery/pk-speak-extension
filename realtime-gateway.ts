@@ -9,6 +9,8 @@ import { discoverAgentInventoryCached } from "./agent-discovery.js";
 import { buildAgentResumeArgs, isResumableAgentSession } from "./agent-provider-registry.js";
 import { resolveAgentProviderConfig } from "./agent-provider.js";
 import { resolveWindowsNpmShim } from "./agent-discovery.js";
+import { normalizeOptionalString } from "./agent-hub-actions.js";
+import { safeSpawn } from "./spawn-shim.js";
 import { spawn } from "node:child_process";
 import type { RealtimeControlMessage } from "./realtime-types.js";
 import {
@@ -92,12 +94,10 @@ function resolveOhMyPiCommand(): string {
 // launch via onSessionLaunch is unchanged.
 function spawnNarratedOmp(prompt: string, cwd: string) {
 	const command = resolveOhMyPiCommand();
-	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-	return spawn(command, ["--cwd", cwd, "--", prompt], {
+	return safeSpawn(command, ["--cwd", cwd, "--", prompt], {
 		cwd,
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
-		shell,
 	});
 }
 
@@ -949,18 +949,25 @@ async function startNewSession(
 					const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd();
 					const hubOnly = call.args?.hubOnly as boolean | undefined;
 					const targetNode = call.args?.targetNode as string | undefined;
+					const narratedPrompt = prompt ? normalizeOptionalString(prompt, 4096, "prompt") : undefined;
 					if (activeSession.nonBlockingEnabled && prompt && !hubOnly && !targetNode) {
-						// Narrated launch: spawn ompk with captured stdout and stream progress
-						// into the conversation. Deferred (NON_BLOCKING) so the loop stays live.
-						deferToolResponse = true;
-						try {
-							const child = spawnNarratedOmp(prompt, cwd);
-							void runWithProgressNarration(activeSession, toolCall, child);
-							sendToClient(activeSession, { type: "tool_progress", name: call.name, message: "Launching agent…" }, false);
-						} catch (err: any) {
-							sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
+						if (typeof narratedPrompt !== "string") {
+							sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: narratedPrompt?.error || "Invalid prompt." }), {
 								scheduling: FunctionResponseScheduling.INTERRUPT,
 							});
+						} else {
+							// Narrated launch: spawn ompk with captured stdout and stream progress
+							// into the conversation. Deferred (NON_BLOCKING) so the loop stays live.
+							deferToolResponse = true;
+							try {
+								const child = spawnNarratedOmp(narratedPrompt, cwd);
+								void runWithProgressNarration(activeSession, toolCall, child);
+								sendToClient(activeSession, { type: "tool_progress", name: call.name, message: "Launching agent…" }, false);
+							} catch (err: any) {
+								sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
+									scheduling: FunctionResponseScheduling.INTERRUPT,
+								});
+							}
 						}
 					} else if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
 						const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly, targetNode });

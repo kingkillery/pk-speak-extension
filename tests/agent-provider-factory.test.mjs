@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	createInitialAgentProviders,
 	createOmpAgentProvider,
@@ -9,6 +12,32 @@ import {
 	resolveAgentWorkspace,
 } from "../dist/agent-provider-factory.js";
 import { collectAgentResponse } from "../dist/agent-provider.js";
+
+test("omp provider passes the prompt to the CLI as a literal argv element via the safe spawn path", async () => {
+	// Regression for the command-injection fix in OmpCliProvider (formerly spawned
+	// with shell:true on a resolved .cmd shim on Windows, with the raw prompt in
+	// argv). runCli/safeSpawn never pass `shell` at all now. The Windows-specific
+	// injection-closure property (cross-spawn's caret-escaping) is covered
+	// separately in tests/spawn-shim.test.mjs, since shell:true there was already
+	// gated to win32 and can't be exercised on this platform; this test instead
+	// confirms the refactor still threads the prompt through argv correctly.
+	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-omp-argv-"));
+	const fakeOmpBin = join(tmp, "fake-omp.js");
+	writeFileSync(
+		fakeOmpBin,
+		"#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify(process.argv.slice(2)));\n",
+	);
+	chmodSync(fakeOmpBin, 0o755);
+	try {
+		const evil = 'do the thing && calc.exe | echo pwned > out.txt ^ "quoted" % PATH %';
+		const provider = createOmpAgentProvider(fakeOmpBin, tmp, { ...process.env, AGENT_TURN_TIMEOUT_MS: "10000" });
+		const text = await collectAgentResponse(provider, evil);
+		const argv = JSON.parse(text);
+		assert.equal(argv[argv.length - 1], evil);
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
 
 test("omp resume provider rejects on a failing CLI — feeds runCodingAgentTurn's onPrimaryFailure (H3)", async () => {
 	// A bogus omp binary makes runCli reject (spawn error or non-zero exit), which
