@@ -237,8 +237,15 @@ export async function executeRealtimeTerminalCommandPlan(plan: RealtimeTerminalC
 		};
 	}
 	if (plan.internal === "get-content") {
-		const result = await runInternalGetContent(plan, cwd);
-		return { ok: true, ...result };
+		try {
+			const result = await runInternalGetContent(plan, cwd);
+			return { ok: true, ...result };
+		} catch (error) {
+			// runInternalGetContent throws on path traversal / unreadable files;
+			// return a structured error like the external-command branch instead
+			// of letting the rejection escape to the caller.
+			return { ok: false, code: 1, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+		}
 	}
 	if (!plan.executable) {
 		return {

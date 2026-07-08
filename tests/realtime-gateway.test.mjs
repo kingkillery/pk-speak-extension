@@ -217,3 +217,17 @@ test("WebSocket realtime gateway authentication and routing", async (t) => {
 	});
 	await server.stop();
 });
+
+test("get-content path traversal resolves to a structured error instead of throwing", async () => {
+	// Regression for the unhandled-rejection fix: runInternalGetContent throws on a
+	// path that escapes the workspace; executeRealtimeTerminalCommandPlan must catch
+	// it and return { ok: false, ... } so the rejection can't crash the gateway.
+	const plan = buildRealtimeTerminalCommandPlan("get-content ../../etc/passwd");
+	assert.equal(plan.internal, "get-content");
+	let result;
+	await assert.doesNotReject(async () => {
+		result = await executeRealtimeTerminalCommandPlan(plan, process.cwd());
+	});
+	assert.equal(result.ok, false);
+	assert.match(result.stderr, /outside the active workspace/i);
+});

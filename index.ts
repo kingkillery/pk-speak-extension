@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
+import { spawnDetached } from "./spawn-shim.js";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -29,7 +30,7 @@ import {
 	setWakeAlias,
 } from "./session-routing.js";
 import { mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
-import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
+import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, normalizeOptionalString, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
@@ -637,28 +638,14 @@ function resolveOhMyPiCommand() {
 
 function launchOhMyPiResume(sessionArg: string, cwd: string) {
 	const command = resolveOhMyPiCommand();
-	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-	const child = spawn(command, ["--resume", sessionArg], {
-		cwd,
-		detached: true,
-		stdio: "ignore",
-		windowsHide: false,
-		shell,
-	});
+	const child = spawnDetached(command, ["--resume", sessionArg], cwd);
 	child.unref();
 	return command;
 }
 
 function launchOhMyPiAgent(argv: string[], cwd: string) {
 	const command = resolveOhMyPiCommand();
-	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-	const child = spawn(command, argv, {
-		cwd,
-		detached: true,
-		stdio: "ignore",
-		windowsHide: false,
-		shell,
-	});
+	const child = spawnDetached(command, argv, cwd);
 	child.unref();
 	return { command, argv, cwd };
 }
@@ -666,13 +653,7 @@ function launchOhMyPiAgent(argv: string[], cwd: string) {
 function launchColabDeployment(cwd: string) {
 	const plan = buildColabLaunchPlan({ cwd }, cwd);
 	if (!plan.ok) return plan;
-	const child = spawn(plan.command, plan.argv, {
-		cwd: plan.cwd,
-		detached: true,
-		stdio: "ignore",
-		windowsHide: false,
-		shell: plan.shell,
-	});
+	const child = spawnDetached(plan.command, plan.argv, plan.cwd);
 	child.unref();
 	return plan;
 }
@@ -2698,7 +2679,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 					if (rawProvider && provider !== "oh-my-pk") {
 						return { ok: false, message: `Resume is not available for provider "${rawProvider}".` };
 					}
-					const sessionArg = payload.sessionId?.trim() || payload.sessionPath?.trim();
+					const rawSessionArg = payload.sessionId?.trim() || payload.sessionPath?.trim();
+					if (!rawSessionArg) return { ok: false, message: "Session id or path is required." };
+					const sessionArg = normalizeOptionalString(rawSessionArg, 1024, "session");
+					if (typeof sessionArg === "object") return { ok: false, message: sessionArg.error };
 					if (!sessionArg) return { ok: false, message: "Session id or path is required." };
 					const cwd = payload.cwd?.trim() || DEFAULT_AGENT_CWD || process.cwd();
 					try {

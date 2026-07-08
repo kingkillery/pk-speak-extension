@@ -209,7 +209,6 @@ export type ColabLaunchPlanResult =
 		session: string;
 		target: string;
 		commandPreview: string;
-		shell: boolean;
 	}
 	| { ok: false; message: string };
 
@@ -245,7 +244,7 @@ function isSafeSingleToken(value: string): boolean {
 }
 const WHITESPACE_CHAR_CODES = new Set<number>([9, 10, 11, 12, 13, 32]);
 
-function normalizeOptionalString(
+export function normalizeOptionalString(
 	value: unknown,
 	max: number,
 	field: string,
@@ -316,7 +315,6 @@ export function buildColabLaunchPlan(
 	const target = targetNormalized ?? "/content/workspace";
 	const command = commandNormalized ?? resolveColabLaunchCommand(env);
 	const argv = ["colab-deploy", cwd, "--run-id", runId, "--session", session, "--target", target];
-	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
 	return {
 		ok: true,
 		command,
@@ -326,7 +324,6 @@ export function buildColabLaunchPlan(
 		session,
 		target,
 		commandPreview: [command, ...argv].map(quotePreviewArg).join(" "),
-		shell,
 	};
 }
 
