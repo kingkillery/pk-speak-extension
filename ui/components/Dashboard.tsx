@@ -30,8 +30,10 @@ export function Dashboard({ dashboard, focusedPath }: DashboardProps) {
 
 	return (
 		<Box flexDirection="column">
-			<Box flexDirection="row" justifyContent="space-between">
+			<Box>
 				<Text bold>pi-speak session manager</Text>
+			</Box>
+			<Box>
 				<Text dimColor>store: {storeText}</Text>
 			</Box>
 			<Box height={1} />
