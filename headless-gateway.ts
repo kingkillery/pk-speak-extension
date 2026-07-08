@@ -19,7 +19,7 @@ import {
 	type ResumedGatewayTarget,
 } from "./headless-gateway-routing.js";
 import { runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
-import type { RemoteTurnResult, TurnProgressEvent } from "./remote-turn-manager.js";
+import { RemoteTurnManager, type RemoteTurnResult, type TurnProgressEvent } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer, transcribeWithWhisperX } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
@@ -29,6 +29,7 @@ import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashboardEntry } from "./session-routing.js";
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { OmpSelectionStore } from "./omp-selection.js";
+import { spawnDetached } from "./spawn-shim.js";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath, sep as pathSep } from "node:path";
@@ -660,6 +661,7 @@ async function runTextTurnWithProgress(
 }
 
 async function cancelCurrentTurn(): Promise<ControlActionResult> {
+	remoteTurnManager.cancelAll("Current turn cancelled.");
 	await Promise.resolve(provider.stop?.()).catch(() => {});
 	await Promise.resolve(fallbackProvider?.stop?.()).catch(() => {});
 	fallbackProvider = undefined;
@@ -853,14 +855,7 @@ function resolveOhMyPiCommand(): string {
 
 function launchOhMyPiAgent(argv: string[], cwd: string) {
 	const command = resolveOhMyPiCommand();
-	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-	const child = spawn(command, argv, {
-		cwd,
-		detached: true,
-		stdio: "ignore",
-		windowsHide: false,
-		shell,
-	});
+	const child = spawnDetached(command, argv, cwd);
 	child.unref();
 	return { command, argv, cwd };
 }
@@ -868,13 +863,7 @@ function launchOhMyPiAgent(argv: string[], cwd: string) {
 function launchColabDeployment(cwd: string) {
 	const plan = buildColabLaunchPlan({ cwd }, cwd);
 	if (!plan.ok) return plan;
-	const child = spawn(plan.command, plan.argv, {
-		cwd: plan.cwd,
-		detached: true,
-		stdio: "ignore",
-		windowsHide: false,
-		shell: plan.shell,
-	});
+	const child = spawnDetached(plan.command, plan.argv, plan.cwd);
 	child.unref();
 	return plan;
 }
@@ -920,6 +909,8 @@ function archiveOrRecoverSession(sessionPath: string, action: "archive" | "recov
 
 provider = createAgentProvider();
 
+const remoteTurnManager = new RemoteTurnManager({});
+
 server = new ControlServer({
 	state,
 	onStateChange: (patch) => Object.assign(state, patch),
@@ -929,7 +920,7 @@ server = new ControlServer({
 		status: status(),
 		lastErrors: {},
 		recentTimings: {},
-		queue: { processing: false, queued: 0, maxQueued: 0, completedTurns: 0 },
+		queue: remoteTurnManager.getSnapshot(),
 	}),
 	getRoutingStatus: () => {
 		refreshRoutingTargets();
@@ -949,8 +940,10 @@ server = new ControlServer({
 	onSpeakAction: (action) => ok(`Speak ${action} is unavailable in tray gateway mode.`),
 	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
 	getSlashCommands: () => HEADLESS_SLASH_COMMANDS,
-	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider, model, clientKey) => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider, model, clientKey),
-	onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, _mode, agentProvider, model, clientKey) => runVoiceTurn(buffer, mimeType, includeAudio, cwd, target, agentProvider, model, clientKey),
+	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider, model, clientKey) =>
+		remoteTurnManager.enqueue("http-text", () => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider, model, clientKey)),
+	onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, _mode, agentProvider, model, clientKey) =>
+		remoteTurnManager.enqueue("http-voice", () => runVoiceTurn(buffer, mimeType, includeAudio, cwd, target, agentProvider, model, clientKey)),
 	onBrainstorm: async (buffer, mimeType, cwd) => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-speak-brainstorm-"));
 		const extension = mimeType?.includes("webm") ? ".webm"

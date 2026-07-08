@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { safeSpawn } from "./spawn-shim.js";
 import type { AgentProvider, AgentProviderConfig, AgentProviderName, AgentPromptOptions } from "./agent-provider.js";
 import { normalizeRunnableAgentProviderName, type RunnableAgentProviderName } from "./agent-provider-registry.js";
 import { ClaudeAgentProvider, ClaudeResumeAgentProvider } from "./claude-agent-provider.js";
@@ -176,7 +177,6 @@ class PiCliProvider implements AgentProvider {
 		const text = await runCli(command.file, [...command.args, "-p", "--no-tools", "--no-context-files", "--no-skills", "--no-extensions", "--no-session", prompt], {
 			cwd: options.cwd || this.cwd,
 			name: "pi",
-			shell: command.shell,
 			env: this.env,
 		});
 		if (text) yield { type: "text" as const, text };
@@ -269,13 +269,12 @@ function buildAgentEnv(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
 	return merged;
 }
 
-function runCli(command: string, args: string[], options: { cwd: string; name: string; stdin?: string; shell?: boolean; env?: NodeJS.ProcessEnv }): Promise<string> {
+function runCli(command: string, args: string[], options: { cwd: string; name: string; stdin?: string; env?: NodeJS.ProcessEnv }): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, {
+		const child = safeSpawn(command, args, {
 			cwd: options.cwd,
 			env: buildAgentEnv(options.env),
 			windowsHide: true,
-			shell: options.shell ?? (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command)),
 			stdio: [options.stdin ? "pipe" : "ignore", "pipe", "pipe"],
 		});
 		let stdout = "";

@@ -9,6 +9,8 @@ import { discoverAgentInventoryCached } from "./agent-discovery.js";
 import { buildAgentResumeArgs, isResumableAgentSession } from "./agent-provider-registry.js";
 import { resolveAgentProviderConfig } from "./agent-provider.js";
 import { resolveWindowsNpmShim } from "./agent-discovery.js";
+import { normalizeOptionalString } from "./agent-hub-actions.js";
+import { safeSpawn } from "./spawn-shim.js";
 import { spawn } from "node:child_process";
 import type { RealtimeControlMessage } from "./realtime-types.js";
 import {
@@ -92,12 +94,10 @@ function resolveOhMyPiCommand(): string {
 // launch via onSessionLaunch is unchanged.
 function spawnNarratedOmp(prompt: string, cwd: string) {
 	const command = resolveOhMyPiCommand();
-	const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-	return spawn(command, ["--cwd", cwd, "--", prompt], {
+	return safeSpawn(command, ["--cwd", cwd, "--", prompt], {
 		cwd,
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
-		shell,
 	});
 }
 
@@ -450,7 +450,9 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 				}
 
 				if (ctrl.type === "terminal_approve" || ctrl.type === "terminal_reject") {
-					void resolveTerminalApproval(activeSession, ctrl.approvalId, ctrl.type === "terminal_approve");
+					resolveTerminalApproval(activeSession, ctrl.approvalId, ctrl.type === "terminal_approve").catch((err) => {
+						sendToClient(activeSession, { type: "error", message: `Terminal approval failed: ${err instanceof Error ? err.message : String(err)}` }, false);
+					});
 				} else if (ctrl.type === "interrupt") {
 					// Barge-in / Interrupt from client
 					if (activeSession.session) {
@@ -500,10 +502,20 @@ async function startNewSession(
 	reconnect?: ReconnectContext,
 ) {
 	const sessionId = reconnect?.priorSessionId || ("sess_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 5));
-	const model = getGeminiLiveModel();
 	const resumptionHandle = reconnect?.resumptionHandle;
-	
-	const clientConfig = createGeminiClient(process.env, { live: true });
+
+	// Resolve the model + client before touching session state. These can throw
+	// synchronously (bad config / missing credentials); catching here prevents an
+	// unhandled rejection from crashing the whole gateway process.
+	let model: string;
+	let clientConfig: ReturnType<typeof createGeminiClient>;
+	try {
+		model = getGeminiLiveModel();
+		clientConfig = createGeminiClient(process.env, { live: true });
+	} catch (error: any) {
+		ws.close(1011, `Failed to initialize Gemini Live client: ${error?.message ?? String(error)}`);
+		return;
+	}
 	const ai = clientConfig.ai;
 	// NON_BLOCKING function behavior is developer-API only (not supported on Vertex
 	// AI per the @google/genai FunctionDeclaration contract). On Vertex we keep the
@@ -671,7 +683,10 @@ async function startNewSession(
 					// results queue in pendingToolResponses and flush after reconnect.
 					if (message.goAway) {
 						sendToClient(activeSession, { type: "reconnecting", timeLeft: message.goAway.timeLeft }, false);
-						void reconnectLiveSession(activeSession);
+						reconnectLiveSession(activeSession).catch((err) => {
+							sendToClient(activeSession, { type: "error", message: `Reconnect failed: ${err instanceof Error ? err.message : String(err)}` }, false);
+							try { activeSession.ws.close(1011, "Reconnect failed"); } catch {}
+						});
 					}
 
 					// 4. Handle Tool calls
@@ -740,7 +755,9 @@ async function startNewSession(
 											const approval = activeSession.terminalApprovals.request(command, plan.reason);
 											const timeoutMs = Math.max(0, approval.expiresAt - Date.now());
 											const timer = setTimeout(() => {
-												void resolveTerminalApproval(activeSession, approval.id, false, "expired");
+												resolveTerminalApproval(activeSession, approval.id, false, "expired").catch((err) => {
+													sendToClient(activeSession, { type: "error", message: `Terminal approval expiry failed: ${err instanceof Error ? err.message : String(err)}` }, false);
+												});
 											}, timeoutMs);
 											timer.unref?.();
 											activeSession.pendingTerminalCalls.set(approval.id, {
@@ -932,18 +949,25 @@ async function startNewSession(
 					const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd();
 					const hubOnly = call.args?.hubOnly as boolean | undefined;
 					const targetNode = call.args?.targetNode as string | undefined;
+					const narratedPrompt = prompt ? normalizeOptionalString(prompt, 4096, "prompt") : undefined;
 					if (activeSession.nonBlockingEnabled && prompt && !hubOnly && !targetNode) {
-						// Narrated launch: spawn ompk with captured stdout and stream progress
-						// into the conversation. Deferred (NON_BLOCKING) so the loop stays live.
-						deferToolResponse = true;
-						try {
-							const child = spawnNarratedOmp(prompt, cwd);
-							void runWithProgressNarration(activeSession, toolCall, child);
-							sendToClient(activeSession, { type: "tool_progress", name: call.name, message: "Launching agent…" }, false);
-						} catch (err: any) {
-							sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
+						if (typeof narratedPrompt !== "string") {
+							sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: narratedPrompt?.error || "Invalid prompt." }), {
 								scheduling: FunctionResponseScheduling.INTERRUPT,
 							});
+						} else {
+							// Narrated launch: spawn ompk with captured stdout and stream progress
+							// into the conversation. Deferred (NON_BLOCKING) so the loop stays live.
+							deferToolResponse = true;
+							try {
+								const child = spawnNarratedOmp(narratedPrompt, cwd);
+								void runWithProgressNarration(activeSession, toolCall, child);
+								sendToClient(activeSession, { type: "tool_progress", name: call.name, message: "Launching agent…" }, false);
+							} catch (err: any) {
+								sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
+									scheduling: FunctionResponseScheduling.INTERRUPT,
+								});
+							}
 						}
 					} else if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
 						const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly, targetNode });

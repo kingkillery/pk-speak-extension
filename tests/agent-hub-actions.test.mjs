@@ -116,7 +116,6 @@ test("buildColabLaunchPlan emits mesh-sync colab-deploy argv with a stable run i
 			"--session", "mesh-colab",
 			"--target", "/content/workspace",
 		]);
-		assert.equal(result.shell, process.platform === "win32");
 		assert.match(result.commandPreview, /colab-deploy/);
 	});
 });
