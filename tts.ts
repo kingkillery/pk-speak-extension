@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { basename, delimiter, join } from "node:path";
 import { withAbortTimeout } from "./request-timeout.js";
 
-export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs" | "gemini" | "sag" | "higgs" | "stable-audio";
+export type TtsProvider = "auto" | "legacy" | "edge" | "openai" | "elevenlabs" | "gemini" | "sag" | "higgs" | "stable-audio" | "minimax";
 
 export type SpeakRuntimeState = {
 	enabled?: boolean;
@@ -62,6 +62,11 @@ export const DEFAULT_STABLE_AUDIO_SAMPLER = process.env.PI_SPEAK_STABLE_AUDIO_SA
 export const DEFAULT_STABLE_AUDIO_SEED = Number.parseInt(process.env.PI_SPEAK_STABLE_AUDIO_SEED || "0", 10);
 export const DEFAULT_REWRITE_MODEL =
 	process.env.PI_SPEAK_REWRITE_MODEL || "openai/gpt-oss-20b:nitro";
+export const DEFAULT_MINIMAX_VOICE_ID = process.env.PI_SPEAK_MINIMAX_VOICE_ID || "male-qn-qingse";
+export const DEFAULT_MINIMAX_MODEL = process.env.PI_SPEAK_MINIMAX_MODEL || "speech-01-turbo";
+export const DEFAULT_MINIMAX_SAMPLE_RATE = Number.parseInt(process.env.PI_SPEAK_MINIMAX_SAMPLE_RATE || "24000", 10);
+export const DEFAULT_MINIMAX_BITRATE = Number.parseInt(process.env.PI_SPEAK_MINIMAX_BITRATE || "32000", 10);
+export const DEFAULT_MINIMAX_FORMAT = process.env.PI_SPEAK_MINIMAX_FORMAT || "mp3";
 
 const OPENROUTER_URL = process.env.PI_SPEAK_OPENROUTER_URL || "https://openrouter.ai/api/v1/chat/completions";
 const require = createRequire(import.meta.url);
@@ -119,6 +124,13 @@ function getGeminiTtsVertexConfig() {
 
 function hasGeminiTtsAuth() {
 	return !!(getGeminiTtsApiKey() || process.env.PI_SPEAK_VERTEX_API_KEY || getGeminiTtsVertexConfig());
+}
+function getMinimaxApiKey() {
+	return process.env.PI_SPEAK_MINIMAX_API_KEY || process.env.MINIMAX_API_KEY || "";
+}
+
+function hasMinimaxAuth() {
+	return !!getMinimaxApiKey();
 }
 
 function createGeminiTtsClient() {
@@ -271,7 +283,10 @@ function isProviderAvailable(provider: Exclude<TtsProvider, "auto">) {
 			return hasHiggsReferenceAudio();
 		case "stable-audio":
 			return true;
+		case "minimax":
+			return hasMinimaxAuth();
 	}
+	return false;
 }
 
 export function resolveTtsProvider(state?: SpeakRuntimeState): Exclude<TtsProvider, "auto"> {
@@ -283,14 +298,16 @@ export function resolveTtsProvider(state?: SpeakRuntimeState): Exclude<TtsProvid
 	if (hasGeminiTtsAuth()) return "gemini";
 	if (process.env.ELEVENLABS_API_KEY) return "elevenlabs";
 	if (getOpenAiAudioKey()) return "openai";
+	if (hasMinimaxAuth()) return "minimax";
 	return "edge";
 }
 
 export function isSanitizeEnabled() {
 	const envValue = (process.env.PI_SPEAK_SANITIZE || "").trim().toLowerCase();
 	if (!envValue) return true;
-	return !["0", "false", "off", "no"].includes(envValue);
+	return envValue !== "false" && envValue !== "0" && envValue !== "off";
 }
+
 
 /**
  * Deterministic, offline cleanup of agent text for spoken delivery.
@@ -375,6 +392,8 @@ export function describeTtsProvider(state?: SpeakRuntimeState) {
 			return `higgs (${DEFAULT_HIGGS_SPACE})`;
 		case "stable-audio":
 			return `stable-audio (${DEFAULT_STABLE_AUDIO_SPACE}/${DEFAULT_STABLE_AUDIO_VARIANT})`;
+		case "minimax":
+			return `minimax (${DEFAULT_MINIMAX_MODEL}/${DEFAULT_MINIMAX_VOICE_ID})`;
 	}
 }
 
@@ -437,6 +456,14 @@ export function getTtsDiagnostics(state?: SpeakRuntimeState) {
 				cfgScale: DEFAULT_STABLE_AUDIO_CFG_SCALE,
 				sampler: DEFAULT_STABLE_AUDIO_SAMPLER,
 				seed: DEFAULT_STABLE_AUDIO_SEED,
+			},
+			minimax: {
+				available: hasMinimaxAuth(),
+				model: DEFAULT_MINIMAX_MODEL,
+				voiceId: DEFAULT_MINIMAX_VOICE_ID,
+				sampleRate: DEFAULT_MINIMAX_SAMPLE_RATE,
+				bitrate: DEFAULT_MINIMAX_BITRATE,
+				format: DEFAULT_MINIMAX_FORMAT,
 			},
 		},
 	};
@@ -669,6 +696,53 @@ async function synthesizeElevenLabs(text: string, outputPath: string, signal?: A
 	const audio = Buffer.from(await response.arrayBuffer());
 	await writeFile(outputPath, audio);
 }
+async function synthesizeMinimax(text: string, outputPath: string, signal?: AbortSignal) {
+	const apiKey = getMinimaxApiKey();
+	if (!apiKey) throw new Error("MINIMAX_API_KEY or PI_SPEAK_MINIMAX_API_KEY is required for Minimax TTS");
+	const voiceId = process.env.PI_SPEAK_MINIMAX_VOICE_ID || DEFAULT_MINIMAX_VOICE_ID;
+	const model = process.env.PI_SPEAK_MINIMAX_MODEL || DEFAULT_MINIMAX_MODEL;
+	const response = await withAbortTimeout(
+		(requestSignal) =>
+			fetch("https://api.minimax.chat/v1/t2a_v2", {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${apiKey}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					model,
+					text,
+					voice_setting: {
+						voice_id: voiceId,
+						seed: Number.parseInt(process.env.PI_SPEAK_MINIMAX_SEED || "-1", 10),
+						vol: Number.parseFloat(process.env.PI_SPEAK_MINIMAX_VOL || "1.0"),
+						speed: Number.parseFloat(process.env.PI_SPEAK_MINIMAX_SPEED || "1.0"),
+						pitch: Number.parseInt(process.env.PI_SPEAK_MINIMAX_PITCH || "0", 10),
+					},
+					audio_setting: {
+						sample_rate: Number.parseInt(process.env.PI_SPEAK_MINIMAX_SAMPLE_RATE || "24000", 10),
+						bitrate: Number.parseInt(process.env.PI_SPEAK_MINIMAX_BITRATE || "32000", 10),
+						format: process.env.PI_SPEAK_MINIMAX_FORMAT || "mp3",
+						channel: Number.parseInt(process.env.PI_SPEAK_MINIMAX_CHANNEL || "1", 10),
+					},
+					stream: false,
+				}),
+				signal: requestSignal,
+			}),
+		signal,
+	);
+	if (!response.ok) {
+		const body = await response.text().catch(() => "");
+		throw new Error(`Minimax TTS failed (${response.status})${body ? `: ${body.slice(0, 240)}` : ""}`);
+	}
+	const json = (await response.json()) as { data?: { audio_hex?: string; audio?: string }; base_resp?: { status_msg?: string } };
+	const hexAudio = json.data?.audio_hex || json.data?.audio;
+	if (!hexAudio) {
+		throw new Error(`Minimax TTS returned no audio${json.base_resp?.status_msg ? `: ${json.base_resp.status_msg}` : ""}`);
+	}
+	await writeFile(outputPath, Buffer.from(hexAudio, "hex"));
+}
+
 
 function getGradioSpaceBase(space: string) {
 	const trimmed = space.trim();
@@ -1079,11 +1153,14 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 						await synthesizeStableAudio(spokenText, options.outputPath, localController.signal);
 					}
 					break;
+				case "minimax":
+					await synthesizeMinimax(spokenText, options.outputPath, localController.signal);
+					break;
 				default:
 					throw new Error(`Unsupported TTS provider: ${provider satisfies never}`);
 			}
 		} catch (error) {
-			if (provider === "openai" || provider === "gemini" || provider === "elevenlabs" || provider === "sag" || provider === "higgs" || provider === "stable-audio") {
+			if (provider === "openai" || provider === "gemini" || provider === "elevenlabs" || provider === "sag" || provider === "higgs" || provider === "stable-audio" || provider === "minimax") {
 				console.warn(`[TTS Fallback] Primary provider '${provider}' failed: ${getErrorMessage(error)}. Falling back to 'edge' TTS. Metrics: { timestamp: ${Date.now()}, originalProvider: "${provider}", targetProvider: "edge", error: "${getErrorMessage(error)}" }`);
 				if (testOverrides.synthesizeEdge) {
 					await testOverrides.synthesizeEdge(spokenText, options.outputPath, localController.signal);

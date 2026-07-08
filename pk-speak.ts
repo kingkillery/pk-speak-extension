@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret } from "./setup-config.js";
-import { resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
+import { getAudioMimeType, resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
+import { transcribeAudioBuffer } from "./stt.js";
+import { runGeminiTextTurn } from "./gemini-live-turn.js";
 import {
 	describeSpeakPlaybackGate,
 	normalizeSpeakPlaybackGate,
@@ -198,15 +200,50 @@ async function runSpeakCommand(argv: string[]) {
 		return;
 	}
 
-	const text = (options.textParts.join(" ") || await readStdin()).trim();
+	let text = "";
+	if (options.input) {
+		const filePath = resolve(options.input);
+		if (!existsSync(filePath)) {
+			console.error(`Audio input file not found: ${filePath}`);
+			process.exitCode = 1;
+			return;
+		}
+		const fileBuffer = await readFile(filePath);
+		const mimeType = getAudioMimeType(filePath);
+		const result = await transcribeAudioBuffer(fileBuffer, mimeType);
+		text = result.text;
+		if (!options.quiet && options.dryRun) {
+			console.log(`Transcribed with ${result.provider}: ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`);
+		}
+	} else {
+		text = (options.textParts.join(" ") || await readStdin()).trim();
+	}
+
 	if (!text) {
-		console.error("No text provided. Pass text as arguments or pipe it on stdin.");
+		console.error("No text provided. Pass text as arguments, pipe it on stdin, or use --input with an audio file.");
 		printSpeakHelp();
 		process.exitCode = 1;
 		return;
 	}
 
-	await speakText(text, options);
+	let finalText = text;
+	if (options.summarize) {
+		finalText = await summarizeText(text);
+		if (!options.quiet && options.dryRun) {
+			console.log(`Summary: ${finalText.slice(0, 200)}${finalText.length > 200 ? "..." : ""}`);
+		}
+	}
+
+	await speakText(finalText, options);
+}
+
+async function summarizeText(text: string): Promise<string> {
+	const prompt = `Summarize the following text into one or two sentences suitable for spoken playback. Keep it concise and natural.\n\n${text}`;
+	const result = await runGeminiTextTurn(prompt);
+	if (!result.replyText || result.replyText === "Gemini completed the turn without returning text.") {
+		throw new Error("Summarization failed: Gemini returned no text.");
+	}
+	return result.replyText.trim();
 }
 
 async function speakText(text: string, options: SpeakTextOptions) {
@@ -312,7 +349,7 @@ function printWrapHelp() {
 		"",
 		"Options:",
 		"  --label <name>             Friendly name to say",
-		"  --provider <auto|edge|gemini|elevenlabs|openai|sag|higgs|stable-audio|legacy>",
+		"  --provider <auto|edge|gemini|elevenlabs|openai|sag|higgs|stable-audio|minimax|legacy>",
 		"  --cwd <path>               Working directory for the command",
 		"  --shell                    Run through the platform shell",
 		"  --capture                  Mirror and classify stdout/stderr",
@@ -339,10 +376,13 @@ function printSpeakHelp() {
 	console.log([
 		"Usage: pk-speak speak [options] [text...]",
 		"",
-		"Speaks text from command arguments or stdin using the saved pk-speak TTS setup.",
+		"Speaks text from command arguments, stdin, or an audio file using the saved pk-speak TTS setup.",
 		"",
 		"Options:",
-		"  --provider <auto|edge|gemini|elevenlabs|openai|sag|higgs|stable-audio|legacy>",
+		"  --provider <auto|edge|gemini|elevenlabs|openai|sag|higgs|stable-audio|minimax|legacy>",
+		"  --input <path>        Transcribe an audio file and speak the transcript",
+		"  --audio-input <path>  Alias for --input",
+		"  --summarize           Summarize the input text before speaking",
 		"  --output <path>       Write audio to a file",
 		"  --no-play             Synthesize only; do not play audio",
 		"  --allow-open-fallback  If hidden playback fails, open the file with the OS default app",
@@ -354,7 +394,9 @@ function printSpeakHelp() {
 		"Examples:",
 		"  pk-speak speak \"Tests passed\"",
 		"  codex exec \"run tests\" | pk-speak speak",
-		"  pk-speak speak --provider sag \"I need approval\"",
+		"  pk-speak speak --input recording.wav",
+		"  pk-speak speak --summarize \"Long status message here\"",
+		"  pk-speak speak --provider minimax \"Hello from Minimax\"",
 	].join("\n"));
 }
 
@@ -368,6 +410,9 @@ type SpeakCommandOptions = {
 	gate?: SpeakPlaybackGate;
 	dryRun: boolean;
 	rewrite?: boolean;
+	summarize?: boolean;
+	input?: string;
+	quiet?: boolean;
 	help: boolean;
 };
 
@@ -382,6 +427,7 @@ type SpeakTextOptions = {
 	rewrite?: boolean;
 	quiet?: boolean;
 };
+
 
 type WrapCommandOptions = {
 	command: string[];
@@ -410,6 +456,7 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 		keep: false,
 		dryRun: false,
 		help: false,
+		quiet: false,
 	};
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i];
@@ -440,6 +487,12 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 			options.gate = normalizeSpeakPlaybackGate(argv[++i]);
 		} else if (key === "rewrite") {
 			options.rewrite = boolArg(argv[++i]);
+		} else if (key === "summarize") {
+			options.summarize = true;
+		} else if (key === "input" || key === "audio-input") {
+			options.input = argv[++i];
+		} else if (key === "quiet") {
+			options.quiet = true;
 		}
 	}
 	if (options.output) options.noPlay = options.noPlay || false;
@@ -516,6 +569,7 @@ function normalizeTtsProvider(value: string | undefined): TtsProvider | undefine
 		|| normalized === "sag"
 		|| normalized === "higgs"
 		|| normalized === "stable-audio"
+		|| normalized === "minimax"
 	) {
 		return normalized;
 	}
