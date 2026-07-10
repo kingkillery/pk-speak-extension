@@ -840,6 +840,8 @@ Then link again with the fresh code.
 
 ## Testing
 
+TTS/STT provider latency (after `npm run build`): `node dist/scripts/benchmark-tts.js --dry-run --text "hello"` and `node dist/scripts/benchmark-stt.js --dry-run --audio-file <wav>`. Dry-run prints the plan only (no JSON); live runs write `--output` JSON and a results table.
+
 Run the automated production-readiness checks with:
 
 ```text

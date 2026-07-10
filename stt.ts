@@ -267,7 +267,36 @@ export async function shutdownLocalSttWorker() {
 	await localWorker.stop();
 }
 
-export async function transcribeAudioBuffer(buffer: Buffer, mimeType?: string, signal?: AbortSignal): Promise<SttResult> {
+export type TranscribeAudioBufferOptions = {
+	signal?: AbortSignal;
+	/**
+	 * When false, remote STT 429/5xx errors are not retried via another provider.
+	 * Defaults to true so existing callers keep current fallback behavior.
+	 */
+	allowProviderFallback?: boolean;
+};
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+	return typeof AbortSignal !== "undefined" && value instanceof AbortSignal;
+}
+
+function normalizeTranscribeAudioBufferOptions(
+	signalOrOptions?: AbortSignal | TranscribeAudioBufferOptions,
+): TranscribeAudioBufferOptions {
+	if (!signalOrOptions) return {};
+	if (isAbortSignal(signalOrOptions)) {
+		return { signal: signalOrOptions };
+	}
+	return signalOrOptions as TranscribeAudioBufferOptions;
+}
+
+export async function transcribeAudioBuffer(
+	buffer: Buffer,
+	mimeType?: string,
+	signalOrOptions?: AbortSignal | TranscribeAudioBufferOptions,
+): Promise<SttResult> {
+	const options = normalizeTranscribeAudioBufferOptions(signalOrOptions);
+	const allowProviderFallback = options.allowProviderFallback !== false;
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-stt-"));
 	const extension = mimeTypeToExtension(mimeType);
 	const filePath = join(tempDir, `input${extension}`);
@@ -276,30 +305,40 @@ export async function transcribeAudioBuffer(buffer: Buffer, mimeType?: string, s
 		await writeFile(filePath, buffer);
 		const provider = resolveSttProvider();
 		const text = provider === "elevenlabs"
-			? await transcribeWithElevenLabsFallback(filePath, mimeType, signal)
+			? await transcribeWithElevenLabsFallback(filePath, mimeType, options.signal, allowProviderFallback)
 			: provider === "openai"
-				? await transcribeWithOpenAiFallback(filePath, mimeType, signal)
-				: await transcribeWithLocal(filePath, signal);
+				? await transcribeWithOpenAiFallback(filePath, mimeType, options.signal, allowProviderFallback)
+				: await transcribeWithLocal(filePath, options.signal);
 		return { provider, text, durationMs: Date.now() - startedAt };
 	} finally {
 		await rm(tempDir, { recursive: true, force: true });
 	}
 }
 
-async function transcribeWithOpenAiFallback(filePath: string, mimeType?: string, signal?: AbortSignal) {
+async function transcribeWithOpenAiFallback(
+	filePath: string,
+	mimeType?: string,
+	signal?: AbortSignal,
+	allowProviderFallback = true,
+) {
 	try {
 		return await transcribeWithOpenAI(filePath, mimeType, signal);
 	} catch (error) {
-		if (!isRetryableOpenAiTranscriptionError(error)) throw error;
+		if (!allowProviderFallback || !isRetryableOpenAiTranscriptionError(error)) throw error;
 		return await transcribeWithLocal(filePath, signal);
 	}
 }
 
-async function transcribeWithElevenLabsFallback(filePath: string, mimeType?: string, signal?: AbortSignal) {
+async function transcribeWithElevenLabsFallback(
+	filePath: string,
+	mimeType?: string,
+	signal?: AbortSignal,
+	allowProviderFallback = true,
+) {
 	try {
 		return await transcribeWithElevenLabs(filePath, mimeType, signal);
 	} catch (error) {
-		if (!isRetryableElevenLabsTranscriptionError(error)) throw error;
+		if (!allowProviderFallback || !isRetryableElevenLabsTranscriptionError(error)) throw error;
 		if (getOpenAiAudioKey()) return await transcribeWithOpenAI(filePath, mimeType, signal);
 		return await transcribeWithLocal(filePath, signal);
 	}

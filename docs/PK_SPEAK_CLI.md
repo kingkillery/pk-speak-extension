@@ -128,6 +128,22 @@ node ./dist/pk-speak.js config
 
 `--dry-run` prints the plan and does not write files.
 
+## Benchmarking
+
+Provider latency harnesses for TTS (`synthesizeToFile`) and STT (`transcribeAudioBuffer`). Live runs print a stdout results table and write JSON to `--output`. `--dry-run` validates inputs and prints the planned providers/iterations/output (and TTS text / STT audio path) without loading models, decoding audio, printing the results table, or writing JSON. STT requires `--audio-file` and exits 1 if the path is missing (including dry-run).
+
+```bash
+node ./dist/scripts/benchmark-tts.js --help
+node ./dist/scripts/benchmark-tts.js --dry-run --text "hello"
+node ./dist/scripts/benchmark-tts.js --text "hello" --providers edge --iterations 3
+
+node ./dist/scripts/benchmark-stt.js --help
+node ./dist/scripts/benchmark-stt.js --dry-run --audio-file sample.wav
+node ./dist/scripts/benchmark-stt.js --audio-file sample.wav --providers local --iterations 3
+```
+
+Build first (`npm run build`) so `dist/scripts/benchmark-*.js` exist.
+
 ## Windows notes
 
 - From PowerShell in the repo root, prefer `node .\dist\pk-speak.js ...` after `npm run build`.
