@@ -222,6 +222,13 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 		source: "extension",
 	},
 	{
+		name: "pk-speak",
+		description: "Hard-stop or control pk-speak voice replies and the wake listener",
+		usage: "/pk-speak [stop|off|on|status]",
+		examples: ["/pk-speak stop", "/pk-speak status", "/pk-speak off"],
+		source: "extension",
+	},
+	{
 		name: "pk-remote-launch",
 		description: "Start the phone remote and automatically supervise ADB reverse port forwarding",
 		usage: "/pk-remote-launch [bluetooth]",
@@ -3864,6 +3871,60 @@ export default function speakExtension(pi: ExtensionAPI) {
 			setPhase("ready", ctx);
 			ctx.ui.notify(`Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
 			pi.sendUserMessage(raw);
+		},
+	});
+
+	const hardStopPkSpeak = (ctx: any) => {
+		speakState.enabled = false;
+		persistState();
+		stopSpeaking(ctx);
+		stopListener(ctx);
+		persistMonoState();
+		updateStatus(ctx);
+		updateMonoStatus(ctx);
+	};
+
+	pi.registerCommand("pk-speak", {
+		description: "Hard-stop pk-speak voice replies and the wake listener",
+		getArgumentCompletions: (prefix) => {
+			const options = ["stop", "off", "on", "status", "quiet", "silence"];
+			const matches = options.filter((opt) => opt.startsWith(prefix));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+		},
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const lower = args.trim().toLowerCase();
+
+			if (!lower || lower === "stop" || lower === "off" || lower === "quiet" || lower === "silence" || lower === "shush") {
+				hardStopPkSpeak(ctx);
+				ctx.ui.notify("pk-speak stopped: speech disabled and wake listener stopped", "info");
+				return;
+			}
+
+			if (lower === "on" || lower === "enable" || lower === "start") {
+				speakState.enabled = true;
+				persistState();
+				setPhase("ready", ctx);
+				updateStatus(ctx);
+				ctx.ui.notify(`pk-speak enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
+				return;
+			}
+
+			if (lower === "status") {
+				const rewriteStatus = isRewriteEnabled(getSpeakRuntimeState()) ? "rewrite on" : "rewrite off";
+				const monoStatus = monoActive
+					? voiceInputActive
+						? "listener active"
+						: "listener waiting for wake"
+					: "listener off";
+				ctx.ui.notify(
+					`pk-speak: speech ${speakState.enabled ? "on" : "off"} (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}); ${monoStatus}`,
+					"info",
+				);
+				return;
+			}
+
+			ctx.ui.notify("Usage: /pk-speak [stop|off|on|status]", "error");
 		},
 	});
 

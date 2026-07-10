@@ -286,6 +286,19 @@ Behavior:
 - the spoken version can optionally be rewritten for audio clarity
 - `/speak stop` interrupts playback without disabling speech mode
 
+
+### `/pk-speak`
+
+Hard-stop for voice chatter. Unlike `/speak stop` (interrupt current playback only), `/pk-speak stop` disables speech mode and stops the wake listener.
+
+```text
+/pk-speak stop
+/pk-speak status
+/pk-speak on
+```
+
+Aliases for stop: `off`, `quiet`, `silence`, `shush`.
+
 ### `/mono`
 
 Controls the wake-word listener.
