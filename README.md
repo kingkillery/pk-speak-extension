@@ -840,7 +840,10 @@ Then link again with the fresh code.
 
 ## Testing
 
+Synthetic `/v1/live` text smoke: `node ./dist/scripts/synthetic-live-smoke.js --dry-run` (or omit `--dry-run` against a running gateway).
+
 Run the automated production-readiness checks with:
+
 
 ```text
 npm test

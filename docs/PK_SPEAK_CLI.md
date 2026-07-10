@@ -128,6 +128,10 @@ node ./dist/pk-speak.js config
 
 `--dry-run` prints the plan and does not write files.
 
+## Smoke testing
+
+Text-only `/v1/live` smoke (no audio): `node ./dist/scripts/synthetic-live-smoke.js --dry-run` prints the plan; omit `--dry-run` to send `{ type: "text" }` turns against a running `pk-speak gateway` (`--help` lists host/port/token/turns/timeout flags).
+
 ## Windows notes
 
 - From PowerShell in the repo root, prefer `node .\dist\pk-speak.js ...` after `npm run build`.

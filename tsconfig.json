@@ -13,6 +13,7 @@
     "composite": true
   },
   "include": [
-    "*.ts"
+    "*.ts",
+    "scripts/synthetic-live-smoke.ts"
   ]
 }
