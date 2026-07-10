@@ -76,6 +76,9 @@ test("benchmark-stt --help exits successfully with usage", async () => {
 	assert.match(stdout, /--providers/);
 	assert.match(stdout, /--iterations/);
 	assert.match(stdout, /--output/);
+	assert.match(stdout, /Valid: local openai elevenlabs google/);
+	assert.match(stdout, /default: local openai elevenlabs/);
+	assert.match(stdout, /--providers google/);
 });
 
 test("benchmark-tts --dry-run prints the plan and does not write JSON", async () => {
@@ -134,6 +137,38 @@ test("benchmark-stt --dry-run accepts an existing audio path and does not write 
 		assert.match(stdout, new RegExp(`Output: ${escapeRegExp(output)}`));
 		assert.match(stdout, new RegExp(`Audio file: ${escapeRegExp(audioFile)}`));
 		assert.doesNotMatch(stdout, /Audio loaded:/);
+		assert.equal(await pathExists(output), false);
+	} finally {
+		await rm(tmp, { recursive: true, force: true });
+	}
+});
+
+test("benchmark-stt --dry-run accepts --providers google without calling Google", async () => {
+	const tmp = await mkdtemp(join(tmpdir(), "pi-speak-bench-stt-google-"));
+	const audioFile = join(tmp, "sample.wav");
+	const output = join(tmp, "stt_benchmark_results.json");
+	await writeFile(audioFile, "not-real-audio-bytes", "utf8");
+	try {
+		const { code, stdout, stderr } = await runBenchmark(STT_SCRIPT, [
+			"--dry-run",
+			"--audio-file",
+			audioFile,
+			"--providers",
+			"google",
+			"--iterations",
+			"2",
+			"--output",
+			output,
+		]);
+		assert.equal(code, 0);
+		assert.equal(stderr, "");
+		assert.match(stdout, /Dry run: planned STT benchmark/);
+		assert.match(stdout, /Providers: google/);
+		assert.match(stdout, /Iterations: 2/);
+		assert.match(stdout, new RegExp(`Output: ${escapeRegExp(output)}`));
+		assert.match(stdout, new RegExp(`Audio file: ${escapeRegExp(audioFile)}`));
+		assert.doesNotMatch(stdout, /Audio loaded:/);
+		assert.doesNotMatch(stdout, /Benchmarking google/);
 		assert.equal(await pathExists(output), false);
 	} finally {
 		await rm(tmp, { recursive: true, force: true });

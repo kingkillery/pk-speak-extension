@@ -56,6 +56,7 @@
     "qr": "node scripts/qr-setup.mjs"
   },
   "dependencies": {
+    "@google-cloud/speech": "^7.5.0",
     "@google/genai": "^1.52.0",
     "bonjour-service": "^1.4.0",
     "cross-spawn": "^7.0.6",

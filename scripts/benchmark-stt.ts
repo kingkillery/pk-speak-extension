@@ -8,6 +8,7 @@
  * Usage:
  *   node dist/scripts/benchmark-stt.js --help
  *   node dist/scripts/benchmark-stt.js --dry-run --audio-file sample.wav
+ *   node dist/scripts/benchmark-stt.js --dry-run --audio-file sample.wav --providers google
  *   node dist/scripts/benchmark-stt.js --audio-file sample.wav --providers local --iterations 3
  */
 import { existsSync } from "node:fs";
@@ -19,9 +20,9 @@ const DEFAULT_OUTPUT = "stt_benchmark_results.json";
 const DEFAULT_ITERATIONS = 5;
 const DEFAULT_PROVIDERS = ["local", "openai", "elevenlabs"] as const;
 
-type BenchmarkSttProvider = Exclude<SttProvider, "auto">;
+type BenchmarkSttProvider = Exclude<SttProvider, "auto"> | "google";
 
-const VALID_PROVIDERS = new Set<BenchmarkSttProvider>(["local", "openai", "elevenlabs"]);
+const VALID_PROVIDERS = new Set<BenchmarkSttProvider>(["local", "openai", "elevenlabs", "google"]);
 
 type CliOptions = {
 	help: boolean;
@@ -103,7 +104,7 @@ Benchmark pk-speak STT providers via transcribeAudioBuffer.
 Options:
   --audio-file <path>        Path to audio file (required; must exist even with --dry-run)
   --providers <names...>     Space-separated providers (default: local openai elevenlabs)
-                             Valid: local openai elevenlabs
+                             Valid: local openai elevenlabs google
   --iterations <n>           Iterations per provider (default: ${DEFAULT_ITERATIONS})
   --output <path>            JSON results path (default: ${DEFAULT_OUTPUT})
   --dry-run                  Validate inputs and print the plan without decoding audio or loading models
@@ -111,6 +112,7 @@ Options:
 
 Examples:
   node dist/scripts/benchmark-stt.js --dry-run --audio-file sample.wav
+  node dist/scripts/benchmark-stt.js --dry-run --audio-file sample.wav --providers google
   node dist/scripts/benchmark-stt.js --audio-file sample.wav --providers local --iterations 3
 `);
 }

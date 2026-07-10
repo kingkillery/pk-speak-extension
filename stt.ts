@@ -5,9 +5,13 @@ import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { withAbortTimeout } from "./request-timeout.js";
 
-export type SttProvider = "auto" | "local" | "openai" | "elevenlabs";
+export type SttProvider = "auto" | "local" | "openai" | "elevenlabs" | "google";
 
 export type SttResult = {
+	/**
+	 * Selected provider identity from resolveSttProvider().
+	 * When allowProviderFallback defaults to true, another backend may have produced `text`.
+	 */
 	provider: Exclude<SttProvider, "auto">;
 	text: string;
 	durationMs: number;
@@ -25,6 +29,66 @@ function getOpenAiAudioKey() {
 function getElevenLabsKey() {
 	return process.env.ELEVENLABS_API_KEY || process.env.XI_API_KEY || "";
 }
+
+function getConfiguredGoogleCloudProject() {
+	return (
+		process.env.GOOGLE_CLOUD_PROJECT?.trim() ||
+		process.env.GCLOUD_PROJECT?.trim() ||
+		process.env.PI_SPEAK_VERTEX_PROJECT?.trim() ||
+		""
+	);
+}
+
+function getGoogleSttLocation() {
+	return process.env.PI_SPEAK_GOOGLE_STT_LOCATION?.trim() || "global";
+}
+
+function getGoogleSttModel() {
+	return process.env.PI_SPEAK_GOOGLE_STT_MODEL?.trim() || "chirp_3";
+}
+
+function getGoogleSttLanguage() {
+	return process.env.PI_SPEAK_STT_LANGUAGE?.trim() || "en-US";
+}
+
+function getGoogleSpeechApiEndpoint(location: string) {
+	return location === "global" ? "speech.googleapis.com" : `${location}-speech.googleapis.com`;
+}
+
+type GoogleRecognizeRequest = {
+	recognizer: string;
+	config: {
+		autoDecodingConfig: Record<string, never>;
+		model: string;
+		languageCodes: string[];
+	};
+	content: Buffer;
+};
+
+type GoogleRecognizeResponse = {
+	results?: Array<{
+		alternatives?: Array<{ transcript?: string | null } | null> | null;
+	} | null> | null;
+};
+
+type GoogleRecognizeCallOptions = {
+	timeout?: number;
+};
+
+type GoogleSpeechClientLike = {
+	getProjectId(): Promise<string>;
+	recognize(
+		request: GoogleRecognizeRequest,
+		options?: GoogleRecognizeCallOptions,
+	): Promise<[GoogleRecognizeResponse, ...unknown[]] | GoogleRecognizeResponse>;
+	close?(): Promise<void>;
+};
+
+export const testOverrides = {
+	createGoogleSpeechClient: null as
+		| null
+		| ((options: { apiEndpoint: string; location: string }) => GoogleSpeechClientLike | Promise<GoogleSpeechClientLike>),
+};
 
 function getPythonExecutable() {
 	if (process.env.PI_SPEAK_PYTHON?.trim()) return process.env.PI_SPEAK_PYTHON.trim();
@@ -66,6 +130,173 @@ export function resolveSttProvider(): Exclude<SttProvider, "auto"> {
 
 function normalizeTranscriptionText(text: string) {
 	return text.replace(/\s+/g, " ").trim();
+}
+
+function flattenGoogleTranscript(response: GoogleRecognizeResponse | null | undefined) {
+	const parts: string[] = [];
+	for (const result of response?.results || []) {
+		const transcript = result?.alternatives?.[0]?.transcript;
+		if (transcript) parts.push(transcript);
+	}
+	return normalizeTranscriptionText(parts.join(" "));
+}
+
+function googleTranscriptionHttpStatus(error: unknown): number | undefined {
+	if (!error || typeof error !== "object") {
+		const message = String(error);
+		const match = message.match(/\b(429|5\d\d)\b/);
+		return match ? Number(match[1]) : undefined;
+	}
+	const err = error as { code?: number | string; status?: number | string; message?: string };
+	const rawCode = err.code ?? err.status;
+	const code = typeof rawCode === "number" ? rawCode : Number(rawCode);
+	if (Number.isFinite(code)) {
+		if (code === 8) return 429; // RESOURCE_EXHAUSTED
+		if (code === 4) return 504; // DEADLINE_EXCEEDED
+		if (code === 13) return 500; // INTERNAL
+		if (code === 14) return 503; // UNAVAILABLE
+		if (code === 429 || (code >= 500 && code <= 599)) return code;
+	}
+	const message = err.message || String(error);
+	const match = message.match(/\b(429|5\d\d)\b/);
+	return match ? Number(match[1]) : undefined;
+}
+
+function getOutboundTimeoutMs() {
+	const parsed = Number.parseInt(process.env.PI_SPEAK_OUTBOUND_TIMEOUT_MS || "30000", 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 30000;
+}
+
+const googleSpeechClients = new Map<string, Promise<GoogleSpeechClientLike>>();
+
+async function createGoogleSpeechClient(location: string): Promise<GoogleSpeechClientLike> {
+	const apiEndpoint = getGoogleSpeechApiEndpoint(location);
+	if (testOverrides.createGoogleSpeechClient) {
+		return await testOverrides.createGoogleSpeechClient({ apiEndpoint, location });
+	}
+	const speech = await import("@google-cloud/speech");
+	return new speech.v2.SpeechClient({ apiEndpoint }) as unknown as GoogleSpeechClientLike;
+}
+
+async function getGoogleSpeechClient(location: string): Promise<{ apiEndpoint: string; client: GoogleSpeechClientLike }> {
+	const apiEndpoint = getGoogleSpeechApiEndpoint(location);
+	let pending = googleSpeechClients.get(apiEndpoint);
+	if (!pending) {
+		pending = createGoogleSpeechClient(location);
+		googleSpeechClients.set(apiEndpoint, pending);
+		try {
+			await pending;
+		} catch (error) {
+			if (googleSpeechClients.get(apiEndpoint) === pending) {
+				googleSpeechClients.delete(apiEndpoint);
+			}
+			throw error;
+		}
+	}
+	return { apiEndpoint, client: await pending };
+}
+
+async function resolveGoogleCloudProject(client: GoogleSpeechClientLike) {
+	const configured = getConfiguredGoogleCloudProject();
+	if (configured) return configured;
+	try {
+		const discovered = (await client.getProjectId())?.trim();
+		if (discovered) return discovered;
+	} catch {
+		// Fall through to actionable configuration error.
+	}
+	throw new Error(
+		"GOOGLE_CLOUD_PROJECT (or GCLOUD_PROJECT / PI_SPEAK_VERTEX_PROJECT) is required for Google STT, or configure Application Default Credentials with a detectable project",
+	);
+}
+
+async function closeGoogleSpeechClient(client: GoogleSpeechClientLike | undefined) {
+	if (!client?.close) return;
+	try {
+		await client.close();
+	} catch {
+		// Best-effort channel release; do not mask the original transcription outcome.
+	}
+}
+
+async function evictGoogleSpeechClient(apiEndpoint: string) {
+	const pending = googleSpeechClients.get(apiEndpoint);
+	if (!pending) return;
+	googleSpeechClients.delete(apiEndpoint);
+	try {
+		await closeGoogleSpeechClient(await pending);
+	} catch {
+		// Creation may have failed; nothing left to close.
+	}
+}
+
+async function shutdownGoogleSpeechClients() {
+	const pendingClients = [...googleSpeechClients.values()];
+	googleSpeechClients.clear();
+	for (const pending of pendingClients) {
+		try {
+			await closeGoogleSpeechClient(await pending);
+		} catch {
+			// Best-effort cleanup across cached endpoints.
+		}
+	}
+}
+
+function isGoogleRpcCancelled(error: unknown) {
+	const message = error instanceof Error ? error.message : String(error);
+	if (message === "Transcription aborted" || message === "Outbound request timed out") return true;
+	if (error instanceof Error && error.name === "AbortError") return true;
+	return /Outbound request timed out|Transcription aborted/i.test(message);
+}
+
+async function transcribeWithGoogle(filePath: string, _mimeType?: string, signal?: AbortSignal) {
+	const location = getGoogleSttLocation();
+	const model = getGoogleSttModel();
+	const language = getGoogleSttLanguage();
+	const timeout = getOutboundTimeoutMs();
+	let apiEndpoint: string | undefined;
+	try {
+		const resolved = await getGoogleSpeechClient(location);
+		apiEndpoint = resolved.apiEndpoint;
+		const client = resolved.client;
+		const project = await resolveGoogleCloudProject(client);
+		const content = await readFile(filePath);
+		const request: GoogleRecognizeRequest = {
+			recognizer: `projects/${project}/locations/${location}/recognizers/_`,
+			config: {
+				autoDecodingConfig: {},
+				model,
+				languageCodes: [language],
+			},
+			content,
+		};
+
+		const response = await withAbortTimeout(async (requestSignal) => {
+			if (requestSignal.aborted) throw new Error("Transcription aborted");
+			return await new Promise<GoogleRecognizeResponse>((resolve, reject) => {
+				const onAbort = () => reject(new Error("Transcription aborted"));
+				requestSignal.addEventListener("abort", onAbort, { once: true });
+				Promise.resolve(client.recognize(request, { timeout }))
+					.then((result) => {
+						const response = Array.isArray(result) ? result[0] : result;
+						resolve(response || {});
+					})
+					.catch(reject)
+					.finally(() => requestSignal.removeEventListener("abort", onAbort));
+			});
+		}, signal, timeout);
+		return flattenGoogleTranscript(response);
+	} catch (error) {
+		if (apiEndpoint && isGoogleRpcCancelled(error)) {
+			await evictGoogleSpeechClient(apiEndpoint);
+		}
+		if (error instanceof Error && error.message === "Transcription aborted") throw error;
+		const status = googleTranscriptionHttpStatus(error);
+		if (status !== undefined) {
+			throw new Error(`Google transcription failed (${status})`);
+		}
+		throw error instanceof Error ? error : new Error(String(error));
+	}
 }
 
 async function transcribeWithOpenAI(filePath: string, mimeType?: string, signal?: AbortSignal) {
@@ -265,13 +496,15 @@ async function transcribeWithLocal(filePath: string, signal?: AbortSignal) {
 
 export async function shutdownLocalSttWorker() {
 	await localWorker.stop();
+	await shutdownGoogleSpeechClients();
 }
 
 export type TranscribeAudioBufferOptions = {
 	signal?: AbortSignal;
 	/**
-	 * When false, remote STT 429/5xx errors are not retried via another provider.
-	 * Defaults to true so existing callers keep current fallback behavior.
+	 * When false, remote STT 429/5xx errors are not retried via another provider,
+	 * pinning the actual backend (needed for benchmarks). Defaults to true so
+	 * existing callers keep current fallback behavior.
 	 */
 	allowProviderFallback?: boolean;
 };
@@ -304,11 +537,13 @@ export async function transcribeAudioBuffer(
 	try {
 		await writeFile(filePath, buffer);
 		const provider = resolveSttProvider();
-		const text = provider === "elevenlabs"
-			? await transcribeWithElevenLabsFallback(filePath, mimeType, options.signal, allowProviderFallback)
-			: provider === "openai"
-				? await transcribeWithOpenAiFallback(filePath, mimeType, options.signal, allowProviderFallback)
-				: await transcribeWithLocal(filePath, options.signal);
+		const text = provider === "google"
+			? await transcribeWithGoogleFallback(filePath, mimeType, options.signal, allowProviderFallback)
+			: provider === "elevenlabs"
+				? await transcribeWithElevenLabsFallback(filePath, mimeType, options.signal, allowProviderFallback)
+				: provider === "openai"
+					? await transcribeWithOpenAiFallback(filePath, mimeType, options.signal, allowProviderFallback)
+					: await transcribeWithLocal(filePath, options.signal);
 		return { provider, text, durationMs: Date.now() - startedAt };
 	} finally {
 		await rm(tempDir, { recursive: true, force: true });
@@ -344,6 +579,21 @@ async function transcribeWithElevenLabsFallback(
 	}
 }
 
+async function transcribeWithGoogleFallback(
+	filePath: string,
+	mimeType?: string,
+	signal?: AbortSignal,
+	allowProviderFallback = true,
+) {
+	try {
+		return await transcribeWithGoogle(filePath, mimeType, signal);
+	} catch (error) {
+		if (!allowProviderFallback || !isRetryableGoogleTranscriptionError(error)) throw error;
+		if (getOpenAiAudioKey()) return await transcribeWithOpenAI(filePath, mimeType, signal);
+		return await transcribeWithLocal(filePath, signal);
+	}
+}
+
 function isRetryableOpenAiTranscriptionError(error: unknown) {
 	const message = error instanceof Error ? error.message : String(error);
 	return /OpenAI transcription failed \((429|5\d\d)\)/.test(message);
@@ -352,6 +602,11 @@ function isRetryableOpenAiTranscriptionError(error: unknown) {
 function isRetryableElevenLabsTranscriptionError(error: unknown) {
 	const message = error instanceof Error ? error.message : String(error);
 	return /ElevenLabs transcription failed \((429|5\d\d)\)/.test(message);
+}
+
+function isRetryableGoogleTranscriptionError(error: unknown) {
+	const message = error instanceof Error ? error.message : String(error);
+	return /Google transcription failed \((429|5\d\d)\)/.test(message);
 }
 
 function mimeTypeToExtension(mimeType?: string) {

@@ -414,7 +414,7 @@ There are six main subsystems:
    Multi-provider speech synthesis. Supports `legacy`, `edge`, `gemini`, `openai`, `elevenlabs`, `sag`, `higgs`, `stable-audio`, and `auto`.
 
 3. `stt.ts` and `listener/stt_worker.py`
-   Remote voice transcription for uploaded audio. `auto` prefers OpenAI when an API key is present, otherwise a warm local `faster-whisper` worker process.
+   Remote voice transcription for uploaded audio. `PI_SPEAK_REMOTE_STT_PROVIDER` accepts `auto|local|openai|elevenlabs|google`. `auto` prefers ElevenLabs/OpenAI when keys are present, otherwise a warm local `faster-whisper` worker.
 
 4. `listener/listener.py`
    The always-on two-tier listener:
@@ -738,6 +738,28 @@ PI_SPEAK_GEMINI_TTS_VOICE=Kore
 
 Run `gcloud auth application-default login` on the machine hosting the tray/gateway, or set `PI_SPEAK_VERTEX_API_KEY` to a Vertex AI API key. Enable the Vertex AI API on the Cloud project.
 
+### Google Cloud Speech-to-Text
+
+`google` is Google Cloud Speech-to-Text v2 using Google Cloud ADC from `gcloud auth application-default login`, not Gemini TTS. `PI_SPEAK_VERTEX_API_KEY` does not authenticate Speech STT. One-time setup on the host:
+
+```text
+gcloud auth application-default login
+gcloud services enable speech.googleapis.com --project <your-gcloud-project>
+```
+
+Project resolution order: `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, `PI_SPEAK_VERTEX_PROJECT`, then ADC discovery.
+
+```text
+GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
+# optional:
+PI_SPEAK_GOOGLE_STT_LOCATION=global
+PI_SPEAK_GOOGLE_STT_MODEL=chirp_3
+PI_SPEAK_STT_LANGUAGE=en-US
+PI_SPEAK_REMOTE_STT_PROVIDER=google
+```
+
+`PI_SPEAK_STT_LANGUAGE` feeds both Google and ElevenLabs STT. Defaults differ: Google uses `en-US`; ElevenLabs uses `en`.
+
 ### Edge TTS
 
 ```text
@@ -756,7 +778,7 @@ WHISPER_MODEL=tiny
 WHISPER_DEVICE=cpu
 WHISPER_COMPUTE=int8
 PI_SPEAK_REMOTE_WHISPER_MODEL=base
-PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai
+PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai|elevenlabs|google
 ```
 
 `PI_SPEAK_PYTHON` and `PI_SPEAK_SPEAK11_PATH` are now the first-class override path for local Python audio setups. When they are unset, Pi scans the normal Windows user-site `Python*/Scripts` locations before falling back to PATH resolution.
@@ -816,6 +838,7 @@ Check these in order:
 2. `/remote token`
 3. `PI_SPEAK_REMOTE_STT_PROVIDER`
 4. OpenAI key or local whisper setup
+5. For `google` STT: Google Cloud ADC (`gcloud auth application-default login`), Speech-to-Text API enabled, and a resolvable project (`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `PI_SPEAK_VERTEX_PROJECT`, then ADC discovery). `PI_SPEAK_VERTEX_API_KEY` does not authenticate Speech STT.
 
 ### Speech is using the wrong provider
 
@@ -840,7 +863,7 @@ Then link again with the fresh code.
 
 ## Testing
 
-TTS/STT provider latency (after `npm run build`): `node dist/scripts/benchmark-tts.js --dry-run --text "hello"` and `node dist/scripts/benchmark-stt.js --dry-run --audio-file <wav>`. Dry-run prints the plan only (no JSON); live runs write `--output` JSON and a results table.
+TTS/STT provider latency (after `npm run build`): `node dist/scripts/benchmark-tts.js --dry-run --text "hello"` and `node dist/scripts/benchmark-stt.js --dry-run --audio-file <wav> --providers google`. Dry-run prints the plan only (no JSON, no provider calls). Default STT providers stay `local openai elevenlabs`.
 
 Run the automated production-readiness checks with:
 

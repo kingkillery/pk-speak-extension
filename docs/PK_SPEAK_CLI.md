@@ -130,7 +130,9 @@ node ./dist/pk-speak.js config
 
 ## Benchmarking
 
-Provider latency harnesses for TTS (`synthesizeToFile`) and STT (`transcribeAudioBuffer`). Live runs print a stdout results table and write JSON to `--output`. `--dry-run` validates inputs and prints the planned providers/iterations/output (and TTS text / STT audio path) without loading models, decoding audio, printing the results table, or writing JSON. STT requires `--audio-file` and exits 1 if the path is missing (including dry-run).
+Provider latency harnesses for TTS (`synthesizeToFile`) and STT (`transcribeAudioBuffer`). Live runs print a stdout results table and write JSON to `--output`. `--dry-run` validates inputs and prints the planned providers/iterations/output (and TTS text / STT audio path) without loading models, decoding audio, calling providers (including Google), printing the results table, or writing JSON. STT requires `--audio-file` and exits 1 if the path is missing (including dry-run). Default STT providers are `local openai elevenlabs`; `google` is valid when passed explicitly.
+
+Live `google` STT uses Google Cloud Speech-to-Text v2 with Google Cloud ADC from `gcloud auth application-default login` (not Gemini TTS; `PI_SPEAK_VERTEX_API_KEY` does not authenticate Speech STT): enable the Speech-to-Text API, resolve project via `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `PI_SPEAK_VERTEX_PROJECT` then ADC discovery, and optionally set `PI_SPEAK_GOOGLE_STT_LOCATION`, `PI_SPEAK_GOOGLE_STT_MODEL`, and `PI_SPEAK_STT_LANGUAGE` (defaults: Google `en-US`, ElevenLabs `en`; the same env feeds both).
 
 ```bash
 node ./dist/scripts/benchmark-tts.js --help
@@ -139,6 +141,7 @@ node ./dist/scripts/benchmark-tts.js --text "hello" --providers edge --iteration
 
 node ./dist/scripts/benchmark-stt.js --help
 node ./dist/scripts/benchmark-stt.js --dry-run --audio-file sample.wav
+node ./dist/scripts/benchmark-stt.js --dry-run --audio-file sample.wav --providers google
 node ./dist/scripts/benchmark-stt.js --audio-file sample.wav --providers local --iterations 3
 ```
 
