@@ -29,8 +29,9 @@ import {
 	setNamedSession,
 	setWakeAlias,
 } from "./session-routing.js";
-import { mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
+import { buildOhMyPiAgentHubDashboardCached, mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
 import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, normalizeOptionalString, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
+import { createLiveAgentHubBinding } from "./herdr-agent-hub-live.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
@@ -2680,6 +2681,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 					return mergeOhMyPiAgentHubSessions(dashboard);
 				},
 				getCompactRouteSlots: () => buildCompactRouteSlots({ sessions: sessionRegistry, aliases: sessionWakeAliases }),
+				agentHub: createLiveAgentHubBinding({
+					dashboardFn: () => buildOhMyPiAgentHubDashboardCached(),
+					submitChatTurn: (text, target, cwd) =>
+						enqueuePhoneTurn("http-text", text, undefined, false, undefined, undefined, undefined, target, cwd),
+				}),
 				onSessionResume: (payload) => {
 					const rawProvider = payload.provider?.trim();
 					const provider = normalizeGatewayProviderOverride(rawProvider);
