@@ -179,12 +179,15 @@ function requireValue(argv: string[], index: number, flag: string): string {
 
 function normalizeProviders(names: string[]): BenchmarkSttProvider[] {
 	const out: BenchmarkSttProvider[] = [];
+	const seen = new Set<BenchmarkSttProvider>();
 	for (const raw of names) {
-		const name = raw.trim().toLowerCase();
-		if (!VALID_PROVIDERS.has(name as BenchmarkSttProvider)) {
+		const name = raw.trim().toLowerCase() as BenchmarkSttProvider;
+		if (!VALID_PROVIDERS.has(name)) {
 			throw new Error(`Unknown STT provider: ${raw}. Valid: ${[...VALID_PROVIDERS].join(", ")}`);
 		}
-		out.push(name as BenchmarkSttProvider);
+		if (seen.has(name)) continue;
+		seen.add(name);
+		out.push(name);
 	}
 	return out;
 }
@@ -305,7 +308,6 @@ async function benchmarkProvider(
 	process.env.PI_SPEAK_REMOTE_STT_PROVIDER = provider;
 	let shutdownLocalSttWorker: undefined | (() => Promise<void>);
 	try {
-		const warmupStart = performance.now();
 		const stt = await import("../stt.js");
 		shutdownLocalSttWorker = stt.shutdownLocalSttWorker;
 		const resolved = stt.resolveSttProvider();
@@ -315,6 +317,7 @@ async function benchmarkProvider(
 			);
 		}
 
+		const warmupStart = performance.now();
 		await transcribeSelected(stt.transcribeAudioBuffer, provider, fileBuffer, mimeType);
 		result.warmupTime = (performance.now() - warmupStart) / 1000;
 		console.log(`Provider ${provider} warmed up in ${result.warmupTime.toFixed(3)}s`);
@@ -357,8 +360,10 @@ async function benchmarkProvider(
 	return result;
 }
 
-function anyProviderFailed(results: BenchmarkResult[]): boolean {
-	return results.some((result) => result.inferenceTimes.length === 0);
+function hasBenchmarkIssues(results: BenchmarkResult[], iterations: number): boolean {
+	return results.some(
+		(result) => result.errors.length > 0 || result.inferenceTimes.length < iterations,
+	);
 }
 
 async function main(): Promise<void> {
@@ -426,7 +431,7 @@ async function main(): Promise<void> {
 		audioFile: options.audioFile,
 		iterations: options.iterations,
 	});
-	if (anyProviderFailed(results)) {
+	if (hasBenchmarkIssues(results, options.iterations)) {
 		process.exitCode = 1;
 	}
 	console.log("Benchmarking complete!");

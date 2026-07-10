@@ -209,12 +209,15 @@ function requireValue(argv: string[], index: number, flag: string): string {
 
 function normalizeProviders(names: string[]): BenchmarkTtsProvider[] {
 	const out: BenchmarkTtsProvider[] = [];
+	const seen = new Set<BenchmarkTtsProvider>();
 	for (const raw of names) {
-		const name = raw.trim().toLowerCase();
-		if (!VALID_PROVIDERS.has(name as BenchmarkTtsProvider)) {
+		const name = raw.trim().toLowerCase() as BenchmarkTtsProvider;
+		if (!VALID_PROVIDERS.has(name)) {
 			throw new Error(`Unknown TTS provider: ${raw}. Valid: ${[...VALID_PROVIDERS].join(", ")}`);
 		}
-		out.push(name as BenchmarkTtsProvider);
+		if (seen.has(name)) continue;
+		seen.add(name);
+		out.push(name);
 	}
 	return out;
 }
@@ -245,13 +248,42 @@ function extensionForProvider(provider: BenchmarkTtsProvider): string {
 }
 
 function estimateWavDurationSeconds(buffer: Buffer): number {
-	if (buffer.length < 44) return 0;
+	if (buffer.length < 12) return 0;
 	const riff = buffer.subarray(0, 4).toString("ascii");
 	const wave = buffer.subarray(8, 12).toString("ascii");
 	if (riff !== "RIFF" || wave !== "WAVE") return 0;
-	const byteRate = buffer.readUInt32LE(28);
-	if (byteRate <= 0) return 0;
-	return Math.max(0, (buffer.length - 44) / byteRate);
+
+	let offset = 12;
+	let byteRate = 0;
+	let dataSize = 0;
+	while (offset + 8 <= buffer.length) {
+		const chunkId = buffer.subarray(offset, offset + 4).toString("ascii");
+		const chunkSize = buffer.readUInt32LE(offset + 4);
+		const dataOffset = offset + 8;
+		if (dataOffset > buffer.length) break;
+		const safeSize = Math.min(chunkSize, buffer.length - dataOffset);
+
+		if (chunkId === "fmt " && safeSize >= 16) {
+			const sampleRate = buffer.readUInt32LE(dataOffset + 4);
+			const channels = buffer.readUInt16LE(dataOffset + 2);
+			const bitsPerSample = buffer.readUInt16LE(dataOffset + 14);
+			const declaredByteRate = buffer.readUInt32LE(dataOffset + 8);
+			byteRate = declaredByteRate > 0
+				? declaredByteRate
+				: sampleRate > 0 && channels > 0 && bitsPerSample > 0
+					? sampleRate * channels * (bitsPerSample / 8)
+					: 0;
+		} else if (chunkId === "data") {
+			dataSize = safeSize;
+			break;
+		}
+
+		// Chunk sizes are word-aligned.
+		offset = dataOffset + chunkSize + (chunkSize % 2);
+	}
+
+	if (byteRate <= 0 || dataSize <= 0) return 0;
+	return dataSize / byteRate;
 }
 
 function skipId3(buffer: Buffer): number {
@@ -391,6 +423,8 @@ async function synthesizeSelected(
 		outputPath,
 		// Force the requested provider path and exclude rewrite latency from provider timings.
 		state: { provider, rewriteEnabled: false },
+		// Disable silent Edge fallback so timings/errors reflect the selected provider.
+		allowProviderFallback: false,
 	});
 	if (synthesis.provider !== provider) {
 		throw new Error(
@@ -408,7 +442,6 @@ async function benchmarkProvider(
 	console.log(`Benchmarking ${provider}...`);
 	const tempRoot = await mkdtemp(join(tmpdir(), "pk-speak-bench-tts-"));
 	try {
-		const warmupStart = performance.now();
 		const { synthesizeToFile, resolveTtsProvider } = await import("../tts.js");
 		const resolved = resolveTtsProvider({ provider, rewriteEnabled: false });
 		if (resolved !== provider) {
@@ -417,6 +450,7 @@ async function benchmarkProvider(
 			);
 		}
 
+		const warmupStart = performance.now();
 		const warmupPath = join(tempRoot, `${provider}-warmup${extensionForProvider(provider)}`);
 		await synthesizeSelected(synthesizeToFile, provider, text, warmupPath);
 		result.warmupTime = (performance.now() - warmupStart) / 1000;
@@ -445,13 +479,21 @@ async function benchmarkProvider(
 		result.addError(message);
 		console.error(`Error benchmarking ${provider}: ${message}`);
 	} finally {
-		await rm(tempRoot, { recursive: true, force: true });
+		try {
+			await rm(tempRoot, { recursive: true, force: true });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			result.addError(`cleanup failed: ${message}`);
+			console.error(`Cleanup error for ${provider}: ${message}`);
+		}
 	}
 	return result;
 }
 
-function anyProviderFailed(results: BenchmarkResult[]): boolean {
-	return results.some((result) => result.inferenceTimes.length === 0);
+function hasBenchmarkIssues(results: BenchmarkResult[], iterations: number): boolean {
+	return results.some(
+		(result) => result.errors.length > 0 || result.inferenceTimes.length < iterations,
+	);
 }
 
 async function main(): Promise<void> {
@@ -505,7 +547,7 @@ async function main(): Promise<void> {
 		languageCode: options.languageCode,
 		iterations: options.iterations,
 	});
-	if (anyProviderFailed(results)) {
+	if (hasBenchmarkIssues(results, options.iterations)) {
 		process.exitCode = 1;
 	}
 	console.log("TTS benchmarking complete!");
