@@ -119,6 +119,7 @@ fun SessionsTabContent(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             SessionsPaneToggle("gateway", "Hub", selectedPane, Modifier.weight(1f)) { selectedPane = it }
+            SessionsPaneToggle("portal", "Tasks", selectedPane, Modifier.weight(1f)) { selectedPane = it }
             SessionsPaneToggle("ops", "Ops", selectedPane, Modifier.weight(1f)) { selectedPane = it }
             SessionsPaneToggle("history", "History", selectedPane, Modifier.weight(1f)) { selectedPane = it }
         }
@@ -128,6 +129,11 @@ fun SessionsTabContent(
                 client = client,
                 prefs = prefs,
                 onRemoteSessionSelected = onRemoteSessionSelected,
+                modifier = Modifier.weight(1f)
+            )
+            "portal" -> HubPortalPane(
+                client = client,
+                prefs = prefs,
                 modifier = Modifier.weight(1f)
             )
             "ops" -> GatewayOpsPane(

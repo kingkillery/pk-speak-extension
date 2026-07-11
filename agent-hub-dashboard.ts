@@ -305,6 +305,48 @@ function collectBackgroundSubagents(sessionPath: string, laneId: string): OhMyPi
 	return subagents.sort((left, right) => left.name.localeCompare(right.name));
 }
 
+/**
+ * Finds the session file currently owning a given background-lane name, regardless of whether
+ * the lane is active or archived. buildOhMyPiAgentHubDashboard only surfaces ACTIVE lanes (an
+ * archived lane's name is intentionally invisible to that scan), so a revive/recover flow that
+ * needs to resolve an id back to a file after archiving uses this instead.
+ */
+export function findOhMyPiBackgroundSessionPath(
+	name: string,
+	options: BuildOhMyPiAgentHubDashboardOptions = {},
+): string | undefined {
+	const roots = (options.sessionsRoots ?? defaultOhMyPiSessionRoots(options.env)).filter((root) => existsSync(root));
+	for (const root of roots) {
+		for (const sessionPath of listSessionFiles(root)) {
+			const stat = safeStat(sessionPath);
+			if (!stat) continue;
+			const headerPrefix = readFilePrefixBytes(sessionPath, SESSION_HEADER_READ_BYTES);
+			if (headerPrefix === undefined) continue;
+			const header = readSessionHeader(parseJsonLineRecords(headerPrefix));
+			if (!header) continue;
+			let candidateName = header.hasBackgroundInstance ? backgroundInstanceName(header.backgroundInstance) : undefined;
+			if (candidateName === undefined) {
+				const tail = readFileTailBytes(sessionPath, stat.size, BACKGROUND_INSTANCE_TAIL_BYTES);
+				if (tail !== undefined) {
+					const tailRecords = parseJsonLineRecords(tail);
+					for (let index = tailRecords.length - 1; index >= 0; index -= 1) {
+						if (tailRecords[index].type === "background_instance") {
+							candidateName = backgroundInstanceName(tailRecords[index]);
+							break;
+						}
+					}
+				}
+			}
+			if (candidateName === name) return sessionPath;
+		}
+	}
+	return undefined;
+}
+
+function backgroundInstanceName(value: unknown): string | undefined {
+	return isRecord(value) && typeof value.name === "string" ? value.name : undefined;
+}
+
 function isSessionJsonl(name: string): boolean {
 	return name.endsWith(JSONL_SUFFIX) && !name.includes(".bak");
 }

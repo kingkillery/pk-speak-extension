@@ -111,11 +111,12 @@ import java.util.Locale
  *   - ZERO ANIMATIONS. No infinite transitions, no pulse, no canvas draws at frame rate. The
  *     linear progress indicator is determinate (advances on state changes), not indeterminate.
  *   - LARGE TOUCH TARGETS. Palma is 824x1648 at 300 dpi; minimum 56.dp hit target.
- *   - READ-ONLY OH-MY-PI LANE VIEW. The Hub peek surfaces the gateway session dashboard,
- *     which already merges background lanes from `~/.omp/agent/sessions/` followed by `*.jsonl`. We do NOT
- *     expose a "start lane" or "send to lane" button -- the gateway has no endpoint that
- *     routes a turn to a specific background lane today, so those controls would be lies.
- *     If we add that later, we add it where the gateway supports it, not here.
+ *   - ACTIONABLE OH-MY-PI LANE VIEW. The Hub peek surfaces the gateway session dashboard,
+ *     which already merges background lanes from `~/.omp/agent/sessions/` followed by `*.jsonl`,
+ *     plus a task launcher and, per lane, a chat composer and a two-step archive control backed
+ *     by `/v1/herdr/agent/:id/{chat,kill}`. Deliberately no live-streaming transcript here: EPD
+ *     ghosting comes from frequent partial redraws, so lane detail refreshes on the same 10s
+ *     poll as the rest of the Hub peek instead of tailing an SSE feed line-by-line.
  */
 class BooxMainActivity : ComponentActivity() {
 
@@ -199,8 +200,8 @@ private fun BooxRoot(
         )
     }
 
-    // Hub visibility is part of cockpit UX (peek the gateway dashboard including oh-my-pk
-    // background lanes). It does NOT add a "send to lane" button -- read-only by design.
+    // Hub visibility is part of cockpit UX: the gateway dashboard including oh-my-pk background
+    // lanes, a task launcher, and per-lane chat/archive controls (see HubPane).
     var showHub by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var forceCheckTrigger by remember { mutableIntStateOf(0) }
@@ -1393,7 +1394,7 @@ private fun LiveButton(
     }
 }
 
-// ─── Hub pane: read-only gateway session dashboard including oh-my-pk lanes ─
+// ─── Hub pane: gateway session dashboard including oh-my-pk lanes, plus task launch, chat, and archive ─
 private sealed class BooxHubUiState {
     data object Idle : BooxHubUiState()
     data object Loading : BooxHubUiState()
@@ -1429,6 +1430,7 @@ private fun HubPane(
     var launchingColab by remember { mutableStateOf(false) }
     var joiningCollab by remember { mutableStateOf(false) }
     var selectedOmpSessionPath by remember { mutableStateOf<String?>(null) }
+    var showTaskLauncher by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -1441,7 +1443,7 @@ private fun HubPane(
             .padding(8.dp)
     ) {
         Text(
-            text = "OMPK AGENT HUB (read-only)",
+            text = "OMPK AGENT HUB",
             color = Ink,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
@@ -1450,13 +1452,31 @@ private fun HubPane(
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = "Persistent oh-my-pk sessions on the host. " +
-                "Tap ROUTE TURNS HERE on a session to direct voice/text turns into it. " +
-                "LAUNCH OMPK HUB starts a new background session.",
+                "Tap ROUTE TURNS HERE to direct voice/text turns into a lane, or expand a lane " +
+                "for a direct chat composer and an archive control. " +
+                "LAUNCH TASK starts a new background session with a prompt of your choice.",
             color = Color(0xFF555555),
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
         )
         Spacer(modifier = Modifier.height(8.dp))
+
+        // ─── Launch task (EPD-friendly: bordered, monospace, no animation) ─────
+        OutlinedButton(
+            onClick = { showTaskLauncher = true },
+            border = BorderStroke(2.dp, Ink),
+            shape = RoundedCornerShape(4.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = "+ LAUNCH TASK",
+                color = Ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
 
         // ─── Launch OMPK Hub (EPD-friendly: bordered, monospace, no animation) ─
         OutlinedButton(
@@ -1622,6 +1642,8 @@ private fun HubPane(
             is BooxHubUiState.Loaded -> {
                 HubLoadedContent(
                     dashboard = state.dashboard,
+                    client = client,
+                    scope = scope,
                     selectedOmpSessionPath = selectedOmpSessionPath,
                     onSelectSession = { path ->
                         scope.launch {
@@ -1630,17 +1652,120 @@ private fun HubPane(
                             launchStatus = msg
                         }
                     },
+                    onStatus = { launchStatus = it },
                 )
             }
         }
     }
+
+    if (showTaskLauncher) {
+        BooxLaunchTaskDialog(
+            client = client,
+            prefs = prefs,
+            onDismiss = { showTaskLauncher = false },
+            onLaunched = { message ->
+                launchStatus = message
+                showTaskLauncher = false
+            },
+        )
+    }
+}
+
+// ─── Task launcher dialog (EPD-friendly: pure B/W, no transition animation) ─
+@Composable
+private fun BooxLaunchTaskDialog(
+    client: VoiceAgentClient,
+    prefs: AppPreferences,
+    onDismiss: () -> Unit,
+    onLaunched: (String) -> Unit,
+) {
+    var cwd by remember { mutableStateOf(prefs.workspacePath) }
+    var prompt by remember { mutableStateOf("") }
+    var model by remember { mutableStateOf("") }
+    var launching by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    AlertDialog(
+        onDismissRequest = { if (!launching) onDismiss() },
+        title = {
+            Text("LAUNCH TASK", color = Ink, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        },
+        text = {
+            Column {
+                BasicTextField(
+                    value = cwd,
+                    onValueChange = { cwd = it },
+                    enabled = !launching,
+                    textStyle = TextStyle(color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Ink),
+                    modifier = Modifier.fillMaxWidth().border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
+                )
+                Text("^ working dir", color = Color(0xFF888888), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Spacer(modifier = Modifier.height(8.dp))
+                BasicTextField(
+                    value = prompt,
+                    onValueChange = { prompt = it },
+                    enabled = !launching,
+                    textStyle = TextStyle(color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Ink),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp)
+                        .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
+                )
+                Text("^ prompt", color = Color(0xFF888888), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Spacer(modifier = Modifier.height(8.dp))
+                BasicTextField(
+                    value = model,
+                    onValueChange = { model = it },
+                    enabled = !launching,
+                    textStyle = TextStyle(color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Ink),
+                    modifier = Modifier.fillMaxWidth().border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
+                )
+                Text("^ model (optional)", color = Color(0xFF888888), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (!launching) {
+                        launching = true
+                        scope.launch {
+                            val message = client.launchSession(
+                                cwd = cwd.trim().ifBlank { null },
+                                prompt = prompt.trim().ifBlank { null },
+                                model = model.trim().ifBlank { null },
+                            )
+                            launching = false
+                            onLaunched(message)
+                        }
+                    }
+                },
+            ) {
+                Text(
+                    if (launching) "LAUNCHING..." else "LAUNCH",
+                    color = Ink,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { if (!launching) onDismiss() }) {
+                Text("CANCEL", color = Color(0xFF555555), fontFamily = FontFamily.Monospace)
+            }
+        },
+        containerColor = Paper,
+    )
 }
 
 @Composable
 private fun HubLoadedContent(
     dashboard: GatewaySessionDashboard,
+    client: VoiceAgentClient,
+    scope: kotlinx.coroutines.CoroutineScope,
     selectedOmpSessionPath: String?,
     onSelectSession: (String) -> Unit,
+    onStatus: (String) -> Unit,
 ) {
     val byKind = remember(dashboard) { groupSessionsByKind(dashboard.sessions) }
     val isOhMyPkGroupEmpty = byKind["oh-my-pk"].isNullOrEmpty()
@@ -1658,7 +1783,7 @@ private fun HubLoadedContent(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         // This is the OMPK Agent Hub: surface ONLY oh-my-pk background agent lanes. codex/remote/
-        // other gateway sessions are intentionally hidden here. Read-only -- no "drive lane" button.
+        // other gateway sessions are intentionally hidden here.
         val order = listOf("oh-my-pk")
         for (kind in order) {
             val entries = byKind[kind].orEmpty()
@@ -1677,8 +1802,11 @@ private fun HubLoadedContent(
                 HubSessionRow(
                     entry = entry,
                     dashboard = dashboard,
+                    client = client,
+                    scope = scope,
                     isSelected = entryPath != null && entryPath == selectedOmpSessionPath,
                     onSelect = { if (entryPath != null) onSelectSession(entryPath) },
+                    onStatus = onStatus,
                 )
             }
         }
@@ -1699,9 +1827,17 @@ private fun HubLoadedContent(
 private fun HubSessionRow(
     entry: GatewaySessionEntry,
     dashboard: GatewaySessionDashboard,
+    client: VoiceAgentClient,
+    scope: kotlinx.coroutines.CoroutineScope,
     isSelected: Boolean = false,
     onSelect: () -> Unit = {},
+    onStatus: (String) -> Unit = {},
 ) {
+    var expanded by remember(entry.name) { mutableStateOf(false) }
+    var chatText by remember(entry.name) { mutableStateOf("") }
+    var sending by remember(entry.name) { mutableStateOf(false) }
+    var pendingKillToken by remember(entry.name) { mutableStateOf<String?>(null) }
+    var killing by remember(entry.name) { mutableStateOf(false) }
     val (statusGlyph, statusLabel, statusBorderWeight) = when {
         entry.isCurrentIn(dashboard) -> Triple("[+]", "current", 2.dp)
         entry.isReadyIn(dashboard) -> Triple("[+]", "ready", 2.dp)
@@ -1780,6 +1916,102 @@ private fun HubSessionRow(
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                     fontFamily = FontFamily.Monospace,
                 )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            OutlinedButton(
+                onClick = { expanded = !expanded },
+                border = BorderStroke(1.dp, Chrome),
+                shape = RoundedCornerShape(3.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = if (expanded) "^ HIDE CHAT / ARCHIVE" else "v CHAT / ARCHIVE",
+                    color = Ink,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+            if (expanded) {
+                Spacer(modifier = Modifier.height(4.dp))
+                BasicTextField(
+                    value = chatText,
+                    onValueChange = { chatText = it },
+                    enabled = !sending,
+                    textStyle = TextStyle(color = Ink, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Ink),
+                    modifier = Modifier.fillMaxWidth().border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(6.dp),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = {
+                            val text = chatText.trim()
+                            if (text.isNotEmpty() && !sending) {
+                                sending = true
+                                scope.launch {
+                                    val result = client.sendHubAgentChat(entry.name, text)
+                                    sending = false
+                                    if (result.ok) {
+                                        chatText = ""
+                                        onStatus("Sent to ${entry.name}.")
+                                    } else {
+                                        onStatus(result.error ?: "Message failed.")
+                                    }
+                                }
+                            }
+                        },
+                        border = BorderStroke(1.dp, Ink),
+                        shape = RoundedCornerShape(3.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(
+                            text = if (sending) "SENDING..." else "SEND",
+                            color = Ink,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            if (killing) return@OutlinedButton
+                            killing = true
+                            scope.launch {
+                                val outcome = client.killHubAgent(entry.name, pendingKillToken)
+                                killing = false
+                                when {
+                                    outcome.ok -> {
+                                        pendingKillToken = null
+                                        onStatus("Archived ${entry.name}.")
+                                    }
+                                    outcome.code == "confirm_required" -> {
+                                        pendingKillToken = outcome.confirmToken
+                                        onStatus("Tap ARCHIVE again to confirm.")
+                                    }
+                                    else -> {
+                                        pendingKillToken = null
+                                        onStatus(outcome.error ?: "Archive failed.")
+                                    }
+                                }
+                            }
+                        },
+                        border = BorderStroke(if (pendingKillToken != null) 2.dp else 1.dp, Ink),
+                        shape = RoundedCornerShape(3.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(
+                            text = if (pendingKillToken != null) "CONFIRM?" else "ARCHIVE",
+                            color = Ink,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
             }
         }
     }
