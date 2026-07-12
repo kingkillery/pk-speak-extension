@@ -33,6 +33,7 @@ import { mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
 import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, normalizeOptionalString, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
+import { clearRootVoiceDisable, enableRootVoiceDisable, isRootVoiceDisabled } from "./pairing.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached, resolveWindowsNpmShim } from "./agent-discovery.js";
@@ -224,8 +225,8 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "pk-speak",
 		description: "Hard-stop or control pk-speak voice replies and the wake listener",
-		usage: "/pk-speak [stop|off|on|status]",
-		examples: ["/pk-speak stop", "/pk-speak status", "/pk-speak off"],
+		usage: "/pk-speak [stop|off|quiet|silence|shush|on|status]",
+		examples: ["/pk-speak stop", "/pk-speak status", "/pk-speak off", "/pk-speak quiet"],
 		source: "extension",
 	},
 	{
@@ -760,6 +761,38 @@ function isListenerEvent(value: unknown): value is ListenerEvent {
 	}
 }
 
+
+function getOmpAgentConfigPath(): string | undefined {
+	const home = process.env.USERPROFILE || process.env.HOME;
+	if (!home) return undefined;
+	return join(home, ".omp", "agent", "config.yml");
+}
+
+function disableOmpSpeechConfig(): void {
+	const configPath = getOmpAgentConfigPath();
+	if (configPath && existsSync(configPath)) {
+		try {
+			const raw = readFileSync(configPath, "utf8");
+			const next = raw.replace(/(^speech:\s*\n\s*enabled:\s*)true\b/m, "$1false");
+			if (next !== raw) writeFileSync(configPath, next, "utf8");
+		} catch {}
+	}
+	// Keep omp + pi-speak sentinels in lockstep with hard-stop.
+	enableRootVoiceDisable();
+}
+
+function enableOmpSpeechConfig(): void {
+	const configPath = getOmpAgentConfigPath();
+	if (configPath && existsSync(configPath)) {
+		try {
+			const raw = readFileSync(configPath, "utf8");
+			const next = raw.replace(/(^speech:\s*\n\s*enabled:\s*)false\b/m, "$1true");
+			if (next !== raw) writeFileSync(configPath, next, "utf8");
+		} catch {}
+	}
+	clearRootVoiceDisable();
+}
+
 export default function speakExtension(pi: ExtensionAPI) {
 	let speakState: SpeakState = {
 		enabled: false,
@@ -1203,6 +1236,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const speakText = async (text: string, ctx?: any) => {
 		const trimmed = text.trim();
 		if (!speakState.enabled || !trimmed) return;
+		if (isRootVoiceDisabled()) return;
 
 		stopSpeaking(ctx);
 
@@ -1226,6 +1260,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 			});
 			speakingProcess = undefined;
 			if (abortController.signal.aborted) return;
+			if (!speakState.enabled || isRootVoiceDisabled()) {
+				cleanupAudioFiles();
+				setPhase("ready", ctx);
+				return;
+			}
 			if (!existsSync(outputPath)) {
 				throw new Error("Speech synthesis did not create an audio file");
 			}
@@ -2310,6 +2349,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		ctx?: any,
 	) => {
 		if (action === "on") {
+			clearRootVoiceDisable();
+			enableOmpSpeechConfig();
 			speakState.enabled = true;
 			persistState();
 			setPhase("ready", ctx);
@@ -2925,7 +2966,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					updateMonoStatus(target);
 					const cue = playMonoCue("listening");
 					cue.on("error", () => {});
-					if (!speakState.enabled) {
+					if (!speakState.enabled && !isRootVoiceDisabled()) {
 						speakState.enabled = true;
 						persistState();
 						setPhase("ready", target);
@@ -3788,6 +3829,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const lower = raw.toLowerCase();
 
 			if (!raw || lower === "on" || lower === "enable" || lower === "start") {
+				clearRootVoiceDisable();
+				enableOmpSpeechConfig();
 				speakState.enabled = true;
 				persistState();
 				setPhase("ready", ctx);
@@ -3877,6 +3920,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const hardStopPkSpeak = (ctx: any) => {
 		speakState.enabled = false;
 		persistState();
+		disableOmpSpeechConfig();
 		stopSpeaking(ctx);
 		stopListener(ctx);
 		persistMonoState();
@@ -3887,7 +3931,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.registerCommand("pk-speak", {
 		description: "Hard-stop pk-speak voice replies and the wake listener",
 		getArgumentCompletions: (prefix) => {
-			const options = ["stop", "off", "on", "status", "quiet", "silence"];
+			const options = ["stop", "off", "on", "status", "quiet", "silence", "shush"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -3902,6 +3946,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (lower === "on" || lower === "enable" || lower === "start") {
+				clearRootVoiceDisable();
+				enableOmpSpeechConfig();
 				speakState.enabled = true;
 				persistState();
 				setPhase("ready", ctx);
