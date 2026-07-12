@@ -123,7 +123,10 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFFF4F1E9))
+                        // Mirrors ui.theme.Canvas; imported as a raw hex here because
+                        // androidx.compose.foundation.Canvas (the drawing composable)
+                        // is already imported under the same name in this file.
+                        .background(Color(0xFFF7F6F0))
                 ) { innerPadding ->
                     PiSpeakConsoleScreen(
                         audioHelper = audioHelper,
@@ -284,7 +287,7 @@ fun PiSpeakConsoleScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFFF4F1E9))
+            .background(Color(0xFFF7F6F0))
     ) {
         Column(
             modifier = Modifier.fillMaxSize()
@@ -477,9 +480,9 @@ fun HeaderSection(
 }
 
 fun gatewayConnectionIndicatorColor(isGatewayConnected: Boolean, isReconnecting: Boolean): Color = when {
-    isGatewayConnected -> Color(0xFF2E7D52)
-    isReconnecting -> Color(0xFFC97E1A)
-    else -> Color(0xFFB3261E)
+    isGatewayConnected -> Success
+    isReconnecting -> Warn
+    else -> Error
 }
 
 
@@ -541,7 +544,7 @@ fun PiSpeakDrawer(
     onSettings: () -> Unit
 ) {
     ModalDrawerSheet(
-        drawerContainerColor = Color(0xFFF4F1E9),
+        drawerContainerColor = Color(0xFFF7F6F0),
         drawerContentColor = Ink,
         drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
         modifier = Modifier.fillMaxWidth(0.84f)
