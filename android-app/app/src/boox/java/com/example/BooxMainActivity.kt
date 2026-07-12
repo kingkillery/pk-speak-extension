@@ -56,6 +56,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -180,6 +182,11 @@ private val Ink = Color(0xFF111111)
 private val Paper = Color(0xFFFFFFFF)
 private val Chrome = Color(0xFFB8B8B8)
 private val SoftChrome = Color(0xFFE2E2E2)
+private val EpdInkMuted = Color(0xFF555555)
+private val EpdInkQuiet = Color(0xFF777777)
+private val EpdInkDisabled = Color(0xFFAAAAAA)
+private val EpdChromeDisabled = Color(0xFFCCCCCC)
+private val EpdChromeSelected = Color(0xFFE8E8E8)
 
 // ─── Root ───────────────────────────────────────────────────────────────────
 @Composable
@@ -299,7 +306,6 @@ private fun BooxRoot(
             // ─── Header ──────────────────────────────────────────────
             BooxHeader(
                 state = state,
-                prefs = prefs,
                 onToggleHub = { showHub = !showHub; showSettings = false },
                 onToggleSettings = { showSettings = !showSettings; showHub = false },
             )
@@ -360,73 +366,57 @@ private fun BooxRoot(
 @Composable
 private fun BooxHeader(
     state: StudioRuntimeState,
-    prefs: AppPreferences,
     onToggleHub: () -> Unit,
     onToggleSettings: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, Chrome, RoundedCornerShape(4.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .heightIn(min = 56.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "pi-speak · e-ink",
+                text = "Pi Speak",
                 color = Ink,
-                fontSize = 14.sp,
+                fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
             )
-            val host = prefs.targetIpAddress.ifBlank { "(no gateway)" }
-            val session = prefs.codexSessionName.ifBlank { "default" }
-            Text(
-                text = "$host · $session",
-                color = Ink,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            // Status is paired with a [OK]/[WAIT]/[!!] glyph + the headline text. The
-            // text itself reads "Connected"/"Searching for gateway..."/"Gateway unreachable"
-            // so it carries meaning even if every color renders identically on EPD.
+            Spacer(modifier = Modifier.height(2.dp))
             val statusPrefix = when {
-                state.isGatewayConnected -> "[OK] "
-                state.isReconnecting -> "[WAIT] "
-                else -> "[!!] "
+                state.isGatewayConnected -> "OK"
+                state.isReconnecting -> "WAIT"
+                else -> "ERROR"
             }
-            val statusBorderWeight = if (state.isGatewayConnected) 1.dp else 2.dp
             Text(
-                text = statusPrefix + state.connectionStatusText,
+                text = "$statusPrefix ${state.connectionStatusText}",
                 color = Ink,
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.border(statusBorderWeight, Ink, RoundedCornerShape(2.dp))
-                    .padding(horizontal = 4.dp, vertical = 1.dp),
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
         OutlinedButton(
             onClick = onToggleHub,
-            border = BorderStroke(1.dp, Ink),
+            modifier = Modifier.heightIn(min = 56.dp),
+            border = BorderStroke(1.dp, Chrome),
             shape = RoundedCornerShape(4.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            Text("HUB", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Text("Hub", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(6.dp))
         OutlinedButton(
             onClick = onToggleSettings,
-            border = BorderStroke(1.dp, Ink),
+            modifier = Modifier.heightIn(min = 56.dp),
+            border = BorderStroke(1.dp, Chrome),
             shape = RoundedCornerShape(4.dp),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
         ) {
-            Text("CFG", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Text("Settings", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -501,25 +491,38 @@ private fun SessionSelector(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onToggle),
+                    .heightIn(min = 56.dp)
+                    .clickable(onClick = onToggle)
+                    .semantics {
+                        contentDescription = if (expanded) {
+                            "Collapse session selector. Current selection: $stripLabel"
+                        } else {
+                            "Open session selector. Current selection: $stripLabel"
+                        }
+                    },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = if (expanded) "▲ SESSION" else "▼ SESSION",
+                    text = "Session",
                     color = Ink,
-                    fontSize = 10.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = stripLabel,
-                    color = if (selectedSessionName.isNotBlank()) Ink else Color(0xFF888888),
+                    color = if (selectedSessionName.isNotBlank()) Ink else EpdInkQuiet,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (expanded) "−" else "+",
+                    color = Ink,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
                 )
             }
 
@@ -538,7 +541,7 @@ private fun SessionSelector(
                 if (projects.isEmpty()) {
                     Text(
                         text = "Loading projects...",
-                        color = Color(0xFF888888),
+                        color = EpdInkQuiet,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -547,7 +550,9 @@ private fun SessionSelector(
                         items(projects, key = { it }) { name ->
                             val sel = name == selectedProject
                             Surface(
-                                modifier = Modifier.clickable { onSelectProject(name) },
+                                modifier = Modifier
+                                    .heightIn(min = 56.dp)
+                                    .clickable { onSelectProject(name) },
                                 color = if (sel) Ink else Paper,
                                 shape = RoundedCornerShape(3.dp),
                                 border = BorderStroke(if (sel) 2.dp else 1.dp, if (sel) Ink else SoftChrome),
@@ -580,7 +585,7 @@ private fun SessionSelector(
                     Text(
                         text = if (selectedProject.isBlank()) "Select a project above."
                                else "No sessions used in the last 24h for $selectedProject.",
-                        color = Color(0xFF888888),
+                        color = EpdInkQuiet,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -592,8 +597,9 @@ private fun SessionSelector(
                             Surface(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .heightIn(min = 56.dp)
                                     .clickable { onSelectSession(entry) },
-                                color = if (sel) Color(0xFFE8E8E8) else Paper,
+                                color = if (sel) EpdChromeSelected else Paper,
                                 shape = RoundedCornerShape(2.dp),
                                 border = BorderStroke(if (sel) 2.dp else 1.dp, if (sel) Ink else SoftChrome),
                             ) {
@@ -620,7 +626,7 @@ private fun SessionSelector(
                                     )
                                     Text(
                                         text = ago,
-                                        color = Color(0xFF666666),
+                                        color = EpdInkMuted,
                                         fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace,
                                     )
@@ -750,7 +756,7 @@ private fun BooxCockpit(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = reason,
-                            color = Color(0xFF555555),
+                            color = EpdInkMuted,
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                         )
@@ -758,10 +764,13 @@ private fun BooxCockpit(
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    liveSessionRef.value?.approveTerminal(approvalId)
-                    approvalDialogState = null
-                }) {
+                TextButton(
+                    onClick = {
+                        liveSessionRef.value?.approveTerminal(approvalId)
+                        approvalDialogState = null
+                    },
+                    modifier = Modifier.heightIn(min = 56.dp),
+                ) {
                     Text(
                         text = "APPROVE",
                         color = Ink,
@@ -771,11 +780,14 @@ private fun BooxCockpit(
                 }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    liveSessionRef.value?.rejectTerminal(approvalId)
-                    appendChat(state, prefs, "system", "[live] Command rejected by user.")
-                    approvalDialogState = null
-                }) {
+                TextButton(
+                    onClick = {
+                        liveSessionRef.value?.rejectTerminal(approvalId)
+                        appendChat(state, prefs, "system", "[live] Command rejected by user.")
+                        approvalDialogState = null
+                    },
+                    modifier = Modifier.heightIn(min = 56.dp),
+                ) {
                     Text(
                         text = "REJECT",
                         color = Ink,
@@ -797,26 +809,40 @@ private fun BooxCockpit(
                 .weight(1f)
                 .fillMaxWidth()
                 .border(1.dp, Chrome, RoundedCornerShape(4.dp))
-                .padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             items(state.chatMessages, key = { it.id }) { msg -> BooxChatBubble(msg) }
             if (state.chatMessages.isEmpty()) {
                 item {
-                    Text(
-                        text = "Ready. Hold TALK to dictate, or type below.",
-                        color = Color(0xFF666666),
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 32.dp),
+                    ) {
+                        Text(
+                            text = "Ready when you are",
+                            color = Ink,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Choose a session, then type a prompt or hold Talk.",
+                            color = EpdInkMuted,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp,
+                        )
+                    }
                 }
             }
             if (state.isProcessing && state.latestReply.isBlank()) {
                 item {
                     Text(
-                        text = "...",
+                        text = "[WORK] Agent is responding",
                         color = Ink,
-                        fontSize = 14.sp,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
@@ -852,25 +878,6 @@ private fun BooxCockpit(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // ─── Latest reply (visible block so user can re-read without scrolling) ─
-        if (state.latestReply.isNotBlank() && !state.isProcessing) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Paper,
-                shape = RoundedCornerShape(4.dp),
-                border = BorderStroke(1.dp, Ink)
-            ) {
-                Text(
-                    text = state.latestReply,
-                    color = Ink,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(10.dp),
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
 
         // ─── Text input ───────────────────────────────────────────
         BooxTextInput(
@@ -896,9 +903,9 @@ private fun BooxCockpit(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // ─── Action row: TALK (push-to-talk) / LIVE / STOP ──────────────
+        // ─── Voice actions: Talk leads; Live and Stop stay secondary ─────────
         Row(
-            modifier = Modifier.fillMaxWidth().height(120.dp),
+            modifier = Modifier.fillMaxWidth().height(64.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -960,7 +967,7 @@ private fun BooxCockpit(
                         recordingStartedAtMs = 0L
                     }
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1.7f),
             )
 
             // LIVE toggle: starts / stops a full-duplex Gemini realtime voice session.
@@ -1090,7 +1097,7 @@ private fun BooxCockpit(
                         }
                     }
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(0.75f),
             )
 
             // STOP: cancels an in-flight HTTP turn OR interrupts Gemini mid-speech in live mode.
@@ -1105,7 +1112,7 @@ private fun BooxCockpit(
                         stopCurrentTurn(state, scope, client, audioHelper, ttsHelper, prefs)
                     }
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(0.75f),
             )
         }
 
@@ -1117,15 +1124,16 @@ private fun BooxCockpit(
         ) {
             OutlinedButton(
                 onClick = { prefs.autoSpeakEnabled = !prefs.autoSpeakEnabled },
+                modifier = Modifier.heightIn(min = 56.dp),
                 border = BorderStroke(1.dp, if (prefs.autoSpeakEnabled) Ink else Chrome),
                 shape = RoundedCornerShape(4.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 Text(
-                    text = if (prefs.autoSpeakEnabled) "[x] SPEAK REPLIES" else "[ ] SPEAK REPLIES",
+                    text = if (prefs.autoSpeakEnabled) "Speak on" else "Speak off",
                     color = Ink,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.SansSerif,
                     fontWeight = FontWeight.Bold,
                 )
             }
@@ -1137,25 +1145,19 @@ private fun BooxCockpit(
                     audioHelper.stopPlayback()
                     state.playingMessageId = null
                 },
+                modifier = Modifier.heightIn(min = 56.dp),
                 border = BorderStroke(1.dp, Chrome),
                 shape = RoundedCornerShape(4.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 Text(
-                    text = "QUIET",
+                    text = "Quiet",
                     color = Ink,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.SansSerif,
                     fontWeight = FontWeight.Bold,
                 )
             }
-            Spacer(modifier = Modifier.weight(1f))
-            Text(
-                text = "v${BuildConfigEink.einkVersion}",
-                color = Color(0xFF888888),
-                fontSize = 10.sp,
-                fontFamily = FontFamily.Monospace,
-            )
         }
     }
 }
@@ -1163,44 +1165,43 @@ private fun BooxCockpit(
 // ─── Chat bubble (read-only render of a single ChatMessage) ────────────────
 @Composable
 private fun BooxChatBubble(msg: ChatMessage) {
-    val (label, labelColor) = when (msg.role) {
-        "user" -> "YOU" to Ink
-        "assistant" -> "AGENT" to Ink
-        "system" -> "! SYSTEM" to Ink
-        "progress" -> "PROGRESS" to Color(0xFF555555)
-        else -> msg.role.uppercase(Locale.US) to Ink
+    val label = when (msg.role) {
+        "user" -> "You"
+        "assistant" -> "Agent"
+        "system" -> "System"
+        "progress" -> "Status"
+        else -> msg.role.replaceFirstChar { it.titlecase(Locale.US) }
     }
+    val messageSurface = if (msg.role == "user") SoftChrome else Paper
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Paper,
-        shape = RoundedCornerShape(2.dp),
-        border = BorderStroke(1.dp, SoftChrome)
+        color = messageSurface,
+        shape = RoundedCornerShape(3.dp),
     ) {
-        Column(modifier = Modifier.padding(8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = label,
-                    color = labelColor,
-                    fontSize = 10.sp,
+                    color = if (msg.role == "progress") EpdInkMuted else Ink,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Text(
                     text = formatTime(msg.timestampMs),
-                    color = Color(0xFF888888),
+                    color = EpdInkQuiet,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                 )
             }
             if (msg.text.isNotBlank()) {
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = msg.text,
                     color = Ink,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp,
                 )
             }
         }
@@ -1222,7 +1223,7 @@ private fun BooxTextInput(
     onSend: () -> Unit,
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
         color = Paper,
         shape = RoundedCornerShape(4.dp),
         border = BorderStroke(1.dp, if (enabled) Ink else Chrome)
@@ -1231,25 +1232,28 @@ private fun BooxTextInput(
             modifier = Modifier.padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+            Box(modifier = Modifier.weight(1f).heightIn(min = 56.dp)) {
                 BasicTextField(
                     value = value,
                     onValueChange = onValueChange,
                     enabled = enabled,
                     textStyle = TextStyle(
-                        color = if (enabled) Ink else Color(0xFF999999),
-                        fontSize = 14.sp,
-                        fontFamily = FontFamily.Monospace,
+                        color = if (enabled) Ink else EpdInkDisabled,
+                        fontSize = 15.sp,
+                        lineHeight = 21.sp,
                     ),
                     cursorBrush = SolidColor(Ink),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 14.dp)
+                        .semantics { contentDescription = "Prompt" },
                 )
                 if (value.isEmpty()) {
                     Text(
-                        text = "type a prompt...",
-                        color = Color(0xFFAAAAAA),
-                        fontSize = 14.sp,
-                        fontFamily = FontFamily.Monospace,
+                        text = "Ask Pi Speak…",
+                        color = EpdInkDisabled,
+                        fontSize = 15.sp,
+                        modifier = Modifier.padding(vertical = 14.dp),
                     )
                 }
             }
@@ -1257,20 +1261,20 @@ private fun BooxTextInput(
             Button(
                 onClick = onSend,
                 enabled = enabled && value.isNotBlank(),
+                modifier = Modifier.heightIn(min = 56.dp),
                 shape = RoundedCornerShape(4.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Ink,
                     contentColor = Paper,
-                    disabledContainerColor = Color(0xFFCCCCCC),
-                    disabledContentColor = Color(0xFF777777),
+                    disabledContainerColor = EpdChromeDisabled,
+                    disabledContentColor = EpdInkQuiet,
                 ),
                 contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
             ) {
                 Text(
-                    text = "SEND",
+                    text = "Send",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
                 )
             }
         }
@@ -1288,12 +1292,18 @@ private fun TalkButton(
 ) {
     val container = when {
         isRecording -> Ink
-        isProcessing -> Color(0xFFCCCCCC)
+        isProcessing -> EpdChromeDisabled
         else -> Paper
     }
     val content = if (isRecording) Paper else Ink
+    val description = when {
+        isRecording -> "Recording. Release to send."
+        isProcessing -> "Talk unavailable while working."
+        else -> "Hold to talk. Release to send."
+    }
     Surface(
         modifier = modifier
+            .semantics { contentDescription = description }
             .then(
                 if (!isProcessing) {
                     Modifier.pointerInput(Unit) {
@@ -1317,21 +1327,20 @@ private fun TalkButton(
                     }
                 } else Modifier
             )
-            .border(1.dp, Ink, RoundedCornerShape(4.dp)),
+            .border(if (isRecording) 2.dp else 1.dp, Ink, RoundedCornerShape(4.dp)),
         color = container,
         shape = RoundedCornerShape(4.dp),
     ) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
                 text = when {
-                    isRecording -> "● RECORDING — RELEASE TO SEND"
-                    isProcessing -> "BUSY"
-                    else -> "HOLD TO TALK"
+                    isRecording -> "[REC] Release to send"
+                    isProcessing -> "Working"
+                    else -> "Hold to talk"
                 },
                 color = content,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
             )
         }
     }
@@ -1347,17 +1356,22 @@ private fun StopButton(
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier,
+        modifier = modifier.heightIn(min = 56.dp),
         border = BorderStroke(if (enabled) 2.dp else 1.dp, if (enabled) Ink else Chrome),
         shape = RoundedCornerShape(4.dp),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = Paper,
+            contentColor = Ink,
+            disabledContainerColor = EpdChromeDisabled,
+            disabledContentColor = EpdInkMuted,
+        ),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
     ) {
         Text(
-            text = if (enabled) "! STOP" else "STOP",
-            color = if (enabled) Ink else Color(0xFFAAAAAA),
-            fontSize = 14.sp,
+            text = if (enabled) "! Stop" else "Stop",
+            color = if (enabled) Ink else EpdInkDisabled,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace,
         )
     }
 }
@@ -1369,26 +1383,26 @@ private fun LiveButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // EPD-safe active indicator: inverted fill (Ink bg / Paper text) mirrors the
-    // RECORDING state of TalkButton. No accent colour — EPD dithering can collapse
-    // colours into the same grey as everything else on a 16-level panel.
     val container = if (isActive) Ink else Paper
     val content = if (isActive) Paper else Ink
     val borderWeight = if (isActive) 2.dp else 1.dp
     Surface(
         modifier = modifier
+            .heightIn(min = 56.dp)
             .border(borderWeight, Ink, RoundedCornerShape(4.dp))
-            .clickable(onClick = onClick),
+            .clickable(onClick = onClick)
+            .semantics {
+                contentDescription = if (isActive) "Live voice active. Tap to disconnect." else "Start live voice."
+            },
         color = container,
         shape = RoundedCornerShape(4.dp),
     ) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
-                text = if (isActive) "● LIVE" else "LIVE",
+                text = if (isActive) "[ON] Live" else "Live",
                 color = content,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
             )
         }
     }
@@ -1455,7 +1469,7 @@ private fun HubPane(
                 "Tap ROUTE TURNS HERE to direct voice/text turns into a lane, or expand a lane " +
                 "for a direct chat composer and an archive control. " +
                 "LAUNCH TASK starts a new background session with a prompt of your choice.",
-            color = Color(0xFF555555),
+            color = EpdInkMuted,
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
         )
@@ -1464,6 +1478,7 @@ private fun HubPane(
         // ─── Launch task (EPD-friendly: bordered, monospace, no animation) ─────
         OutlinedButton(
             onClick = { showTaskLauncher = true },
+            modifier = Modifier.heightIn(min = 56.dp),
             border = BorderStroke(2.dp, Ink),
             shape = RoundedCornerShape(4.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -1491,6 +1506,7 @@ private fun HubPane(
                     launching = false
                 }
             },
+            modifier = Modifier.heightIn(min = 56.dp),
             border = BorderStroke(1.dp, Ink),
             shape = RoundedCornerShape(4.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -1514,6 +1530,7 @@ private fun HubPane(
                     launchingColab = false
                 }
             },
+            modifier = Modifier.heightIn(min = 56.dp),
             border = BorderStroke(1.dp, Ink),
             shape = RoundedCornerShape(4.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -1552,6 +1569,7 @@ private fun HubPane(
                     joiningCollab = false
                 }
             },
+            modifier = Modifier.heightIn(min = 56.dp),
             border = BorderStroke(1.dp, Ink),
             shape = RoundedCornerShape(4.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -1589,7 +1607,7 @@ private fun HubPane(
             BooxHubUiState.Empty -> {
                 Text(
                     text = "No sessions reported by gateway.",
-                    color = Color(0xFF555555),
+                    color = EpdInkMuted,
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                 )
@@ -1698,9 +1716,10 @@ private fun BooxLaunchTaskDialog(
                     enabled = !launching,
                     textStyle = TextStyle(color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
                     cursorBrush = SolidColor(Ink),
-                    modifier = Modifier.fillMaxWidth().border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
                 )
-                Text("^ working dir", color = Color(0xFF888888), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Text("^ working dir", color = EpdInkQuiet, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                 Spacer(modifier = Modifier.height(8.dp))
                 BasicTextField(
                     value = prompt,
@@ -1711,7 +1730,7 @@ private fun BooxLaunchTaskDialog(
                     modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp)
                         .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
                 )
-                Text("^ prompt", color = Color(0xFF888888), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Text("^ prompt", color = EpdInkQuiet, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                 Spacer(modifier = Modifier.height(8.dp))
                 BasicTextField(
                     value = model,
@@ -1719,9 +1738,10 @@ private fun BooxLaunchTaskDialog(
                     enabled = !launching,
                     textStyle = TextStyle(color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
                     cursorBrush = SolidColor(Ink),
-                    modifier = Modifier.fillMaxWidth().border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
                 )
-                Text("^ model (optional)", color = Color(0xFF888888), fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Text("^ model (optional)", color = EpdInkQuiet, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
             }
         },
         confirmButton = {
@@ -1740,6 +1760,7 @@ private fun BooxLaunchTaskDialog(
                         }
                     }
                 },
+                modifier = Modifier.heightIn(min = 56.dp),
             ) {
                 Text(
                     if (launching) "LAUNCHING..." else "LAUNCH",
@@ -1750,8 +1771,11 @@ private fun BooxLaunchTaskDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = { if (!launching) onDismiss() }) {
-                Text("CANCEL", color = Color(0xFF555555), fontFamily = FontFamily.Monospace)
+            TextButton(
+                onClick = { if (!launching) onDismiss() },
+                modifier = Modifier.heightIn(min = 56.dp),
+            ) {
+                Text("CANCEL", color = EpdInkMuted, fontFamily = FontFamily.Monospace)
             }
         },
         containerColor = Paper,
@@ -1772,7 +1796,7 @@ private fun HubLoadedContent(
     if (dashboard.sessions.isEmpty()) {
         Text(
             text = "No sessions reported by gateway.",
-            color = Color(0xFF555555),
+            color = EpdInkMuted,
             fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
         )
@@ -1814,7 +1838,7 @@ private fun HubLoadedContent(
             item(key = "omp-empty") {
                 Text(
                     text = "No oh-my-pk background lanes running. Start one on the host (oh-my-pk agent mode) and it will appear here.",
-                    color = Color(0xFF555555),
+                    color = EpdInkMuted,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                 )
@@ -1848,7 +1872,7 @@ private fun HubSessionRow(
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = if (isSelected) Color(0xFFE8E8E8) else Paper,
+        color = if (isSelected) EpdChromeSelected else Paper,
         shape = RoundedCornerShape(2.dp),
         border = BorderStroke(if (isSelected) 2.dp else 1.dp, if (isSelected) Ink else SoftChrome)
     ) {
@@ -1883,7 +1907,7 @@ private fun HubSessionRow(
             if (subtitle.isNotBlank()) {
                 Text(
                     text = subtitle,
-                    color = Color(0xFF555555),
+                    color = EpdInkMuted,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 2,
@@ -1894,7 +1918,7 @@ private fun HubSessionRow(
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = "subagents: ${entry.subagents.joinToString(", ") { it.name.ifBlank { it.id } }}",
-                    color = Color(0xFF555555),
+                    color = EpdInkMuted,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 2,
@@ -1907,7 +1931,7 @@ private fun HubSessionRow(
                 border = BorderStroke(if (isSelected) 2.dp else 1.dp, Ink),
                 shape = RoundedCornerShape(3.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
             ) {
                 Text(
                     text = if (isSelected) "[*] ROUTING TURNS HERE" else "[ ] ROUTE TURNS HERE",
@@ -1923,7 +1947,7 @@ private fun HubSessionRow(
                 border = BorderStroke(1.dp, Chrome),
                 shape = RoundedCornerShape(3.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
             ) {
                 Text(
                     text = if (expanded) "^ HIDE CHAT / ARCHIVE" else "v CHAT / ARCHIVE",
@@ -1940,7 +1964,8 @@ private fun HubSessionRow(
                     enabled = !sending,
                     textStyle = TextStyle(color = Ink, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
                     cursorBrush = SolidColor(Ink),
-                    modifier = Modifier.fillMaxWidth().border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(6.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(6.dp),
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(modifier = Modifier.fillMaxWidth()) {
@@ -1964,7 +1989,7 @@ private fun HubSessionRow(
                         border = BorderStroke(1.dp, Ink),
                         shape = RoundedCornerShape(3.dp),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp),
                     ) {
                         Text(
                             text = if (sending) "SENDING..." else "SEND",
@@ -2001,7 +2026,7 @@ private fun HubSessionRow(
                         border = BorderStroke(if (pendingKillToken != null) 2.dp else 1.dp, Ink),
                         shape = RoundedCornerShape(3.dp),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp),
                     ) {
                         Text(
                             text = if (pendingKillToken != null) "CONFIRM?" else "ARCHIVE",
@@ -2143,6 +2168,7 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
                         cameraPermission.launchPermissionRequest()
                     }
                 },
+                modifier = Modifier.heightIn(min = 56.dp),
                 border = BorderStroke(1.dp, Ink),
                 shape = RoundedCornerShape(4.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
@@ -2187,6 +2213,7 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
                     savedHint = true
                     onSave()
                 },
+                modifier = Modifier.heightIn(min = 56.dp),
                 shape = RoundedCornerShape(4.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Ink, contentColor = Paper),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
@@ -2196,6 +2223,7 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
             Spacer(modifier = Modifier.width(8.dp))
             OutlinedButton(
                 onClick = onClose,
+                modifier = Modifier.heightIn(min = 56.dp),
                 border = BorderStroke(1.dp, Ink),
                 shape = RoundedCornerShape(4.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
@@ -2215,7 +2243,7 @@ private fun SettingsRow(label: String, value: String, onChange: (String) -> Unit
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(
             text = label,
-            color = Color(0xFF555555),
+            color = EpdInkMuted,
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
@@ -2227,6 +2255,7 @@ private fun SettingsRow(label: String, value: String, onChange: (String) -> Unit
             cursorBrush = SolidColor(Ink),
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 56.dp)
                 .border(1.dp, Chrome, RoundedCornerShape(2.dp))
                 .padding(6.dp),
         )
@@ -2241,6 +2270,7 @@ private fun ToggleRow(label: String, value: Boolean, onChange: (Boolean) -> Unit
     ) {
         OutlinedButton(
             onClick = { onChange(!value) },
+            modifier = Modifier.heightIn(min = 56.dp),
             border = BorderStroke(1.dp, if (value) Ink else Chrome),
             shape = RoundedCornerShape(2.dp),
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
