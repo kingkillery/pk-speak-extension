@@ -6,13 +6,14 @@ Source: `DESIGN.md` (repo root). Replaced 2026-07-12: the monochrome "paper" sys
 Pi Speak Android is a spacious, voice-first mobile hub for coding agents — home base for watching sessions run, reviewing what an agent did, and approving what it wants to do next. Warm and confidence-building rather than clinical: generous spacing, plain language over jargon, a clear visual difference between agent and user messages.
 
 ## Palette (standard build — Sage & Clay)
+
 | Token | Hex | Use |
 |---|---:|---|
 | `Canvas` | `#F7F6F0` | App background |
 | `SurfacePaper` | `#FEFDF9` | Composer, sheets, primary panels |
 | `SurfaceSubtle` | `#EDEDE1` | Inset panels, empty-state glyphs |
 | `SurfaceMuted` | `#E3E3D3` | Disabled controls, pressed fills |
-| `SelectedFill` | `#E3E8DA` | Selected nav row, active tab (sage wash) |
+| `SelectedFill` | `#E3E8DA` | Selected nav row, active tab, quick command chips (sage wash) |
 | `Ink` | `#2B2E24` | Primary text |
 | `InkMuted` | `#767A64` | Secondary text, labels |
 | `Line` | `#DEDECD` | Hairline borders |

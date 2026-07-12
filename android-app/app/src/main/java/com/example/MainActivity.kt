@@ -14,6 +14,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import com.example.ui.theme.Canvas as CanvasColor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -123,10 +124,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
-                        // Mirrors ui.theme.Canvas; imported as a raw hex here because
-                        // androidx.compose.foundation.Canvas (the drawing composable)
-                        // is already imported under the same name in this file.
-                        .background(Color(0xFFF7F6F0))
+                        .background(CanvasColor)
                 ) { innerPadding ->
                     PiSpeakConsoleScreen(
                         audioHelper = audioHelper,
@@ -287,12 +285,12 @@ fun PiSpeakConsoleScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFFF7F6F0))
+            .background(CanvasColor)
     ) {
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Top bar: menu / serif title / settings (Claude "paper" header)
+            // Top bar: menu / title / settings (Sage & Clay header)
             HeaderSection(
                 title = tabTitle,
                 sessionName = codexSessionName,
@@ -544,7 +542,7 @@ fun PiSpeakDrawer(
     onSettings: () -> Unit
 ) {
     ModalDrawerSheet(
-        drawerContainerColor = Color(0xFFF7F6F0),
+        drawerContainerColor = CanvasColor,
         drawerContentColor = Ink,
         drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
         modifier = Modifier.fillMaxWidth(0.84f)
