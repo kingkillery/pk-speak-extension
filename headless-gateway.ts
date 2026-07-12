@@ -24,7 +24,8 @@ import { shutdownLocalSttWorker, transcribeAudioBuffer, transcribeWithWhisperX }
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
 import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
-import { defaultOhMyPiSessionRoots, mergeOhMyPiAgentHubSessionsCached } from "./agent-hub-dashboard.js";
+import { buildOhMyPiAgentHubDashboardCached, defaultOhMyPiSessionRoots, mergeOhMyPiAgentHubSessionsCached } from "./agent-hub-dashboard.js";
+import { createLiveAgentHubBinding } from "./herdr-agent-hub-live.js";
 import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashboardEntry } from "./session-routing.js";
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
@@ -1025,6 +1026,11 @@ ${text}
 	onTurnCancel: cancelCurrentTurn,
 	getSessionDashboard: buildRecentSessionDashboard,
 	getCompactRouteSlots: () => [],
+	agentHub: createLiveAgentHubBinding({
+		dashboardFn: () => buildOhMyPiAgentHubDashboardCached(),
+		submitChatTurn: (text, target, cwd) =>
+			remoteTurnManager.enqueue("http-text", () => runTextTurn(text, false, cwd, undefined, target)),
+	}),
 	onSessionResume: resumeStoredSession,
 	onSessionArchive: (payload) =>
 		archiveOrRecoverSession(payload.sessionPath ?? "", payload.action === "recover" ? "recover" : "archive"),
