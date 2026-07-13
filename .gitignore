@@ -95,3 +95,7 @@ goals/
 # Scratch files
 test-rl.js
 .tmp/
+
+# Generated multi-agent collaboration and planning artifacts
+.llm-router/
+.omo/
