@@ -1,10 +1,12 @@
 package com.example
 
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import com.example.ui.theme.Error
 import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.theme.Success
+import com.example.ui.theme.Warn
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -21,18 +23,18 @@ class HeaderConnectionStateTest {
   @get:Rule val composeTestRule = createComposeRule()
 
   @Test
-  fun gatewayIndicatorColor_isGreenWhenConnected() {
-    assertEquals(Color(0xFF2E7D52), gatewayConnectionIndicatorColor(isGatewayConnected = true, isReconnecting = false))
+  fun gatewayIndicatorColor_isSuccessWhenConnected() {
+    assertEquals(Success, gatewayConnectionIndicatorColor(isGatewayConnected = true, isReconnecting = false))
   }
 
   @Test
-  fun gatewayIndicatorColor_isOrangeWhenReconnecting() {
-    assertEquals(Color(0xFFC97E1A), gatewayConnectionIndicatorColor(isGatewayConnected = false, isReconnecting = true))
+  fun gatewayIndicatorColor_isWarnWhenReconnecting() {
+    assertEquals(Warn, gatewayConnectionIndicatorColor(isGatewayConnected = false, isReconnecting = true))
   }
 
   @Test
-  fun gatewayIndicatorColor_isRedWhenUnreachable() {
-    assertEquals(Color(0xFFB3261E), gatewayConnectionIndicatorColor(isGatewayConnected = false, isReconnecting = false))
+  fun gatewayIndicatorColor_isErrorWhenUnreachable() {
+    assertEquals(Error, gatewayConnectionIndicatorColor(isGatewayConnected = false, isReconnecting = false))
   }
 
   @Test

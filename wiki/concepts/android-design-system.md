@@ -1,55 +1,60 @@
 # Android Design System (DESIGN.md token contract)
 
-Source: `DESIGN.md` (repo root), added 2026-07-02 as part of the Android redesign effort.
+Source: `DESIGN.md` (repo root). Replaced 2026-07-12: the monochrome "paper" system (added 2026-07-02) was superseded by the Sage & Clay system after a mobile Agent Hub mockup review.
 
 ## Product posture
-Pi Speak Android is now framed as a calm mobile connection surface for coding agents — closer to the OpenAI Codex mobile app connected to a computer than an admin dashboard. The desired feel is minimal, premium, sparse, and confidence-building.
+Pi Speak Android is a spacious, voice-first mobile hub for coding agents — home base for watching sessions run, reviewing what an agent did, and approving what it wants to do next. Warm and confidence-building rather than clinical: generous spacing, plain language over jargon, a clear visual difference between agent and user messages.
 
-## Palette (standard build — quiet off-white + monochrome accent)
+## Palette (standard build — Sage & Clay)
+
 | Token | Hex | Use |
 |---|---:|---|
-| `Canvas` | `#F7F7F4` | App background |
-| `SurfacePaper` | `#FFFFFF` | Composer, sheets, primary panels |
-| `SurfaceSubtle` | `#F1F1EE` | Inset panels, empty-state glyphs |
-| `SurfaceMuted` | `#E6E6E1` | Disabled controls, pressed fills |
-| `SelectedFill` | `#EDEDEA` | Selected nav row, quick command chips |
-| `Ink` | `#171717` | Primary text and monochrome accent |
-| `InkMuted` | `#6B6B66` | Secondary text, labels |
-| `Line` | `#E1E1DC` | Hairline borders |
-| `Accent` | `#171717` | Primary send/record actions |
-| `AccentSoft` | `#F1F1EE` | User messages, soft accent fills |
-| `Success` | `#147A4A` | Connected/live success (paired with text) |
-| `SuccessSoft` | `#E2F4EA` | Connected status dot fill |
-| `Warn` | `#9A6A16` | Reconnecting/wait state (paired with text) |
-| `Error` | `#B42318` | Errors/destructive actions (paired with text) |
+| `Canvas` | `#F7F6F0` | App background |
+| `SurfacePaper` | `#FEFDF9` | Composer, sheets, primary panels |
+| `SurfaceSubtle` | `#EDEDE1` | Inset panels, empty-state glyphs |
+| `SurfaceMuted` | `#E3E3D3` | Disabled controls, pressed fills |
+| `SelectedFill` | `#E3E8DA` | Selected nav row, active tab, quick command chips (sage wash) |
+| `Ink` | `#2B2E24` | Primary text |
+| `InkMuted` | `#767A64` | Secondary text, labels |
+| `Line` | `#DEDECD` | Hairline borders |
+| `Accent` | `#C1653E` | Primary send/record actions, avatars (clay) |
+| `AccentSoft` | `#F7EBE6` | User messages, soft accent fills |
+| `Success` | `#5F7548` | Connected/live status — also the primary "sage" UI color, paired with text |
+| `SuccessSoft` | `#EAEDE0` | Connected status dot fill |
+| `Warn` | `#9C6B1E` | Reconnecting/wait state, paired with text |
+| `Error` | `#B23B23` | Errors/destructive actions, paired with text |
 
 Boox/e-ink build is a separate palette: pure ink/paper/chrome greys only, color is never the sole status signal.
 
 ## Typography
-- Large headings: serif, quiet paper-console identity.
+- Large headings: platform sans (Default), semibold — dropped the old serif "paper" identity for a friendlier, more spacious voice.
 - Body/controls: platform sans, 15-17sp, line-height 1.45-1.55.
 - Command/session metadata: monospace only where it carries code/path semantics.
 - Data/status numbers: tabular or monospace where alignment matters.
 - Labels: sentence case unless a deliberate console tag.
+- Copy avoids jargon (`tool_call`, `diff`, `commit`) in favor of plain language ("Looked through 4 files," "Ready to save this change") — the target user is not assumed to be technical.
 
 ## Spacing and shape
 - Base spacing unit: 4dp.
-- Screen gutters: 16dp standard, 12dp in dense cockpit rows.
-- Primary panels: 24dp radius. Chips/buttons: 12-18dp radius (circles only for single-icon actions).
+- Screen gutters: 20-24dp standard (spacious by default), 12dp in dense cockpit rows.
+- Primary panels: 20-24dp radius, generous internal padding. Chips/buttons: 12-18dp radius (circles only for single-icon actions).
 - Minimum touch target: 44dp standard, 56dp e-ink.
+- Prefer fewer, larger cards per screen over dense lists.
 
 ## Named components (design contract → implementation)
-- `HeaderSection`: compact command bar, menu affordance, centered destination title, gateway status chip, configure action. (Reworked in `MainActivity.kt` as part of this redesign — see git diff 2026-07-02.)
-- `PiSpeakDrawer`: warm paper nav sheet, selected row fill, profile footer.
-- `StudioTabContent`: cockpit screen — status strip, conversation panel, quick command chips, composer. `StudioIdleState` should center the connected-to-computer story: glyph, headline, short explanation, compact Gateway/Target/Voice card, quiet command hint. Implementation lives in `StudioComposables.kt` (see `wiki/concepts/studio-composables-structure.md`).
+- `HeaderSection`: compact command bar, menu affordance, centered destination title, gateway status chip, configure action.
+- `PiSpeakDrawer`: warm paper nav sheet, selected row fill (sage wash), profile footer.
+- `StudioTabContent`: cockpit screen — status strip, conversation panel, quick command chips, composer. `StudioIdleState` centers the connected-to-computer story: glyph, headline, short explanation, compact Gateway/Target/Voice card, quiet command hint. Implementation lives in `StudioComposables.kt` (see `wiki/concepts/studio-composables-structure.md`).
 - `ConnectionErrorBanner`: dark error strip, blocking gateway failures only.
 - `GatewaySessionRow`: session/agent lane row; status badges pair color with text.
+- `HubPortalComposables.kt`: Agent Hub portal (hub agent list/snapshot, chat/kill/revive) — see `wiki/concepts/herdr-agent-hub-module.md` for the backing API.
 
 ## Interaction/non-goal constraints worth enforcing in review
 - Every clickable surface needs a visible pressed/selected/focus affordance.
 - Voice/live states must use text labels in addition to color (not color alone).
 - Loading/progress states must preserve cancel/stop access.
 - Empty states must tell the operator what to do next (see `StudioIdleState` in StudioComposables.kt).
+- Tool-use/activity collapses into a tappable summary row, not a raw log; approval moments are a distinct bordered card with two labeled buttons.
 - No emoji icons in visible UI. No blue/purple AI gradients. No raw black/white except Boox contrast needs.
 
 ## Status

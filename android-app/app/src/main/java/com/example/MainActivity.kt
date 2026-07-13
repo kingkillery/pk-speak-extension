@@ -14,6 +14,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import com.example.ui.theme.Canvas as CanvasColor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -123,7 +124,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFFF4F1E9))
+                        .background(CanvasColor)
                 ) { innerPadding ->
                     PiSpeakConsoleScreen(
                         audioHelper = audioHelper,
@@ -284,12 +285,12 @@ fun PiSpeakConsoleScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFFF4F1E9))
+            .background(CanvasColor)
     ) {
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Top bar: menu / serif title / settings (Claude "paper" header)
+            // Top bar: menu / title / settings (Sage & Clay header)
             HeaderSection(
                 title = tabTitle,
                 sessionName = codexSessionName,
@@ -477,9 +478,9 @@ fun HeaderSection(
 }
 
 fun gatewayConnectionIndicatorColor(isGatewayConnected: Boolean, isReconnecting: Boolean): Color = when {
-    isGatewayConnected -> Color(0xFF2E7D52)
-    isReconnecting -> Color(0xFFC97E1A)
-    else -> Color(0xFFB3261E)
+    isGatewayConnected -> Success
+    isReconnecting -> Warn
+    else -> Error
 }
 
 
@@ -541,7 +542,7 @@ fun PiSpeakDrawer(
     onSettings: () -> Unit
 ) {
     ModalDrawerSheet(
-        drawerContainerColor = Color(0xFFF4F1E9),
+        drawerContainerColor = CanvasColor,
         drawerContentColor = Ink,
         drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
         modifier = Modifier.fillMaxWidth(0.84f)
