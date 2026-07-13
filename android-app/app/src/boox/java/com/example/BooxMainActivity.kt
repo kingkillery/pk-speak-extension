@@ -721,6 +721,8 @@ private fun BooxCockpit(
     val liveRecorderRef = remember { mutableStateOf<StreamingPcmRecorder?>(null) }
     val livePlayerRef = remember { mutableStateOf<StreamingPcmPlayer?>(null) }
     var approvalDialogState by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    val liveTranscriptBufferRef = remember { mutableStateOf<RealtimeTranscriptBuffer?>(null) }
+    val approvalRejectionGuard = remember { TerminalApprovalRejectionGuard() }
 
     // Ensure resources are released if the cockpit leaves the composition.
     DisposableEffect(Unit) {
@@ -728,13 +730,20 @@ private fun BooxCockpit(
             liveRecorderRef.value?.stop()
             liveSessionRef.value?.disconnect()
             livePlayerRef.value?.stop()
+            liveTranscriptBufferRef.value?.close()
         }
+    }
+    fun rejectApproval(approvalId: String) {
+        if (approvalRejectionGuard.rejectOnce(approvalId) { liveSessionRef.value?.rejectTerminal(it) ?: false }) {
+            appendChat(state, prefs, "system", "[live] Command rejected by user.")
+        }
+        approvalDialogState = null
     }
 
     // ─── Realtime terminal-command approval dialog ────────────────────────────
     approvalDialogState?.let { (approvalId, command, reason) ->
         AlertDialog(
-            onDismissRequest = { approvalDialogState = null },
+            onDismissRequest = { rejectApproval(approvalId) },
             title = {
                 Text(
                     text = "APPROVE COMMAND?",
@@ -766,6 +775,7 @@ private fun BooxCockpit(
             confirmButton = {
                 TextButton(
                     onClick = {
+                        approvalRejectionGuard.clear(approvalId)
                         liveSessionRef.value?.approveTerminal(approvalId)
                         approvalDialogState = null
                     },
@@ -781,11 +791,7 @@ private fun BooxCockpit(
             },
             dismissButton = {
                 TextButton(
-                    onClick = {
-                        liveSessionRef.value?.rejectTerminal(approvalId)
-                        appendChat(state, prefs, "system", "[live] Command rejected by user.")
-                        approvalDialogState = null
-                    },
+                    onClick = { rejectApproval(approvalId) },
                     modifier = Modifier.heightIn(min = 56.dp),
                 ) {
                     Text(
@@ -983,6 +989,7 @@ private fun BooxCockpit(
                         liveRecorderRef.value = null
                         livePlayerRef.value = null
                         liveSessionActive = false
+                        liveTranscriptBufferRef.value?.close()
                     } else {
                         // Toggle ON — check mic permission then start.
                         val micGranted = ContextCompat.checkSelfPermission(
@@ -995,6 +1002,8 @@ private fun BooxCockpit(
                         } else {
                             val player = StreamingPcmPlayer()
                             val recorder = StreamingPcmRecorder(context)
+                            val transcriptBuffer = RealtimeTranscriptBuffer()
+                            liveTranscriptBufferRef.value = transcriptBuffer
                             val session = RealtimeVoiceSession(
                                 prefs = prefs,
                                 listener = object : RealtimeVoiceSessionListener {
@@ -1016,13 +1025,21 @@ private fun BooxCockpit(
                                     }
 
                                     override fun onTranscript(text: String) {
-                                        scope.launch {
-                                            appendChat(state, prefs, "user", text)
+                                        transcriptBuffer.append(text)
+                                    }
+
+                                    override fun onTranscriptComplete() {
+                                        val completedText = transcriptBuffer.drain()
+                                        if (completedText.isNotBlank()) {
+                                            scope.launch {
+                                                appendChat(state, prefs, "assistant", completedText)
+                                            }
                                         }
                                     }
 
                                     override fun onInterrupt() {
-                                        // Server interrupted its own speech — flush and restart the track.
+                                        // Interrupted output is partial; do not persist it as a complete reply.
+                                        transcriptBuffer.discardCurrentTurn()
                                         player.stop()
                                         player.start()
                                     }
@@ -1054,6 +1071,7 @@ private fun BooxCockpit(
 
                                     override fun onApprovalResolved(approvalId: String) {
                                         scope.launch {
+                                            approvalRejectionGuard.clear(approvalId)
                                             if (approvalDialogState?.first == approvalId) {
                                                 approvalDialogState = null
                                             }
@@ -1070,6 +1088,7 @@ private fun BooxCockpit(
                                             liveRecorderRef.value = null
                                             livePlayerRef.value = null
                                             liveSessionActive = false
+                                            transcriptBuffer.close()
                                         }
                                     }
 
@@ -1085,6 +1104,7 @@ private fun BooxCockpit(
                                             liveRecorderRef.value = null
                                             livePlayerRef.value = null
                                             liveSessionActive = false
+                                            transcriptBuffer.close()
                                         }
                                     }
                                 }

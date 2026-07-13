@@ -665,6 +665,10 @@ async function startNewSession(
 							text,
 						}, false);
 					}
+					const outputTranscription = message.serverContent?.outputTranscription;
+					if (outputTranscription?.finished || (!outputTranscription && message.serverContent?.turnComplete)) {
+						sendToClient(activeSession, { type: "transcript_complete" }, false);
+					}
 
 					// 3. Handle model interruption/barge-in signal from server
 					if (message.serverContent?.interrupted) {

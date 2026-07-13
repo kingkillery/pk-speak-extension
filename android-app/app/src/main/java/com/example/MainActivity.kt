@@ -959,6 +959,7 @@ fun StudioTabContent(
                 override fun onTranscript(text: String) {
                     scope.launch { state.transcription = text }
                 }
+                override fun onTranscriptComplete() = Unit
 
                 override fun onInterrupt() {
                     player.stop()
