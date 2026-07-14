@@ -21,6 +21,7 @@ import {
 	buildRealtimeTerminalCommandPlan,
 	classifyRealtimeTerminalCommand,
 	executeRealtimeTerminalCommandPlan,
+	looksLikeSecretPath,
 	type RealtimeTerminalCommandPlan,
 	type RealtimeTerminalCommandSafety,
 } from "./realtime-terminal-command.js";
@@ -437,6 +438,14 @@ async function resolveTerminalApproval(
 	sendRealtimeToolResponse(activeSession, pending.call, outputText, { approvalId: approval.id, scheduling: FunctionResponseScheduling.INTERRUPT });
 }
 
+// A launch_agent call is navigational (just opens the hub/dashboard, mutates
+// nothing) when hubOnly is set, or when there is neither a prompt nor a
+// targetNode to actually launch/deploy. Pulled out as a pure function so the
+// approval-boundary decision is unit-testable without a live Gemini session.
+export function isNavigationalLaunch(args: { prompt?: string; hubOnly?: boolean; targetNode?: string }): boolean {
+	return !!args.hubOnly || (!args.prompt && !args.targetNode);
+}
+
 // Gate a mutating tool call (launch_agent, archive_session) behind operator
 // approval instead of running it. Mirrors the execute_terminal_command
 // confirmation flow above, but keyed on kind+description rather than a raw
@@ -461,6 +470,13 @@ function requestCommandApproval(
 		kind,
 		description,
 		timer,
+	});
+	appendTerminalAudit(activeSession, {
+		kind: "command.approval_requested",
+		toolCallId: toolCall.id,
+		approvalId: approval.id,
+		commandKind: kind,
+		description,
 	});
 	sendToClient(activeSession, {
 		type: "tool_approval_required",
@@ -534,6 +550,15 @@ async function resolveCommandApproval(
 	}
 	if (pending.timer) clearTimeout(pending.timer);
 	activeSession.pendingCommandCalls.delete(approval.id);
+	appendTerminalAudit(activeSession, {
+		kind: "command.approval_resolved",
+		toolCallId: pending.call.id,
+		approvalId: approval.id,
+		commandKind: pending.kind,
+		description: pending.description,
+		approved,
+		decision: reason,
+	});
 	sendToClient(activeSession, {
 		type: "tool_approval_resolved",
 		approvalId: approval.id,
@@ -544,6 +569,14 @@ async function resolveCommandApproval(
 	}, false);
 
 	if (!approved) {
+		appendTerminalAudit(activeSession, {
+			kind: "command.execution_result",
+			toolCallId: pending.call.id,
+			approvalId: approval.id,
+			commandKind: pending.kind,
+			description: pending.description,
+			result: buildRealtimeTerminalAuditResult({ ok: false, code: null, skipped: reason === "expired" ? "expired" : "rejected" }),
+		});
 		sendRealtimeToolResponse(activeSession, pending.call, JSON.stringify({
 			ok: false,
 			rejected: true,
@@ -564,9 +597,27 @@ async function resolveCommandApproval(
 	} catch (err: any) {
 		outputText = JSON.stringify({ ok: false, error: err?.message || String(err) });
 	}
+	appendTerminalAudit(activeSession, {
+		kind: "command.execution_result",
+		toolCallId: pending.call.id,
+		approvalId: approval.id,
+		commandKind: pending.kind,
+		description: pending.description,
+		result: buildRealtimeTerminalAuditResult({ ok: resultLooksOk(outputText), stdout: outputText ?? "dispatched (narrated launch; result streams separately)" }),
+	});
 	// undefined means the narrated-launch path already sent its own response(s).
 	if (outputText === undefined) return;
 	sendRealtimeToolResponse(activeSession, pending.call, outputText, { approvalId: approval.id, scheduling: FunctionResponseScheduling.INTERRUPT });
+}
+
+function resultLooksOk(outputText: string | undefined): boolean {
+	if (outputText === undefined) return true;
+	try {
+		const parsed = JSON.parse(outputText);
+		return typeof parsed?.ok === "boolean" ? parsed.ok : true;
+	} catch {
+		return true;
+	}
 }
 
 function setupSocketHandlers(activeSession: ActiveSession) {
@@ -1158,7 +1209,7 @@ async function startNewSession(
 					const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd();
 					const hubOnly = call.args?.hubOnly as boolean | undefined;
 					const targetNode = call.args?.targetNode as string | undefined;
-					if (hubOnly || (!prompt && !targetNode)) {
+					if (isNavigationalLaunch({ prompt, hubOnly, targetNode })) {
 						// Navigational only (opens the hub/dashboard); nothing mutates, so no approval needed.
 						if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
 							const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly: true, targetNode });
@@ -1205,10 +1256,15 @@ async function startNewSession(
 								} else if (call.name === "browse_workspace") {
 									outputText = JSON.stringify({ ok: true, workspace: listWorkspaceDirectory(call.args?.path as string | undefined) });
 								} else if (call.name === "read_workspace_file") {
-									const result = readWorkspaceFile(call.args?.path as string | undefined);
-									outputText = result.ok
-										? JSON.stringify({ ok: true, file: { name: result.name, path: result.path, size: result.size, truncated: result.truncated, binary: result.binary, content: result.content } })
-										: JSON.stringify({ ok: false, error: result.error });
+									const requestedPath = call.args?.path as string | undefined;
+									if (requestedPath && looksLikeSecretPath(requestedPath)) {
+										outputText = JSON.stringify({ ok: false, error: "Refusing to read a file that looks like it may hold secrets or credentials." });
+									} else {
+										const result = readWorkspaceFile(requestedPath);
+										outputText = result.ok
+											? JSON.stringify({ ok: true, file: { name: result.name, path: result.path, size: result.size, truncated: result.truncated, binary: result.binary, content: result.content } })
+											: JSON.stringify({ ok: false, error: result.error });
+									}
 								} else {
 									outputText = JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
 								}

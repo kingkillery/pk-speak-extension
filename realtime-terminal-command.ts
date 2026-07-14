@@ -23,7 +23,19 @@ export type RealtimeTerminalCommandPlan = RealtimeTerminalCommandSafety & {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const SHELL_CONTROL_PATTERN = /(?:\|\||&&|\$\(|[|;<>`\r\n])/;
 const SECRET_INSPECTION_PATTERN = /\b(?:secret|token|api[_-]?key|apikey|password|credential|private[_-]?key|env|dotenv)\b|(?:^|[\\/])\.env(?:\.|$|[\\/])/i;
+const SECRET_PATH_EXTENSION_PATTERN = /\.(pem|key|pfx|p12|jks|keystore)$/i;
+const SECRET_PATH_FILENAME_PATTERN = /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i;
 const RG_DENIED_OPTIONS = new Set(["--pre", "--pre-glob"]);
+
+// Shared with the realtime read_workspace_file tool: a path that looks like it
+// holds a credential or private key should never have its content narrated
+// into a voice conversation or transcript. Broader/less precise than the
+// terminal SECRET_INSPECTION_PATTERN check on purpose — this gates full file
+// content, not just whether a command is allowed to run.
+export function looksLikeSecretPath(targetPath: string): boolean {
+	const base = path.basename(targetPath);
+	return SECRET_INSPECTION_PATTERN.test(targetPath) || SECRET_PATH_EXTENSION_PATTERN.test(base) || SECRET_PATH_FILENAME_PATTERN.test(base);
+}
 
 function tokenizeCommand(command: string): string[] | undefined {
 	const tokens: string[] = [];

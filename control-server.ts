@@ -416,10 +416,7 @@ export class ControlServer {
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
-	// Public (not private) so the conversational realtime gateway can call the
-	// same read-only listAgents/getAgent/readTranscript surface the HTTP
-	// /v1/herdr/* routes use, instead of duplicating agent-hub access.
-	readonly agentHubGateway: AgentHubGateway;
+	private readonly _agentHubGateway: AgentHubGateway;
 	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
@@ -468,8 +465,15 @@ export class ControlServer {
 		this.sendHerdrAgent = options.sendHerdrAgent || ((payload) => sendHerdrAgent(payload));
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
-		this.agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
+		this._agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
 		this.onBrainstorm = options.onBrainstorm;
+	}
+
+	// Read-only view for the conversational realtime gateway: snapshot/detail
+	// only, not chat/kill/revive/stream, so a future realtime tool can't reach
+	// a mutating agent-hub action without going through the approval boundary.
+	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail"> {
+		return this._agentHubGateway;
 	}
 
 	getRuntimeState() {
@@ -774,7 +778,7 @@ export class ControlServer {
 		}
 
 		if (req.method === "GET" && url.pathname === "/v1/herdr/agents") {
-			const snapshot = await this.agentHubGateway.snapshot();
+			const snapshot = await this._agentHubGateway.snapshot();
 			this.writeJson(res, 200, { ok: true, generatedAtMs: Date.now(), ...snapshot });
 			return;
 		}
@@ -790,7 +794,7 @@ export class ControlServer {
 				const action = agentMatch[2];
 				if (req.method === "GET" && !action) {
 					const lines = parsePositiveInt(url.searchParams.get("lines"), 80);
-					const agent = await this.agentHubGateway.detail(id, Math.min(lines, 500));
+					const agent = await this._agentHubGateway.detail(id, Math.min(lines, 500));
 					if (!agent) { this.writeJson(res, 404, { ok: false, code: "not_found", error: `Unknown agent: ${id}` }); return; }
 					this.writeJson(res, 200, { ok: true, agent });
 					return;
@@ -799,19 +803,19 @@ export class ControlServer {
 					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 					const parsed = parseHubChatRequest(payload, getPrimaryHeaderValue(req.headers["x-pi-speak-idempotency-key"]));
 					if (!parsed) { this.writeJson(res, 400, { ok: false, code: "bad_request", error: "Body must be { text } (non-empty, <=8192 chars)." }); return; }
-					const result = await this.agentHubGateway.chat(id, parsed.text, parsed.idempotencyKey);
+					const result = await this._agentHubGateway.chat(id, parsed.text, parsed.idempotencyKey);
 					this.writeJson(res, result.ok ? 200 : result.status, result);
 					return;
 				}
 				if (req.method === "POST" && action === "revive") {
-					const result = await this.agentHubGateway.revive(id);
+					const result = await this._agentHubGateway.revive(id);
 					this.writeJson(res, result.ok ? 200 : result.status, result);
 					return;
 				}
 				if (req.method === "POST" && action === "kill") {
 					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 					const confirm = parseHubKillConfirm(payload ?? undefined);
-					const result = await this.agentHubGateway.kill(id, confirm?.confirmToken);
+					const result = await this._agentHubGateway.kill(id, confirm?.confirmToken);
 					this.writeJson(res, result.ok ? 200 : result.status, result);
 					return;
 				}
@@ -825,7 +829,7 @@ export class ControlServer {
 				if (!id) { this.writeJson(res, 400, { ok: false, code: "bad_id", error: "Malformed agent id." }); return; }
 				const fromByte = parseNonNegativeInt(url.searchParams.get("fromByte"), 0);
 				// SSE: long-lived stream — don't apply REQUEST_TIMEOUT_MS here.
-				await this.agentHubGateway.stream(id, res, fromByte);
+				await this._agentHubGateway.stream(id, res, fromByte);
 				return;
 			}
 		}

@@ -2,11 +2,37 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
 import { ControlServer } from "../dist/control-server.js";
-import { classifyRealtimeTerminalCommand, buildRealtimeTools, REALTIME_SYSTEM_PROMPT } from "../dist/realtime-gateway.js";
+import { classifyRealtimeTerminalCommand, buildRealtimeTools, isNavigationalLaunch, REALTIME_SYSTEM_PROMPT } from "../dist/realtime-gateway.js";
 import {
 	buildRealtimeTerminalCommandPlan,
 	executeRealtimeTerminalCommandPlan,
+	looksLikeSecretPath,
 } from "../dist/realtime-terminal-command.js";
+
+test("isNavigationalLaunch only treats hubOnly or no-prompt/no-target calls as non-mutating", () => {
+	assert.equal(isNavigationalLaunch({ hubOnly: true }), true);
+	assert.equal(isNavigationalLaunch({ hubOnly: true, prompt: "fix the bug" }), true, "hubOnly wins even with a prompt");
+	assert.equal(isNavigationalLaunch({}), true, "no prompt and no targetNode just opens the hub");
+	assert.equal(isNavigationalLaunch({ prompt: "fix the bug" }), false, "a real prompt launches an agent");
+	assert.equal(isNavigationalLaunch({ targetNode: "colab" }), false, "a targetNode deploys, even without a prompt");
+});
+
+test("looksLikeSecretPath flags common credential/key paths and leaves ordinary files alone", () => {
+	for (const path of [
+		"/repo/.env",
+		"/repo/.env.local",
+		"/repo/secret/service-account.json",
+		"/home/user/.ssh/id_rsa",
+		"/home/user/.ssh/id_ed25519.pub",
+		"/repo/certs/server.pem",
+		"/repo/config/api_key.txt",
+	]) {
+		assert.equal(looksLikeSecretPath(path), true, path);
+	}
+	for (const path of ["/repo/README.md", "/repo/src/index.ts", "/repo/package.json"]) {
+		assert.equal(looksLikeSecretPath(path), false, path);
+	}
+});
 
 test("REALTIME_SYSTEM_PROMPT frames a conversational assistant that reads freely but asks before mutating", () => {
 	assert.doesNotMatch(REALTIME_SYSTEM_PROMPT, /voice coding assistant/i);
