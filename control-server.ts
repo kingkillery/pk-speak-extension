@@ -416,7 +416,10 @@ export class ControlServer {
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
-	private readonly agentHubGateway: AgentHubGateway;
+	// Public (not private) so the conversational realtime gateway can call the
+	// same read-only listAgents/getAgent/readTranscript surface the HTTP
+	// /v1/herdr/* routes use, instead of duplicating agent-hub access.
+	readonly agentHubGateway: AgentHubGateway;
 	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
@@ -2543,7 +2546,7 @@ function isWindowsReservedDeviceName(pathOrName: string) {
 
 const WORKSPACE_LIST_MAX_ENTRIES = 2000;
 
-function listWorkspaceDirectory(requestedPath?: string) {
+export function listWorkspaceDirectory(requestedPath?: string) {
 	const root = resolve(getWorkspaceRoot());
 	const requested = resolve(requestedPath?.trim() || root);
 	// Lexical clamp first (cheap ../ guard), then confirm the real directory stays in
@@ -2615,7 +2618,7 @@ function decodeTextPreview(buffer: Buffer, truncated: boolean): string {
 	return buffer.subarray(0, end).toString("utf8");
 }
 
-type WorkspaceFileResult =
+export type WorkspaceFileResult =
 	| {
 		ok: true;
 		name: string;
@@ -2627,7 +2630,7 @@ type WorkspaceFileResult =
 	}
 	| { ok: false; status: number; error: string };
 
-function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
+export function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 	const trimmed = requestedPath?.trim();
 	if (!trimmed) {
 		return { ok: false, status: 400, error: "A file path is required." };

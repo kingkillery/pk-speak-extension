@@ -2,11 +2,52 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
 import { ControlServer } from "../dist/control-server.js";
-import { classifyRealtimeTerminalCommand } from "../dist/realtime-gateway.js";
+import { classifyRealtimeTerminalCommand, buildRealtimeTools, REALTIME_SYSTEM_PROMPT } from "../dist/realtime-gateway.js";
 import {
 	buildRealtimeTerminalCommandPlan,
 	executeRealtimeTerminalCommandPlan,
 } from "../dist/realtime-terminal-command.js";
+
+test("REALTIME_SYSTEM_PROMPT frames a conversational assistant that reads freely but asks before mutating", () => {
+	assert.doesNotMatch(REALTIME_SYSTEM_PROMPT, /voice coding assistant/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /conversational assistant/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /read-only tools/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /require.*(the )?operator's explicit approval/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /clarifying question/i);
+});
+
+test("buildRealtimeTools exposes read-only agent-hub and workspace tools alongside the existing session tools", () => {
+	const [{ functionDeclarations }] = buildRealtimeTools(false);
+	const names = functionDeclarations.map((tool) => tool.name);
+
+	for (const readOnlyName of [
+		"get_session_info",
+		"list_sessions",
+		"list_agent_hub_agents",
+		"get_agent_hub_agent",
+		"browse_workspace",
+		"read_workspace_file",
+	]) {
+		assert.ok(names.includes(readOnlyName), `expected read-only tool ${readOnlyName}`);
+	}
+
+	for (const mutatingName of ["launch_agent", "archive_session"]) {
+		const tool = functionDeclarations.find((t) => t.name === mutatingName);
+		assert.ok(tool, `expected mutating tool ${mutatingName}`);
+		assert.match(tool.description, /requires operator approval/i);
+	}
+});
+
+test("buildRealtimeTools only sets NON_BLOCKING behavior when the caller opts in", () => {
+	const [{ functionDeclarations: blocking }] = buildRealtimeTools(false);
+	for (const tool of blocking) assert.equal(tool.behavior, undefined, tool.name);
+
+	const [{ functionDeclarations: nonBlocking }] = buildRealtimeTools(true);
+	const terminalTool = nonBlocking.find((t) => t.name === "execute_terminal_command");
+	const launchTool = nonBlocking.find((t) => t.name === "launch_agent");
+	assert.equal(terminalTool.behavior, "NON_BLOCKING");
+	assert.equal(launchTool.behavior, "NON_BLOCKING");
+});
 
 const TEST_PORT = 18768;
 const TEST_TOKEN = "test-secret-token";

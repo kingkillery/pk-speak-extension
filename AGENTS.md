@@ -1,6 +1,8 @@
 # AGENTS.md - pi-speak-pk Extension
 
-Extension development context for `pi-speak-pk` — voice, wake-word, and remote-control extension for pi-coding-agent.
+Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent, reachable over voice, wake-word, phone, and browser/Android remote.
+
+The assistant (`realtime-gateway.ts`) has full read access to sessions, background agents, and the workspace on every turn, but never mutates anything without explicit operator approval. See "Conversational Assistant Mode" in `README.md` and the approval-flow notes below.
 
 ## Build
 
@@ -40,6 +42,9 @@ npm test         # Run tests
 | `herdr-agent-hub-gateway.ts` | `AgentHubGateway` — chat/kill/revive/stream request handling for `/v1/herdr/agent*`, shared by every `AgentHubBinding` (disk-only fallback or live) |
 | `herdr-agent-hub-live.ts` | The real (mutating) `AgentHubBinding`: chat submits a normal turn targeted at the lane's name, kill archives it, revive recovers it — no invented IPC with the external oh-my-pk binary |
 | `listener/listener.py` | Always-on wake-word listener (faster-whisper wake detection + transcription) |
+| `realtime-gateway.ts` | Live-voice conversational assistant over Gemini Live: `REALTIME_SYSTEM_PROMPT` persona, `buildRealtimeTools` tool surface (read-only session/agent-hub/workspace tools + approval-gated mutating tools), tool-call dispatch |
+| `realtime-terminal-approval.ts` / `realtime-terminal-command.ts` | Approval registry + safety classifier for `execute_terminal_command` (raw shell command, read-only allowlist vs. confirm) |
+| `realtime-command-approval.ts` | Approval registry for non-terminal mutating tool calls (`launch_agent`, `archive_session`), keyed by kind+description rather than a command string |
 
 ## TTS Provider Logic
 
@@ -65,6 +70,7 @@ Auto-resolution order:
 
 - **Workspace browse + file read**: The PWA Workspace tab uses `GET /v1/workspace?path=...` (lists a directory; `entries` now include files as well as directories with `name`/`path`/`type` and `size` on files) and the read-only `GET /v1/workspace/file?path=...` (returns `name`/`path`/`size`/`truncated`/`binary`/`content`, capped at the first 512 KB, empty content for binary files). Both are confined to `PI_SPEAK_WORKSPACE_ROOT`, which **defaults to the agent working directory** (`getDefaultWorkspacePath`: `AGENT_CWD`/`AGENT_WORKSPACE`/`process.cwd()`) rather than the whole drive, since the file endpoint reads file contents under that root; set it to a directory to widen, or to `fs` for the drive root. Containment uses a lexical `..` guard plus a realpath check (symlinks/junctions resolving outside root are rejected), the listing is streamed and capped at 2000 entries (`truncated` flag), and Windows reserved device names (CON/NUL/COM1…) are rejected. These expose the `workspace-browse` and `workspace-file-read` capabilities; "Use this folder" sets the launch `cwd` for turns. Endpoints/capabilities live in `control-server.ts` (`/v1/workspace`, `/v1/workspace/file`).
 - **Pane write path**: All pane-driven mutations flow through `loadPersistedSessionRouting` → pure helper in `session-routing.ts` → `persistSessionRouting` → `appendSessionEvent(kind, "admin", payload)`. The extension watches the routing store mtime and reloads in-process state on external writes.
+- **Conversational assistant approval boundary**: `execute_terminal_command` outside the read-only allowlist, `launch_agent` when it actually launches (as opposed to `hubOnly`/no-prompt, which just opens the hub), and `archive_session` all defer their tool response, send `tool_approval_required` over the realtime WS, and only run after the client sends `terminal_approve`/`terminal_reject` (terminal) or `command_approve`/`command_reject` (everything else). Read-only tools (`list_sessions`, `get_session_info`, `list_agent_hub_agents`, `get_agent_hub_agent`, `browse_workspace`, `read_workspace_file`) never require approval. When adding a new mutating tool, gate it the same way instead of executing inline.
 - **Remote audio**: Browser mic requires HTTPS origin (use Tailscale Serve or tunnel)
 
 ## Testing
