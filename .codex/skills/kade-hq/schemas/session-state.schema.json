@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pk-skills1.local/schemas/kade-hq/session-state.schema.json",
+  "title": "Kade-HQ Session State",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "current_outcome": {"type": ["string", "null"]},
+    "definition_of_done": {"type": ["string", "null"]},
+    "current_phase": {"type": ["string", "null"]},
+    "constraints": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sourcedText"},
+      "default": []
+    },
+    "decisions": {
+      "type": "array",
+      "items": {"$ref": "decision-packet.schema.json"},
+      "default": []
+    },
+    "open_loops": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/trackedItem"},
+      "default": []
+    },
+    "waiting_on": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/trackedItem"},
+      "default": []
+    },
+    "commitments": {
+      "type": "array",
+      "items": {"$ref": "commitment.schema.json"},
+      "default": []
+    },
+    "captured_tangents": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sourcedText"},
+      "default": []
+    },
+    "next_action": {"type": ["string", "null"]},
+    "last_verified_at": {"type": ["string", "null"], "format": "date-time"},
+    "verification_sources": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    },
+    "unresolved_conflicts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sourcedText"},
+      "default": []
+    }
+  },
+  "required": [
+    "current_outcome",
+    "definition_of_done",
+    "constraints",
+    "decisions",
+    "open_loops",
+    "waiting_on",
+    "commitments",
+    "captured_tangents",
+    "next_action"
+  ],
+  "$defs": {
+    "sourcedText": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "recorded_at": {"type": "string", "format": "date-time"}
+      },
+      "required": ["text", "source", "recorded_at"]
+    },
+    "trackedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "item": {"type": "string", "minLength": 1},
+        "owner": {"type": ["string", "null"]},
+        "next_check": {"type": ["string", "null"], "format": "date-time"},
+        "status": {
+          "type": "string",
+          "enum": ["open", "blocked", "waiting", "resolved", "cancelled"]
+        },
+        "source": {"type": "string", "minLength": 1},
+        "recorded_at": {"type": "string", "format": "date-time"},
+        "resolved_at": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "required": ["id", "item", "status", "source", "recorded_at"]
+    }
+  }
+}
