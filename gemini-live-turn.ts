@@ -21,6 +21,7 @@ export const GEMINI_LIVE_MODEL_OPTIONS = [
 
 export const GEMINI_TEXT_MODEL_OPTIONS = [
 	"gemini-3.5-flash",
+	"9router/ag/gemini-3-5-flash-high",
 	"gemini-3.1-flash-lite",
 	"gemini-2.5-flash",
 ] as const;

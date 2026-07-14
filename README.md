@@ -19,7 +19,16 @@ If you just want the shortest path:
 2. Hands-free on the same machine: use `/mono on`
 3. Remote from your phone with the least friction: use `/phone on`
 4. Remote from your phone with QR setup: use `/pk-remote`, then scan the QR from the Android phone
-5. Remote button grid on Android: use the bundled Unified Remote remote
+## Documentation
+
+- [Getting Started](./docs/GETTING_STARTED.md) — install, five voice paths, first session, TTS ladder, phone setup, session routing, Gemini Live
+- [Architecture](./docs/ARCHITECTURE.md) — subsystem map, data flow, provider model, HTTP API surface, Android/PWA clients, environment variables
+- [Troubleshooting](./docs/TROUBLESHOOTING.md) — 12 common problem areas with causes and fixes, plus a 5-command quick diagnostic checklist
+- [Session Operations](./docs/SESSION_OPERATIONS.md) — named sessions, wake routing, compact PK1/PK2 lanes
+- [Remote Operating Guide](./docs/REMOTE_OPERATING_GUIDE.md) — phone setup, Android app, web app, Tailscale/tunnel configuration
+- [Validation Checklist](./docs/REMOTE_VALIDATION_CHECKLIST.md) — full phone-focused pass/fail run sheet
+- [Codebase Map](./docs/CODEBASE_MAP.md) — file-level tour of the TypeScript source
+
 
 ## Install
 

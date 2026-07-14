@@ -117,6 +117,7 @@ fun SettingsTabContent(
     val modelPresets = listOf(
         "Gemini 3.1 Live" to "gemini-3.1-flash-live-preview",
         "Gemini 3.5 Flash" to "gemini-3.5-flash",
+        "9Router Gemini 3.5 Flash High" to "9router/ag/gemini-3-5-flash-high",
         "Server default" to "",
         "Legacy 2.5 Live" to "gemini-live-2.5-flash-native-audio"
     )
