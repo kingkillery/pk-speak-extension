@@ -1,3 +1,8 @@
+## 2026-07-14 - session: wt-001 conversational-assistant-pivot verification assist
+
+- Added `sessions/2026-07-14-wt001-conversational-assistant-assist.md` — verified colleague worktree wt-001 (branch `advisor/001-conversational-assistant-pivot`, commit `e5e5d21`): build clean, 371/372 tests; fixed + committed the unrelated Windows `spawn-shim` EPERM teardown flake as `62dd2bd` (rmSync maxRetries/retryDelay). Recorded branch open items (README pivot WIP, skill-sync churn) and the sibling-worktree `git -C` / `npm --prefix` workaround.
+- Linked from `wiki/index.md`. Direct-file writes (no Obsidian MCP write transport exposed this session).
+
 ## 2026-07-13 - concept: Agent Harness Design reading list
 
 - Added `concepts/agent-harness-design.md` — curated reading list for the harness side of agentic systems (everything around the model: persistent execution, context governance, memory, skill routing, role coordination, supervision, runtime orchestration). Organized into three buckets — most relevant papers (Scaling the Harness in Agentic AI; Toward Executable, Verifiable, and Stateful Agent Systems; Interpreting Agentic Systems: Beyond Model Explanations; The Shift to Agentic AI: Evidence from Codex), benchmark and capability papers (Terminal-Bench, RE-Bench, Hierarchy of Agentic Capabilities, Forecasting Frontier Agent Capabilities), and practical harness engineering (philschmid 2026, Microsoft Agent Framework BUILD 2026, Claude context engineering cookbook). Includes a suggested reading order and a follow-up note about splitting into design/evaluation/safety buckets later. Cross-links to [[herdr-agent-hub- Module]] and the oh-my-pk fork snapshot.

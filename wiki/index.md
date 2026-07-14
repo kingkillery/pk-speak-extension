@@ -10,6 +10,7 @@
 - [pk-speak Voice Pipeline Benchmarks and Boox Transcripts](concepts/pk-speak-voice-benchmarks.md)
 - [oh-my-pk Fork Architecture Snapshot 2026-07](syntheses/oh-my-pk-fork-2026-07.md)
 - [Recent History — 2026-06/07](syntheses/recent-history-2026-06-07.md) - voice, realtime, OMP routing, Android parity, Agent Hub, benchmarks, and Boox cockpit changes.
+- [wt-001 Conversational Assistant Pivot Assist (2026-07-14)](sessions/2026-07-14-wt001-conversational-assistant-assist.md) - verification pass, spawn-shim EPERM flake fix, branch open items.
 
 ## Concepts
 - [[herdr-agent-hub- Module]]: concept (status: developing)
