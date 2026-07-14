@@ -27,7 +27,7 @@ function withTempDir(fn) {
 	try {
 		return fn(tmp);
 	} finally {
-		rmSync(tmp, { recursive: true, force: true });
+		rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 }
 
@@ -60,7 +60,9 @@ test("spawnDetached passes arguments literally without shell interpretation", as
 		const received = JSON.parse(readFileSync(outFile, "utf8"));
 		assert.deepEqual(received, [evil]);
 	} finally {
-		rmSync(tmp, { recursive: true, force: true });
+		// The detached child keeps `tmp` as its cwd briefly after writing the
+		// file, so a bare rmSync can hit EPERM on Windows. Retry instead.
+		rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
