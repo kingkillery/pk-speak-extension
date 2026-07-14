@@ -1,14 +1,34 @@
-# herdr-agent-hub-* module (parallel to Android redesign)
+---
+type: concept
+title: "herdr-agent-hub-* Module"
+created: 2026-07-13
+updated: 2026-07-13
+tags: []
+status: developing
+related: []
+sources: 
+  - pi-speak-extension PR #19 (819f6a2), herdr-agent-hub-live.ts
+---
 
-Untracked TypeScript module observed appearing across passes 2-4 (2026-07-02), unrelated to the Android UI redesign. Backs `/v1/herdr/agent*` routes wired into `control-server.ts` (modified, +69/-… as of pass 4).
+# herdr-agent-hub-* module and Agent Hub portal
 
-## Files
-- `herdr-agent-hub-schema.ts` (103 lines) — "parse-not-validate boundary" for the routes. Defines branded `HubAgentId` (via `unique symbol` brand + `parseHubAgentId`), `HubAgentStatus` (`running | idle | parked | aborted`), `HubAgentKind` (`main | sub | advisor | background`), `HubFolder`, `HubAgent` interfaces.
-- `herdr-agent-hub-gateway.ts` (294 lines) — gateway/binding layer; exports an `AgentHubBinding` type (referenced by the disk fallback) plus the live routing implementation.
-- `herdr-agent-hub-disk.ts` (121 lines, new in pass 4) — `createDiskFallbackBinding(dashboardFn)`: builds an `AgentHubBinding` from the `agent-hub-dashboard` stale-while-revalidate scan when no live hub connection exists. `canMutate: false` — chat/kill/revive calls answer `409 hub_offline` in this mode.
+Backs `/v1/herdr/agent*` routes in the pi-speak gateway. Originally observed in-flight 2026-07-02; landed via `218ed8a feat: expose agent hub through herdr gateway`, then upgraded from a read-only peek into an actionable portal by PR #19 `819f6a2 feat(agent-hub): actionable Agent Hub portal for Android + e-ink` (2026-07-11).
 
-## Interpretation
-This looks like a resilience layer for the agent-hub API: a live gateway binding plus a read-only disk-scan fallback binding sharing the same `AgentHubBinding` interface, so `/v1/herdr/agent*` routes degrade gracefully to "list-only" when the hub is offline instead of failing outright.
+## Backend files
+- `herdr-agent-hub-schema.ts` — parse-not-validate boundary: branded `HubAgentId`, `HubAgentStatus` (`running | idle | parked | aborted`), `HubAgentKind` (`main | sub | advisor | background`), `HubFolder`, `HubAgent`.
+- `herdr-agent-hub-gateway.ts` — routing layer over an `AgentHubBinding`; now catches binding-thrown errors and surfaces them as clean 400s.
+- `herdr-agent-hub-disk.ts` — `createDiskFallbackBinding(dashboardFn)`: read-only binding from the agent-hub-dashboard stale-while-revalidate scan (`canMutate: false`, mutations answer `409 hub_offline`). Since PR #19 this is only the fallback, no longer the default.
+- `herdr-agent-hub-live.ts` (PR #19) — real `AgentHubBinding` wired into both `index.ts` and `headless-gateway.ts`:
+  - `chat`: submits a normal turn targeted at the lane's name (same mechanism as `PK <session-name>`).
+  - `kill`: archives the lane.
+  - `revive`: resolves an already-archived lane back to a file via `findOhMyPiBackgroundSessionPath` (archived lanes are invisible to the normal dashboard scan).
+  - Tests: `tests/herdr-agent-hub-live.test.mjs`.
 
-## Status
-Still in-flux and untracked as of pass 4 (2026-07-02) — no tests observed yet for this module. Re-verify shape once it stabilizes or lands in a commit; update this page rather than treating it as final.
+## Android portal (PR #19)
+- `api/GatewayHub.kt` — hub models/parsers; `api/HerdrAgentStream.kt` — per-agent live transcript SSE.
+- `api/VoiceAgentClient.launchSession` — generalizes hub/Colab launch presets into a free-form prompt/model/provider/cwd launcher.
+- Standard flavor: new "Tasks" pane (`HubPortalComposables.kt`, ~560 lines) — lane -> subagent tree, per-lane chat and archive, general task launcher.
+- Boox e-ink flavor: same launcher and per-lane chat/archive inline in the Hub peek, but no live stream (EPD ghosting makes continuous redraws the wrong tradeoff).
+
+## Deliberate gap
+`revive` is not wired into either UI: an archived lane can never appear in the tree it would be revived from. The client method exists for a future surface that tracks archived-lane names persistently.

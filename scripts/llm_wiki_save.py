@@ -33,8 +33,14 @@ def now_iso() -> str:
 
 
 def slug_title(title: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title).strip()
-    cleaned = re.sub(r"\s+", " ", cleaned)
+    # Drop filesystem-unsafe characters entirely (replacing with a space
+    # mangled titles like "foo-* Bar" into "foo- Bar"), then normalize.
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # A removed character can leave a dangling hyphen against a space
+    # ("foo- Bar"); collapse spaces around hyphens and hyphen runs.
+    cleaned = re.sub(r"\s*-\s*", "-", cleaned)
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-. ")
     return cleaned or "Untitled"
 
 
@@ -197,8 +203,8 @@ def conflict_section(args: argparse.Namespace, likely_conflicts: list[str] | Non
         lines.append("")
         if args.contradicts:
             lines.append("This note was saved with explicit contradiction metadata:")
-        for item in args.contradicts:
-            lines.append(f"- Contradicts: {item}")
+            for item in args.contradicts:
+                lines.append(f"- Contradicts: {item}")
         if likely_conflicts:
             lines.append("Likely conflicts detected before save:")
             for item in likely_conflicts:

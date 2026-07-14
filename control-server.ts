@@ -40,6 +40,13 @@ export type ControlActionResult = {
 	[key: string]: unknown;
 };
 
+function actionResultStatus(result: ControlActionResult): number {
+	const status = result.status;
+	return typeof status === "number" && Number.isInteger(status) && status >= 200 && status <= 599
+		? status
+		: result.ok ? 200 : 400;
+}
+
 export type SessionRenamePayload = {
 	sessionPath: string;
 	newName: string;
@@ -69,6 +76,16 @@ export type SessionLaunchPayload = {
 	sessionDir?: string;
 	hubOnly?: boolean;
 	targetNode?: string;
+};
+
+export type HubPublishPayload = {
+	sessionPath: string;
+	cwd?: string;
+};
+
+export type HubResumePayload = {
+	link: string;
+	cwd?: string;
 };
 
 export type SessionArchivePayload = {
@@ -253,6 +270,9 @@ export type ControlServerOptions = {
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionArchive?: (body: SessionArchivePayload) => Promise<ControlActionResult> | ControlActionResult;
+	onHubPublish?: (body: HubPublishPayload) => Promise<ControlActionResult> | ControlActionResult;
+	onHubResume?: (body: HubResumePayload) => Promise<ControlActionResult> | ControlActionResult;
+	isHubHandoffReady?: () => boolean;
 	/** Select (sessionPath) or deselect (null) the ompk resume session for a client. */
 	onOmpSelectSession?: (clientKey: string, sessionPath: string | null) => { ok: boolean; error?: string } | void;
 	onOmpGetSelectedSession?: (clientKey: string) => string | null;
@@ -379,6 +399,9 @@ export class ControlServer {
 	private readonly onSessionResume?: ControlServerOptions["onSessionResume"];
 	private readonly onSessionLaunch?: ControlServerOptions["onSessionLaunch"];
 	private readonly onSessionArchive?: ControlServerOptions["onSessionArchive"];
+	private readonly onHubPublish?: ControlServerOptions["onHubPublish"];
+	private readonly onHubResume?: ControlServerOptions["onHubResume"];
+	private readonly isHubHandoffReady: NonNullable<ControlServerOptions["isHubHandoffReady"]>;
 	private readonly onOmpSelectSession?: ControlServerOptions["onOmpSelectSession"];
 	private readonly onOmpGetSelectedSession?: ControlServerOptions["onOmpGetSelectedSession"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
@@ -430,6 +453,9 @@ export class ControlServer {
 		this.onSessionResume = options.onSessionResume;
 		this.onSessionLaunch = options.onSessionLaunch;
 		this.onSessionArchive = options.onSessionArchive;
+		this.onHubPublish = options.onHubPublish;
+		this.onHubResume = options.onHubResume;
+		this.isHubHandoffReady = options.isHubHandoffReady || (() => false);
 		this.onOmpSelectSession = options.onOmpSelectSession;
 		this.onOmpGetSelectedSession = options.onOmpGetSelectedSession;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
@@ -573,6 +599,9 @@ export class ControlServer {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
 		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
 		this.applyCors(req, res, url);
+		if (url.pathname === "/v1/hub/publish" || url.pathname === "/v1/hub/resume") {
+			res.setHeader("Cache-Control", "no-store");
+		}
 
 		if (req.method === "OPTIONS") {
 			res.statusCode = 204;
@@ -911,6 +940,42 @@ export class ControlServer {
 			}
 			const result = await this.onSessionRemove({ sessionPath: payload.sessionPath });
 			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/hub/publish") {
+			res.setHeader("Cache-Control", "no-store");
+			if (!this.onHubPublish) {
+				this.writeJson(res, 501, { ok: false, error: "Hub publish is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const sessionPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
+			const cwd = typeof payload?.cwd === "string" ? payload.cwd.trim() || undefined : undefined;
+			if (!sessionPath || (payload?.cwd !== undefined && typeof payload.cwd !== "string")) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: sessionPath is required and cwd must be a string." });
+				return;
+			}
+			const result = await this.onHubPublish({ sessionPath, cwd });
+			this.writeJson(res, actionResultStatus(result), result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/hub/resume") {
+			res.setHeader("Cache-Control", "no-store");
+			if (!this.onHubResume) {
+				this.writeJson(res, 501, { ok: false, error: "Hub resume is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const link = typeof payload?.link === "string" ? payload.link.trim() : "";
+			const cwd = typeof payload?.cwd === "string" ? payload.cwd.trim() || undefined : undefined;
+			if (!link || (payload?.cwd !== undefined && typeof payload.cwd !== "string")) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: link is required and cwd must be a string." });
+				return;
+			}
+			const result = await this.onHubResume({ link, cwd });
+			this.writeJson(res, actionResultStatus(result), result);
 			return;
 		}
 
@@ -1388,6 +1453,8 @@ export class ControlServer {
 				collabLink: "/v1/collab-link",
 				sessions: "/v1/sessions",
 				sessionLaunch: "/v1/sessions/launch",
+				hubPublish: "/v1/hub/publish",
+				hubResume: "/v1/hub/resume",
 				slots: "/v1/sessions/slots",
 				agents: "/v1/agents",
 				events: "/v1/events",
@@ -1414,6 +1481,7 @@ export class ControlServer {
 				"workspace-file-read",
 				"collab-link",
 				"session-launch",
+				...(this.onHubPublish && this.onHubResume && this.isHubHandoffReady() ? ["hub-handoff"] : []),
 				"colab-launch",
 				"turn-cancel",
 				"progress-events",

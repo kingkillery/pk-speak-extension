@@ -4,10 +4,11 @@ import { spawnDetached } from "./spawn-shim.js";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir, networkInterfaces, platform, tmpdir } from "node:os";
+import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
 import { ControlServer, type ControlActionResult, type ControlServerState, type GatewayAgentProvider, type RemoteSlashCommand, type SessionLaunchPayload, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
+import { publishOwnerHubSession, resumeOwnerHubSession } from "./hub-handoff.js";
 import { sendHerdrPane } from "./herdr-client.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type ConversationExecutionPlan, type ConversationReducerSummary, type RemoteTurnResult, type TurnProgressEvent, type TurnTimingSummary } from "./remote-turn-manager.js";
@@ -159,13 +160,9 @@ const DEFAULT_ADB_REMOTE_HOST = process.env.PI_SPEAK_ADB_HTTP_HOST || "127.0.0.1
 const DEFAULT_ADB_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_ADB_HTTP_PORT || "8787", 10);
 const PUBLIC_REMOTE_BASE_URL = process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim() || "";
 const DEFAULT_REMOTE_AUTH_TOKEN = process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
-const TAILSCALE_APPSERVER_IP = "100.76.136.91";
-const TAILSCALE_MAC_IP = "100.76.176.119";
-const DEFAULT_BLUETOOTH_IP = "192.168.44.1";
-const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim()
 	|| process.env.AGENT_WORKSPACE?.trim()
-	|| (platform() === "win32" ? DEFAULT_WINDOWS_WORKSPACE : "");
+	|| process.cwd();
 const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "speak",
@@ -482,27 +479,24 @@ function getDefaultTailscaleBaseUrl(port: number) {
 	if (configured) return normalizeBaseUrl(configured);
 	const detected = getReachableIpv4Addresses().tailscale[0];
 	if (detected) return `http://${detected}:${port}/`;
-	const address = platform() === "darwin" ? TAILSCALE_MAC_IP : TAILSCALE_APPSERVER_IP;
-	return `http://${address}:${port}/`;
+	return `http://127.0.0.1:${port}/`;
 }
 
 function getDefaultBluetoothBaseUrl(port: number) {
 	const configured = process.env.PI_SPEAK_BLUETOOTH_BASE_URL?.trim();
 	if (configured) return normalizeBaseUrl(configured);
-	return `http://${DEFAULT_BLUETOOTH_IP}:${port}/`;
+	const detected = getReachableIpv4Addresses().lan[0];
+	return `http://${detected || "127.0.0.1"}:${port}/`;
 }
 
 function getSetupProfileForBaseUrl(baseUrl: string, mode: "tailscale" | "bluetooth" = "tailscale") {
 	if (mode === "bluetooth") {
 		return { machineId: "bluetooth-local", profileName: "Bluetooth / local link", connectionMode: "bluetooth" };
 	}
-	if (baseUrl.includes(TAILSCALE_MAC_IP)) {
-		return { machineId: "tailscale-mac", profileName: "Mac", connectionMode: "tailscale" };
-	}
 	if (baseUrl.includes("192.168.") || baseUrl.includes("10.") || /172\.(1[6-9]|2\d|3[01])\./.test(baseUrl)) {
 		return { machineId: "local-lan", profileName: "Local network", connectionMode: "manual" };
 	}
-	return { machineId: "tailscale-appserver", profileName: "MSI / appserver", connectionMode: "tailscale" };
+	return { machineId: "tailscale", profileName: "Tailscale", connectionMode: "tailscale" };
 }
 
 function buildRemoteSetupUrls(
@@ -2748,6 +2742,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 					}
 				},
 				onSessionLaunch: (payload) => launchSessionTarget(payload, "admin"),
+				onHubPublish: (payload) => publishOwnerHubSession(lastCtx, payload),
+				onHubResume: (payload) => resumeOwnerHubSession(lastCtx, payload),
+				isHubHandoffReady: () => typeof lastCtx?.executeBuiltinCommand === "function",
 				onSessionArchive: (payload) => {
 					const sessionPath = payload.sessionPath;
 					if (!sessionPath) return { ok: false, message: "Session path is required." };
