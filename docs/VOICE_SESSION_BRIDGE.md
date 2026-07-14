@@ -1,10 +1,10 @@
 # Voice Session Bridge
 
-Use this file as the operator bridge between natural wake phrases and the real `/sess` command surface.
+Use this file as the operator bridge between natural wake phrases and the real `/sess` command surface. The wake phrase is how you start a conversation with the pi-speak conversational assistant hands-free.
 
 ## Core idea
 
-`/mono` listens for the wake phrase `PK`.
+`/mono` listens for the wake phrase `PK`. Saying `PK` opens a conversation with the assistant; the assistant can then see subagent state, interview you, and propose commands for approval.
 After the wake phrase, Pi can optionally capture a session target before the spoken request.
 
 Examples:

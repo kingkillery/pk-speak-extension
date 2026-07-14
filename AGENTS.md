@@ -1,6 +1,6 @@
 # AGENTS.md - pi-speak-pk Extension
 
-Extension development context for `pi-speak-pk` — voice, wake-word, and remote-control extension for pi-coding-agent.
+Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent that uses voice, wake-word, and remote-control as input channels. The assistant can read all subagent state and the workspace, interview the user to scope work, and propose commands that only execute after explicit approval. Voice (`/mono`, `PK` wake phrase), Telegram (`/phone`), and the mobile/web remote (`/remote`, `/pk-remote`) are all ways to reach the same assistant.
 
 ## Build
 
@@ -39,6 +39,9 @@ npm test         # Run tests
 | `agent-hub-actions.ts` | Pure helpers: `archiveOhMyPiBackgroundSession`, `buildOhMyPiLaunchArgv` for `/v1/sessions/launch` and `/v1/sessions/remove` |
 | `herdr-agent-hub-gateway.ts` | `AgentHubGateway` — chat/kill/revive/stream request handling for `/v1/herdr/agent*`, shared by every `AgentHubBinding` (disk-only fallback or live) |
 | `herdr-agent-hub-live.ts` | The real (mutating) `AgentHubBinding`: chat submits a normal turn targeted at the lane's name, kill archives it, revive recovers it — no invented IPC with the external oh-my-pk binary |
+| `realtime-gateway.ts` | The conversational assistant core. Runs a Gemini Live session with read-only subagent/workspace tools (`list_agents`, `get_agent`, `read_transcript`, `list_workspace`, `read_workspace_file`) and a `propose_command` approval flow. Voice, phone, and remote turns all reach this assistant. |
+| `realtime-terminal-approval.ts` | Original terminal-command approval registry used by the realtime gateway |
+| `realtime-command-approval.ts` | Extended approval registry covering terminal, chat, kill, and launch command proposals. `propose_command` stages a mutation and returns a confirmation token; the assistant only executes after the user approves. |
 | `listener/listener.py` | Always-on wake-word listener (faster-whisper wake detection + transcription) |
 
 ## TTS Provider Logic
