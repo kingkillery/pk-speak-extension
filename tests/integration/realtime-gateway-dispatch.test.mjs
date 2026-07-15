@@ -1,0 +1,306 @@
+// End-to-end dispatch test for the realtime conversational-assistant gateway.
+//
+// Everything else in tests/realtime-gateway.test.mjs exercises pure helpers
+// (buildRealtimeTools, isNavigationalLaunch, looksLikeSecretPath, the approval
+// registries) in isolation. None of that proves the ~700-line onmessage
+// switch-case in realtime-gateway.ts actually wires those pieces together
+// correctly at runtime. This file drives the real public entrypoint
+// (handleRealtimeGateway) with a fake WebSocket and a fake Gemini Live
+// connection, and asserts on what the gateway actually does: which tool
+// calls get real read-only answers immediately, which get deferred behind
+// tool_approval_required, what happens on command_approve/command_reject,
+// and that approvals/executions land in the real audit trail on disk.
+//
+// Requires --experimental-test-module-mocks (see package.json's
+// test:realtime-live script) to fake out @google/genai's network layer.
+import { test, mock } from "node:test";
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { WebSocket as RealWebSocket } from "ws";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const real = await import("@google/genai");
+
+class FakeLiveSession {
+	constructor() {
+		this.toolResponses = [];
+		this.closed = false;
+	}
+	sendToolResponse(payload) {
+		this.toolResponses.push(payload);
+	}
+	sendClientContent() {}
+	sendRealtimeInput() {}
+	close() {
+		this.closed = true;
+	}
+}
+
+// Each ai.live.connect() call (one per handleRealtimeGateway session) pushes
+// a capture record here so a test can grab the callbacks Gemini would drive
+// and the fake session it would call back on.
+const connections = [];
+
+class FakeGoogleGenAI {
+	constructor(opts) {
+		this.opts = opts;
+		this.live = {
+			connect: async ({ model, config, callbacks }) => {
+				const session = new FakeLiveSession();
+				connections.push({ model, config, callbacks, session });
+				callbacks.onopen?.();
+				return session;
+			},
+		};
+	}
+}
+
+mock.module("@google/genai", {
+	namedExports: { ...real, GoogleGenAI: FakeGoogleGenAI },
+});
+
+const { handleRealtimeGateway } = await import("../../dist/realtime-gateway.js");
+const { getRealtimeTerminalAuditPath } = await import("../../dist/realtime-terminal-audit.js");
+
+class FakeWebSocket extends EventEmitter {
+	constructor() {
+		super();
+		this.readyState = RealWebSocket.OPEN;
+		this.sent = [];
+	}
+	send(data) {
+		this.sent.push(data);
+	}
+	close(code, reason) {
+		this.readyState = RealWebSocket.CLOSED;
+		this.emit("close", code, reason);
+	}
+	jsonMessages() {
+		return this.sent.filter((d) => typeof d === "string").map((d) => JSON.parse(d));
+	}
+}
+
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Forces the deterministic (non-narrated) launch_agent path: vertex backend
+// makes nonBlockingEnabled false, so launch_agent calls activeSession.server
+// .onSessionLaunch directly instead of spawning a real `ompk` child process.
+function setVertexEnv() {
+	process.env.PI_SPEAK_GEMINI_BACKEND = "vertex";
+	process.env.GOOGLE_CLOUD_PROJECT = "fake-project";
+	process.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+}
+
+async function startFakeSession(server) {
+	const ws = new FakeWebSocket();
+	handleRealtimeGateway.call(server, ws);
+	// Kick startNewSession immediately instead of waiting on its 500ms
+	// no-first-message fallback timer; "noop" isn't a recognized control
+	// message so replaying it after setup is a harmless no-op.
+	ws.emit("message", Buffer.from(JSON.stringify({ type: "noop" })), false);
+	await sleep(20);
+	const connection = connections.at(-1);
+	assert.ok(connection, "expected a fake Gemini Live connection to have been created");
+	return { ws, connection };
+}
+
+function lastToolResponse(connection) {
+	const responses = connection.session.toolResponses;
+	return responses.at(-1)?.functionResponses?.[0];
+}
+
+function readOutput(functionResponse) {
+	return JSON.parse(functionResponse.response.output);
+}
+
+// The audit JSONL file is real and persists on disk across separate test
+// *processes* (by design -- it's a durable trail), but the approval-id
+// counter resets to 1 each process start. So a later run's "rt-cmd-2" can
+// collide with a stale "rt-cmd-2" line from an earlier run. Reading only the
+// bytes appended since a captured offset (rather than filtering the whole
+// file by id) sidesteps that instead of relying on id uniqueness across runs.
+function auditFileSize() {
+	const path = getRealtimeTerminalAuditPath();
+	return existsSync(path) ? statSync(path).size : 0;
+}
+
+function readNewAuditEvents(offsetBefore) {
+	const path = getRealtimeTerminalAuditPath();
+	if (!existsSync(path)) return [];
+	const appended = readFileSync(path).subarray(offsetBefore).toString("utf8");
+	return appended
+		.trim()
+		.split("\n")
+		.filter((line) => line.length > 0)
+		.map((line) => JSON.parse(line));
+}
+
+test("read-only tool: list_agent_hub_agents answers immediately with no approval step", async (t) => {
+	setVertexEnv();
+	const snapshot = { folders: [{ key: "root" }], agents: [{ id: "a1", name: "agent-one", status: "running" }] };
+	const server = { agentHubGateway: { snapshot: async () => snapshot } };
+	const { ws, connection } = await startFakeSession(server);
+	// Deliberately not calling ws.close() here: the real gateway's ws "close"
+	// handler starts a 60s (non-unref'd) reconnect-grace timer, which is fine
+	// in a long-lived server but would stall this short-lived test process on
+	// exit for no benefit -- the in-memory session dangling after the test
+	// process exits is harmless.
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-1", name: "list_agent_hub_agents", args: {} }] },
+	});
+
+	const fr = lastToolResponse(connection);
+	assert.equal(fr.id, "call-1");
+	const output = readOutput(fr);
+	assert.equal(output.ok, true);
+	assert.deepEqual(output.agents, snapshot.agents);
+	assert.deepEqual(output.folders, snapshot.folders);
+
+	const approvalMessages = ws.jsonMessages().filter((m) => m.type === "tool_approval_required");
+	assert.equal(approvalMessages.length, 0, "a read-only tool must never require approval");
+});
+
+test("mutating tool: launch_agent defers behind approval, then actually launches on command_approve", async (t) => {
+	setVertexEnv();
+	const launchCalls = [];
+	const server = {
+		agentHubGateway: { snapshot: async () => ({ folders: [], agents: [] }) },
+		onSessionLaunch: async (payload) => {
+			launchCalls.push(payload);
+			return { ok: true, message: "launched", sessionPath: "/tmp/repo/new-session.jsonl" };
+		},
+	};
+	const { ws, connection } = await startFakeSession(server);
+	// Not calling ws.close() here -- see the comment on the first test above.
+	const auditOffsetBefore = auditFileSize();
+
+	await connection.callbacks.onmessage({
+		toolCall: {
+			functionCalls: [{ id: "call-launch", name: "launch_agent", args: { prompt: "fix the failing test", cwd: "/tmp/repo" } }],
+		},
+	});
+
+	// Deferred: nothing executed, no tool response sent yet, but the client was told approval is required.
+	assert.equal(launchCalls.length, 0, "must not launch before approval");
+	assert.equal(connection.session.toolResponses.length, 0, "must not answer the tool call before approval");
+	const approvalMsg = ws.jsonMessages().find((m) => m.type === "tool_approval_required");
+	assert.ok(approvalMsg, "expected a tool_approval_required message");
+	assert.match(approvalMsg.command, /fix the failing test/);
+	const approvalId = approvalMsg.approvalId;
+	assert.ok(approvalId);
+
+	// Simulate the operator approving from the client.
+	ws.emit("message", Buffer.from(JSON.stringify({ type: "command_approve", approvalId })), false);
+	await sleep(30);
+
+	assert.equal(launchCalls.length, 1, "must launch exactly once after approval");
+	assert.deepEqual(launchCalls[0], { prompt: "fix the failing test", cwd: "/tmp/repo", hubOnly: undefined, targetNode: undefined });
+
+	const fr = lastToolResponse(connection);
+	assert.equal(fr.id, "call-launch");
+	const output = readOutput(fr);
+	assert.equal(output.ok, true);
+	assert.equal(output.message, "launched");
+
+	const resolvedMsg = ws.jsonMessages().find((m) => m.type === "tool_approval_resolved" && m.approvalId === approvalId);
+	assert.ok(resolvedMsg, "expected a tool_approval_resolved message");
+
+	const auditEvents = readNewAuditEvents(auditOffsetBefore).filter((e) => e.approvalId === approvalId);
+	const kinds = auditEvents.map((e) => e.kind);
+	assert.deepEqual(kinds, ["command.approval_requested", "command.approval_resolved", "command.execution_result"]);
+	assert.equal(auditEvents[0].commandKind, "launch_agent");
+	assert.equal(auditEvents[2].result.ok, true);
+});
+
+test("mutating tool: archive_session never runs when the operator rejects it", async (t) => {
+	setVertexEnv();
+	const archiveCalls = [];
+	const server = {
+		agentHubGateway: { snapshot: async () => ({ folders: [], agents: [] }) },
+		onSessionArchive: async (payload) => {
+			archiveCalls.push(payload);
+			return { ok: true, message: "archived" };
+		},
+	};
+	const { ws, connection } = await startFakeSession(server);
+	// Not calling ws.close() here -- see the comment on the first test above.
+	const auditOffsetBefore = auditFileSize();
+
+	await connection.callbacks.onmessage({
+		toolCall: {
+			functionCalls: [{ id: "call-archive", name: "archive_session", args: { sessionPath: "/tmp/repo/session.jsonl", action: "archive" } }],
+		},
+	});
+	const approvalMsg = ws.jsonMessages().find((m) => m.type === "tool_approval_required");
+	assert.ok(approvalMsg);
+
+	ws.emit("message", Buffer.from(JSON.stringify({ type: "command_reject", approvalId: approvalMsg.approvalId })), false);
+	await sleep(30);
+
+	assert.equal(archiveCalls.length, 0, "a rejected mutation must never execute");
+	const fr = lastToolResponse(connection);
+	assert.equal(fr.id, "call-archive");
+	const output = readOutput(fr);
+	assert.equal(output.ok, false);
+	assert.equal(output.rejected, true);
+
+	const auditEvents = readNewAuditEvents(auditOffsetBefore).filter((e) => e.approvalId === approvalMsg.approvalId);
+	assert.deepEqual(
+		auditEvents.map((e) => e.kind),
+		["command.approval_requested", "command.approval_resolved", "command.execution_result"],
+	);
+	assert.equal(auditEvents[2].result.skipped, "rejected");
+});
+
+test("read_workspace_file: refuses a secret-shaped path without ever touching disk", async (t) => {
+	setVertexEnv();
+	const server = { agentHubGateway: { snapshot: async () => ({ folders: [], agents: [] }) } };
+	const { ws, connection } = await startFakeSession(server);
+	// Not calling ws.close() here -- see the comment on the first test above.
+
+	await connection.callbacks.onmessage({
+		toolCall: {
+			functionCalls: [{ id: "call-secret", name: "read_workspace_file", args: { path: "/tmp/definitely-does-not-exist/.env" } }],
+		},
+	});
+
+	const fr = lastToolResponse(connection);
+	const output = readOutput(fr);
+	assert.equal(output.ok, false);
+	assert.match(output.error, /secrets or credentials/);
+	// No approval flow for reads either -- it's an outright refusal, not a mutation.
+	assert.equal(ws.jsonMessages().filter((m) => m.type === "tool_approval_required").length, 0);
+});
+
+test("read_workspace_file: returns real file content for an ordinary file under the workspace root", async (t) => {
+	setVertexEnv();
+	const workspaceDir = mkdtempSync(join(tmpdir(), "pi-speak-dispatch-test-"));
+	const previousRoot = process.env.PI_SPEAK_WORKSPACE_ROOT;
+	process.env.PI_SPEAK_WORKSPACE_ROOT = workspaceDir;
+	const filePath = join(workspaceDir, "notes.txt");
+	writeFileSync(filePath, "hello from disk", "utf8");
+	t.after(() => {
+		if (previousRoot === undefined) delete process.env.PI_SPEAK_WORKSPACE_ROOT;
+		else process.env.PI_SPEAK_WORKSPACE_ROOT = previousRoot;
+		rmSync(workspaceDir, { recursive: true, force: true });
+	});
+
+	const server = { agentHubGateway: { snapshot: async () => ({ folders: [], agents: [] }) } };
+	const { ws, connection } = await startFakeSession(server);
+	// Not calling ws.close() here -- see the comment on the first test above.
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-read", name: "read_workspace_file", args: { path: filePath } }] },
+	});
+
+	const fr = lastToolResponse(connection);
+	const output = readOutput(fr);
+	assert.equal(output.ok, true);
+	assert.equal(output.file.content, "hello from disk");
+	assert.equal(output.file.binary, false);
+});
