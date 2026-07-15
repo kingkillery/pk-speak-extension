@@ -440,10 +440,13 @@ async function resolveTerminalApproval(
 
 // A launch_agent call is navigational (just opens the hub/dashboard, mutates
 // nothing) when hubOnly is set, or when there is neither a prompt nor a
-// targetNode to actually launch/deploy. Pulled out as a pure function so the
-// approval-boundary decision is unit-testable without a live Gemini session.
+// targetNode to actually launch/deploy. A targetNode is always a deployment
+// (e.g. "colab") regardless of hubOnly, so it always requires approval --
+// hubOnly must not be usable to smuggle a deploy past the approval boundary.
+// Pulled out as a pure function so the approval-boundary decision is
+// unit-testable without a live Gemini session.
 export function isNavigationalLaunch(args: { prompt?: string; hubOnly?: boolean; targetNode?: string }): boolean {
-	return !!args.hubOnly || (!args.prompt && !args.targetNode);
+	return !args.targetNode && (!!args.hubOnly || !args.prompt);
 }
 
 // Gate a mutating tool call (launch_agent, archive_session) behind operator
@@ -1261,9 +1264,17 @@ async function startNewSession(
 										outputText = JSON.stringify({ ok: false, error: "Refusing to read a file that looks like it may hold secrets or credentials." });
 									} else {
 										const result = readWorkspaceFile(requestedPath);
-										outputText = result.ok
-											? JSON.stringify({ ok: true, file: { name: result.name, path: result.path, size: result.size, truncated: result.truncated, binary: result.binary, content: result.content } })
-											: JSON.stringify({ ok: false, error: result.error });
+										// The requested path alone isn't enough: it could be an
+										// innocuously-named symlink pointing at a secret file, so
+										// also gate on the symlink-resolved real path before the
+										// content (already read into memory) is ever returned.
+										if (result.ok && looksLikeSecretPath(result.realPath)) {
+											outputText = JSON.stringify({ ok: false, error: "Refusing to read a file that looks like it may hold secrets or credentials." });
+										} else {
+											outputText = result.ok
+												? JSON.stringify({ ok: true, file: { name: result.name, path: result.path, size: result.size, truncated: result.truncated, binary: result.binary, content: result.content } })
+												: JSON.stringify({ ok: false, error: result.error });
+										}
 									}
 								} else {
 									outputText = JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });

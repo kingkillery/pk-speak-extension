@@ -17,7 +17,7 @@ import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { WebSocket as RealWebSocket } from "ws";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -82,8 +82,17 @@ class FakeWebSocket extends EventEmitter {
 	}
 }
 
-function sleep(ms) {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+// Condition-based instead of a fixed sleep: this is an event-driven dispatch
+// (message in, async handlers, message out), and a fixed-duration sleep is
+// exactly the kind of thing that's fine on a fast local machine and flaky
+// under slower/loaded CI scheduling. Poll for the actual observable effect
+// instead, with a generous bound so a real hang still fails loudly.
+async function waitFor(predicate, message, timeoutMs = 2_000) {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() >= deadline) assert.fail(message);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
 }
 
 // Forces the deterministic (non-narrated) launch_agent path: vertex backend
@@ -97,14 +106,14 @@ function setVertexEnv() {
 
 async function startFakeSession(server) {
 	const ws = new FakeWebSocket();
+	const connectionCountBefore = connections.length;
 	handleRealtimeGateway.call(server, ws);
 	// Kick startNewSession immediately instead of waiting on its 500ms
 	// no-first-message fallback timer; "noop" isn't a recognized control
 	// message so replaying it after setup is a harmless no-op.
 	ws.emit("message", Buffer.from(JSON.stringify({ type: "noop" })), false);
-	await sleep(20);
+	await waitFor(() => connections.length > connectionCountBefore, "expected a fake Gemini Live connection to have been created");
 	const connection = connections.at(-1);
-	assert.ok(connection, "expected a fake Gemini Live connection to have been created");
 	return { ws, connection };
 }
 
@@ -195,8 +204,9 @@ test("mutating tool: launch_agent defers behind approval, then actually launches
 	assert.ok(approvalId);
 
 	// Simulate the operator approving from the client.
+	const responseCountBefore = connection.session.toolResponses.length;
 	ws.emit("message", Buffer.from(JSON.stringify({ type: "command_approve", approvalId })), false);
-	await sleep(30);
+	await waitFor(() => connection.session.toolResponses.length > responseCountBefore, "expected a tool response after command_approve");
 
 	assert.equal(launchCalls.length, 1, "must launch exactly once after approval");
 	assert.deepEqual(launchCalls[0], { prompt: "fix the failing test", cwd: "/tmp/repo", hubOnly: undefined, targetNode: undefined });
@@ -239,8 +249,9 @@ test("mutating tool: archive_session never runs when the operator rejects it", a
 	const approvalMsg = ws.jsonMessages().find((m) => m.type === "tool_approval_required");
 	assert.ok(approvalMsg);
 
+	const responseCountBefore = connection.session.toolResponses.length;
 	ws.emit("message", Buffer.from(JSON.stringify({ type: "command_reject", approvalId: approvalMsg.approvalId })), false);
-	await sleep(30);
+	await waitFor(() => connection.session.toolResponses.length > responseCountBefore, "expected a tool response after command_reject");
 
 	assert.equal(archiveCalls.length, 0, "a rejected mutation must never execute");
 	const fr = lastToolResponse(connection);
@@ -275,6 +286,36 @@ test("read_workspace_file: refuses a secret-shaped path without ever touching di
 	assert.match(output.error, /secrets or credentials/);
 	// No approval flow for reads either -- it's an outright refusal, not a mutation.
 	assert.equal(ws.jsonMessages().filter((m) => m.type === "tool_approval_required").length, 0);
+});
+
+test("read_workspace_file: refuses an innocuously-named symlink that resolves to a secret file", async (t) => {
+	setVertexEnv();
+	const workspaceDir = mkdtempSync(join(tmpdir(), "pi-speak-dispatch-symlink-test-"));
+	const previousRoot = process.env.PI_SPEAK_WORKSPACE_ROOT;
+	process.env.PI_SPEAK_WORKSPACE_ROOT = workspaceDir;
+	const secretPath = join(workspaceDir, ".env");
+	writeFileSync(secretPath, "API_KEY=super-secret-value", "utf8");
+	const symlinkPath = join(workspaceDir, "notes.txt");
+	symlinkSync(secretPath, symlinkPath);
+	t.after(() => {
+		if (previousRoot === undefined) delete process.env.PI_SPEAK_WORKSPACE_ROOT;
+		else process.env.PI_SPEAK_WORKSPACE_ROOT = previousRoot;
+		rmSync(workspaceDir, { recursive: true, force: true });
+	});
+
+	const server = { agentHubGateway: { snapshot: async () => ({ folders: [], agents: [] }) } };
+	const { ws, connection } = await startFakeSession(server);
+	// Not calling ws.close() here -- see the comment on the first test above.
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-symlink", name: "read_workspace_file", args: { path: symlinkPath } }] },
+	});
+
+	const fr = lastToolResponse(connection);
+	const output = readOutput(fr);
+	assert.equal(output.ok, false, "an innocuous-looking name must not bypass the secret-path refusal via a symlink");
+	assert.match(output.error, /secrets or credentials/);
+	assert.doesNotMatch(JSON.stringify(output), /super-secret-value/, "the secret content must never appear in the tool response");
 });
 
 test("read_workspace_file: returns real file content for an ordinary file under the workspace root", async (t) => {

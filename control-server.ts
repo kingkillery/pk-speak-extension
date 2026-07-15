@@ -469,11 +469,17 @@ export class ControlServer {
 		this.onBrainstorm = options.onBrainstorm;
 	}
 
-	// Read-only view for the conversational realtime gateway: snapshot/detail
-	// only, not chat/kill/revive/stream, so a future realtime tool can't reach
-	// a mutating agent-hub action without going through the approval boundary.
+	// Read-only view for the conversational realtime gateway: a genuinely
+	// narrow runtime object exposing only snapshot/detail, not chat/kill/
+	// revive/stream. The Pick<> return type alone only narrows at compile
+	// time -- the realtime gateway holds this behind an `any`-typed `server`
+	// reference, so returning `this._agentHubGateway` directly would still let
+	// a future (or buggy) realtime tool reach the mutating methods at runtime.
 	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail"> {
-		return this._agentHubGateway;
+		return {
+			snapshot: () => this._agentHubGateway.snapshot(),
+			detail: (id, tailLines) => this._agentHubGateway.detail(id, tailLines),
+		};
 	}
 
 	getRuntimeState() {
@@ -2627,6 +2633,8 @@ export type WorkspaceFileResult =
 		ok: true;
 		name: string;
 		path: string;
+		/** Symlink/junction-resolved canonical path, for callers that must gate on the real target rather than the (possibly innocuously-named) requested path. */
+		realPath: string;
 		size: number;
 		truncated: boolean;
 		binary: boolean;
@@ -2660,7 +2668,8 @@ export function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 		return { ok: false, status: 400, error: "Path is not a regular file." };
 	}
 	// Symlink/junction hardening: the real (link-resolved) path must also stay in root.
-	if (!realPathInsideRoot(target, root)) {
+	const realTarget = realPathInsideRoot(target, root);
+	if (!realTarget) {
 		return { ok: false, status: 403, error: "Path is outside the workspace root." };
 	}
 	let buffer: Buffer;
@@ -2683,6 +2692,7 @@ export function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 		ok: true,
 		name: basename(target),
 		path: target,
+		realPath: realTarget,
 		size: stats.size,
 		truncated,
 		binary,

@@ -2,7 +2,7 @@
 
 Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent, reachable over voice, wake-word, phone, and browser/Android remote.
 
-The assistant (`realtime-gateway.ts`) has full read access to sessions, background agents, and the workspace on every turn, but never mutates anything without explicit operator approval. See "Conversational Assistant Mode" in `README.md` and the approval-flow notes below.
+The assistant (`realtime-gateway.ts`) has broad read-only access to sessions, background agents, and the workspace on every turn (workspace reads stay confined to `PI_SPEAK_WORKSPACE_ROOT`, are capped in size, and refuse secret-shaped paths), but never mutates anything without explicit operator approval. See "Conversational Assistant Mode" in `README.md` and the approval-flow notes below.
 
 ## Build
 
@@ -80,7 +80,7 @@ npm test               # Non-local auth, rate limiting, body size, audio expiry,
 npm run test:realtime-live   # End-to-end: real handleRealtimeGateway dispatch against a fake Gemini Live connection
 ```
 
-`npm test` (`tests/*.test.mjs`) only covers pure helpers in isolation — e.g. `buildRealtimeTools`, `isNavigationalLaunch`, `looksLikeSecretPath`, the approval registries. It does not exercise the actual onmessage tool-call switch in `realtime-gateway.ts`. `npm run test:realtime-live` (`tests/integration/*.test.mjs`, requires Node's `--experimental-test-module-mocks`, kept out of the default `tests/*.test.mjs` glob on purpose) fakes `@google/genai`'s `GoogleGenAI`/`live.connect` and drives the real `handleRealtimeGateway` entrypoint end to end: a read-only tool call answers immediately with no approval step; a mutating call (`launch_agent`/`archive_session`) defers behind `tool_approval_required` and only actually runs after a `command_approve` control message, never after `command_reject`; approvals/executions land in the real on-disk audit trail; `read_workspace_file` refuses a secret-shaped path without touching disk and returns real content for an ordinary one. Extend this file (not just the pure-helper tests) when changing the approval-gating wiring itself, not just the logic it calls.
+`npm test` (`tests/*.test.mjs`) covers plenty of real integration behavior generally (non-local auth, rate limiting, body size, audio expiry, etc.), but for the realtime conversational-assistant gateway specifically it only covers pure helpers in isolation — e.g. `buildRealtimeTools`, `isNavigationalLaunch`, `looksLikeSecretPath`, the approval registries. It does not exercise the actual onmessage tool-call switch in `realtime-gateway.ts`. `npm run test:realtime-live` (`tests/integration/*.test.mjs`, requires Node's `--experimental-test-module-mocks`, kept out of the default `tests/*.test.mjs` glob on purpose) fakes `@google/genai`'s `GoogleGenAI`/`live.connect` and drives the real `handleRealtimeGateway` entrypoint end to end: a read-only tool call answers immediately with no approval step; a mutating call (`launch_agent`/`archive_session`) defers behind `tool_approval_required` and only actually runs after a `command_approve` control message, never after `command_reject`; approvals/executions land in the real on-disk audit trail; `read_workspace_file` refuses a secret-shaped path without touching disk and returns real content for an ordinary one. Extend this file (not just the pure-helper tests) when changing the approval-gating wiring itself, not just the logic it calls.
 
 ## Release
 

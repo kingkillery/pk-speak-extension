@@ -33,7 +33,13 @@ const RG_DENIED_OPTIONS = new Set(["--pre", "--pre-glob"]);
 // terminal SECRET_INSPECTION_PATTERN check on purpose — this gates full file
 // content, not just whether a command is allowed to run.
 export function looksLikeSecretPath(targetPath: string): boolean {
-	const base = path.basename(targetPath);
+	// path.basename() only splits on the host platform's separator, so a
+	// Windows-style path (C:\Users\me\.ssh\id_rsa) running on a POSIX host
+	// wouldn't get split at all and would slip past the filename/extension
+	// checks below. Normalize both separators ourselves instead of relying on
+	// the host OS to agree with the path's own style.
+	const normalized = targetPath.replace(/\\/g, "/");
+	const base = normalized.slice(normalized.lastIndexOf("/") + 1);
 	return SECRET_INSPECTION_PATTERN.test(targetPath) || SECRET_PATH_EXTENSION_PATTERN.test(base) || SECRET_PATH_FILENAME_PATTERN.test(base);
 }
 
