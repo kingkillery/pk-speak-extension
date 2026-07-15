@@ -2,14 +2,122 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { WebSocket } from "ws";
 import { ControlServer } from "../dist/control-server.js";
-import { classifyRealtimeTerminalCommand } from "../dist/realtime-gateway.js";
+import { classifyRealtimeTerminalCommand, buildRealtimeTools, isNavigationalLaunch, REALTIME_SYSTEM_PROMPT } from "../dist/realtime-gateway.js";
 import {
 	buildRealtimeTerminalCommandPlan,
 	executeRealtimeTerminalCommandPlan,
+	looksLikeSecretPath,
 } from "../dist/realtime-terminal-command.js";
+
+test("isNavigationalLaunch only treats hubOnly or no-prompt/no-target calls as non-mutating", () => {
+	assert.equal(isNavigationalLaunch({ hubOnly: true }), true);
+	assert.equal(isNavigationalLaunch({ hubOnly: true, prompt: "fix the bug" }), true, "hubOnly wins even with a prompt");
+	assert.equal(isNavigationalLaunch({}), true, "no prompt and no targetNode just opens the hub");
+	assert.equal(isNavigationalLaunch({ prompt: "fix the bug" }), false, "a real prompt launches an agent");
+	assert.equal(isNavigationalLaunch({ targetNode: "colab" }), false, "a targetNode deploys, even without a prompt");
+	assert.equal(
+		isNavigationalLaunch({ hubOnly: true, targetNode: "colab" }),
+		false,
+		"hubOnly must not smuggle a targetNode deploy past approval",
+	);
+});
+
+test("looksLikeSecretPath flags common credential/key paths and leaves ordinary files alone", () => {
+	for (const path of [
+		"/repo/.env",
+		"/repo/.env.local",
+		"/repo/secret/service-account.json",
+		"/home/user/.ssh/id_rsa",
+		"/home/user/.ssh/id_ed25519.pub",
+		"/repo/certs/server.pem",
+		"/repo/config/api_key.txt",
+		// Windows-style backslash paths: path.basename() only splits on the
+		// host platform's separator, so these must be checked independent of
+		// whether the gateway happens to be running on a POSIX host.
+		"C:\\repo\\.env",
+		"C:\\Users\\me\\.ssh\\id_rsa",
+	]) {
+		assert.equal(looksLikeSecretPath(path), true, path);
+	}
+	for (const path of ["/repo/README.md", "/repo/src/index.ts", "/repo/package.json", "C:\\repo\\README.md"]) {
+		assert.equal(looksLikeSecretPath(path), false, path);
+	}
+});
+
+test("REALTIME_SYSTEM_PROMPT frames a conversational assistant that reads freely but asks before mutating", () => {
+	assert.doesNotMatch(REALTIME_SYSTEM_PROMPT, /voice coding assistant/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /conversational assistant/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /read-only tools/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /require.*(the )?operator's explicit approval/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /clarifying question/i);
+});
+
+test("buildRealtimeTools exposes read-only agent-hub and workspace tools alongside the existing session tools", () => {
+	const [{ functionDeclarations }] = buildRealtimeTools(false);
+	const names = functionDeclarations.map((tool) => tool.name);
+
+	for (const readOnlyName of [
+		"get_session_info",
+		"list_sessions",
+		"list_agent_hub_agents",
+		"get_agent_hub_agent",
+		"browse_workspace",
+		"read_workspace_file",
+	]) {
+		assert.ok(names.includes(readOnlyName), `expected read-only tool ${readOnlyName}`);
+	}
+
+	for (const mutatingName of ["launch_agent", "archive_session"]) {
+		const tool = functionDeclarations.find((t) => t.name === mutatingName);
+		assert.ok(tool, `expected mutating tool ${mutatingName}`);
+		assert.match(tool.description, /requires operator approval/i);
+	}
+});
+
+test("buildRealtimeTools only sets NON_BLOCKING behavior when the caller opts in", () => {
+	const [{ functionDeclarations: blocking }] = buildRealtimeTools(false);
+	for (const tool of blocking) assert.equal(tool.behavior, undefined, tool.name);
+
+	const [{ functionDeclarations: nonBlocking }] = buildRealtimeTools(true);
+	const terminalTool = nonBlocking.find((t) => t.name === "execute_terminal_command");
+	const launchTool = nonBlocking.find((t) => t.name === "launch_agent");
+	assert.equal(terminalTool.behavior, "NON_BLOCKING");
+	assert.equal(launchTool.behavior, "NON_BLOCKING");
+});
 
 const TEST_PORT = 18768;
 const TEST_TOKEN = "test-secret-token";
+
+function newTestControlServer() {
+	return new ControlServer({
+		state: { enabled: false, host: "127.0.0.1", port: TEST_PORT, authToken: TEST_TOKEN },
+		onStateChange: () => {},
+		getStatus: () => ({}),
+		getDiagnostics: () => ({}),
+		getRoutingStatus: () => ({}),
+		setRoutingTarget: () => ({ ok: true, message: "ok" }),
+		onMonoAction: () => ({ ok: true, message: "ok" }),
+		onSpeakAction: () => ({ ok: true, message: "ok" }),
+		onPhoneAction: () => ({ ok: true, message: "ok" }),
+		onTextTurn: async () => ({ replyText: "hello" }),
+		onVoiceTurn: async () => ({ replyText: "hello" }),
+	});
+}
+
+test("ControlServer.agentHubGateway is a genuinely narrow runtime facade, not just a narrowed type", () => {
+	// Regression: an earlier version returned `this._agentHubGateway` directly
+	// with only a Pick<> return *type* -- that only narrows at compile time,
+	// so at runtime (especially through the `any`-typed realtime `server`
+	// reference) chat/kill/revive/stream were still reachable. The facade must
+	// be a real object literal that lacks those properties entirely.
+	const server = newTestControlServer();
+	const facade = server.agentHubGateway;
+	assert.equal(typeof facade.snapshot, "function");
+	assert.equal(typeof facade.detail, "function");
+	for (const mutatingMethod of ["chat", "kill", "revive", "stream"]) {
+		assert.equal(facade[mutatingMethod], undefined, `${mutatingMethod} must not be reachable through the realtime-facing facade`);
+	}
+});
 
 test("realtime terminal safety allows only read-only commands", () => {
 	for (const command of [

@@ -416,7 +416,7 @@ export class ControlServer {
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
-	private readonly agentHubGateway: AgentHubGateway;
+	private readonly _agentHubGateway: AgentHubGateway;
 	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
@@ -465,8 +465,21 @@ export class ControlServer {
 		this.sendHerdrAgent = options.sendHerdrAgent || ((payload) => sendHerdrAgent(payload));
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
-		this.agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
+		this._agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
 		this.onBrainstorm = options.onBrainstorm;
+	}
+
+	// Read-only view for the conversational realtime gateway: a genuinely
+	// narrow runtime object exposing only snapshot/detail, not chat/kill/
+	// revive/stream. The Pick<> return type alone only narrows at compile
+	// time -- the realtime gateway holds this behind an `any`-typed `server`
+	// reference, so returning `this._agentHubGateway` directly would still let
+	// a future (or buggy) realtime tool reach the mutating methods at runtime.
+	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail"> {
+		return {
+			snapshot: () => this._agentHubGateway.snapshot(),
+			detail: (id, tailLines) => this._agentHubGateway.detail(id, tailLines),
+		};
 	}
 
 	getRuntimeState() {
@@ -771,7 +784,7 @@ export class ControlServer {
 		}
 
 		if (req.method === "GET" && url.pathname === "/v1/herdr/agents") {
-			const snapshot = await this.agentHubGateway.snapshot();
+			const snapshot = await this._agentHubGateway.snapshot();
 			this.writeJson(res, 200, { ok: true, generatedAtMs: Date.now(), ...snapshot });
 			return;
 		}
@@ -787,7 +800,7 @@ export class ControlServer {
 				const action = agentMatch[2];
 				if (req.method === "GET" && !action) {
 					const lines = parsePositiveInt(url.searchParams.get("lines"), 80);
-					const agent = await this.agentHubGateway.detail(id, Math.min(lines, 500));
+					const agent = await this._agentHubGateway.detail(id, Math.min(lines, 500));
 					if (!agent) { this.writeJson(res, 404, { ok: false, code: "not_found", error: `Unknown agent: ${id}` }); return; }
 					this.writeJson(res, 200, { ok: true, agent });
 					return;
@@ -796,19 +809,19 @@ export class ControlServer {
 					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 					const parsed = parseHubChatRequest(payload, getPrimaryHeaderValue(req.headers["x-pi-speak-idempotency-key"]));
 					if (!parsed) { this.writeJson(res, 400, { ok: false, code: "bad_request", error: "Body must be { text } (non-empty, <=8192 chars)." }); return; }
-					const result = await this.agentHubGateway.chat(id, parsed.text, parsed.idempotencyKey);
+					const result = await this._agentHubGateway.chat(id, parsed.text, parsed.idempotencyKey);
 					this.writeJson(res, result.ok ? 200 : result.status, result);
 					return;
 				}
 				if (req.method === "POST" && action === "revive") {
-					const result = await this.agentHubGateway.revive(id);
+					const result = await this._agentHubGateway.revive(id);
 					this.writeJson(res, result.ok ? 200 : result.status, result);
 					return;
 				}
 				if (req.method === "POST" && action === "kill") {
 					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 					const confirm = parseHubKillConfirm(payload ?? undefined);
-					const result = await this.agentHubGateway.kill(id, confirm?.confirmToken);
+					const result = await this._agentHubGateway.kill(id, confirm?.confirmToken);
 					this.writeJson(res, result.ok ? 200 : result.status, result);
 					return;
 				}
@@ -822,7 +835,7 @@ export class ControlServer {
 				if (!id) { this.writeJson(res, 400, { ok: false, code: "bad_id", error: "Malformed agent id." }); return; }
 				const fromByte = parseNonNegativeInt(url.searchParams.get("fromByte"), 0);
 				// SSE: long-lived stream — don't apply REQUEST_TIMEOUT_MS here.
-				await this.agentHubGateway.stream(id, res, fromByte);
+				await this._agentHubGateway.stream(id, res, fromByte);
 				return;
 			}
 		}
@@ -2543,7 +2556,7 @@ function isWindowsReservedDeviceName(pathOrName: string) {
 
 const WORKSPACE_LIST_MAX_ENTRIES = 2000;
 
-function listWorkspaceDirectory(requestedPath?: string) {
+export function listWorkspaceDirectory(requestedPath?: string) {
 	const root = resolve(getWorkspaceRoot());
 	const requested = resolve(requestedPath?.trim() || root);
 	// Lexical clamp first (cheap ../ guard), then confirm the real directory stays in
@@ -2615,11 +2628,13 @@ function decodeTextPreview(buffer: Buffer, truncated: boolean): string {
 	return buffer.subarray(0, end).toString("utf8");
 }
 
-type WorkspaceFileResult =
+export type WorkspaceFileResult =
 	| {
 		ok: true;
 		name: string;
 		path: string;
+		/** Symlink/junction-resolved canonical path, for callers that must gate on the real target rather than the (possibly innocuously-named) requested path. */
+		realPath: string;
 		size: number;
 		truncated: boolean;
 		binary: boolean;
@@ -2627,7 +2642,7 @@ type WorkspaceFileResult =
 	}
 	| { ok: false; status: number; error: string };
 
-function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
+export function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 	const trimmed = requestedPath?.trim();
 	if (!trimmed) {
 		return { ok: false, status: 400, error: "A file path is required." };
@@ -2653,7 +2668,8 @@ function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 		return { ok: false, status: 400, error: "Path is not a regular file." };
 	}
 	// Symlink/junction hardening: the real (link-resolved) path must also stay in root.
-	if (!realPathInsideRoot(target, root)) {
+	const realTarget = realPathInsideRoot(target, root);
+	if (!realTarget) {
 		return { ok: false, status: 403, error: "Path is outside the workspace root." };
 	}
 	let buffer: Buffer;
@@ -2676,6 +2692,7 @@ function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 		ok: true,
 		name: basename(target),
 		path: target,
+		realPath: realTarget,
 		size: stats.size,
 		truncated,
 		binary,

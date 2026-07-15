@@ -1,8 +1,8 @@
 # pk-speak
 
-Voice, wake-word, and remote-control extensions for Pi / `pi-mono`.
+A conversational assistant for Pi / `pi-mono`, reachable over voice, phone, and browser remote.
 
-This package turns Pi into a usable voice workstation, not just a text assistant with TTS bolted on. It gives you:
+`pk-speak` runs a persistent conversational assistant that can see session and background-agent state and read the workspace on every turn, but never mutates anything — launching an agent, archiving a session, or running a command outside a small read-only allowlist — without your explicit approval. Voice (`/mono`), Telegram (`/phone`), and the browser/Android remote (`/remote`) are channels into that same assistant, not separate products. It gives you:
 
 - spoken assistant replies with multiple TTS backends
 - the always-listening `PK` wake phrase flow
@@ -437,6 +437,18 @@ There are six main subsystems:
 
 6. `control-server.ts`
    Local HTTP API, audio artifact serving, and the built-in mobile app host.
+
+## Conversational Assistant Mode
+
+`realtime-gateway.ts` runs the live-voice conversational assistant. It can call read-only tools on every turn — `list_sessions`, `get_session_info`, `list_agent_hub_agents`, `get_agent_hub_agent`, `browse_workspace`, `read_workspace_file` — to see real session, background-agent, and workspace state before answering.
+
+Anything that mutates state goes through operator approval first:
+
+- `execute_terminal_command` outside the read-only allowlist
+- `launch_agent` when it actually launches an agent (not just opening the hub)
+- `archive_session` (archive or recover)
+
+The assistant calls the tool normally; if the action needs approval, the client shows what is about to happen and waits for an explicit approve/reject before anything runs. Nothing is claimed as done until a real tool result confirms it.
 
 ## Remote Paths
 
