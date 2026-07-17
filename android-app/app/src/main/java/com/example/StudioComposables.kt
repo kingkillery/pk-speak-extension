@@ -155,13 +155,19 @@ private fun StudioConversationPanel(
             items(state.pendingTerminalApprovals, key = { it.approvalId }) { approval ->
                 TerminalApprovalCard(
                     approval = approval,
+                    // Only clear the prompt once the decision actually reached the live
+                    // session; with no session the disconnect paths clear the list instead.
                     onApprove = {
-                        liveSessionRef.value?.approveTerminal(approval.approvalId)
-                        state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
+                        liveSessionRef.value?.let { session ->
+                            session.approveTerminal(approval.approvalId)
+                            state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
+                        }
                     },
                     onReject = {
-                        liveSessionRef.value?.rejectTerminal(approval.approvalId)
-                        state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
+                        liveSessionRef.value?.let { session ->
+                            session.rejectTerminal(approval.approvalId)
+                            state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
+                        }
                     },
                 )
             }
@@ -185,7 +191,9 @@ private fun StudioConversationPanel(
         if (state.isProcessing) {
             item { TurnProgress(state.progressText, prefs.showTurnProgress, state.stopStatusText, onStopCurrentTurn) }
         }
-        if (state.transcription.isEmpty() && state.latestReply.isEmpty() && state.chatMessages.isEmpty() && !state.isProcessing) {
+        // latestReply is not rendered in this panel, so it must not suppress the
+        // idle state — otherwise a reply with an empty chat leaves the screen blank.
+        if (state.transcription.isEmpty() && state.chatMessages.isEmpty() && !state.isProcessing) {
             item { StudioIdleState(prefs.transmissionMode, prefs.codexSessionName, state.connectionStatusText, modifier = Modifier.fillParentMaxSize()) }
         }
     }
