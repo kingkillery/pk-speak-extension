@@ -26,10 +26,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -70,7 +68,6 @@ import com.example.ui.theme.SuccessSoft
 import com.example.ui.theme.SurfaceMuted
 import com.example.ui.theme.SurfacePaper
 import com.example.ui.theme.SurfaceSubtle
-import com.example.ui.theme.Warn
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.PermissionState
 import com.google.accompanist.permissions.isGranted
@@ -96,13 +93,12 @@ fun StudioCockpitLayout(
     onStopAndSend: () -> Unit,
     onSendText: () -> Unit,
 ) {
+    // Edge-to-edge chat column (Claude Code mobile style): the conversation is
+    // the screen, with only a compact composer docked below it.
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        StudioStatusStrip(state = state, onClearConversation = onClearConversation)
         StudioConversationPanel(
             state = state,
             prefs = prefs,
@@ -115,8 +111,7 @@ fun StudioCockpitLayout(
             onClearConversation = onClearConversation,
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .padding(top = 8.dp, bottom = 10.dp),
+                .weight(1f),
         )
         StudioComposer(
             state = state,
@@ -136,47 +131,6 @@ fun StudioCockpitLayout(
 }
 
 @Composable
-private fun StudioStatusStrip(state: StudioRuntimeState, onClearConversation: () -> Unit) {
-    val text = when {
-        state.isRealtimeActive -> if (state.isRealtimeConnected) "Live connected" else "Live connecting"
-        state.isRecording -> "Recording"
-        state.stopStatusText == "Stopping..." -> "Stopping turn"
-        state.isProcessing -> "Agent working"
-        else -> "Ready"
-    }
-    val color = when {
-        state.isRealtimeActive -> if (state.isRealtimeConnected) Success else Warn
-        state.isRecording -> Accent
-        state.isProcessing -> Warn
-        else -> InkMuted
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = text,
-            color = color,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        if (state.chatMessages.isNotEmpty()) {
-            TextButton(
-                onClick = onClearConversation,
-                enabled = !state.isProcessing,
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-            ) {
-                Text("Clear", color = InkMuted, fontSize = 11.sp)
-            }
-        }
-    }
-}
-
-@Composable
 private fun StudioConversationPanel(
     state: StudioRuntimeState,
     prefs: AppPreferences,
@@ -189,57 +143,50 @@ private fun StudioConversationPanel(
     onClearConversation: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(
-        modifier = modifier,
-        color = SurfacePaper,
-        shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, Line),
+    // Messages sit directly on the canvas — no card, no border, no inner gutter —
+    // so the full screen width carries conversation content.
+    LazyColumn(
+        state = listState,
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (state.pendingTerminalApprovals.isNotEmpty()) {
-                items(state.pendingTerminalApprovals, key = { it.approvalId }) { approval ->
-                    TerminalApprovalCard(
-                        approval = approval,
-                        onApprove = {
-                            liveSessionRef.value?.approveTerminal(approval.approvalId)
-                            state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
-                        },
-                        onReject = {
-                            liveSessionRef.value?.rejectTerminal(approval.approvalId)
-                            state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
-                        },
-                    )
-                }
+        if (state.pendingTerminalApprovals.isNotEmpty()) {
+            items(state.pendingTerminalApprovals, key = { it.approvalId }) { approval ->
+                TerminalApprovalCard(
+                    approval = approval,
+                    onApprove = {
+                        liveSessionRef.value?.approveTerminal(approval.approvalId)
+                        state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
+                    },
+                    onReject = {
+                        liveSessionRef.value?.rejectTerminal(approval.approvalId)
+                        state.pendingTerminalApprovals.removeAll { it.approvalId == approval.approvalId }
+                    },
+                )
             }
-            if (state.chatMessages.isNotEmpty()) {
-                item { ConversationLogHeader(onClearConversation, enabled = !state.isProcessing) }
-                items(state.chatMessages, key = { it.id }) { message ->
-                    StudioChatMessage(
-                        message = message,
-                        activeAgent = prefs.activeAgent,
-                        playingMessageId = state.playingMessageId,
-                        onPlayingMessageChange = { state.playingMessageId = it },
-                        audioHelper = audioHelper,
-                        ttsHelper = ttsHelper,
-                        haptic = haptic,
-                    )
-                }
+        }
+        if (state.chatMessages.isNotEmpty()) {
+            item { ConversationLogHeader(onClearConversation, enabled = !state.isProcessing) }
+            items(state.chatMessages, key = { it.id }) { message ->
+                StudioChatMessage(
+                    message = message,
+                    playingMessageId = state.playingMessageId,
+                    onPlayingMessageChange = { state.playingMessageId = it },
+                    audioHelper = audioHelper,
+                    ttsHelper = ttsHelper,
+                    haptic = haptic,
+                )
             }
-            if (state.transcription.isNotEmpty()) {
-                item { TranscriptStream(state.transcription) }
-            }
-            if (state.isProcessing) {
-                item { TurnProgress(state.progressText, prefs.showTurnProgress, state.stopStatusText, onStopCurrentTurn) }
-            }
-            if (state.transcription.isEmpty() && state.latestReply.isEmpty() && state.chatMessages.isEmpty() && !state.isProcessing) {
-                item { StudioIdleState(prefs.transmissionMode, prefs.codexSessionName, state.connectionStatusText, modifier = Modifier.fillParentMaxSize()) }
-            }
+        }
+        if (state.transcription.isNotEmpty()) {
+            item { TranscriptStream(state.transcription) }
+        }
+        if (state.isProcessing) {
+            item { TurnProgress(state.progressText, prefs.showTurnProgress, state.stopStatusText, onStopCurrentTurn) }
+        }
+        if (state.transcription.isEmpty() && state.latestReply.isEmpty() && state.chatMessages.isEmpty() && !state.isProcessing) {
+            item { StudioIdleState(prefs.transmissionMode, prefs.codexSessionName, state.connectionStatusText, modifier = Modifier.fillParentMaxSize()) }
         }
     }
 }
@@ -267,53 +214,71 @@ private fun ConversationLogHeader(onClearConversation: () -> Unit, enabled: Bool
 @Composable
 private fun StudioChatMessage(
     message: ChatMessage,
-    activeAgent: String,
     playingMessageId: String?,
     onPlayingMessageChange: (String?) -> Unit,
     audioHelper: AudioHelper,
     ttsHelper: TtsHelper,
     haptic: HapticFeedback,
 ) {
-    val isUser = message.role == "user"
-    val isProgress = message.role == "progress"
-    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = if (isUser) Alignment.End else Alignment.Start) {
-        Text(
-            text = when (message.role) {
-                "user" -> "You"
-                "assistant" -> activeAgent.uppercase()
-                "progress" -> "Progress"
-                else -> "System"
-            },
-            color = when (message.role) {
-                "user" -> Accent
-                "assistant" -> Success
-                "progress" -> InkMuted
-                else -> Error
-            },
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.5.sp,
-        )
-        Spacer(modifier = Modifier.height(3.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(if (isUser) 0.86f else 1f)
-                .background(if (isUser) AccentSoft else SurfaceSubtle, RoundedCornerShape(8.dp))
-                .border(1.dp, Line, RoundedCornerShape(8.dp))
-                .padding(10.dp),
-        ) {
-            Column {
+    // Claude Code mobile message anatomy: user turns are compact right-aligned
+    // bubbles; assistant turns are plain full-width text on the canvas; progress
+    // and system lines are quiet metadata. No role labels, borders, or panels.
+    when (message.role) {
+        "user" -> {
+            Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 300.dp)
+                        .background(AccentSoft, RoundedCornerShape(18.dp))
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                ) {
+                    Text(
+                        text = message.text,
+                        color = Ink,
+                        fontSize = 15.sp,
+                        lineHeight = 21.sp,
+                    )
+                }
+            }
+        }
+        "assistant" -> {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     text = message.text,
-                    color = if (isProgress) InkMuted else Ink,
-                    fontSize = if (isProgress) 11.sp else 13.sp,
-                    lineHeight = if (isProgress) 16.sp else 19.sp,
-                    fontFamily = if (message.role == "assistant") FontFamily.Monospace else FontFamily.Default,
+                    color = Ink,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
                 )
-                if (!isProgress) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    MessageActions(message, playingMessageId == message.id, onPlayingMessageChange, audioHelper, ttsHelper, haptic)
-                }
+                Spacer(modifier = Modifier.height(4.dp))
+                MessageActions(message, playingMessageId == message.id, onPlayingMessageChange, audioHelper, ttsHelper, haptic)
+            }
+        }
+        "progress" -> {
+            Text(
+                text = message.text,
+                color = InkMuted,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        else -> {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 6.dp)
+                        .size(5.dp)
+                        .clip(CircleShape)
+                        .background(InkMuted)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = message.text,
+                    color = InkMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }
@@ -330,7 +295,7 @@ private fun MessageActions(
 ) {
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start, verticalAlignment = Alignment.CenterVertically) {
         Text(
             text = "Copy",
             color = InkMuted,
@@ -380,21 +345,34 @@ private fun TranscriptStream(text: String) {
 
 @Composable
 private fun TurnProgress(progressText: String, showTurnProgress: Boolean, stopStatusText: String, onStopCurrentTurn: () -> Unit) {
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        CircularProgressIndicator(color = Accent, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
-        if (showTurnProgress && progressText.isNotBlank()) {
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(progressText, color = Ink, fontSize = 12.sp, lineHeight = 17.sp, textAlign = TextAlign.Center)
+    // Inline working row, Claude-style: spinner + status on the left, a quiet
+    // Stop affordance on the right. No centered block eating vertical space.
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(color = Accent, strokeWidth = 2.dp, modifier = Modifier.size(16.dp))
+            Spacer(modifier = Modifier.width(10.dp))
+            Text("Working…", color = InkMuted, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            TextButton(
+                onClick = onStopCurrentTurn,
+                enabled = stopStatusText != "Stopping...",
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+            ) {
+                Text(
+                    if (stopStatusText == "Stopping...") "Stopping…" else "Stop",
+                    color = Error,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
-        Spacer(modifier = Modifier.height(12.dp))
-        OutlinedButton(
-            onClick = onStopCurrentTurn,
-            enabled = stopStatusText != "Stopping...",
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Error),
-            border = BorderStroke(1.dp, Accent),
-            shape = RoundedCornerShape(8.dp),
-        ) {
-            Text(if (stopStatusText == "Stopping...") "Stopping..." else "Stop turn", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        if (showTurnProgress && progressText.isNotBlank()) {
+            Text(
+                progressText,
+                color = InkMuted,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(start = 26.dp, top = 2.dp),
+            )
         }
     }
 }
@@ -409,7 +387,7 @@ internal fun StudioIdleState(
     val voiceHint = if (transmissionMode == "PTT") "Hold to talk" else "Tap to talk"
     Column(
         modifier = modifier
-            .padding(start = 14.dp, end = 14.dp, top = 128.dp)
+            .padding(start = 14.dp, end = 14.dp, top = 48.dp)
             .fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top,
@@ -522,8 +500,9 @@ private fun StudioComposer(
         }
     }
     LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         items(quickCommands) { cmd ->
@@ -532,18 +511,18 @@ private fun StudioComposer(
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.clickable(enabled = !state.isProcessing) { sendQuickCommand(cmd) },
             ) {
-                Text(cmd, color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+                Text(cmd, color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp))
             }
         }
     }
     Surface(
-        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
         color = SurfacePaper,
-        shape = RoundedCornerShape(26.dp),
+        shape = RoundedCornerShape(24.dp),
         border = BorderStroke(1.dp, Line),
         shadowElevation = 2.dp,
     ) {
-        Column(modifier = Modifier.padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 10.dp)) {
+        Column(modifier = Modifier.padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 8.dp)) {
             BasicTextField(
                 value = state.textInputState,
                 onValueChange = { state.textInputState = it },
@@ -556,7 +535,7 @@ private fun StudioComposer(
                     inner()
                 },
             )
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Row(
                     modifier = Modifier

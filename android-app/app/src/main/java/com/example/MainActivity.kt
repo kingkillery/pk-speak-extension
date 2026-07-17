@@ -34,8 +34,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -290,7 +292,7 @@ fun PiSpeakConsoleScreen(
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Top bar: menu / title / settings (Sage & Clay header)
+            // Slim top bar: menu / title+status / settings (Claude Code mobile style)
             HeaderSection(
                 title = tabTitle,
                 sessionName = codexSessionName,
@@ -302,12 +304,13 @@ fun PiSpeakConsoleScreen(
                 onSettingsClick = { currentTab = "settings" }
             )
 
-            // Content Container with smooth fade effects
+            // Content container. Studio renders edge-to-edge like a chat surface;
+            // the list-style tabs keep a small gutter.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .padding(horizontal = 16.dp)
+                    .padding(horizontal = if (currentTab == "studio") 0.dp else 12.dp)
             ) {
                 when (currentTab) {
                     "studio" -> StudioTabContent(
@@ -353,29 +356,13 @@ fun PiSpeakConsoleScreen(
                     )
                 }
             }
-
-            // Android standard decoration indicator at bottom
-            Spacer(modifier = Modifier.height(12.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(width = 120.dp, height = 4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(Line)
-                )
-            }
         }
         ConnectionErrorBanner(
             message = studioState.connectionBannerText,
             onDismiss = { studioState.connectionBannerText = "" },
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 76.dp, start = 16.dp, end = 16.dp)
+                .padding(top = 60.dp, start = 16.dp, end = 16.dp)
         )
     }
     }
@@ -394,58 +381,39 @@ fun HeaderSection(
 ) {
     val connectionColor = gatewayConnectionIndicatorColor(isGatewayConnected, isReconnecting)
     val statusLabel = "$connectionStatusText | Codex: $sessionName"
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        color = SurfacePaper,
-        shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, Line),
-        shadowElevation = 1.dp,
-    ) {
+    // Flat, slim app bar (Claude Code mobile style): icon / title+status / icon,
+    // separated from content by a hairline instead of a floating card.
+    Column(modifier = Modifier.fillMaxWidth().background(CanvasColor)) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            TextButton(
-                onClick = onMenuClick,
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                colors = ButtonDefaults.textButtonColors(contentColor = Ink),
-            ) {
-                Text("Menu", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            IconButton(onClick = onMenuClick) {
+                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = Ink)
             }
-
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+                    .padding(horizontal = 2.dp),
             ) {
                 Text(
                     text = title,
                     color = Ink,
-                    style = MaterialTheme.typography.titleLarge,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(SurfaceSubtle)
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(7.dp)
+                            .size(6.dp)
                             .clip(CircleShape)
                             .background(connectionColor)
                     )
-                    Spacer(modifier = Modifier.width(7.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = statusLabel,
                         color = InkMuted,
@@ -454,7 +422,7 @@ fun HeaderSection(
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (isGatewayConnected && connectionLatencyMs >= 0L) {
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Text(
                             text = "${connectionLatencyMs}ms",
                             color = connectionColor,
@@ -464,16 +432,16 @@ fun HeaderSection(
                     }
                 }
             }
-
-            TextButton(
-                onClick = onSettingsClick,
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                colors = ButtonDefaults.textButtonColors(contentColor = Ink),
-            ) {
-                Text("Tune", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            IconButton(onClick = onSettingsClick) {
+                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = InkMuted)
             }
         }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Line)
+        )
     }
 }
 
