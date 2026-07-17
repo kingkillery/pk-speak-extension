@@ -1,6 +1,0 @@
-interface:
-  display_name: "g-kade"
-  short_description: "Packet-owned KADE plus gstack bridge wrapper."
-  default_prompt: "Use g-kade for this task."
-policy:
-  allow_implicit_invocation: true
