@@ -230,7 +230,8 @@ fun stopAndSendVoiceTurn(
             if (elapsedMs in 0 until MINIMUM_VOICE_CAPTURE_MS) {
                 delay(MINIMUM_VOICE_CAPTURE_MS - elapsedMs)
             }
-            val stoppedCleanly = audioHelper.stopRecording()
+            // stopRecording joins the WAV writer thread (up to 1.5s) — keep it off main.
+            val stoppedCleanly = withContext(Dispatchers.IO) { audioHelper.stopRecording() }
             val file = audioHelper.getRecordedFile(RECORD_FILE)
             if (stoppedCleanly && file.exists() && file.length() >= MIN_VALID_WAV_BYTES) {
                 setProgress(state, prefs, "Uploading voice to gateway.")

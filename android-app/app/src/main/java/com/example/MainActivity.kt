@@ -86,6 +86,8 @@ import com.example.ui.theme.SurfaceMuted
 import com.example.ui.theme.SurfacePaper
 import com.example.ui.theme.SurfaceSubtle
 import com.example.ui.theme.Warn
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
@@ -216,51 +218,56 @@ fun PiSpeakConsoleScreen(
         }
     }
 
+    // Health polling only runs while the app is visible (STARTED); it pauses in the
+    // background instead of hitting the gateway every 5s for the life of the process.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     LaunchedEffect(Unit) {
-        var unreachableSinceMs: Long? = null
-        var lastLoggedConnectionStatus = ""
-        while (true) {
-            val startTime = System.currentTimeMillis()
-            val healthy = client.pingHealth()
-            val latency = System.currentTimeMillis() - startTime
-            if (healthy) {
-                unreachableSinceMs = null
-                studioState.isGatewayConnected = true
-                studioState.isReconnecting = false
-                studioState.connectionLatencyMs = latency
-                studioState.connectionStatusText = "Connected"
-                studioState.connectionBannerText = ""
-            } else {
-                val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
-                unreachableSinceMs = firstFailureMs
-                studioState.isGatewayConnected = false
-                studioState.isReconnecting = true
-                studioState.connectionStatusText = "Reconnecting..."
-                val reconnectStartTime = System.currentTimeMillis()
-                val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
-                val reconnectLatency = System.currentTimeMillis() - reconnectStartTime
-                codexSessionName = prefs.codexSessionName
-                if (result.connected) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var unreachableSinceMs: Long? = null
+            var lastLoggedConnectionStatus = ""
+            while (true) {
+                val startTime = System.currentTimeMillis()
+                val healthy = client.pingHealth()
+                val latency = System.currentTimeMillis() - startTime
+                if (healthy) {
                     unreachableSinceMs = null
                     studioState.isGatewayConnected = true
                     studioState.isReconnecting = false
-                    studioState.connectionLatencyMs = reconnectLatency
+                    studioState.connectionLatencyMs = latency
                     studioState.connectionStatusText = "Connected"
                     studioState.connectionBannerText = ""
                 } else {
-                    val elapsedMs = System.currentTimeMillis() - firstFailureMs
-                    studioState.isReconnecting = elapsedMs <= 10_000L
-                    studioState.connectionStatusText = if (studioState.isReconnecting) "Searching for gateway..." else "Gateway unreachable"
-                    if (studioState.connectionBannerText.isBlank()) {
-                        studioState.connectionBannerText = result.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+                    val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
+                    unreachableSinceMs = firstFailureMs
+                    studioState.isGatewayConnected = false
+                    studioState.isReconnecting = true
+                    studioState.connectionStatusText = "Reconnecting..."
+                    val reconnectStartTime = System.currentTimeMillis()
+                    val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+                    val reconnectLatency = System.currentTimeMillis() - reconnectStartTime
+                    codexSessionName = prefs.codexSessionName
+                    if (result.connected) {
+                        unreachableSinceMs = null
+                        studioState.isGatewayConnected = true
+                        studioState.isReconnecting = false
+                        studioState.connectionLatencyMs = reconnectLatency
+                        studioState.connectionStatusText = "Connected"
+                        studioState.connectionBannerText = ""
+                    } else {
+                        val elapsedMs = System.currentTimeMillis() - firstFailureMs
+                        studioState.isReconnecting = elapsedMs <= 10_000L
+                        studioState.connectionStatusText = if (studioState.isReconnecting) "Searching for gateway..." else "Gateway unreachable"
+                        if (studioState.connectionBannerText.isBlank()) {
+                            studioState.connectionBannerText = result.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+                        }
                     }
                 }
+                if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
+                    lastLoggedConnectionStatus = studioState.connectionStatusText
+                    Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
+                }
+                delay(5_000)
             }
-            if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
-                lastLoggedConnectionStatus = studioState.connectionStatusText
-                Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
-            }
-            delay(5_000)
         }
     }
 
@@ -813,6 +820,9 @@ fun StudioTabContent(
     val listState = rememberLazyListState()
 
     LaunchedEffect(state.chatMessages.size, state.transcription, state.isProcessing, state.isRecording, state.latestReply) {
+        val layoutInfo = listState.layoutInfo
+        val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (!shouldFollowConversationTail(lastVisibleIndex, layoutInfo.totalItemsCount)) return@LaunchedEffect
         val totalCount = state.chatMessages.size + 10
         if (totalCount > 10) {
             listState.animateScrollToItem(totalCount)
@@ -1097,7 +1107,8 @@ fun StudioTabContent(
                     if (elapsedMs in 0 until minimumVoiceCaptureMs) {
                         delay(minimumVoiceCaptureMs - elapsedMs)
                     }
-                    val stoppedCleanly = audioHelper.stopRecording()
+                    // stopRecording joins the WAV writer thread (up to 1.5s) — keep it off main.
+                    val stoppedCleanly = withContext(Dispatchers.IO) { audioHelper.stopRecording() }
                     val file = audioHelper.getRecordedFile("turn.wav")
                     Log.d("MainActivity", "Voice recording stopped: stoppedCleanly=$stoppedCleanly, exists=${file.exists()}, bytes=${file.length()}")
                     if (stoppedCleanly && file.exists() && file.length() >= 12_000) {
