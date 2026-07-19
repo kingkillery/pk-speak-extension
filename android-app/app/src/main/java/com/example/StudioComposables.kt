@@ -44,6 +44,12 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -309,7 +315,7 @@ private fun MessageActions(
             color = InkMuted,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.clickable {
+            modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Copy message") {
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                 clipboardManager.setText(AnnotatedString(message.text))
                 android.widget.Toast.makeText(context, "Copied to clipboard", android.widget.Toast.LENGTH_SHORT).show()
@@ -321,7 +327,10 @@ private fun MessageActions(
             color = if (isPlaying) Accent else InkMuted,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.clickable {
+            modifier = Modifier.clickable(
+                role = Role.Button,
+                onClickLabel = if (isPlaying) "Stop playback" else "Play message aloud",
+            ) {
                 if (isPlaying) {
                     audioHelper.stopPlayback()
                     ttsHelper.stop()
@@ -517,7 +526,11 @@ private fun StudioComposer(
             Surface(
                 color = SelectedFill,
                 shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.clickable(enabled = !state.isProcessing) { sendQuickCommand(cmd) },
+                modifier = Modifier.clickable(
+                    enabled = !state.isProcessing,
+                    role = Role.Button,
+                    onClickLabel = "Send $cmd",
+                ) { sendQuickCommand(cmd) },
             ) {
                 Text(cmd, color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp))
             }
@@ -549,7 +562,11 @@ private fun StudioComposer(
                     modifier = Modifier
                         .clip(RoundedCornerShape(16.dp))
                         .border(BorderStroke(1.dp, Line), RoundedCornerShape(16.dp))
-                        .clickable(enabled = !state.isProcessing) {
+                        .clickable(
+                            enabled = !state.isProcessing,
+                            role = Role.Button,
+                            onClickLabel = "Prefix message with a slash command",
+                        ) {
                             if (!state.textInputState.startsWith("/")) state.textInputState = "/" + state.textInputState
                         }
                         .padding(horizontal = 12.dp, vertical = 7.dp),
@@ -606,6 +623,7 @@ private fun StudioComposerActions(
             StudioPillButton("Live Off", Ink, Canvas) {
                 if (!permissionState.status.isGranted) permissionState.launchPermissionRequest() else onStartLiveSession()
             }
+            val talkDescription = if (prefs.transmissionMode == "PTT") "Hold to talk" else "Tap to start or stop talking"
             Box(
                 modifier = Modifier
                     .height(44.dp)
@@ -614,6 +632,23 @@ private fun StudioComposerActions(
                     .clip(CircleShape)
                     .background(if (state.isRecording) Accent else Canvas)
                     .border(BorderStroke(1.dp, Line), CircleShape)
+                    .semantics {
+                        role = Role.Button
+                        contentDescription = talkDescription
+                        stateDescription = if (state.isRecording) "Recording" else "Not recording"
+                        // TalkBack cannot drive the raw press-and-hold gesture below, so expose
+                        // an explicit activation that toggles recording in both PTT and TOGGLE
+                        // modes (tap to start, tap again to stop and send).
+                        onClick(label = if (state.isRecording) "Stop recording and send" else "Start recording") {
+                            if (state.isProcessing) return@onClick false
+                            if (!permissionState.status.isGranted) {
+                                permissionState.launchPermissionRequest()
+                                return@onClick true
+                            }
+                            if (state.isRecording) onStopAndSend() else onRecordTrigger()
+                            true
+                        }
+                    }
                     .pointerInput(prefs.transmissionMode, permissionState.status.isGranted, state.isProcessing) {
                         detectTapGestures(
                             onPress = {
@@ -648,7 +683,8 @@ private fun StudioComposerActions(
                 .size(44.dp)
                 .clip(CircleShape)
                 .background(if (canSend) Accent else SurfaceMuted)
-                .clickable(enabled = canSend) { onSendText() },
+                .clickable(enabled = canSend, role = Role.Button) { onSendText() }
+                .semantics { contentDescription = "Send message" },
             contentAlignment = Alignment.Center,
         ) {
             Text("↑", color = if (canSend) SurfacePaper else InkMuted, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -665,7 +701,7 @@ private fun StudioPillButton(text: String, textColor: Color, backgroundColor: Co
             .clip(CircleShape)
             .background(backgroundColor)
             .border(BorderStroke(1.dp, Line), CircleShape)
-            .clickable { onClick() },
+            .clickable(role = Role.Button) { onClick() },
         contentAlignment = Alignment.Center,
     ) {
         Text(text, color = textColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 8.dp))

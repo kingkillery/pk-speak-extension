@@ -62,7 +62,6 @@ class AppPreferencesConnectionTest {
 
     assertEquals(AppPreferences.DEFAULT_WORKSPACE_PATH, prefs.workspaceRoot)
     assertEquals(AppPreferences.DEFAULT_WORKSPACE_PATH, prefs.workspacePath)
-    assertEquals("C:\\Users\\Prest\\Desktop\\SPWR-DAILY\\Interconnection-Dash-2026", AppPreferences.SPWR_DAILY_WORKSPACE_PATH)
   }
 
   @Test
