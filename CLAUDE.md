@@ -1,6 +1,15 @@
 # CLAUDE.md - pi-speak-pk
 
-Use this file as a quick repo-local operating guide for voice and multi-session control work.
+Use this file as a quick repo-local operating guide for the pi-speak conversational assistant and its voice/multi-session control surfaces. The assistant is the center; voice (`/mono`, `PK` wake phrase), Telegram (`/phone`), and the mobile/web remote (`/remote`, `/pk-remote`) are input/output channels that reach the same assistant.
+
+## Start Here For Conversational Assistant Work
+
+When the task involves the realtime assistant persona, the `propose_command` approval flow, read-only subagent/workspace tools, or how voice/remote turns reach the assistant, read these first:
+
+1. `realtime-gateway.ts` — assistant core, tool definitions, `propose_command` handling
+2. `realtime-command-approval.ts` — approval registry for terminal/chat/kill/launch proposals
+3. `README.md` — the conversational assistant thesis and how the input channels map to it
+4. the relevant source file
 
 ## Start Here For Natural Voice Control Work
 
@@ -15,8 +24,13 @@ When the task involves spoken replies, wake-word listening, voice session routin
 
 ## What This Repo Optimizes For
 
+<<<<<<< HEAD
+- a conversational assistant that reads subagent state and proposes commands for approval
+- natural spoken interaction as one input channel among several
+=======
 - a conversational assistant with broad read-only access to sessions, background agents, and the workspace (workspace reads confined to the workspace root, capped, secret-shaped paths refused), but no mutation without explicit operator approval
 - natural spoken interaction
+>>>>>>> origin/main
 - command-backed control surfaces
 - safe multi-session routing
 - one primary session-manager abstraction for normal operators
@@ -36,6 +50,8 @@ When the task involves spoken replies, wake-word listening, voice session routin
 ## Important Source Map
 
 - `index.ts` → command registration and runtime orchestration (also owns the routing-store watcher that reloads after pane writes)
+- `realtime-gateway.ts` → conversational assistant core: Gemini Live session, read-only subagent/workspace tools, `propose_command` approval flow
+- `realtime-command-approval.ts` → approval registry for terminal/chat/kill/launch proposals
 - `voice-session-command.ts` → natural spoken session phrases
 - `voice-routing.ts` → normalized target matching, compact numeric route families, and conflict checks
 - `session-routing.ts` → naming, aliases, dashboard formatting, removal rules, and `buildSessionDashboard` shared with the pane

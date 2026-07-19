@@ -1,11 +1,18 @@
 # pk-speak
 
+<<<<<<< HEAD
+A conversational assistant for Pi / `pi-mono` that uses voice, wake-word, and remote-control as input channels.
+
+pi-speak is a conversational assistant, not just a text assistant with TTS bolted on. The assistant can see all subagent state and the workspace, interview you to scope ambiguous requests, and ask for explicit approval before running any command that mutates a subagent, terminal, or file. Voice, the `PK` wake phrase, Telegram, and the mobile web/Android remote are all ways to reach the same assistant. It gives you:
+=======
 A conversational assistant for Pi / `pi-mono`, reachable over voice, phone, and browser remote.
 
 `pk-speak` runs a persistent conversational assistant that can see session and background-agent state and read the workspace on every turn, but never mutates anything — launching an agent, archiving a session, or running a command outside a small read-only allowlist — without your explicit approval. Voice (`/mono`), Telegram (`/phone`), and the browser/Android remote (`/remote`) are channels into that same assistant, not separate products. It gives you:
+>>>>>>> origin/main
 
+- a conversational assistant that reads subagent state and proposes commands for approval
 - spoken assistant replies with multiple TTS backends
-- the always-listening `PK` wake phrase flow
+- the always-listening `PK` wake phrase flow as a way to start a conversation
 - Telegram text and voice turns from your phone
 - a local HTTP control API
 - a built-in mobile web app at `/app/`
@@ -13,10 +20,10 @@ A conversational assistant for Pi / `pi-mono`, reachable over voice, phone, and 
 
 ## What To Use
 
-If you just want the shortest path:
+These are all input channels to the same conversational assistant. Pick the one that fits where you are:
 
 1. Local desktop voice: use `/speak on`
-2. Hands-free on the same machine: use `/mono on`
+2. Hands-free on the same machine: use `/mono on` (say `PK` to start a conversation)
 3. Remote from your phone with the least friction: use `/phone on`
 4. Remote from your phone with QR setup: use `/pk-remote`, then scan the QR from the Android phone
 ## Documentation
@@ -268,6 +275,19 @@ Optional environment:
 
 Keep Gemini, Vertex, and ElevenLabs credentials server-side. Do not put them in the Android app or browser app.
 
+## The Conversational Assistant
+
+The real-time gateway (`realtime-gateway.ts`) runs a Gemini Live session that acts as a conversational assistant, not a voice command executor. The assistant:
+
+- can see all subagent state (`list_agents`, `get_agent`, `read_transcript`) and the workspace (`list_workspace`, `read_workspace_file`)
+- interviews you to scope ambiguous requests before acting
+- asks for explicit approval before any command that mutates a subagent, terminal, or file, using the `propose_command` tool, which returns a confirmation token and a human-readable description and does **not** execute until you approve
+- keeps replies short and conversational
+
+Mutating actions (`execute_terminal_command`, `launch_agent`, `chat_agent`, `kill_agent`, `archive_session`) are staged as proposals through the same approval registry used by the terminal and Agent Hub gateways. The assistant proposes; you approve; only then does it run.
+
+Voice (`/mono`, `/speak`), Telegram (`/phone`), and the mobile web/Android remote (`/remote`, `/pk-remote`) are all input channels to this same assistant. The wake phrase `PK` is how you start a conversation hands-free.
+
 ## Main Commands
 
 ### `/speak`
@@ -312,7 +332,7 @@ Aliases for stop: `off`, `quiet`, `silence`, `shush`.
 
 ### `/mono`
 
-Controls the wake-word listener.
+Controls the wake-word listener — the hands-free way to start a conversation with the assistant.
 
 ```text
 /mono on
@@ -380,7 +400,7 @@ Behavior:
 
 ### `/sess`
 
-Named sessions, wake aliases, and routing summaries for voice control.
+Named sessions, wake aliases, and routing summaries for the assistant. Sessions are assistant-managed: the conversational assistant can switch between them (`switch_session`), inspect them (`get_session_info`), and archive/recover them (`archive_session`) — always asking for approval before mutating.
 
 ```text
 /sess
@@ -416,26 +436,29 @@ For operator details, see:
 
 ## Architecture
 
-There are six main subsystems:
+The conversational assistant is the center; voice, wake-word, Telegram, and the mobile remote are input/output channels around it. There are seven main subsystems:
 
 1. `index.ts`
    The extension entrypoint. Registers commands, persists state, owns wake-word routing, and coordinates TTS, STT, Telegram, and HTTP control.
 
-2. `tts.ts`
-   Multi-provider speech synthesis. Supports `legacy`, `edge`, `gemini`, `openai`, `elevenlabs`, `sag`, `higgs`, `stable-audio`, and `auto`.
+2. `realtime-gateway.ts`
+   The conversational assistant core. Runs a Gemini Live session with read-only subagent/workspace tools and a `propose_command` approval flow. Voice, phone, and remote turns all reach this assistant.
 
-3. `stt.ts` and `listener/stt_worker.py`
+3. `tts.ts`
+   Multi-provider speech synthesis (the assistant's voice). Supports `legacy`, `edge`, `gemini`, `openai`, `elevenlabs`, `sag`, `higgs`, `stable-audio`, and `auto`.
+
+4. `stt.ts` and `listener/stt_worker.py`
    Remote voice transcription for uploaded audio. `PI_SPEAK_REMOTE_STT_PROVIDER` accepts `auto|local|openai|elevenlabs|google`. `auto` prefers ElevenLabs/OpenAI when keys are present, otherwise a warm local `faster-whisper` worker.
 
-4. `listener/listener.py`
-   The always-on two-tier listener:
+5. `listener/listener.py`
+   The always-on two-tier listener (wake-phrase detection is how you start a conversation with the assistant):
    - Tier 1: `faster-whisper` tiny for wake-phrase detection
    - Tier 2: `faster-whisper` for actual speech transcription
 
-5. `phone-bridge.ts`
-   Telegram transport for remote text and voice notes.
+6. `phone-bridge.ts`
+   Telegram transport for remote text and voice notes (a channel to reach the assistant from your phone).
 
-6. `control-server.ts`
+7. `control-server.ts`
    Local HTTP API, audio artifact serving, and the built-in mobile app host.
 
 ## Conversational Assistant Mode
@@ -924,6 +947,7 @@ For a compact operator worksheet, use `docs/REMOTE_VALIDATION_RUN_SHEET.md`.
 ## Files You Will Care About
 
 - [index.ts](./index.ts)
+- [realtime-gateway.ts](./realtime-gateway.ts)
 - [tts.ts](./tts.ts)
 - [stt.ts](./stt.ts)
 - [phone-bridge.ts](./phone-bridge.ts)

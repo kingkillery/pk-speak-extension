@@ -2,5 +2,9 @@
   "managed_by": "pk-skills1/scripts/reconcile_skills.py",
   "canonical_path": "C:\\Users\\prest\\.agents\\skills1\\pk-skills1\\skills\\kade-hq",
   "canonical_digest": "daa98e3afeea42955e0e6278fe0863d2105968f6a0b4605ae3971a8ece398777",
+<<<<<<< HEAD
+  "projected_at": "2026-07-14T06:30:30.588881+00:00"
+=======
   "projected_at": "2026-07-14T06:30:30.664306+00:00"
+>>>>>>> origin/main
 }
