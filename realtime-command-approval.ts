@@ -3,11 +3,13 @@
 // launching an agent or archiving/recovering a session — behind one
 // kind+description shape without reshaping the terminal flow.
 export type RealtimeCommandKind = "launch_agent" | "archive_session";
+
 export type RealtimeCommandApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export type RealtimeCommandApproval = {
 	id: string;
-	kind: RealtimeCommandKind;	description: string;
+	kind: RealtimeCommandKind;
+	description: string;
 	requestedAt: number;
 	expiresAt: number;
 	status: RealtimeCommandApprovalStatus;
@@ -33,11 +35,13 @@ export function createRealtimeCommandApprovalRegistry(
 		}
 	};
 
-	const request = (kind: RealtimeCommandKind, description: string) => {		pruneExpired();
+	const request = (kind: RealtimeCommandKind, description: string) => {
+		pruneExpired();
 		const requestedAt = now();
 		const approval: RealtimeCommandApproval = {
 			id: `rt-cmd-${nextApprovalId++}`,
-			kind,			description,
+			kind,
+			description,
 			requestedAt,
 			expiresAt: requestedAt + timeoutMs,
 			status: "pending",

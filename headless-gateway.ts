@@ -27,7 +27,7 @@ import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunch
 import { buildOhMyPiAgentHubDashboardCached, defaultOhMyPiSessionRoots, mergeOhMyPiAgentHubSessionsCached } from "./agent-hub-dashboard.js";
 import { createLiveAgentHubBinding } from "./herdr-agent-hub-live.js";
 import { handleRealtimeGateway } from "./realtime-gateway.js";
-import { enrichDashboardWithWorkspaces, type SessionDashboard, type SessionDashboardEntry } from "./session-routing.js";
+import { enrichDashboardWithWorkspaces, normalizeArchivePath, type SessionDashboard, type SessionDashboardEntry } from "./session-routing.js";
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { OmpSelectionStore } from "./omp-selection.js";
 import { spawnDetached } from "./spawn-shim.js";
@@ -890,12 +890,15 @@ function archiveOrRecoverSession(sessionPath: string, action: "archive" | "recov
 	}
 
 	// codex/claude: track-and-hide in the routing store (reversible, no file move).
+	// Normalize so archive-with-spelling-A then recover-with-spelling-B still match,
+	// and so the persisted set is canonical for the dashboard's archived check.
+	const archiveKey = normalizeArchivePath(trimmed);
 	const persisted = loadPersistedSessionRouting();
-	const set = new Set(persisted.archivedPaths);
+	const set = new Set(persisted.archivedPaths.map((p) => normalizeArchivePath(p)));
 	if (action === "recover") {
-		if (!set.delete(trimmed)) return { ok: false, message: "Session is not archived." };
+		if (!set.delete(archiveKey)) return { ok: false, message: "Session is not archived." };
 	} else {
-		set.add(trimmed);
+		set.add(archiveKey);
 	}
 	persistSessionRouting({
 		sessions: persisted.sessions,

@@ -14,9 +14,9 @@ import { safeSpawn } from "./spawn-shim.js";
 import { spawn } from "node:child_process";
 import type { RealtimeControlMessage } from "./realtime-types.js";
 import {
-	createRealtimeCommandApprovalRegistry,
-	type RealtimeCommandApprovalRegistry,
-} from "./realtime-command-approval.js";
+	createRealtimeTerminalApprovalRegistry,
+	type RealtimeTerminalApprovalRegistry,
+} from "./realtime-terminal-approval.js";
 import {
 	buildRealtimeTerminalCommandPlan,
 	classifyRealtimeTerminalCommand,
@@ -118,7 +118,8 @@ interface ActiveSession {
 	disconnectTimeout?: NodeJS.Timeout;
 	pendingServerMessages: { seqId: number; isBinary: boolean; data: any }[];
 	terminalApprovals: RealtimeTerminalApprovalRegistry;
-	pendingTerminalCalls: Map<string, PendingTerminalCall>;	commandApprovals: RealtimeCommandApprovalRegistry;
+	pendingTerminalCalls: Map<string, PendingTerminalCall>;
+	commandApprovals: RealtimeCommandApprovalRegistry;
 	pendingCommandCalls: Map<string, PendingCommandCall>;
 	provider: string;
 	model: string;
@@ -133,10 +134,9 @@ interface ActiveSession {
 	pendingToolResponses: Record<string, unknown>[];
 }
 
-type PendingCommandCall = {
+type PendingTerminalCall = {
 	call: { id: string; name: string; args?: unknown };
-	plan?: RealtimeTerminalCommandPlan;
-	commandArgs?: Record<string, unknown>;
+	plan: RealtimeTerminalCommandPlan;
 	timer?: ReturnType<typeof setTimeout>;
 };
 
@@ -158,7 +158,8 @@ export const REALTIME_SYSTEM_PROMPT = [
 	"When a request is ambiguous or could mean more than one thing, ask a short clarifying question before acting instead of assuming.",
 	"Mutating actions — launching a background agent, archiving or recovering a session, or running a terminal command outside the read-only allowlist — always require the operator's explicit approval. Call the tool normally; if the result says it requires confirmation, tell the user what you are about to do and wait for them to approve or reject it before treating it as done.",
 	"Never claim an action completed until you receive a real tool result confirming it.",
-	"When you fire a background tool (launch_agent, execute_terminal_command), acknowledge in one short sentence, then continue the conversation normally.",	"Do not narrate a tool's progress unless you receive an explicit progress update.",
+	"When you fire a background tool (launch_agent, execute_terminal_command), acknowledge in one short sentence, then continue the conversation normally.",
+	"Do not narrate a tool's progress unless you receive an explicit progress update.",
 	"When a tool result arrives, announce it conversationally at the next natural pause.",
 	"Do not narrate background state refreshes delivered silently.",
 	"Keep replies short and conversational.",
@@ -367,156 +368,73 @@ export async function runWithProgressNarration(
 	});
 }
 
-async function executeProposedCommand(
-	activeSession: ActiveSession,
-	pending: PendingCommandCall,
-	approvalId?: string,
-) {
-	const args = pending.commandArgs ?? {};
-	const callName = pending.call.name;
-	const server = activeSession.server;
-	try {
-		if (callName === "execute_terminal_command" && pending.plan) {
-			return await executeRealtimeTerminalCommand(activeSession, pending.plan, pending.call.id, approvalId);
-		}
-		if (callName === "launch_agent") {
-			const prompt = args.prompt as string | undefined;
-			const cwd = (args.cwd as string | undefined) || getCurrentCwd();
-			const hubOnly = args.hubOnly as boolean | undefined;
-			const targetNode = args.targetNode as string | undefined;
-			if (server && typeof server.onSessionLaunch === "function") {
-				return await server.onSessionLaunch({ prompt, cwd, hubOnly, targetNode });
-			}
-			return { ok: false, error: "Session launch is not available." };
-		}
-		if (callName === "archive_session") {
-			const sessionPath = args.sessionPath as string;
-			const action = args.action === "recover" ? "recover" : "archive";
-			if (!sessionPath) return { ok: false, error: "Missing 'sessionPath' argument" };
-			if (server && typeof server.onSessionArchive === "function") {
-				return await server.onSessionArchive({ sessionPath, action });
-			}
-			return { ok: false, error: "Session archive is not available." };
-		}
-		if (callName === "chat_agent" || callName === "kill_agent") {
-			const token = args.proposalToken as string | undefined;
-			if (!token) return { ok: false, error: "Missing proposal token." };
-			if (server && typeof server.agentHubExecute === "function") {
-				return await server.agentHubExecute(token);
-			}
-			return { ok: false, error: "Agent hub execution is not available." };
-		}
-		if (callName === "propose_command") {
-			const commandType = args.commandType as string;
-			if (commandType === "execute_terminal_command" && pending.plan) {
-				return await executeRealtimeTerminalCommand(activeSession, pending.plan, pending.call.id, approvalId);
-			}
-			if (commandType === "launch_agent" || commandType === "archive_session" || commandType === "chat" || commandType === "kill") {
-				return await executeProposedCommand(activeSession, {
-					...pending,
-					call: { ...pending.call, name: commandType === "chat" ? "chat_agent" : commandType === "kill" ? "kill_agent" : commandType },
-				}, approvalId);
-			}
-			return { ok: false, error: `Proposed command type not executable: ${commandType}` };
-		}
-		return { ok: false, error: `Unknown command: ${callName}` };
-	} catch (err: any) {
-		return { ok: false, error: err.message };
-	}
-}
-
-async function resolveCommandApproval(
+async function resolveTerminalApproval(
 	activeSession: ActiveSession,
 	approvalId: string | undefined,
 	approved: boolean,
 	reason = approved ? "approved" : "rejected",
 ) {
-	const pending = approvalId ? activeSession.pendingCommandCalls.get(approvalId) : undefined;
+	const pending = approvalId ? activeSession.pendingTerminalCalls.get(approvalId) : undefined;
 	const approval = reason === "expired"
-		? activeSession.commandApprovals.expire(approvalId)
-		: activeSession.commandApprovals.resolve(approvalId, approved);
+		? activeSession.terminalApprovals.expire(approvalId)
+		: activeSession.terminalApprovals.resolve(approvalId, approved);
 	if (!approval || !pending) {
 		sendToClient(activeSession, {
 			type: "error",
-			message: `Command approval not found or expired: ${approvalId || "missing"}`,
+			message: `Terminal approval not found or expired: ${approvalId || "missing"}`,
 		}, false);
 		return;
 	}
 	if (pending.timer) clearTimeout(pending.timer);
-	activeSession.pendingCommandCalls.delete(approval.id);
-
-	if (pending.call.name === "execute_terminal_command" && pending.plan) {
-		appendTerminalAudit(activeSession, {
-			kind: "terminal.approval_resolved",
-			toolCallId: pending.call.id,
-			approvalId: approval.id,
-			...buildRealtimeTerminalPlanAuditFields(pending.plan),
-			cwd: getCurrentCwd(),
-			approved,
-			decision: reason,
-		});
-		sendToClient(activeSession, {
-			type: "tool_approval_resolved",
-			approvalId: approval.id,
-			name: pending.call.name,
-			command: pending.plan.command,
-			cwd: getCurrentCwd(),
-			timeoutMs: pending.plan.timeoutMs,
-			reason: pending.plan.reason,
-			message: approved ? "Terminal command approved." : "Terminal command rejected.",
-		}, false);
-
-		const outputText = approved
-			? await executeRealtimeTerminalCommand(activeSession, pending.plan, pending.call.id, approval.id)
-			: (() => {
-				appendTerminalAudit(activeSession, {
-					kind: "terminal.execution_result",
-					toolCallId: pending.call.id,
-					approvalId: approval.id,
-					...buildRealtimeTerminalPlanAuditFields(pending.plan),
-					cwd: getCurrentCwd(),
-					result: buildRealtimeTerminalAuditResult({
-						ok: false,
-						code: null,
-						skipped: reason === "expired" ? "expired" : "rejected",
-					}),
-				});
-				return JSON.stringify({
-					ok: false,
-					rejected: true,
-					requiresConfirmation: true,
-					reason,
-					command: pending.plan.command,
-					cwd: getCurrentCwd(),
-					timeoutMs: pending.plan.timeoutMs,
-					riskReason: pending.plan.reason,
-					commandFamily: pending.plan.family || "unregistered",
-					message: "Realtime terminal command was not approved by the operator.",
-				});
-			})();
-		sendRealtimeToolResponse(activeSession, pending.call, outputText, { approvalId: approval.id, scheduling: FunctionResponseScheduling.INTERRUPT });
-		return;
-	}
-
+	activeSession.pendingTerminalCalls.delete(approval.id);
+	appendTerminalAudit(activeSession, {
+		kind: "terminal.approval_resolved",
+		toolCallId: pending.call.id,
+		approvalId: approval.id,
+		...buildRealtimeTerminalPlanAuditFields(pending.plan),
+		cwd: getCurrentCwd(),
+		approved,
+		decision: reason,
+	});
 	sendToClient(activeSession, {
 		type: "tool_approval_resolved",
 		approvalId: approval.id,
 		name: pending.call.name,
-		command: approval.command,
-		description: approval.description,
-		message: approved ? "Command approved." : "Command rejected.",
+		command: pending.plan.command,
+		cwd: getCurrentCwd(),
+		timeoutMs: pending.plan.timeoutMs,
+		reason: pending.plan.reason,
+		message: approved ? "Terminal command approved." : "Terminal command rejected.",
 	}, false);
 
 	const outputText = approved
-		? JSON.stringify(await executeProposedCommand(activeSession, pending, approval.id))
-		: JSON.stringify({
+		? await executeRealtimeTerminalCommand(activeSession, pending.plan, pending.call.id, approval.id)
+		: (() => {
+			appendTerminalAudit(activeSession, {
+				kind: "terminal.execution_result",
+				toolCallId: pending.call.id,
+				approvalId: approval.id,
+				...buildRealtimeTerminalPlanAuditFields(pending.plan),
+				cwd: getCurrentCwd(),
+				result: buildRealtimeTerminalAuditResult({
+					ok: false,
+					code: null,
+					skipped: reason === "expired" ? "expired" : "rejected",
+				}),
+			});
+			return JSON.stringify({
 			ok: false,
 			rejected: true,
 			requiresConfirmation: true,
 			reason,
-			command: approval.command,
-			message: "Command was not approved by the operator.",
-		});
+			command: pending.plan.command,
+			cwd: getCurrentCwd(),
+			timeoutMs: pending.plan.timeoutMs,
+			riskReason: pending.plan.reason,
+			commandFamily: pending.plan.family || "unregistered",
+			message: "Realtime terminal command was not approved by the operator.",
+			});
+		})();
 	sendRealtimeToolResponse(activeSession, pending.call, outputText, { approvalId: approval.id, scheduling: FunctionResponseScheduling.INTERRUPT });
 }
 
@@ -542,7 +460,8 @@ function requestCommandApproval(
 	kind: RealtimeCommandKind,
 	description: string,
 ) {
-	const approval = activeSession.commandApprovals.request(kind, description);	const timeoutMs = Math.max(0, approval.expiresAt - Date.now());
+	const approval = activeSession.commandApprovals.request(kind, description);
+	const timeoutMs = Math.max(0, approval.expiresAt - Date.now());
 	const timer = setTimeout(() => {
 		resolveCommandApproval(activeSession, approval.id, false, "expired").catch((err) => {
 			sendToClient(activeSession, { type: "error", message: `Command approval expiry failed: ${err instanceof Error ? err.message : String(err)}` }, false);
@@ -701,7 +620,8 @@ function resultLooksOk(outputText: string | undefined): boolean {
 		return typeof parsed?.ok === "boolean" ? parsed.ok : true;
 	} catch {
 		return true;
-	}}
+	}
+}
 
 function setupSocketHandlers(activeSession: ActiveSession) {
 	const ws = activeSession.ws;
@@ -737,8 +657,8 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 				}
 
 				if (ctrl.type === "terminal_approve" || ctrl.type === "terminal_reject") {
-					resolveCommandApproval(activeSession, ctrl.approvalId, ctrl.type === "terminal_approve").catch((err) => {
-						sendToClient(activeSession, { type: "error", message: `Command approval failed: ${err instanceof Error ? err.message : String(err)}` }, false);
+					resolveTerminalApproval(activeSession, ctrl.approvalId, ctrl.type === "terminal_approve").catch((err) => {
+						sendToClient(activeSession, { type: "error", message: `Terminal approval failed: ${err instanceof Error ? err.message : String(err)}` }, false);
 					});
 				} else if (ctrl.type === "command_approve" || ctrl.type === "command_reject") {
 					resolveCommandApproval(activeSession, ctrl.approvalId, ctrl.type === "command_approve").catch((err) => {
@@ -795,11 +715,12 @@ type ReconnectContext = {
 // what the assistant can read freely vs. what requires operator approval —
 // is unit-testable independently of a live Gemini Live connection.
 export function buildRealtimeTools(nonBlockingEnabled: boolean) {
-	return [		{
+	return [
+		{
 			functionDeclarations: [
 				{
 					name: "execute_terminal_command",
-					description: "Executes a shell command in the local workspace. Read-only allowlisted commands run immediately. Mutating, risky, or unknown commands are staged as a proposal that requires user approval before running.",
+					description: "Executes a shell command in the local workspace directory, returning the stdout, stderr, and exit code.",
 					parameters: {
 						type: "OBJECT",
 						properties: {
@@ -811,85 +732,6 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 						required: ["command"]
 					},
 					...(nonBlockingEnabled ? { behavior: Behavior.NON_BLOCKING } : {}),
-				},
-				{
-					name: "propose_command",
-					description: "Propose a mutating command to the user before executing it. Use for launch_agent, chat/kill subagent actions, archive_session, execute_terminal_command, or multi-step plans. Returns a confirmation token and a human-readable description; nothing runs until the user approves.",
-					parameters: {
-						type: "OBJECT",
-						properties: {
-							commandType: {
-								type: "STRING",
-								description: "The command being proposed: execute_terminal_command, launch_agent, chat, kill, archive_session, or multi_step."
-							},
-							command: {
-								type: "STRING",
-								description: "A concise, human-readable description of the command to run."
-							},
-							description: {
-								type: "STRING",
-								description: "A conversational explanation of why you want to run it and what it will do."
-							},
-							args: {
-								type: "OBJECT",
-								description: "The arguments for the proposed command, matching the target tool's parameters."
-							}
-						},
-						required: ["commandType", "command", "description"]
-					}
-				},
-				{
-					name: "list_agents",
-					description: "Lists all subagents and background lanes, grouped by workspace, with their status and recent activity. Read-only.",
-					parameters: {
-						type: "OBJECT",
-						properties: {}
-					}
-				},
-				{
-					name: "get_agent",
-					description: "Gets details about a single subagent or background lane, including its status, model, and cwd. Read-only.",
-					parameters: {
-						type: "OBJECT",
-						properties: {
-							agentId: { type: "STRING", description: "The agent id." },
-							lines: { type: "INTEGER", description: "Number of transcript tail lines to include (default 80, max 500)." }
-						},
-						required: ["agentId"]
-					}
-				},
-				{
-					name: "read_transcript",
-					description: "Reads the recent transcript tail of a subagent or background lane. Read-only.",
-					parameters: {
-						type: "OBJECT",
-						properties: {
-							agentId: { type: "STRING", description: "The agent id." },
-							lines: { type: "INTEGER", description: "Number of transcript lines to return (default 80, max 500)." }
-						},
-						required: ["agentId"]
-					}
-				},
-				{
-					name: "list_workspace",
-					description: "Lists the contents of a workspace directory. Read-only.",
-					parameters: {
-						type: "OBJECT",
-						properties: {
-							path: { type: "STRING", description: "Optional directory path. Defaults to the workspace root." }
-						}
-					}
-				},
-				{
-					name: "read_workspace_file",
-					description: "Reads the contents of a workspace file (text or binary notice). Read-only.",
-					parameters: {
-						type: "OBJECT",
-						properties: {
-							path: { type: "STRING", description: "The file path to read." }
-						},
-						required: ["path"]
-					}
 				},
 				{
 					name: "switch_session",
@@ -923,7 +765,8 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 				},
 				{
 					name: "launch_agent",
-					description: "Launches a new oh-my-pk background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'. Actually launching (as opposed to just opening the hub) mutates state, so it requires operator approval.",					parameters: {
+					description: "Launches a new oh-my-pk background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'. Actually launching (as opposed to just opening the hub) mutates state, so it requires operator approval.",
+					parameters: {
 						type: "OBJECT",
 						properties: {
 							prompt: { type: "STRING", description: "Optional task prompt for the new agent. Omit to open the agent hub." },
@@ -936,7 +779,8 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 				},
 				{
 					name: "archive_session",
-					description: "Archives or recovers a session by its path. Archived sessions are hidden from the dashboard but fully recoverable. Mutates state, so it requires operator approval.",					parameters: {
+					description: "Archives or recovers a session by its path. Archived sessions are hidden from the dashboard but fully recoverable. Mutates state, so it requires operator approval.",
+					parameters: {
 						type: "OBJECT",
 						properties: {
 							sessionPath: { type: "STRING", description: "The full session path to archive or recover." },
@@ -983,7 +827,8 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 						properties: {
 							path: { type: "STRING", description: "Absolute path of the file to read." }
 						},
-						required: ["path"]					}
+						required: ["path"]
+					}
 				}
 			]
 		}
@@ -1117,8 +962,9 @@ async function startNewSession(
 					if (message.toolCall?.functionCalls) {
 						for (const call of message.toolCall.functionCalls) {
 							if (!call.name || !call.id) continue;
-							const toolCall = { id: call.id, name: call.name, args: call.args };
-
+							const toolCall = { id: call.id, name: call.name };
+							let deferToolResponse = false;
+							
 							// Send tool_start event
 							sendToClient(activeSession, {
 								type: "tool_start",
@@ -1443,6 +1289,7 @@ async function startNewSession(
 								outputText = JSON.stringify({ ok: false, error: err.message });
 							}
 							if (deferToolResponse) continue;
+
 							sendRealtimeToolResponse(activeSession, toolCall, outputText);
 						}
 					}

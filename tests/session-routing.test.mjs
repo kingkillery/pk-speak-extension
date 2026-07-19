@@ -8,6 +8,7 @@ import {
 	findSessionRegistryKey,
 	findWakeAliasKey,
 	formatCompactRouteSlots,
+	enrichDashboardWithWorkspaces,
 	formatSessionManagerSummary,
 	formatSessionRoutingList,
 	removeSessionRoutingForPath,
@@ -338,4 +339,22 @@ test("describeSessionRoutingStore includes store path", () => {
 		}),
 		"Sessions: none. Wake aliases: none. Store: /tmp/session-routing.json",
 	);
+});
+
+test("enrichDashboardWithWorkspaces hides an archived session despite path spelling differences", () => {
+	// The dashboard scanner emits one spelling; the archive request stored another
+	// equivalent spelling. The archived check must normalize both, or a session the
+	// user archived stays visible (and the codex/claude track-and-hide breaks).
+	const dashboard = {
+		sessions: [
+			{ sessionPath: "/sessions/proj/a.jsonl", lastActivity: Date.now() },
+			{ sessionPath: "/sessions/proj/b.jsonl", lastActivity: Date.now() },
+		],
+	};
+	const enriched = enrichDashboardWithWorkspaces(dashboard, {
+		// Equivalent but differently-spelled path for a.jsonl.
+		archivedPaths: ["/sessions/proj/sub/../a.jsonl"],
+	});
+	const visiblePaths = enriched.sessions.map((s) => s.sessionPath);
+	assert.deepEqual(visiblePaths, ["/sessions/proj/b.jsonl"], "archived a.jsonl is hidden despite the ../ spelling");
 });

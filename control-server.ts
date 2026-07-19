@@ -1100,6 +1100,10 @@ export class ControlServer {
 		}
 
 		if (req.method === "POST" && (url.pathname === "/v1/ompk/select-session" || url.pathname === "/v1/omp/select-session")) {
+			if (!this.onOmpSelectSession) {
+				this.writeJson(res, 501, { ok: false, error: "Omp session selection is not available on this gateway." });
+				return;
+			}
 			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 			const rawPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
 			const explicitClient = typeof payload?.clientId === "string" ? payload.clientId : undefined;
@@ -1118,8 +1122,12 @@ export class ControlServer {
 		}
 
 		if (req.method === "GET" && (url.pathname === "/v1/ompk/selected-session" || url.pathname === "/v1/omp/selected-session")) {
+			if (!this.onOmpGetSelectedSession) {
+				this.writeJson(res, 501, { ok: false, error: "Omp session selection is not available on this gateway." });
+				return;
+			}
 			const clientKey = this.clientKey(req, url.searchParams.get("clientId") || undefined);
-			const sessionPath = this.onOmpGetSelectedSession?.(clientKey) ?? null;
+			const sessionPath = this.onOmpGetSelectedSession(clientKey) ?? null;
 			this.writeJson(res, 200, { ok: true, sessionPath });
 			return;
 		}
@@ -1843,6 +1851,15 @@ export class ControlServer {
 	private async handleAudioRequest(id: string, res: ServerResponse) {
 		const artifact = this.audioArtifacts.get(id);
 		if (!artifact || !existsSync(artifact.path)) {
+			this.writeJson(res, 404, { ok: false, error: "Audio not found" });
+			return;
+		}
+		// Enforce the TTL at read time, not only via the periodic sweep: between
+		// sweeps (or if cleanup is delayed/disabled) an expired artifact must not
+		// remain accessible. Treat expired as 404 and drop it opportunistically.
+		if (artifact.expiresAt <= Date.now()) {
+			this.audioArtifacts.delete(id);
+			void rm(artifact.path, { force: true }).catch(() => {});
 			this.writeJson(res, 404, { ok: false, error: "Audio not found" });
 			return;
 		}
