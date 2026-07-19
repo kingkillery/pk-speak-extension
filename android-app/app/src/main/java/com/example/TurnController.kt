@@ -11,6 +11,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -226,12 +227,19 @@ fun stopAndSendVoiceTurn(
         state.isProcessing = true
         var progressJob: Job? = null
         try {
-            val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
-            if (elapsedMs in 0 until MINIMUM_VOICE_CAPTURE_MS) {
-                delay(MINIMUM_VOICE_CAPTURE_MS - elapsedMs)
-            }
             // stopRecording joins the WAV writer thread (up to 1.5s) — keep it off main.
-            val stoppedCleanly = withContext(Dispatchers.IO) { audioHelper.stopRecording() }
+            // On cancellation mid-delay the recorder must still be shut down, or the
+            // WAV writer thread keeps the mic open until the next recording starts.
+            val stoppedCleanly = try {
+                val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
+                if (elapsedMs in 0 until MINIMUM_VOICE_CAPTURE_MS) {
+                    delay(MINIMUM_VOICE_CAPTURE_MS - elapsedMs)
+                }
+                withContext(Dispatchers.IO) { audioHelper.stopRecording() }
+            } catch (e: CancellationException) {
+                withContext(NonCancellable + Dispatchers.IO) { audioHelper.stopRecording() }
+                throw e
+            }
             val file = audioHelper.getRecordedFile(RECORD_FILE)
             if (stoppedCleanly && file.exists() && file.length() >= MIN_VALID_WAV_BYTES) {
                 setProgress(state, prefs, "Uploading voice to gateway.")

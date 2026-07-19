@@ -95,6 +95,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1103,12 +1104,19 @@ fun StudioTabContent(
                 state.isProcessing = true
                 var progressJob: Job? = null
                 try {
-                    val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
-                    if (elapsedMs in 0 until minimumVoiceCaptureMs) {
-                        delay(minimumVoiceCaptureMs - elapsedMs)
-                    }
                     // stopRecording joins the WAV writer thread (up to 1.5s) — keep it off main.
-                    val stoppedCleanly = withContext(Dispatchers.IO) { audioHelper.stopRecording() }
+                    // On cancellation mid-delay the recorder must still be shut down, or the
+                    // WAV writer thread keeps the mic open until the next recording starts.
+                    val stoppedCleanly = try {
+                        val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
+                        if (elapsedMs in 0 until minimumVoiceCaptureMs) {
+                            delay(minimumVoiceCaptureMs - elapsedMs)
+                        }
+                        withContext(Dispatchers.IO) { audioHelper.stopRecording() }
+                    } catch (e: CancellationException) {
+                        withContext(NonCancellable + Dispatchers.IO) { audioHelper.stopRecording() }
+                        throw e
+                    }
                     val file = audioHelper.getRecordedFile("turn.wav")
                     Log.d("MainActivity", "Voice recording stopped: stoppedCleanly=$stoppedCleanly, exists=${file.exists()}, bytes=${file.length()}")
                     if (stoppedCleanly && file.exists() && file.length() >= 12_000) {

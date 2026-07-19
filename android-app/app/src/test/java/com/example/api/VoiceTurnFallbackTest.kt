@@ -39,23 +39,26 @@ class VoiceTurnFallbackTest {
     servers.forEach { it.stop(0) }
     servers.clear()
     audioFile.delete()
+    System.clearProperty("is_testing")
   }
 
   @Test
-  fun fallbackDecision_firesOnlyOnConnectionErrorOr429Or502() {
-    assertTrue(VoiceAgentClient.shouldFallBackToTextTurn(GatewayTurnResult("t", "r", connectionError = true)))
+  fun fallbackDecision_firesOnlyOnDefinitive429Rejection() {
     assertTrue(VoiceAgentClient.shouldFallBackToTextTurn(GatewayTurnResult("t", "r", statusCode = 429)))
-    assertTrue(VoiceAgentClient.shouldFallBackToTextTurn(GatewayTurnResult("t", "r", statusCode = 502)))
+    // A 502 or connection error is ambiguous — the turn may already have executed,
+    // so re-sending the prompt could double-run non-idempotent agent actions.
+    assertFalse(VoiceAgentClient.shouldFallBackToTextTurn(GatewayTurnResult("t", "r", statusCode = 502)))
+    assertFalse(VoiceAgentClient.shouldFallBackToTextTurn(GatewayTurnResult("t", "r", connectionError = true)))
     assertFalse(VoiceAgentClient.shouldFallBackToTextTurn(GatewayTurnResult("t", "r", statusCode = 500)))
     assertFalse(VoiceAgentClient.shouldFallBackToTextTurn(GatewayTurnResult("t", "r", statusCode = 401)))
     assertFalse(VoiceAgentClient.shouldFallBackToTextTurn(GatewayTurnResult("t", "r")))
   }
 
   @Test
-  fun voiceTurn502_fallsBackToTextTurnWithLocalTranscript() = kotlinx.coroutines.runBlocking {
+  fun voiceTurn429_fallsBackToTextTurnWithLocalTranscript() = kotlinx.coroutines.runBlocking {
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     server.createContext("/v1/turn/voice") { exchange ->
-      exchange.sendResponseHeaders(502, -1)
+      exchange.sendResponseHeaders(429, -1)
       exchange.close()
     }
     server.createContext("/v1/turn/text") { exchange ->
@@ -75,32 +78,7 @@ class VoiceTurnFallbackTest {
   }
 
   @Test
-  fun voiceTurn500_doesNotFallBack() = kotlinx.coroutines.runBlocking {
-    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-    var textCalled = false
-    server.createContext("/v1/turn/voice") { exchange ->
-      exchange.sendResponseHeaders(500, -1)
-      exchange.close()
-    }
-    server.createContext("/v1/turn/text") { exchange ->
-      textCalled = true
-      exchange.sendResponseHeaders(200, -1)
-      exchange.close()
-    }
-    server.start()
-    servers.add(server)
-    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
-    val client = VoiceAgentClient(context, prefs)
-
-    val result = client.sendVoiceTurnDetailed(audioFile, fallbackPrompt = "run the tests")
-
-    assertEquals(500, result.statusCode)
-    assertTrue(result.replyText.contains("500"))
-    assertFalse(textCalled)
-  }
-
-  @Test
-  fun voiceTurnFallback_skippedWhenPromptIsBlankOrPlaceholder() = kotlinx.coroutines.runBlocking {
+  fun voiceTurn502_doesNotFallBack() = kotlinx.coroutines.runBlocking {
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     var textCalled = false
     server.createContext("/v1/turn/voice") { exchange ->
@@ -117,11 +95,36 @@ class VoiceTurnFallbackTest {
     prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
     val client = VoiceAgentClient(context, prefs)
 
+    val result = client.sendVoiceTurnDetailed(audioFile, fallbackPrompt = "run the tests")
+
+    assertEquals(502, result.statusCode)
+    assertTrue(result.replyText.contains("502"))
+    assertFalse(textCalled)
+  }
+
+  @Test
+  fun voiceTurnFallback_skippedWhenPromptIsBlankOrPlaceholder() = kotlinx.coroutines.runBlocking {
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    var textCalled = false
+    server.createContext("/v1/turn/voice") { exchange ->
+      exchange.sendResponseHeaders(429, -1)
+      exchange.close()
+    }
+    server.createContext("/v1/turn/text") { exchange ->
+      textCalled = true
+      exchange.sendResponseHeaders(200, -1)
+      exchange.close()
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    val client = VoiceAgentClient(context, prefs)
+
     val blank = client.sendVoiceTurnDetailed(audioFile, fallbackPrompt = "   ")
     val listening = client.sendVoiceTurnDetailed(audioFile, fallbackPrompt = "Listening...")
 
-    assertEquals(502, blank.statusCode)
-    assertEquals(502, listening.statusCode)
+    assertEquals(429, blank.statusCode)
+    assertEquals(429, listening.statusCode)
     assertFalse(textCalled)
   }
 }

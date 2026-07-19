@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -635,6 +636,18 @@ private fun StudioComposerActions(
                         role = Role.Button
                         contentDescription = talkDescription
                         stateDescription = if (state.isRecording) "Recording" else "Not recording"
+                        // TalkBack cannot drive the raw press-and-hold gesture below, so expose
+                        // an explicit activation that toggles recording in both PTT and TOGGLE
+                        // modes (tap to start, tap again to stop and send).
+                        onClick(label = if (state.isRecording) "Stop recording and send" else "Start recording") {
+                            if (state.isProcessing) return@onClick false
+                            if (!permissionState.status.isGranted) {
+                                permissionState.launchPermissionRequest()
+                                return@onClick true
+                            }
+                            if (state.isRecording) onStopAndSend() else onRecordTrigger()
+                            true
+                        }
                     }
                     .pointerInput(prefs.transmissionMode, permissionState.status.isGranted, state.isProcessing) {
                         detectTapGestures(

@@ -46,11 +46,13 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     companion object {
         /**
          * A voice turn falls back to a plain text turn (re-sending the local transcript) only
-         * when the gateway was unreachable or replied 429/502 — transient conditions where the
-         * prompt still has a chance of succeeding as text.
+         * on a definitive 429 rejection, where the gateway refused the turn without running it.
+         * A 502 or a connection error is ambiguous — the turn may already have executed before
+         * the reply was lost, and re-sending the prompt could run non-idempotent agent actions
+         * twice — so those are surfaced as errors instead of retried.
          */
         fun shouldFallBackToTextTurn(result: GatewayTurnResult): Boolean =
-            result.connectionError || result.statusCode == 429 || result.statusCode == 502
+            result.statusCode == 429
     }
 
     suspend fun sendTextTurnDetailed(text: String): GatewayTurnResult {
