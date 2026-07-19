@@ -109,6 +109,7 @@ class VoiceAgentClientConnectionTest {
     assertEquals("http://localhost:8767", result.baseUrl)
     assertEquals("http://localhost:8767", prefs.targetIpAddress)
     assertTrue(result.discovered)
+    assertEquals(ConnectionReason.Ok, result.reason)
     if (server != null) {
       server.stop(0)
       servers.remove(server)
@@ -133,6 +134,7 @@ class VoiceAgentClientConnectionTest {
     val result = client.tryAutoConnect(forceVerify = true)
 
     assertTrue(result.connected)
+    assertEquals(ConnectionReason.Ok, result.reason)
     assertEquals("http://100.64.216.11:8767", result.baseUrl)
     assertEquals("http://100.64.216.11:8767", prefs.targetIpAddress)
     assertEquals("Warp", prefs.codexSessionName)
@@ -476,9 +478,75 @@ class VoiceAgentClientConnectionTest {
     assertTrue(seenBody.contains(""""cwd":"C:\\dev\\Desktop-Projects\\pi-speak-extension""""))
   }
 
+  @Test
+  fun tryAutoConnect_reportsPairingRequiredWhenGatewayRequiresPairingAndTokenMissing() {
+    val server = startGatewayServer(
+      descriptor = """{"app":"pi-speak","authRequired":true,"pairingRequired":true,"routing":{"currentSession":"Main"}}"""
+    )
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = ""
+    val client = VoiceAgentClient(context, prefs)
+
+    val result = client.tryAutoConnect(forceVerify = true)
+
+    assertFalse(result.connected)
+    assertEquals(ConnectionReason.PairingRequired, result.reason)
+    assertTrue(result.message.contains("pair", ignoreCase = true))
+  }
+
+  @Test
+  fun tryAutoConnect_reportsTokenRejectedWhenGatewayRejectsSavedToken() {
+    val server = startGatewayServer(
+      descriptor = """{"app":"pi-speak","authRequired":true,"pairingRequired":false,"routing":{"currentSession":"Main"}}""",
+      statusCode = 401
+    )
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "stale-token"
+    val client = VoiceAgentClient(context, prefs)
+
+    val result = client.tryAutoConnect(forceVerify = true)
+
+    assertFalse(result.connected)
+    assertEquals(ConnectionReason.TokenRejected, result.reason)
+    assertTrue(result.message.contains("rejected", ignoreCase = true))
+  }
+
+  @Test
+  fun tryAutoConnect_doesNotTreatStatusServerErrorAsTokenRejection() {
+    val server = startGatewayServer(
+      descriptor = """{"app":"pi-speak","authRequired":true,"pairingRequired":false,"routing":{"currentSession":"Main"}}""",
+      statusCode = 500
+    )
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "saved-token"
+    val client = VoiceAgentClient(context, prefs)
+
+    val result = client.tryAutoConnect(forceVerify = true)
+
+    assertFalse(result.connected)
+    assertEquals(ConnectionReason.Unreachable, result.reason)
+    assertFalse(result.message.contains("rejected", ignoreCase = true))
+  }
+
+  @Test
+  fun tryAutoConnect_reportsUnreachableWhenNoGatewayResponds() {
+    prefs.targetIpAddress = "http://127.0.0.1:1"
+    val client = VoiceAgentClient(context, prefs)
+
+    val result = client.tryAutoConnect(forceVerify = true)
+
+    assumeTrue(
+      "A gateway answered localhost:8767 or LAN discovery on this machine; cannot exercise the unreachable path",
+      !result.connected && result.baseUrl == "http://127.0.0.1:1"
+    )
+    assertFalse(result.connected)
+    assertEquals(ConnectionReason.Unreachable, result.reason)
+  }
+
   private fun startGatewayServer(
     port: Int = 0,
-    descriptor: String = """{"app":"pi-speak","routing":{"currentSession":"Main-Project-Alpha"}}"""
+    descriptor: String = """{"app":"pi-speak","routing":{"currentSession":"Main-Project-Alpha"}}""",
+    statusCode: Int = 200
   ): HttpServer {
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
     server.createContext("/health") { exchange ->
@@ -489,6 +557,11 @@ class VoiceAgentClientConnectionTest {
     server.createContext("/.well-known/pi-speak") { exchange ->
       val body = descriptor.toByteArray()
       exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.createContext("/v1/status") { exchange ->
+      val body = """{"ok":${statusCode in 200..299}}""".toByteArray()
+      exchange.sendResponseHeaders(statusCode, body.size.toLong())
       exchange.responseBody.use { it.write(body) }
     }
     server.start()

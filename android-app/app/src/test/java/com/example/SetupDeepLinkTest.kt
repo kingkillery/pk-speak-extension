@@ -107,4 +107,49 @@ class SetupDeepLinkTest {
 
     assertEquals("Gateway OMPK (oh-my-pk)", prefs.activeAgent)
   }
+
+  @Test
+  fun parsePairingSetupInput_urlPlusToken_matchesNativeSetupUri() {
+    val synthetic = parsePairingSetupInput("http://100.93.214.66:8767/remote/path", "secret")
+    val native = parseSetupDeepLink(
+      Uri.parse("pi-speak://setup?base_url=http%3A%2F%2F100.93.214.66%3A8767&token=secret")
+    )
+
+    requireNotNull(synthetic)
+    requireNotNull(native)
+    assertEquals(native.baseUrl, synthetic.baseUrl)
+    assertEquals(native.token, synthetic.token)
+
+    val queryToken = parsePairingSetupInput("https://gateway.example:9443/connect?token=query-secret")
+    requireNotNull(queryToken)
+    assertEquals("https://gateway.example:9443", queryToken.baseUrl)
+    assertEquals("query-secret", queryToken.token)
+
+    val syntheticPrefs = AppPreferences(context)
+    applySetupDeepLink(syntheticPrefs, synthetic)
+    assertEquals("http://100.93.214.66:8767", syntheticPrefs.targetIpAddress)
+    assertEquals("secret", syntheticPrefs.remoteToken)
+  }
+
+  @Test
+  fun applySetupDeepLink_preservesUnrelatedPreferencesWhenRePairing() {
+    val prefs = AppPreferences(context)
+    prefs.codexSessionName = "main"
+    prefs.workspacePath = "C:\\dev\\fork"
+    prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
+    val rePair = parseSetupDeepLink(
+      Uri.parse(
+        "pi-speak://setup?base_url=${Uri.encode("http://100.93.214.66:8767")}&token=${Uri.encode("rotated-secret")}"
+      )
+    )
+    requireNotNull(rePair)
+
+    applySetupDeepLink(prefs, rePair)
+
+    assertEquals("http://100.93.214.66:8767", prefs.targetIpAddress)
+    assertEquals("rotated-secret", prefs.remoteToken)
+    assertEquals("main", prefs.codexSessionName)
+    assertEquals("C:\\dev\\fork", prefs.workspacePath)
+    assertEquals("Gateway OMPK (oh-my-pk)", prefs.activeAgent)
+  }
 }

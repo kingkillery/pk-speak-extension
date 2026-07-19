@@ -28,6 +28,23 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+enum class ConnectionReason { Ok, PairingRequired, TokenRejected, Unreachable, DiscoveryFailed }
+
+private enum class GatewayAuthentication { Accepted, Rejected, Unreachable }
+
+internal fun classifyPairing(
+    healthOk: Boolean,
+    requiresPairing: Boolean,
+    authRequired: Boolean,
+    token: String,
+    authenticated: Boolean
+): ConnectionReason = when {
+    !healthOk -> ConnectionReason.Unreachable
+    (requiresPairing || authRequired) && token.isBlank() -> ConnectionReason.PairingRequired
+    authRequired && token.isNotBlank() && !authenticated -> ConnectionReason.TokenRejected
+    else -> ConnectionReason.Ok
+}
+
 class VoiceAgentClient(private val context: Context, private val prefs: AppPreferences) {
 
     private val client = OkHttpClient.Builder()
@@ -1634,30 +1651,74 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         val currentUrl = gatewayBaseUrl()
         if (forceVerify && currentUrl.isNotBlank() && pingHealth(currentUrl)) {
             val pairingState = getPairingState(currentUrl)
-            if (pairingState.requiresPairing && prefs.remoteToken.isBlank()) {
-                return AutoConnectResult(false, currentUrl, "Gateway found. Scan the setup QR from /pk-remote to pair this phone.", discovered = false)
+            val authentication = if (prefs.remoteToken.isBlank() || !pairingState.authRequired) {
+                GatewayAuthentication.Accepted
+            } else {
+                checkGatewayAuthentication(currentUrl)
             }
-            if (prefs.remoteToken.isNotBlank() && pairingState.authRequired && !isAuthenticatedGateway(currentUrl)) {
-                return AutoConnectResult(false, currentUrl, "Gateway found, but the saved token was rejected. Scan the setup QR again.", discovered = false)
+            val reason = if (authentication == GatewayAuthentication.Unreachable) {
+                ConnectionReason.Unreachable
+            } else {
+                classifyPairing(
+                    healthOk = true,
+                    requiresPairing = pairingState.requiresPairing,
+                    authRequired = pairingState.authRequired,
+                    token = prefs.remoteToken,
+                    authenticated = authentication == GatewayAuthentication.Accepted
+                )
+            }
+            if (reason == ConnectionReason.PairingRequired) {
+                return AutoConnectResult(false, currentUrl, "Gateway found. Scan the setup QR from /pk-remote to pair this phone.", discovered = false, reason = reason)
+            }
+            if (reason == ConnectionReason.TokenRejected) {
+                return AutoConnectResult(false, currentUrl, "Gateway found, but the saved token was rejected. Scan the setup QR again.", discovered = false, reason = reason)
+            }
+            if (reason == ConnectionReason.Unreachable) {
+                return AutoConnectResult(false, currentUrl, "Gateway found, but authentication could not be verified.", discovered = false, reason = reason)
             }
             val preferredUrl = applyDescriptorSession(currentUrl) ?: currentUrl
-            return AutoConnectResult(true, preferredUrl, "Current gateway is reachable.", discovered = false)
+            return AutoConnectResult(true, preferredUrl, "Current gateway is reachable.", discovered = false, reason = reason)
         }
 
         // Phase 1: localhost probe (fast, no network needed)
         val localhostUrl = "http://localhost:8767"
         if (pingHealth(localhostUrl)) {
             val pairingState = getPairingState(localhostUrl)
-            if (pairingState.requiresPairing && prefs.remoteToken.isBlank()) {
-                return AutoConnectResult(false, localhostUrl, "Local gateway found. Scan the setup QR from /pk-remote to pair this phone.", discovered = true)
+            val authentication = if (prefs.remoteToken.isBlank() || !pairingState.authRequired) {
+                GatewayAuthentication.Accepted
+            } else {
+                checkGatewayAuthentication(localhostUrl)
             }
-            if (prefs.remoteToken.isNotBlank() && pairingState.authRequired && !isAuthenticatedGateway(localhostUrl)) {
-                return AutoConnectResult(false, localhostUrl, "Local gateway found, but the saved token was rejected. Scan the setup QR again.", discovered = true)
+            val reason = if (authentication == GatewayAuthentication.Unreachable) {
+                ConnectionReason.Unreachable
+            } else {
+                classifyPairing(
+                    healthOk = true,
+                    requiresPairing = pairingState.requiresPairing,
+                    authRequired = pairingState.authRequired,
+                    token = prefs.remoteToken,
+                    authenticated = authentication == GatewayAuthentication.Accepted
+                )
+            }
+            if (reason == ConnectionReason.PairingRequired) {
+                return AutoConnectResult(false, localhostUrl, "Local gateway found. Scan the setup QR from /pk-remote to pair this phone.", discovered = true, reason = reason)
+            }
+            if (reason == ConnectionReason.TokenRejected) {
+                return AutoConnectResult(false, localhostUrl, "Local gateway found, but the saved token was rejected. Scan the setup QR again.", discovered = true, reason = reason)
+            }
+            if (reason == ConnectionReason.Unreachable) {
+                return AutoConnectResult(false, localhostUrl, "Local gateway found, but authentication could not be verified.", discovered = true, reason = reason)
             }
             val preferredUrl = applyDescriptorSession(localhostUrl) ?: localhostUrl
             prefs.targetIpAddress = preferredUrl
             Log.d("VoiceAgent", "Auto-connected to localhost gateway: $preferredUrl")
-            return AutoConnectResult(true, preferredUrl, if (preferredUrl != localhostUrl) "Connected through advertised Tailscale gateway." else "Connected through local ADB reverse.", discovered = true)
+            return AutoConnectResult(
+                true,
+                preferredUrl,
+                if (preferredUrl != localhostUrl) "Connected through advertised Tailscale gateway." else "Connected through local ADB reverse.",
+                discovered = true,
+                reason = reason
+            )
         }
 
         // Phase 2: network discovery (LAN / Tailscale)
@@ -1666,11 +1727,30 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             val onlineMachine = machines.firstOrNull { it.status == "online" }
                 ?: machines.firstOrNull()
             if (onlineMachine != null) {
-                if (onlineMachine.requiresPairing && prefs.remoteToken.isBlank()) {
-                    return AutoConnectResult(false, onlineMachine.ip, "Gateway found. Run /pk-remote on the computer and scan the setup QR to pair.", discovered = true)
+                val authentication = if (prefs.remoteToken.isBlank() || !onlineMachine.authRequired) {
+                    GatewayAuthentication.Accepted
+                } else {
+                    checkGatewayAuthentication(onlineMachine.ip)
                 }
-                if (prefs.remoteToken.isNotBlank() && onlineMachine.authRequired && !isAuthenticatedGateway(onlineMachine.ip)) {
-                    return AutoConnectResult(false, onlineMachine.ip, "Discovered gateway rejected the saved token. Scan the setup QR again.", discovered = true)
+                val reason = if (authentication == GatewayAuthentication.Unreachable) {
+                    ConnectionReason.Unreachable
+                } else {
+                    classifyPairing(
+                        healthOk = true,
+                        requiresPairing = onlineMachine.requiresPairing,
+                        authRequired = onlineMachine.authRequired,
+                        token = prefs.remoteToken,
+                        authenticated = authentication == GatewayAuthentication.Accepted
+                    )
+                }
+                if (reason == ConnectionReason.PairingRequired) {
+                    return AutoConnectResult(false, onlineMachine.ip, "Gateway found. Run /pk-remote on the computer and scan the setup QR to pair.", discovered = true, reason = reason)
+                }
+                if (reason == ConnectionReason.TokenRejected) {
+                    return AutoConnectResult(false, onlineMachine.ip, "Discovered gateway rejected the saved token. Scan the setup QR again.", discovered = true, reason = reason)
+                }
+                if (reason == ConnectionReason.Unreachable) {
+                    return AutoConnectResult(false, onlineMachine.ip, "Discovered gateway authentication could not be verified.", discovered = true, reason = reason)
                 }
                 prefs.targetIpAddress = onlineMachine.ip
                 val firstSession = onlineMachine.activeSessions.firstOrNull()
@@ -1679,13 +1759,18 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 }
                 applyDescriptorSession(onlineMachine.ip)
                 Log.d("VoiceAgent", "Auto-connected to network gateway: ${prefs.targetIpAddress}")
-                AutoConnectResult(true, prefs.targetIpAddress, "Connected to discovered gateway.", discovered = true)
+                AutoConnectResult(true, prefs.targetIpAddress, "Connected to discovered gateway.", discovered = true, reason = reason)
             } else {
-                AutoConnectResult(false, currentUrl, "No reachable Pi Speak gateway found.")
+                AutoConnectResult(
+                    false,
+                    currentUrl,
+                    "No reachable Pi Speak gateway found.",
+                    reason = classifyPairing(false, false, false, prefs.remoteToken, authenticated = false)
+                )
             }
         } catch (e: Exception) {
             Log.d("VoiceAgent", "Network auto-connect probe failed: ${e.message}")
-            AutoConnectResult(false, currentUrl, "Gateway discovery failed: ${shortError(e)}")
+            AutoConnectResult(false, currentUrl, "Gateway discovery failed: ${shortError(e)}", reason = ConnectionReason.DiscoveryFailed)
         }
     }
 
@@ -1709,19 +1794,25 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
-    private fun isAuthenticatedGateway(baseUrl: String): Boolean {
+    private fun checkGatewayAuthentication(baseUrl: String): GatewayAuthentication {
         val normalized = baseUrl.trim().trimEnd('/')
-        if (normalized.isBlank()) return false
+        if (normalized.isBlank()) return GatewayAuthentication.Unreachable
         return try {
             val request = Request.Builder()
                 .url("$normalized/v1/status")
                 .header("X-Pi-Speak-Token", prefs.remoteToken)
                 .get()
                 .build()
-            healthClient.newCall(request).execute().use { response -> response.isSuccessful }
+            healthClient.newCall(request).execute().use { response ->
+                when {
+                    response.isSuccessful -> GatewayAuthentication.Accepted
+                    response.code == 401 -> GatewayAuthentication.Rejected
+                    else -> GatewayAuthentication.Unreachable
+                }
+            }
         } catch (e: Exception) {
             Log.d("VoiceAgent", "Authenticated gateway check failed for $baseUrl: ${e.message}")
-            false
+            GatewayAuthentication.Unreachable
         }
     }
 
@@ -2067,5 +2158,6 @@ data class AutoConnectResult(
     val connected: Boolean,
     val baseUrl: String = "",
     val message: String = "",
-    val discovered: Boolean = false
+    val discovered: Boolean = false,
+    val reason: ConnectionReason
 )

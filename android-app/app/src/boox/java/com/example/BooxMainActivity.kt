@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -68,8 +67,6 @@ import androidx.lifecycle.lifecycleScope
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import com.example.RealtimeVoiceSession
 import com.example.RealtimeVoiceSessionListener
 import com.example.api.GatewaySessionDashboard
@@ -1078,7 +1075,7 @@ private fun BooxCockpit(
                                         }
                                     }
 
-                                    override fun onError(message: String) {
+                                    override fun onError(message: String, httpCode: Int?) {
                                         scope.launch {
                                             appendChat(state, prefs, "system",
                                                 "[live error] $message")
@@ -2105,8 +2102,8 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
     var scanHint by remember { mutableStateOf("") }
 
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
-    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val content = result.contents ?: return@rememberLauncherForActivityResult
+    val scanLauncher = rememberSetupQrScanner { content ->
+        if (content == null) return@rememberSetupQrScanner
         val uri = Uri.parse(content)
         val setup = parseSetupDeepLink(uri)
         var scannedGateway = ""
@@ -2177,13 +2174,7 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
                 onClick = {
                     scanHint = ""
                     if (cameraPermission.status.isGranted) {
-                        scanLauncher.launch(
-                            ScanOptions().apply {
-                                setOrientationLocked(false)
-                                setBeepEnabled(false)
-                                setPrompt("Point at the pi-speak setup QR code")
-                            }
-                        )
+                        scanLauncher.launch(setupScanOptions())
                     } else {
                         cameraPermission.launchPermissionRequest()
                     }

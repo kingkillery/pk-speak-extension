@@ -24,8 +24,27 @@ interface RealtimeVoiceSessionListener {
     fun onToolComplete(name: String, output: String)
     fun onApprovalRequired(approvalId: String, command: String, reason: String, cwd: String, timeoutMs: Int)
     fun onApprovalResolved(approvalId: String)
-    fun onError(message: String)
+    fun onError(message: String, httpCode: Int? = null)
     fun onDisconnected()
+}
+
+data class RealtimeError(val message: String, val httpCode: Int?, val isAuth: Boolean)
+
+/**
+ * Maps a WebSocket failure to a typed [RealtimeError].
+ *
+ * [response] is the failed handshake response OkHttp delivers with [WebSocketListener.onFailure];
+ * it is null for pure transport failures (timeout, DNS, refused), in which case [RealtimeError.httpCode]
+ * is null and [RealtimeError.isAuth] is false. HTTP 401 is classified as an auth failure.
+ * [RealtimeError.message] preserves the throwable's localized message (falling back to the class name).
+ */
+internal fun classifyRealtimeFailure(t: Throwable, response: Response?): RealtimeError {
+    val httpCode = response?.code
+    return RealtimeError(
+        message = t.localizedMessage ?: t.javaClass.simpleName,
+        httpCode = httpCode,
+        isAuth = httpCode == 401
+    )
 }
 
 class RealtimeVoiceSession(
@@ -111,9 +130,11 @@ class RealtimeVoiceSession(
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket failure: ${t.message}", t)
+                Log.e(TAG, "WebSocket failure: ${t.message} (http=${response?.code ?: "none"})", t)
                 if (!intentionalDisconnect.get()) {
-                    listener.onError(t.localizedMessage ?: t.javaClass.simpleName)
+                    val failure = classifyRealtimeFailure(t, response)
+                    if (failure.isAuth) intentionalDisconnect.set(true)
+                    listener.onError(failure.message, failure.httpCode)
                 }
                 handleDisconnect()
             }

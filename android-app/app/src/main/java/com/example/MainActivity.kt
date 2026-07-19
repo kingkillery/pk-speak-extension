@@ -57,6 +57,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.api.AutoConnectResult
+import com.example.api.ConnectionReason
 import com.example.api.GatewaySessionDashboard
 import com.example.api.GatewaySessionEntry
 import com.example.api.GatewaySessionErrorKind
@@ -112,6 +114,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var ttsHelper: TtsHelper
     private lateinit var appPreferences: AppPreferences
     private lateinit var voiceAgentClient: VoiceAgentClient
+    private var pairingIntentGeneration by mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -122,7 +125,7 @@ class MainActivity : ComponentActivity() {
         appPreferences.clearGatewayConfigIfAppUpgraded(BuildConfig.VERSION_CODE)
         voiceAgentClient = VoiceAgentClient(this, appPreferences)
         
-        handleDeepLink(intent)
+        if (savedInstanceState == null) handleDeepLink(intent)
 
         setContent {
             MyApplicationTheme {
@@ -136,6 +139,7 @@ class MainActivity : ComponentActivity() {
                         ttsHelper = ttsHelper,
                         prefs = appPreferences,
                         client = voiceAgentClient,
+                        pairingIntentGeneration = pairingIntentGeneration,
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -152,6 +156,8 @@ class MainActivity : ComponentActivity() {
     private fun handleDeepLink(intent: Intent?) {
         val setup = parseSetupDeepLink(intent?.data) ?: return
         applySetupDeepLink(appPreferences, setup)
+        pairingIntentGeneration += 1
+        intent?.data = null
         Log.d(
             "MainActivity",
             "Successfully processed zero-touch onboarding QR link: base_url=${setup.baseUrl}, profile=${setup.profileName}, target=${setup.defaultTarget}"
@@ -171,6 +177,7 @@ fun PiSpeakConsoleScreen(
     ttsHelper: TtsHelper,
     prefs: AppPreferences,
     client: VoiceAgentClient,
+    pairingIntentGeneration: Int = 0,
     modifier: Modifier = Modifier
 ) {
     val permissionState = rememberPermissionState(permission = Manifest.permission.RECORD_AUDIO)
@@ -191,6 +198,14 @@ fun PiSpeakConsoleScreen(
         )
     }
     val context = androidx.compose.ui.platform.LocalContext.current
+    var consumedPairingIntentGeneration by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(pairingIntentGeneration) {
+        if (pairingIntentGeneration > consumedPairingIntentGeneration) {
+            consumedPairingIntentGeneration = pairingIntentGeneration
+            studioState.pairingGeneration += 1
+        }
+    }
 
     // Synchronize agent state
     LaunchedEffect(selectedAgent) {
@@ -219,62 +234,102 @@ fun PiSpeakConsoleScreen(
         }
     }
 
-    // Health polling only runs while the app is visible (STARTED); it pauses in the
-    // background instead of hitting the gateway every 5s for the life of the process.
+    fun applyAutoConnectResult(result: AutoConnectResult, latencyMs: Long, searching: Boolean) {
+        codexSessionName = prefs.codexSessionName
+        studioState.connectionHealth = result.reason
+        studioState.connectionLatencyMs = latencyMs
+        if (result.reason == ConnectionReason.Ok && result.connected) {
+            studioState.isGatewayConnected = true
+            studioState.isReconnecting = false
+            studioState.connectionStatusText = "Connected"
+            studioState.connectionBannerText = ""
+            studioState.realtimeAuthFailure = false
+            return
+        }
+
+        studioState.isGatewayConnected = false
+        studioState.connectionBannerText = result.message.ifBlank {
+            "Gateway is unreachable. Searching for a Pi Speak server."
+        }
+        val setupRequired = result.reason == ConnectionReason.PairingRequired ||
+            result.reason == ConnectionReason.TokenRejected
+        studioState.isReconnecting = !setupRequired && searching
+        studioState.connectionStatusText = when {
+            setupRequired -> "Setup required"
+            searching -> "Searching for gateway..."
+            else -> "Gateway unreachable"
+        }
+    }
+
+    // A newly applied setup link gets an immediate authenticated verification instead of
+    // waiting for the next five-second lifecycle poll.
+    LaunchedEffect(studioState.pairingGeneration) {
+        if (studioState.pairingGeneration == 0) return@LaunchedEffect
+        val verificationGeneration = studioState.pairingGeneration
+        studioState.isReconnecting = true
+        studioState.connectionStatusText = "Reconnecting..."
+        val startedAt = System.currentTimeMillis()
+        val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+        if (studioState.pairingGeneration != verificationGeneration) return@LaunchedEffect
+        applyAutoConnectResult(result, System.currentTimeMillis() - startedAt, searching = false)
+        Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
+    }
+
+    // Health polling only runs while the app is visible (STARTED). tryAutoConnect verifies
+    // both reachability and the saved token, so a public /health response cannot hide a 401.
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     LaunchedEffect(Unit) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var unreachableSinceMs: Long? = null
             var lastLoggedConnectionStatus = ""
             while (true) {
-                val startTime = System.currentTimeMillis()
-                val healthy = client.pingHealth()
-                val latency = System.currentTimeMillis() - startTime
-                if (healthy) {
+                val pollGeneration = studioState.pairingGeneration
+                val startedAt = System.currentTimeMillis()
+                val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+                val latencyMs = System.currentTimeMillis() - startedAt
+                val setupRequired = result.reason == ConnectionReason.PairingRequired ||
+                    result.reason == ConnectionReason.TokenRejected
+                val searching = if (result.connected || setupRequired) {
                     unreachableSinceMs = null
-                    studioState.isGatewayConnected = true
-                    studioState.isReconnecting = false
-                    studioState.connectionLatencyMs = latency
-                    studioState.connectionStatusText = "Connected"
-                    studioState.connectionBannerText = ""
+                    false
                 } else {
                     val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
                     unreachableSinceMs = firstFailureMs
-                    studioState.isGatewayConnected = false
-                    studioState.isReconnecting = true
-                    studioState.connectionStatusText = "Reconnecting..."
-                    val reconnectStartTime = System.currentTimeMillis()
-                    val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
-                    val reconnectLatency = System.currentTimeMillis() - reconnectStartTime
-                    codexSessionName = prefs.codexSessionName
-                    if (result.connected) {
-                        unreachableSinceMs = null
-                        studioState.isGatewayConnected = true
-                        studioState.isReconnecting = false
-                        studioState.connectionLatencyMs = reconnectLatency
-                        studioState.connectionStatusText = "Connected"
-                        studioState.connectionBannerText = ""
-                    } else {
-                        val elapsedMs = System.currentTimeMillis() - firstFailureMs
-                        studioState.isReconnecting = elapsedMs <= 10_000L
-                        studioState.connectionStatusText = if (studioState.isReconnecting) "Searching for gateway..." else "Gateway unreachable"
-                        if (studioState.connectionBannerText.isBlank()) {
-                            studioState.connectionBannerText = result.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
-                        }
-                    }
+                    System.currentTimeMillis() - firstFailureMs <= 10_000L
                 }
-                if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
-                    lastLoggedConnectionStatus = studioState.connectionStatusText
-                    Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
+                if (studioState.pairingGeneration == pollGeneration) {
+                    applyAutoConnectResult(result, latencyMs, searching)
+                    if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
+                        lastLoggedConnectionStatus = studioState.connectionStatusText
+                        Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
+                    }
                 }
                 delay(5_000)
             }
         }
     }
 
+    val pairingGateReason = if (studioState.realtimeAuthFailure) {
+        ConnectionReason.TokenRejected
+    } else {
+        studioState.connectionHealth
+    }
+    val showPairingGate = pairingGateReason == ConnectionReason.PairingRequired ||
+        pairingGateReason == ConnectionReason.TokenRejected
+    val pairingGateDetail = if (
+        studioState.realtimeAuthFailure &&
+        (studioState.connectionHealth == ConnectionReason.Unreachable ||
+            studioState.connectionHealth == ConnectionReason.DiscoveryFailed)
+    ) {
+        "The saved token still needs replacement, and the gateway is currently unreachable."
+    } else {
+        studioState.connectionBannerText
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         scrimColor = Ink.copy(alpha = 0.4f),
+        gesturesEnabled = !showPairingGate,
         drawerContent = {
             PiSpeakDrawer(
                 activeTab = currentTab,
@@ -366,12 +421,22 @@ fun PiSpeakConsoleScreen(
             }
         }
         ConnectionErrorBanner(
-            message = studioState.connectionBannerText,
+            message = if (showPairingGate) "" else studioState.connectionBannerText,
             onDismiss = { studioState.connectionBannerText = "" },
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .padding(top = 60.dp, start = 16.dp, end = 16.dp)
         )
+        if (showPairingGate) {
+            PairingRequiredGate(
+                connectionReason = pairingGateReason,
+                detail = pairingGateDetail,
+                prefs = prefs,
+                client = client,
+                onPairingApplied = { studioState.pairingGeneration += 1 },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
     }
 }
@@ -687,6 +752,9 @@ class StudioRuntimeState(
     var connectionStatusText by mutableStateOf("Searching for gateway...")
     var connectionBannerText by mutableStateOf("")
     var connectionLatencyMs by mutableLongStateOf(-1L)
+    var connectionHealth by mutableStateOf(ConnectionReason.Unreachable)
+    var realtimeAuthFailure by mutableStateOf(false)
+    var pairingGeneration by mutableIntStateOf(0)
     var isRealtimeActive by mutableStateOf(false)
     var isRealtimeConnected by mutableStateOf(false)
     val pendingTerminalApprovals = mutableStateListOf<TerminalApprovalPrompt>()
@@ -797,9 +865,15 @@ fun StudioTabContent(
 
     DisposableEffect(Unit) {
         onDispose {
+            val disposedSession = liveSessionRef.value
+            liveSessionRef.value = null
             liveRecorderRef.value?.stop()
-            liveSessionRef.value?.disconnect()
+            liveRecorderRef.value = null
             livePlayerRef.value?.stop()
+            livePlayerRef.value = null
+            disposedSession?.disconnect()
+            state.isRealtimeActive = false
+            state.isRealtimeConnected = false
         }
     }
 
@@ -874,14 +948,24 @@ fun StudioTabContent(
         state.connectionBannerText = cleanMessage
         setProgress("Gateway unreachable. Searching for a Pi Speak server.")
         scope.launch {
+            val reconnectGeneration = state.pairingGeneration
             val reconnect = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+            if (state.pairingGeneration != reconnectGeneration) return@launch
+            state.connectionHealth = reconnect.reason
             state.isGatewayConnected = reconnect.connected
+            val setupRequired = reconnect.reason == ConnectionReason.PairingRequired ||
+                reconnect.reason == ConnectionReason.TokenRejected
             state.isReconnecting = false
-            state.connectionStatusText = if (reconnect.connected) "Connected" else "Gateway unreachable"
+            state.connectionStatusText = when {
+                reconnect.connected -> "Connected"
+                setupRequired -> "Setup required"
+                else -> "Gateway unreachable"
+            }
             if (reconnect.connected) {
                 state.connectionBannerText = ""
-            } else if (state.connectionBannerText.isBlank()) {
-                state.connectionBannerText = reconnect.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+                state.realtimeAuthFailure = false
+            } else {
+                state.connectionBannerText = reconnect.message.ifBlank { cleanMessage }
             }
         }
     }
@@ -902,20 +986,24 @@ fun StudioTabContent(
         val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
         val player = StreamingPcmPlayer()
         val recorder = StreamingPcmRecorder(context)
-        val session = RealtimeVoiceSession(
+        lateinit var session: RealtimeVoiceSession
+        session = RealtimeVoiceSession(
             prefs = prefs,
             listener = object : RealtimeVoiceSessionListener {
                 override fun onConnected(sessionId: String) {
+                    if (liveSessionRef.value !== session) return
                     player.start()
                     try {
                         recorder.start { seqId, pcm ->
-                            liveSessionRef.value?.sendAudioChunk(seqId, pcm)
+                            if (liveSessionRef.value === session) {
+                                session.sendAudioChunk(seqId, pcm)
+                            }
                             // Client-side VAD barge-in: interrupt assistant speech when the
                             // user starts talking over it (configurable in Settings).
                             if (player.isPlaying && sharedPrefs.getBoolean("vad_enabled", true)) {
                                 val threshold = sharedPrefs.getFloat("vad_threshold", 1500f).toInt()
                                 if (pcmPeakAmplitude(pcm) > threshold) {
-                                    liveSessionRef.value?.sendInterrupt()
+                                    session.sendInterrupt()
                                     player.stop()
                                     player.start()
                                 }
@@ -923,35 +1011,49 @@ fun StudioTabContent(
                         }
                     } catch (e: Exception) {
                         scope.launch {
-                            appendChat("system", "[live] Mic failed to start: ${e.message}")
+                            if (liveSessionRef.value === session) {
+                                appendChat("system", "[live] Mic failed to start: ${e.message}")
+                            }
                         }
                     }
                     scope.launch {
+                        if (liveSessionRef.value !== session) return@launch
                         state.isRealtimeConnected = true
+                        state.realtimeAuthFailure = false
+                        state.connectionHealth = ConnectionReason.Ok
                         appendChat("system", "[live] Connected: $sessionId")
                     }
                 }
 
                 override fun onAudioChunk(seqId: Int, pcm: ByteArray) {
-                    player.write(seqId, pcm)
+                    if (liveSessionRef.value === session) player.write(seqId, pcm)
                 }
 
                 override fun onTranscript(text: String) {
-                    scope.launch { state.transcription = text }
+                    scope.launch {
+                        if (liveSessionRef.value === session) state.transcription = text
+                    }
                 }
                 override fun onTranscriptComplete() = Unit
 
                 override fun onInterrupt() {
+                    if (liveSessionRef.value !== session) return
                     player.stop()
                     player.start()
                 }
 
                 override fun onToolStart(name: String) {
-                    scope.launch { appendChat("system", "[tool] $name") }
+                    scope.launch {
+                        if (liveSessionRef.value === session) appendChat("system", "[tool] $name")
+                    }
                 }
 
                 override fun onToolComplete(name: String, output: String) {
-                    scope.launch { appendChat("system", "[tool done] $name: ${output.take(200)}") }
+                    scope.launch {
+                        if (liveSessionRef.value === session) {
+                            appendChat("system", "[tool done] $name: ${output.take(200)}")
+                        }
+                    }
                 }
 
                 override fun onApprovalRequired(
@@ -962,6 +1064,7 @@ fun StudioTabContent(
                     timeoutMs: Int
                 ) {
                     scope.launch {
+                        if (liveSessionRef.value !== session) return@launch
                         state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
                         state.pendingTerminalApprovals.add(
                             TerminalApprovalPrompt(
@@ -978,26 +1081,47 @@ fun StudioTabContent(
 
                 override fun onApprovalResolved(approvalId: String) {
                     scope.launch {
-                        state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
+                        if (liveSessionRef.value === session) {
+                            state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
+                        }
                     }
                 }
 
-                override fun onError(message: String) {
+                override fun onError(message: String, httpCode: Int?) {
                     scope.launch {
-                        state.latestReply = "Realtime error: $message"
-                        appendChat("system", "[live error] $message")
+                        if (liveSessionRef.value !== session) return@launch
+                        val authFailure = httpCode == 401
                         recorder.stop()
                         player.stop()
+                        session.disconnect()
                         liveSessionRef.value = null
                         liveRecorderRef.value = null
                         livePlayerRef.value = null
-                        state.isRealtimeActive = false
                         state.isRealtimeConnected = false
+                        if (authFailure) {
+                            state.latestReply = "Gateway pairing is required."
+                            state.realtimeAuthFailure = true
+                            state.connectionHealth = ConnectionReason.TokenRejected
+                            state.isGatewayConnected = false
+                            state.isReconnecting = false
+                            state.connectionStatusText = "Setup required"
+                            state.connectionBannerText = "Gateway found, but the saved token was rejected. Scan or paste a fresh setup link."
+                            // Preserve the user's live-session intent so pairingGeneration can
+                            // restart it with the replacement token.
+                            state.isRealtimeActive = true
+                        } else {
+                            state.latestReply = "Realtime error: $message"
+                            appendChat("system", "[live error] $message")
+                            state.isRealtimeActive = false
+                        }
                     }
                 }
 
                 override fun onDisconnected() {
                     scope.launch {
+                        // A repaired session may already have replaced this one. Never let a
+                        // delayed callback from the old socket clear the new refs or active flag.
+                        if (liveSessionRef.value !== session) return@launch
                         if (state.isRealtimeActive) {
                             appendChat("system", "[live] Disconnected.")
                             recorder.stop()
@@ -1017,6 +1141,25 @@ fun StudioTabContent(
         livePlayerRef.value = player
         state.isRealtimeActive = true
         session.connect()
+    }
+
+    var observedPairingGeneration by remember { mutableIntStateOf(state.pairingGeneration) }
+    LaunchedEffect(state.pairingGeneration) {
+        if (state.pairingGeneration == observedPairingGeneration) return@LaunchedEffect
+        observedPairingGeneration = state.pairingGeneration
+        val shouldRestartLive = state.isRealtimeActive || state.realtimeAuthFailure
+        val oldSession = liveSessionRef.value
+        liveSessionRef.value = null
+        liveRecorderRef.value?.stop()
+        liveRecorderRef.value = null
+        livePlayerRef.value?.stop()
+        livePlayerRef.value = null
+        oldSession?.disconnect()
+        state.isRealtimeConnected = false
+        if (shouldRestartLive) {
+            state.isRealtimeActive = false
+            startLiveSession()
+        }
     }
 
     fun stopCurrentTurn() {

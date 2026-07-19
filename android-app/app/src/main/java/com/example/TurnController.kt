@@ -1,6 +1,7 @@
 package com.example
 
 import android.content.Context
+import com.example.api.ConnectionReason
 import com.example.api.VoiceAgentClient
 import com.example.audio.AudioHelper
 import com.example.audio.TtsHelper
@@ -97,15 +98,26 @@ internal fun handleGatewayConnectionError(
     state.connectionBannerText = cleanMessage
     setProgress(state, prefs, "Gateway unreachable. Searching for a Pi Speak server.")
     scope.launch {
+        val reconnectGeneration = state.pairingGeneration
         val reconnect = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+        if (state.pairingGeneration != reconnectGeneration) return@launch
+        state.connectionHealth = reconnect.reason
         state.isGatewayConnected = reconnect.connected
+        val setupRequired = reconnect.reason == ConnectionReason.PairingRequired ||
+            reconnect.reason == ConnectionReason.TokenRejected
         state.isReconnecting = false
-        state.connectionStatusText = if (reconnect.connected) "Connected" else "Gateway unreachable"
+        state.connectionStatusText = when {
+            reconnect.connected -> "Connected"
+            setupRequired -> "Setup required"
+            else -> "Gateway unreachable"
+        }
         if (reconnect.connected) {
             state.connectionBannerText = ""
-        } else if (state.connectionBannerText.isBlank()) {
-            state.connectionBannerText =
-                reconnect.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+            state.realtimeAuthFailure = false
+        } else {
+            state.connectionBannerText = reconnect.message.ifBlank {
+                cleanMessage
+            }
         }
     }
 }
