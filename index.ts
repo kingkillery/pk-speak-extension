@@ -1,12 +1,15 @@
-﻿import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
+import { spawnDetached } from "./spawn-shim.js";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { networkInterfaces, platform, tmpdir } from "node:os";
+import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
-import { ControlServer, type ControlActionResult, type ControlServerState, type RemoteSlashCommand, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
+import { ControlServer, type ControlActionResult, type ControlServerState, type GatewayAgentProvider, type RemoteSlashCommand, type SessionLaunchPayload, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
+import { publishOwnerHubSession, resumeOwnerHubSession } from "./hub-handoff.js";
+import { sendHerdrPane } from "./herdr-client.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type ConversationExecutionPlan, type ConversationReducerSummary, type RemoteTurnResult, type TurnProgressEvent, type TurnTimingSummary } from "./remote-turn-manager.js";
 import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
@@ -27,16 +30,24 @@ import {
 	setNamedSession,
 	setWakeAlias,
 } from "./session-routing.js";
+import { buildOhMyPiAgentHubDashboardCached, mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
+import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, normalizeOptionalString, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
+import { createLiveAgentHubBinding } from "./herdr-agent-hub-live.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
+import { clearRootVoiceDisable, enableRootVoiceDisable, isRootVoiceDisabled } from "./pairing.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
-import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached } from "./agent-discovery.js";
+import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached, resolveWindowsNpmShim } from "./agent-discovery.js";
+import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { buildSessionWorkingDirectoryMap } from "./session-working-directory.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { PiAgentProvider } from "./pi-agent-provider.js";
 import { CodexAgentProvider } from "./codex-agent-provider.js";
+import { ClaudeAgentProvider } from "./claude-agent-provider.js";
+import { createOmpAgentProvider, createOmpResumeProvider } from "./agent-provider-factory.js";
+import { OmpSelectionStore } from "./omp-selection.js";
 import {
 	appendExecutionTrace,
 	type ExecutionDecision,
@@ -81,6 +92,13 @@ type SessionRegistryState = {
 type SessionWakeAliasState = {
 	aliases: Record<string, string>; // alias -> sessionPath
 };
+
+function normalizeGatewayProviderOverride(value: string | undefined): GatewayAgentProvider | undefined {
+	const normalized = (value || "").trim().toLowerCase();
+	if (normalized === "pi" || normalized === "codex" || normalized === "claude") return normalized;
+	if (normalized === "oh-my-pk" || normalized === "ompk" || normalized === "oh-my-pi" || normalized === "omp") return "oh-my-pk";
+	return undefined;
+}
 
 type RemoteState = ControlServerState & {
 	defaultTarget?: string;
@@ -138,7 +156,7 @@ const REMOTE_STATE_TYPE = "remote-control-state";
 const SESSION_REGISTRY_TYPE = "session-registry";
 const SESSION_WAKE_ALIAS_TYPE = "session-wake-aliases";
 const SESSION_REMOVE_CONFIRM_TTL_MS = Number.parseInt(process.env.PI_SPEAK_SESSION_REMOVE_CONFIRM_TTL_MS || "120000", 10);
-const AVAILABLE_TTS_PROVIDERS: TtsProvider[] = ["auto", "legacy", "edge", "openai", "elevenlabs"];
+const AVAILABLE_TTS_PROVIDERS: TtsProvider[] = ["auto", "legacy", "gemini", "elevenlabs", "openai", "edge", "sag", "higgs", "stable-audio"];
 const MONO_KEEP_ALIVE_SECONDS = Number.parseFloat(
 	process.env.PI_SPEAK_MONO_ACTIVITY_TIMEOUT || process.env.MONO_ACTIVITY_TIMEOUT || "15",
 );
@@ -146,12 +164,13 @@ const MONO_WAKE_PHRASE = process.env.PI_SPEAK_WAKE_PHRASE || process.env.PI_SPEA
 const PHONE_TURN_WAIT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_PHONE_WAIT_TIMEOUT_MS || "180000", 10);
 const DEFAULT_REMOTE_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
+const DEFAULT_ADB_REMOTE_HOST = process.env.PI_SPEAK_ADB_HTTP_HOST || "127.0.0.1";
+const DEFAULT_ADB_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_ADB_HTTP_PORT || "8787", 10);
 const PUBLIC_REMOTE_BASE_URL = process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim() || "";
 const DEFAULT_REMOTE_AUTH_TOKEN = process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
-const TAILSCALE_APPSERVER_IP = "100.76.136.91";
-const TAILSCALE_MAC_IP = "100.76.176.119";
-const DEFAULT_BLUETOOTH_IP = "192.168.44.1";
-const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim() || process.env.AGENT_WORKSPACE?.trim() || "";
+const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim()
+	|| process.env.AGENT_WORKSPACE?.trim()
+	|| process.cwd();
 const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "speak",
@@ -170,9 +189,23 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "sess",
 		description: "Manage named sessions, wake aliases, slot lanes, and routing summaries",
-		usage: "/sess [new|switch|rename|edit|alias|remove|list|name|wake|slots|ui|export] <args>",
-		examples: ["/sess", "/sess slots", "/sess wake one", "/sess switch one"],
+		usage: "/sess [new|switch|rename|edit|alias|remove|launch|list|name|wake|slots|ui|export] <args>",
+		examples: ["/sess", "/sess slots", "/sess launch colab", "/sess switch one"],
 		source: "extension",
+	},
+	{
+		name: "skills",
+		description: "List and search installed agent skills from the generated Codex skill index",
+		usage: "/skills [list|search <query>|show <name>]",
+		examples: ["/skills", "/skills search android", "/skills show android-development"],
+		source: "builtin",
+	},
+	{
+		name: "model",
+		description: "Show the gateway default model and the model override sent by this app",
+		usage: "/model",
+		examples: ["/model"],
+		source: "builtin",
 	},
 	{
 		name: "phone",
@@ -193,6 +226,20 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 		description: "Start the phone remote and show Android setup QR details",
 		usage: "/pk-remote [bluetooth]",
 		examples: ["/pk-remote", "/pk-remote bluetooth"],
+		source: "extension",
+	},
+	{
+		name: "pk-speak",
+		description: "Hard-stop or control pk-speak voice replies and the wake listener",
+		usage: "/pk-speak [stop|off|quiet|silence|shush|on|status]",
+		examples: ["/pk-speak stop", "/pk-speak status", "/pk-speak off", "/pk-speak quiet"],
+		source: "extension",
+	},
+	{
+		name: "pk-remote-launch",
+		description: "Start the phone remote and automatically supervise ADB reverse port forwarding",
+		usage: "/pk-remote-launch [bluetooth]",
+		examples: ["/pk-remote-launch", "/pk-remote-launch bluetooth"],
 		source: "extension",
 	},
 ];
@@ -227,6 +274,107 @@ function getInstallAuthTokenPath() {
 		|| process.env.APPDATA && join(process.env.APPDATA, "pi-speak")
 		|| join(process.cwd(), ".pi-speak");
 	return join(base, "http-token");
+}
+
+type SkillIndexEntry = {
+	name: string;
+	summary: string;
+	source?: string;
+	path?: string;
+};
+
+function readSkillIndexEntries(): SkillIndexEntry[] {
+	const skillIndexPath = join(homedir(), ".codex", "skill-index.md");
+	let raw = "";
+	try {
+		raw = readFileSync(skillIndexPath, "utf8");
+	} catch {
+		return [];
+	}
+	return raw
+		.split(/\r?\n## /)
+		.slice(1)
+		.map((section) => {
+			const lines = section.split(/\r?\n/);
+			const name = (lines.shift() || "").trim();
+			const summaryLines: string[] = [];
+			let source: string | undefined;
+			let path: string | undefined;
+			let readingSummary = true;
+			for (const line of lines) {
+				if (line.startsWith("- ")) readingSummary = false;
+				if (readingSummary) {
+					const cleaned = line.replace(/^>\s?-?\s?/, "").trim();
+					if (cleaned) summaryLines.push(cleaned);
+				}
+				if (line.startsWith("- source:")) source = line.slice("- source:".length).trim();
+				if (line.startsWith("- path:")) path = line.slice("- path:".length).trim();
+			}
+			return {
+				name,
+				summary: summaryLines.join(" ").trim(),
+				source,
+				path,
+			};
+		})
+		.filter((entry) => entry.name && entry.path);
+}
+
+function formatSkillEntry(entry: SkillIndexEntry) {
+	const summary = entry.summary || entry.source || "No summary in the generated index.";
+	return `/${entry.name} - ${summary}`;
+}
+
+function handleSkillsSlashCommand(args: string[]): string {
+	const entries = readSkillIndexEntries();
+	if (entries.length === 0) {
+		return "No generated skill index was found at ~/.codex/skill-index.md. Run the skill index refresh, then try /skills again.";
+	}
+	const action = (args[0] || "list").toLowerCase();
+	if (action === "show") {
+		const name = args.slice(1).join(" ").trim().toLowerCase();
+		if (!name) return "Usage: /skills show <name>";
+		const entry = entries.find((candidate) => candidate.name.toLowerCase() === name);
+		if (!entry) return `No installed skill named "${name}" was found. Try /skills search ${name}.`;
+		return [
+			`Skill: ${entry.name}`,
+			entry.summary || "No summary in the generated index.",
+			entry.source ? `Source: ${entry.source}` : undefined,
+			entry.path ? `Path: ${entry.path}` : undefined,
+		].filter(Boolean).join("\n");
+	}
+	const query = action === "search" ? args.slice(1).join(" ").trim().toLowerCase() : "";
+	const matches = query
+		? entries.filter((entry) => `${entry.name} ${entry.summary} ${entry.source || ""}`.toLowerCase().includes(query))
+		: entries;
+	const shown = matches.slice(0, 12);
+	const header = query
+		? `Skills matching "${query}" (${shown.length}/${matches.length} shown):`
+		: `Installed skills (${shown.length}/${entries.length} shown):`;
+	return [header, ...shown.map(formatSkillEntry)].join("\n");
+}
+
+function handleGatewaySlashCommand(
+	trimmed: string,
+	options: { model?: string; defaultModel?: string; cwd?: string; agentProvider?: GatewayAgentProvider },
+): RemoteTurnResult | undefined {
+	if (!trimmed.startsWith("/")) return undefined;
+	const [rawCommand, ...args] = trimmed.slice(1).split(/\s+/);
+	const command = rawCommand.toLowerCase();
+	if (command === "skills") {
+		return { replyText: handleSkillsSlashCommand(args) };
+	}
+	if (command === "model") {
+		return {
+			replyText: [
+				`App model override: ${options.model || "server default"}.`,
+				`Gateway default model: ${options.defaultModel || "not set"}.`,
+				`Provider: ${options.agentProvider || "auto"}.`,
+				options.cwd ? `Working directory: ${options.cwd}.` : undefined,
+			].filter(Boolean).join("\n"),
+		};
+	}
+	return undefined;
 }
 
 const SPEECH_MODE_PROMPT = `Activate CodeChat mode for this conversation.
@@ -322,27 +470,24 @@ function getDefaultTailscaleBaseUrl(port: number) {
 	if (configured) return normalizeBaseUrl(configured);
 	const detected = getReachableIpv4Addresses().tailscale[0];
 	if (detected) return `http://${detected}:${port}/`;
-	const address = platform() === "darwin" ? TAILSCALE_MAC_IP : TAILSCALE_APPSERVER_IP;
-	return `http://${address}:${port}/`;
+	return `http://127.0.0.1:${port}/`;
 }
 
 function getDefaultBluetoothBaseUrl(port: number) {
 	const configured = process.env.PI_SPEAK_BLUETOOTH_BASE_URL?.trim();
 	if (configured) return normalizeBaseUrl(configured);
-	return `http://${DEFAULT_BLUETOOTH_IP}:${port}/`;
+	const detected = getReachableIpv4Addresses().lan[0];
+	return `http://${detected || "127.0.0.1"}:${port}/`;
 }
 
 function getSetupProfileForBaseUrl(baseUrl: string, mode: "tailscale" | "bluetooth" = "tailscale") {
 	if (mode === "bluetooth") {
 		return { machineId: "bluetooth-local", profileName: "Bluetooth / local link", connectionMode: "bluetooth" };
 	}
-	if (baseUrl.includes(TAILSCALE_MAC_IP)) {
-		return { machineId: "tailscale-mac", profileName: "Mac", connectionMode: "tailscale" };
-	}
 	if (baseUrl.includes("192.168.") || baseUrl.includes("10.") || /172\.(1[6-9]|2\d|3[01])\./.test(baseUrl)) {
 		return { machineId: "local-lan", profileName: "Local network", connectionMode: "manual" };
 	}
-	return { machineId: "tailscale-appserver", profileName: "MSI / appserver", connectionMode: "tailscale" };
+	return { machineId: "tailscale", profileName: "Tailscale", connectionMode: "tailscale" };
 }
 
 function buildRemoteSetupUrls(
@@ -352,6 +497,7 @@ function buildRemoteSetupUrls(
 	mode: "tailscale" | "bluetooth" = "tailscale",
 	agentProvider?: string,
 	defaultTarget?: string,
+	agentModel?: string,
 ) {
 	const publicBase = PUBLIC_REMOTE_BASE_URL ? normalizeBaseUrl(PUBLIC_REMOTE_BASE_URL) : "";
 	const fallbackBase = getDefaultTailscaleBaseUrl(port);
@@ -380,9 +526,14 @@ function buildRemoteSetupUrls(
 		if (agentProvider) {
 			params.set("agent_provider", agentProvider);
 		}
+		if (agentModel) {
+			params.set("agent_model", agentModel);
+		}
 		if (defaultTarget) {
 			params.set("default_target", defaultTarget);
 		}
+		params.set("workspace_root", DEFAULT_AGENT_CWD || process.cwd());
+		params.set("workspace_path", DEFAULT_AGENT_CWD || process.cwd());
 		return `pi-speak://setup?${params.toString()}`;
 	});
 	return { baseUrls, browserUrls, setupPageUrls, downloadUrls, appSetupUrls };
@@ -467,6 +618,106 @@ function getErrorMessage(error: unknown) {
 	return String(error);
 }
 
+function resolveOhMyPiCommand() {
+	return process.env.PI_SPEAK_OH_MY_PK_BIN?.trim()
+		|| process.env.OMPK_BIN?.trim()
+		|| process.env.PI_SPEAK_OH_MY_PI_BIN?.trim()
+		|| process.env.OMP_BIN?.trim()
+		|| resolveWindowsNpmShim("ompk.cmd")
+		|| resolveWindowsNpmShim("ompk")
+		|| resolveWindowsNpmShim("omp.cmd")
+		|| resolveWindowsNpmShim("omp")
+		|| "ompk";
+}
+
+function launchOhMyPiResume(sessionArg: string, cwd: string) {
+	const command = resolveOhMyPiCommand();
+	const child = spawnDetached(command, ["--resume", sessionArg], cwd);
+	child.unref();
+	return command;
+}
+
+function launchOhMyPiAgent(argv: string[], cwd: string) {
+	const command = resolveOhMyPiCommand();
+	const child = spawnDetached(command, argv, cwd);
+	child.unref();
+	return { command, argv, cwd };
+}
+
+function launchColabDeployment(cwd: string) {
+	const plan = buildColabLaunchPlan({ cwd }, cwd);
+	if (!plan.ok) return plan;
+	const child = spawnDetached(plan.command, plan.argv, plan.cwd);
+	child.unref();
+	return plan;
+}
+
+function launchSessionTarget(payload: SessionLaunchPayload, source: SessionEventSource = "admin"): ControlActionResult {
+	const fallbackCwd = payload.cwd?.trim()
+		|| DEFAULT_AGENT_CWD
+		|| process.cwd();
+	const built = buildOhMyPiLaunchArgv({
+		cwd: payload.cwd,
+		prompt: payload.prompt,
+		model: payload.model,
+		provider: payload.provider,
+		sessionDir: payload.sessionDir,
+		hubOnly: payload.hubOnly,
+		targetNode: payload.targetNode,
+	}, fallbackCwd);
+	if (!built.ok) {
+		return { ok: false, message: built.message };
+	}
+	try {
+		if (built.targetNode === "colab") {
+			const launched = launchColabDeployment(built.cwd);
+			if (!launched.ok) return { ok: false, message: launched.message };
+			appendSessionEvent("sess.launch", source, {
+				provider: "colab",
+				targetNode: "colab",
+				mode: "colab",
+				runId: launched.runId,
+				session: launched.session,
+				target: launched.target,
+				argv: launched.argv,
+				cwd: launched.cwd,
+				command: launched.command,
+			});
+			return {
+				ok: true,
+				message: `Launching Colab deployment ${launched.runId} for ${launched.cwd}.`,
+				command: launched.command,
+				commandPreview: launched.commandPreview,
+				argv: launched.argv,
+				cwd: launched.cwd,
+				runId: launched.runId,
+				session: launched.session,
+				target: launched.target,
+				targetNode: "colab",
+			};
+		}
+		const launched = launchOhMyPiAgent(built.argv, built.cwd);
+		appendSessionEvent("sess.launch", source, {
+			provider: "oh-my-pk",
+			mode: built.mode,
+			argv: launched.argv,
+			cwd: launched.cwd,
+			command: launched.command,
+		});
+		return {
+			ok: true,
+			message: built.mode === "hub"
+				? `Launching Oh-my-pk Agent Hub in ${launched.cwd}.`
+				: `Launching Oh-my-pk agent in ${launched.cwd}.`,
+			command: launched.command,
+			argv: launched.argv,
+			cwd: launched.cwd,
+		};
+	} catch (error) {
+		return { ok: false, message: `Session launch failed: ${getErrorMessage(error)}` };
+	}
+}
+
 function getTelegramBotToken(state?: PhoneBridgeState) {
 	return process.env.PI_SPEAK_TELEGRAM_BOT_TOKEN?.trim() || process.env.TELEGRAM_BOT_TOKEN?.trim() || state?.botToken?.trim() || "";
 }
@@ -494,6 +745,38 @@ function isListenerEvent(value: unknown): value is ListenerEvent {
 		default:
 			return false;
 	}
+}
+
+
+function getOmpAgentConfigPath(): string | undefined {
+	const home = process.env.USERPROFILE || process.env.HOME;
+	if (!home) return undefined;
+	return join(home, ".omp", "agent", "config.yml");
+}
+
+function disableOmpSpeechConfig(): void {
+	const configPath = getOmpAgentConfigPath();
+	if (configPath && existsSync(configPath)) {
+		try {
+			const raw = readFileSync(configPath, "utf8");
+			const next = raw.replace(/(^speech:\s*\n\s*enabled:\s*)true\b/m, "$1false");
+			if (next !== raw) writeFileSync(configPath, next, "utf8");
+		} catch {}
+	}
+	// Keep omp + pi-speak sentinels in lockstep with hard-stop.
+	enableRootVoiceDisable();
+}
+
+function enableOmpSpeechConfig(): void {
+	const configPath = getOmpAgentConfigPath();
+	if (configPath && existsSync(configPath)) {
+		try {
+			const raw = readFileSync(configPath, "utf8");
+			const next = raw.replace(/(^speech:\s*\n\s*enabled:\s*)false\b/m, "$1true");
+			if (next !== raw) writeFileSync(configPath, next, "utf8");
+		} catch {}
+	}
+	clearRootVoiceDisable();
 }
 
 export default function speakExtension(pi: ExtensionAPI) {
@@ -542,6 +825,14 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const piAgentProvider = new PiAgentProvider({
 		sendUserMessage: (content, options) => pi.sendUserMessage(content, options),
 	});
+	const ompAgentProvider = createOmpAgentProvider(resolveOhMyPiCommand(), DEFAULT_AGENT_CWD || process.cwd(), process.env);
+	const ompSelection = new OmpSelectionStore();
+	const getActiveOmpProvider = (clientKey?: string) => {
+		const selected = ompSelection.get(clientKey);
+		return selected
+			? createOmpResumeProvider(resolveOhMyPiCommand(), DEFAULT_AGENT_CWD || process.cwd(), selected, process.env)
+			: ompAgentProvider;
+	};
 	const codexAgentProvider = new CodexAgentProvider({
 		codexBin: agentProviderConfig.codexBin,
 		model: agentProviderConfig.model,
@@ -566,8 +857,20 @@ export default function speakExtension(pi: ExtensionAPI) {
 			});
 		},
 	});
+	const claudeAgentProvider = new ClaudeAgentProvider({
+		claudeBin: process.env.CLAUDE_BIN?.trim() || resolveWindowsNpmShim("claude.cmd") || agentProviderConfig.claudeBin,
+		model: agentProviderConfig.model,
+		cwd: DEFAULT_AGENT_CWD || process.cwd(),
+		env: process.env,
+	});
 	const getAgentProvider = (): AgentProvider =>
-		agentProviderConfig.provider === "codex" ? codexAgentProvider : piAgentProvider;
+		agentProviderConfig.provider === "codex"
+			? codexAgentProvider
+			: agentProviderConfig.provider === "claude"
+				? claudeAgentProvider
+				: agentProviderConfig.provider === "oh-my-pk"
+					? ompAgentProvider
+					: piAgentProvider;
 	let forceSpeechPromptNextTurn = false;
 	const diagnostics: RuntimeDiagnostics = {
 		lastErrors: {},
@@ -779,7 +1082,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getSessCompletions = (prefix: string) => {
 		const trimmed = prefix.trimStart();
 		const complete = (value: string, label = value) => ({ value, label });
-		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "list", "name", "wake", "slots", "ui", "export"];
+		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "launch", "list", "name", "wake", "slots", "ui", "export"];
 		if (!trimmed) return top.map((value) => complete(value));
 		const firstSpace = trimmed.indexOf(" ");
 		if (firstSpace === -1) return top.filter((value) => value.startsWith(trimmed.toLowerCase())).map((value) => complete(value));
@@ -803,6 +1106,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 				const targetPrefix = rest.slice("remove ".length);
 				return targets.filter((value) => value.toLowerCase().startsWith(targetPrefix.toLowerCase())).map((value) => complete(`confirm remove ${value}`, `confirm remove ${value}`));
 			}
+		}
+		if (sub === "launch") {
+			const launchOptions = ["colab", "hub"];
+			const launchPrefix = rest.trim().toLowerCase();
+			return launchOptions
+				.filter((value) => value.startsWith(launchPrefix))
+				.map((value) => complete(`launch ${value}`, `launch ${value}`));
 		}
 		if (sub === "alias") {
 			const aliasSub = rest.trimStart();
@@ -849,7 +1159,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getRoutingStatus = () => ({
 		defaultTarget: remoteDefaultTarget,
 		currentSession: pi.getSessionName() || undefined,
-		availableTargets: getKnownTargets(),
+		availableTargets: [...getKnownTargets(), ...(remoteDefaultTarget?.startsWith("herdr:") ? [remoteDefaultTarget] : [])],
 	});
 
 	const setRoutingTarget = (target?: string): ControlActionResult => {
@@ -857,6 +1167,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (!trimmed) {
 			syncRemoteState({ defaultTarget: undefined }, true);
 			return { ok: true, message: "Remote target cleared. New turns stay on the current session." };
+		}
+		if (trimmed.startsWith("herdr:")) {
+			syncRemoteState({ defaultTarget: trimmed }, true);
+			return { ok: true, message: `Remote target set to ${trimmed}.` };
 		}
 		const match = resolveSessionByName(trimmed);
 		if (!match) {
@@ -920,6 +1234,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const speakText = async (text: string, ctx?: any) => {
 		const trimmed = text.trim();
 		if (!speakState.enabled || !trimmed) return;
+		if (isRootVoiceDisabled()) return;
 
 		stopSpeaking(ctx);
 
@@ -943,6 +1258,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 			});
 			speakingProcess = undefined;
 			if (abortController.signal.aborted) return;
+			if (!speakState.enabled || isRootVoiceDisabled()) {
+				cleanupAudioFiles();
+				setPhase("ready", ctx);
+				return;
+			}
 			if (!existsSync(outputPath)) {
 				throw new Error("Speech synthesis did not create an audio file");
 			}
@@ -987,7 +1307,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const synthesis = await synthesizeToFile({
 				text: trimmed,
 				outputPath,
-				state: { ...getSpeakRuntimeState(), provider: "elevenlabs" },
+				state: getSpeakRuntimeState(),
 			});
 			const ttsMs = Date.now() - startedAt;
 			return {
@@ -1138,7 +1458,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const runAgentPrompt = async (
 		prompt: string,
-		options: { mode?: "turn" | "steer" | "followUp"; timeoutMs?: number; cwd?: string } = {},
+		options: { mode?: "turn" | "steer" | "followUp"; timeoutMs?: number; cwd?: string; model?: string } = {},
 		agentProviderOverride?: AgentProvider,
 	) => {
 		const provider = agentProviderOverride || getAgentProvider();
@@ -1147,7 +1467,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 		const replyText = await collectAgentResponse(provider, prompt, {
 			mode: options.mode,
-			model: agentProviderConfig.model,
+			model: options.model || agentProviderConfig.model,
 			cwd: options.cwd || DEFAULT_AGENT_CWD || undefined,
 			timeoutMs: options.timeoutMs ?? PHONE_TURN_WAIT_TIMEOUT_MS,
 			instructions: SPEECH_MODE_PROMPT,
@@ -1166,7 +1486,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		targetName?: string,
 		cwd?: string,
 		mode: "auto" | "live" = "auto",
-		agentProvider?: "pi" | "codex",
+		agentProvider?: GatewayAgentProvider,
+		model?: string,
 	): Promise<RemoteTurnResult> => {
 		const trimmed = text.trim();
 		if (!trimmed) {
@@ -1183,8 +1504,33 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 
 		const desiredTarget = targetName?.trim() || remoteDefaultTarget;
+		if (desiredTarget?.startsWith("herdr:")) {
+			const paneId = desiredTarget.slice("herdr:".length).trim();
+			const result = await sendHerdrPane({ paneId, text: trimmed, submit: true });
+			const replyText = result.ok ? `Sent turn to Herdr pane ${paneId}.` : `Herdr turn failed: ${result.message}`;
+			appendExecutionTrace({
+				ts: Date.now(),
+				source,
+				rawText: trimmed,
+				targetName: desiredTarget,
+				outcome: result.ok ? "dispatch-success" : "dispatch-failed",
+				replyText,
+			});
+			return { replyText, transcript, warnings: result.ok ? warnings : [...(warnings || []), result.message] };
+		}
 		const isVoiceInput = source === "http-voice" || source === "telegram-voice";
-		const directBackend = agentProvider || (agentProviderConfig.provider === "codex" ? "codex" : "pi");
+		const directBackend: GatewayAgentProvider = agentProvider || (
+			agentProviderConfig.provider === "codex" || agentProviderConfig.provider === "claude" || agentProviderConfig.provider === "oh-my-pk"
+				? agentProviderConfig.provider
+				: "pi"
+		);
+		const localSlashResult = handleGatewaySlashCommand(trimmed, {
+			model,
+			defaultModel: agentProviderConfig.model,
+			cwd: cwd || DEFAULT_AGENT_CWD || undefined,
+			agentProvider: directBackend,
+		});
+		if (localSlashResult) return { ...localSlashResult, transcript };
 		const directSummary: ConversationReducerSummary = {
 			goal: trimmed,
 			actionItems: [trimmed],
@@ -1201,9 +1547,15 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const directExecutionPlan: ConversationExecutionPlan = {
 			dispatch: true,
 			backend: directBackend,
-			reason: directBackend === "codex" ? "dispatch-codex" : "dispatch-pi",
+			reason: directBackend === "codex"
+				? "dispatch-codex"
+				: directBackend === "claude"
+					? "dispatch-claude"
+					: directBackend === "oh-my-pk"
+						? "dispatch-oh-my-pk"
+						: "dispatch-pi",
 			confidence: 1,
-			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : "Pi"}; voice-only router bypassed.`,
+			rationale: `Direct text turn to ${directBackend === "codex" ? "Codex" : directBackend === "claude" ? "Claude" : directBackend === "oh-my-pk" ? "Oh-my-pk" : "Pi"}; voice-only router bypassed.`,
 			actionForSeed: trimmed,
 		};
 		const reducer = isVoiceInput
@@ -1453,8 +1805,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 		let executionProvider: AgentProvider;
 		if (executionPlan.backend === "codex") {
 			executionProvider = codexAgentProvider;
+		} else if (executionPlan.backend === "claude") {
+			executionProvider = claudeAgentProvider;
 		} else if (executionPlan.backend === "pi") {
 			executionProvider = piAgentProvider;
+		} else if (executionPlan.backend === "oh-my-pk") {
+			executionProvider = getActiveOmpProvider();
 		} else {
 			const reason = `Execution route \"${executionPlan.backend}\" is a placeholder and cannot run this turn yet.`;
 			appendExecutionTrace({
@@ -1496,7 +1852,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (mode === "live" && wantAudio && isGeminiLiveConfigured()) {
 			try {
 				const liveStartedAt = Date.now();
-				const liveResult = await runGeminiLiveTurn(reducer.promptForAgent, { timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS });
+				const liveResult = await runGeminiLiveTurn(reducer.promptForAgent, {
+					model,
+					timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS,
+				});
 				agentRunMs = Date.now() - liveStartedAt;
 				replyText = liveResult.replyText;
 				usedLiveMode = true;
@@ -1524,7 +1883,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				startedWithAgent = Date.now();
 				replyText = await runAgentPrompt(
 					reducer.promptForAgent,
-					{ timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS, cwd },
+					{ timeoutMs: PHONE_TURN_WAIT_TIMEOUT_MS, cwd, model },
 					executionProvider,
 				);
 				agentRunMs = Date.now() - startedWithAgent;
@@ -1532,6 +1891,21 @@ export default function speakExtension(pi: ExtensionAPI) {
 			} catch (error) {
 				const reason = `Failed to run remote turn: ${getErrorMessage(error)}`;
 				diagnostics.lastErrors.remote = reason;
+			// H3 parity: only clear the selection when the failure is the resume
+				// target itself being gone (stale/archived/removed) — re-validate with the
+				// same shared validator. A transient failure (timeout, omp busy) leaves a
+				// valid path, so we keep the selection instead of nuking it every blip.
+				if (executionPlan.backend === "oh-my-pk") {
+					const selected = ompSelection.get(undefined);
+					if (selected) {
+						const recheck = validateOmpSelection(selected);
+						if (!recheck.ok) {
+							ompSelection.select(undefined, null);
+							appendSessionEvent("sess.omp-select-cleared", "admin", { reason, error: recheck.error });
+							lastCtx?.ui?.notify?.(`Cleared the omp session selection: ${recheck.error}`, "warning");
+						}
+					}
+				}
 				const failedMs = Date.now() - (startedWithAgent || Date.now());
 				agentRunMs = failedMs;
 				appendExecutionTrace({
@@ -1670,11 +2044,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 		targetName?: string,
 		cwd?: string,
 		mode: "auto" | "live" = "auto",
-		agentProvider?: "pi" | "codex",
+		agentProvider?: GatewayAgentProvider,
+		model?: string,
 	) => {
 		diagnostics.recentTimings.lastRemoteSource = source;
 		return await remoteTurnManager.enqueue(source, async () =>
-			await executePhoneTurn(source, text, transcript, wantAudio, timings, providers, warnings, targetName, cwd, mode, agentProvider),
+			await executePhoneTurn(source, text, transcript, wantAudio, timings, providers, warnings, targetName, cwd, mode, agentProvider, model),
 		);
 	};
 
@@ -1883,7 +2258,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const token = runtime?.authToken || remoteState.authToken || "";
 		const current = status.currentSession || "current session";
 		const route = status.defaultTarget || current;
-		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode, agentProviderConfig.provider, route);
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, mode, agentProviderConfig.provider, route, agentProviderConfig.model);
 		const phoneSetupUrl = urls.setupPageUrls[0] || "";
 		const nativeSetupUrl = urls.appSetupUrls[0] || "";
 		const downloadUrl = urls.downloadUrls[0] || "";
@@ -1918,7 +2293,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			return false;
 		}
 		const route = status.defaultTarget || status.currentSession;
-		const urls = buildRemoteSetupUrls(status.host, status.port, token, "tailscale", agentProviderConfig.provider, route);
+		const urls = buildRemoteSetupUrls(status.host, status.port, token, "tailscale", agentProviderConfig.provider, route, agentProviderConfig.model);
 		const baseUrl = urls.baseUrls[0] || getDefaultTailscaleBaseUrl(status.port);
 		const profile = getSetupProfileForBaseUrl(baseUrl);
 		const tray = await startRemoteTray({
@@ -1981,7 +2356,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 		ctx?: any,
 	) => {
 		if (action === "on") {
+<<<<<<< HEAD
 			setSpeakMode("on");
+=======
+			clearRootVoiceDisable();
+			enableOmpSpeechConfig();
+			speakState.enabled = true;
+>>>>>>> origin/main
 			persistState();
 			setPhase("ready", ctx);
 			return {
@@ -2105,7 +2486,143 @@ export default function speakExtension(pi: ExtensionAPI) {
 		return { ok: true, message: `Phone unpaired. New link code: ${linkCode}.`, phone: getPhoneStatus() };
 	};
 
-	const startRemoteServer = async (ctx?: any, quiet = false) => {
+	let adbReverseTimer: ReturnType<typeof setInterval> | undefined;
+	let adbWarned = false;
+
+	const getAdbPath = (): string => {
+		const env = process.env;
+		const sdkRoot = env.ANDROID_HOME || env.ANDROID_SDK_ROOT;
+		if (sdkRoot && existsSync(join(sdkRoot, "platform-tools", "adb.exe"))) {
+			return join(sdkRoot, "platform-tools", "adb.exe");
+		}
+		if (sdkRoot && existsSync(join(sdkRoot, "platform-tools", "adb"))) {
+			return join(sdkRoot, "platform-tools", "adb");
+		}
+		if (env.LOCALAPPDATA && existsSync(join(env.LOCALAPPDATA, "Android", "Sdk", "platform-tools", "adb.exe"))) {
+			return join(env.LOCALAPPDATA, "Android", "Sdk", "platform-tools", "adb.exe");
+		}
+		return "adb";
+	};
+
+	const getAdbDevices = (adbPath: string): Promise<string[]> => {
+		return new Promise((resolve, reject) => {
+			const child = spawn(adbPath, ["devices"]);
+			let stdout = "";
+			child.stdout.on("data", (data) => { stdout += data.toString(); });
+			child.on("error", (err) => reject(err));
+			child.on("close", (code) => {
+				if (code !== 0) {
+					reject(new Error(`adb exited with code ${code}`));
+					return;
+				}
+				const lines = stdout.split(/\r?\n/);
+				const devices: string[] = [];
+				for (const line of lines.slice(1)) {
+					const trimmed = line.trim();
+					if (!trimmed) continue;
+					const parts = trimmed.split(/\s+/);
+					if (parts[1] === "device" && parts[0]) {
+						devices.push(parts[0]);
+					}
+				}
+				resolve(devices);
+			});
+		});
+	};
+
+	const reversedSerials = new Map<string, Set<number>>();
+
+	const startAdbReverseWatcher = (ctx?: any) => {
+		if (adbReverseTimer) return;
+		adbWarned = false;
+		reversedSerials.clear();
+		const port = remoteState.port || DEFAULT_REMOTE_PORT;
+
+		const poll = async () => {
+			const adbPath = getAdbPath();
+			try {
+				const devices = await getAdbDevices(adbPath);
+				const activeSet = new Set(devices);
+
+				// Clean up disconnected devices
+				for (const serial of reversedSerials.keys()) {
+					if (!activeSet.has(serial)) {
+						reversedSerials.delete(serial);
+					}
+				}
+
+				if (devices.length > 0) {
+					for (const serial of devices) {
+						const ports = reversedSerials.get(serial) || new Set<number>();
+						if (!ports.has(port)) {
+							const child = spawn(adbPath, ["-s", serial, "reverse", `tcp:${port}`, `tcp:${port}`]);
+							child.on("error", () => {});
+							child.on("close", (code) => {
+								if (code === 0) {
+									if (!reversedSerials.has(serial)) {
+										reversedSerials.set(serial, new Set());
+									}
+									reversedSerials.get(serial)!.add(port);
+								}
+							});
+						}
+					}
+				}
+			} catch (error: any) {
+				if (!adbWarned) {
+					adbWarned = true;
+					ctx?.ui?.notify(`ADB reverse watcher warning: could not run adb (${error.message || error})`, "warning");
+				}
+			}
+		};
+
+		void poll();
+		adbReverseTimer = setInterval(poll, 5000);
+	};
+
+	const stopAdbReverseWatcher = () => {
+		if (adbReverseTimer) {
+			clearInterval(adbReverseTimer);
+			adbReverseTimer = undefined;
+		}
+		reversedSerials.clear();
+	};
+	type RemoteSetupMode = "tailscale" | "bluetooth";
+
+	const getDesiredRemoteState = (mode: RemoteSetupMode): Partial<RemoteState> => {
+		if (mode === "bluetooth") {
+			return {
+				host: DEFAULT_ADB_REMOTE_HOST,
+				port: DEFAULT_ADB_REMOTE_PORT,
+			};
+		}
+		return {
+			host: DEFAULT_REMOTE_HOST,
+			port: DEFAULT_REMOTE_PORT,
+		};
+	};
+
+	const shouldRestartRemoteServerForMode = (mode: RemoteSetupMode) => {
+		if (!remoteServer) return false;
+		const desired = getDesiredRemoteState(mode);
+		const runtime = remoteServer.getRuntimeState();
+		return runtime.host !== desired.host || runtime.port !== desired.port;
+	};
+
+	const stopRemoteServerRuntime = async () => {
+		if (!remoteServer) return;
+		await remoteServer.stop().catch(() => {});
+		remoteServer = undefined;
+	};
+
+	const startRemoteServer = async (ctx?: any, quiet = false, mode: RemoteSetupMode = "tailscale") => {
+		if (mode === "tailscale") {
+			stopAdbReverseWatcher();
+		}
+		if (shouldRestartRemoteServerForMode(mode)) {
+			await stopRemoteServerRuntime();
+		}
+		syncRemoteState(getDesiredRemoteState(mode), true);
 		if (!remoteServer) {
 			remoteServer = new ControlServer({
 				state: remoteState,
@@ -2139,7 +2656,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				onSpeakAction: (action, value) => handleSpeakAction(action, value, lastCtx),
 				onPhoneAction: (action) => handlePhoneAction(action, lastCtx),
 				getSlashCommands: () => REMOTE_SLASH_COMMANDS,
-				onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider) => {
+				onTextTurn: async (text, includeAudio, target, cwd, mode, agentProvider, model) => {
 					try {
 						return await enqueuePhoneTurn(
 							"http-text",
@@ -2153,6 +2670,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							cwd,
 							mode,
 							agentProvider,
+							model,
 						);
 					} catch (error) {
 						const reason = getErrorMessage(error);
@@ -2164,7 +2682,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 						};
 					}
 				},
-				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, mode, agentProvider) => {
+				onVoiceTurn: async (buffer, mimeType, includeAudio, target, cwd, mode, agentProvider, model) => {
 					try {
 						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
@@ -2183,6 +2701,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							cwd,
 							mode,
 							agentProvider,
+							model,
 						);
 					} catch (error) {
 						diagnostics.lastErrors.stt = getErrorMessage(error);
@@ -2206,7 +2725,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 						currentSessionPath || undefined,
 						...snapshots.map((snapshot) => snapshot.sessionPath),
 					];
-					return buildSessionDashboard({
+					const dashboard = buildSessionDashboard({
 						sessions: persisted.sessions,
 						aliases: persisted.aliases,
 						runtimeSnapshots: snapshots,
@@ -2220,8 +2739,67 @@ export default function speakExtension(pi: ExtensionAPI) {
 						),
 						storePath: getSessionRoutingStorePath(),
 					});
+					return mergeOhMyPiAgentHubSessions(dashboard);
 				},
 				getCompactRouteSlots: () => buildCompactRouteSlots({ sessions: sessionRegistry, aliases: sessionWakeAliases }),
+				agentHub: createLiveAgentHubBinding({
+					dashboardFn: () => buildOhMyPiAgentHubDashboardCached(),
+					submitChatTurn: (text, target, cwd) =>
+						enqueuePhoneTurn("http-text", text, undefined, false, undefined, undefined, undefined, target, cwd),
+				}),
+				onSessionResume: (payload) => {
+					const rawProvider = payload.provider?.trim();
+					const provider = normalizeGatewayProviderOverride(rawProvider);
+					if (rawProvider && provider !== "oh-my-pk") {
+						return { ok: false, message: `Resume is not available for provider "${rawProvider}".` };
+					}
+					const rawSessionArg = payload.sessionId?.trim() || payload.sessionPath?.trim();
+					if (!rawSessionArg) return { ok: false, message: "Session id or path is required." };
+					const sessionArg = normalizeOptionalString(rawSessionArg, 1024, "session");
+					if (typeof sessionArg === "object") return { ok: false, message: sessionArg.error };
+					if (!sessionArg) return { ok: false, message: "Session id or path is required." };
+					const cwd = payload.cwd?.trim() || DEFAULT_AGENT_CWD || process.cwd();
+					try {
+						const command = launchOhMyPiResume(sessionArg, cwd);
+						appendSessionEvent("sess.resume", "admin", { provider: "oh-my-pk", session: sessionArg, cwd, command });
+						return { ok: true, message: `Launching Oh-my-pk resume for ${sessionArg}.` };
+					} catch (error) {
+						return { ok: false, message: `Oh-my-pk resume failed: ${getErrorMessage(error)}` };
+					}
+				},
+				onSessionLaunch: (payload) => launchSessionTarget(payload, "admin"),
+				onHubPublish: (payload) => publishOwnerHubSession(lastCtx, payload),
+				onHubResume: (payload) => resumeOwnerHubSession(lastCtx, payload),
+				isHubHandoffReady: () => typeof lastCtx?.executeBuiltinCommand === "function",
+				onSessionArchive: (payload) => {
+					const sessionPath = payload.sessionPath;
+					if (!sessionPath) return { ok: false, message: "Session path is required." };
+					const result = payload.action === "recover"
+						? recoverOhMyPiBackgroundSession(sessionPath)
+						: archiveOhMyPiBackgroundSession(sessionPath);
+					if (result.ok) {
+						appendSessionEvent(payload.action === "recover" ? "sess.recover" : "sess.archive", "admin", {
+							provider: "oh-my-pk",
+							path: sessionPath,
+						});
+					}
+					return { ok: result.ok, message: result.message, route: getRoutingStatus() };
+				},
+				onOmpSelectSession: (_clientKey, sessionPath) => {
+					// Local single-user extension: one selection (default bucket) matching
+					// getActiveOmpProvider(). Same shared validation as the gateway, surfaced
+					// via notify/log instead of an HTTP 400. Deselect (null) always allowed.
+					const validation = validateOmpSelection(sessionPath);
+					if (!validation.ok) {
+						appendSessionEvent("sess.ompk-select-rejected", "admin", { sessionPath, error: validation.error });
+						lastCtx?.ui?.notify?.(`Can't select ompk session: ${validation.error}`, "error");
+						return validation;
+					}
+					ompSelection.select(undefined, sessionPath);
+					appendSessionEvent("sess.ompk-select", "admin", { sessionPath });
+					return { ok: true };
+				},
+				onOmpGetSelectedSession: () => ompSelection.get(undefined),
 				onSessionRename: (payload) => {
 					const sessionPath = payload.sessionPath;
 					const newName = payload.newName.trim();
@@ -2256,6 +2834,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 					const sessionPath = payload.sessionPath;
 					if (!sessionPath) return { ok: false, message: "Session path is required." };
 					if (!Object.values(sessionRegistry).includes(sessionPath) && lastCtx?.sessionManager?.getSessionFile?.() !== sessionPath) {
+						const archived = archiveOhMyPiBackgroundSession(sessionPath);
+						if (archived.ok) {
+							appendSessionEvent("sess.remove", "admin", { provider: "oh-my-pk", path: sessionPath, archived: true });
+							return { ok: true, message: archived.message, route: getRoutingStatus() };
+						}
 						return { ok: false, message: "Unknown session path." };
 					}
 					const removal = removeSessionRoutingForPath(sessionRegistry, sessionWakeAliases, sessionPath);
@@ -2267,6 +2850,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				},
 				getDiscoveredAgents: () => discoverAgentInventoryCached(),
 				tailSessionEvents,
+				onRealtimeConnection: handleRealtimeGateway,
 			});
 		}
 
@@ -2293,6 +2877,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const stopRemoteServer = async (ctx?: any, quiet = false) => {
 		remoteTurnManager.cancelAll("Remote API stopped before queued work completed");
+		stopAdbReverseWatcher();
 		if (remoteServer) {
 			await remoteServer.stop().catch(() => {});
 			remoteServer = undefined;
@@ -2410,8 +2995,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 					updateMonoStatus(target);
 					const cue = playMonoCue("listening");
 					cue.on("error", () => {});
+<<<<<<< HEAD
 					if (!speakState.enabled) {
 						setSpeakMode("on");
+=======
+					if (!speakState.enabled && !isRootVoiceDisabled()) {
+						speakState.enabled = true;
+>>>>>>> origin/main
 						persistState();
 						setPhase("ready", target);
 					}
@@ -2692,6 +3282,28 @@ export default function speakExtension(pi: ExtensionAPI) {
 					const reason = result.reason ? `${result.reason} ` : "";
 					ctx.ui.notify(`${reason}Run manually: ${result.manualCommand}`, "warning");
 				}
+				return;
+			}
+
+			if (sub === "launch") {
+				if (!rest) {
+					ctx.ui.notify("Usage: /sess launch [colab|hub|<agent prompt>]", "error");
+					return;
+				}
+				const launchTarget = rest.toLowerCase().replace(/\s+/g, " ").trim();
+				const payload: SessionLaunchPayload = { cwd: DEFAULT_AGENT_CWD || process.cwd() };
+				if (["hub", "agent hub", "ompk hub", "oh-my-pk hub", "omp hub", "oh-my-pi hub"].includes(launchTarget)) {
+					payload.hubOnly = true;
+				} else if (
+					["colab", "google colab", "colab workspace", "colab deploy", "colab launch"].includes(launchTarget)
+					|| launchTarget.startsWith("colab ")
+				) {
+					payload.targetNode = "colab";
+				} else {
+					payload.prompt = rest;
+				}
+				const result = launchSessionTarget(payload, source);
+				notifyAudible(ctx, result.message, result.ok ? "info" : "error", source === "voice" ? result.message : undefined);
 				return;
 			}
 
@@ -2993,7 +3605,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|list|name|wake|slots|ui|export] <args>", "error");
+			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|launch|list|name|wake|slots|ui|export] <args>", "error");
 	};
 
 	pi.registerCommand("sess", {
@@ -3108,7 +3720,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.registerCommand("remote", {
 		description: "Control Pi through the local HTTP API for phone remotes and automations",
 		getArgumentCompletions: (prefix) => {
-			const options = ["on", "off", "status", "token", "setup", "setup bluetooth", "tray on", "tray off", "tray status"];
+			const options = ["on", "off", "status", "token", "setup", "setup bluetooth", "tray on", "tray off", "tray status", "launch", "launch bluetooth"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -3116,8 +3728,15 @@ export default function speakExtension(pi: ExtensionAPI) {
 			lastCtx = ctx;
 			const lower = args.trim().toLowerCase();
 
-			if (!lower || lower === "on" || lower === "start") {
-				await startRemoteServer(ctx);
+			if (!lower || lower === "on" || lower === "start" || lower === "launch" || lower === "launch bluetooth") {
+				const mode: RemoteSetupMode = lower.includes("bluetooth") ? "bluetooth" : "tailscale";
+				await startRemoteServer(ctx, lower.startsWith("launch"), mode);
+				if (lower === "launch bluetooth") {
+					startAdbReverseWatcher(ctx);
+				}
+				if (lower.startsWith("launch")) {
+					ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
+				}
 				return;
 			}
 
@@ -3132,13 +3751,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (lower === "setup") {
-				await startRemoteServer(ctx, true);
+				await startRemoteServer(ctx, true, "tailscale");
 				ctx.ui.notify(await getRemoteSetupText("tailscale", true), "info");
 				return;
 			}
 
 			if (lower === "setup bluetooth" || lower === "bluetooth setup") {
-				await startRemoteServer(ctx, true);
+				await startRemoteServer(ctx, true, "bluetooth");
 				ctx.ui.notify(await getRemoteSetupText("bluetooth", true), "info");
 				return;
 			}
@@ -3190,7 +3809,28 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const mode = lower === "bluetooth" || lower === "setup bluetooth" || lower === "bluetooth setup"
 				? "bluetooth"
 				: "tailscale";
-			await startRemoteServer(ctx, true);
+			await startRemoteServer(ctx, true, mode);
+			ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
+		},
+	});
+
+	pi.registerCommand("pk-remote-launch", {
+		description: "Start the phone remote, show the setup QR, and supervise ADB reverse port forwarding",
+		getArgumentCompletions: (prefix) => {
+			const options = ["", "bluetooth"];
+			const matches = options.filter((opt) => opt.startsWith(prefix));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value || "setup" })) : null;
+		},
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const lower = args.trim().toLowerCase();
+			const mode = lower === "bluetooth" || lower === "setup bluetooth" || lower === "bluetooth setup"
+				? "bluetooth"
+				: "tailscale";
+			await startRemoteServer(ctx, true, mode);
+			if (mode === "bluetooth") {
+				startAdbReverseWatcher(ctx);
+			}
 			ctx.ui.notify(await getRemoteSetupText(mode, true), "info");
 		},
 	});
@@ -3209,6 +3849,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				"provider auto",
 				"provider legacy",
 				"provider edge",
+				"provider gemini",
 				"provider openai",
 				"provider elevenlabs",
 				"rewrite on",
@@ -3223,7 +3864,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const lower = raw.toLowerCase();
 
 			if (!raw || lower === "on" || lower === "enable" || lower === "start") {
+<<<<<<< HEAD
 				setSpeakMode("on");
+=======
+				clearRootVoiceDisable();
+				enableOmpSpeechConfig();
+				speakState.enabled = true;
+>>>>>>> origin/main
 				persistState();
 				setPhase("ready", ctx);
 				ctx.ui.notify(`Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
@@ -3317,6 +3964,63 @@ export default function speakExtension(pi: ExtensionAPI) {
 			setPhase("ready", ctx);
 			ctx.ui.notify(`Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
 			pi.sendUserMessage(raw);
+		},
+	});
+
+	const hardStopPkSpeak = (ctx: any) => {
+		speakState.enabled = false;
+		persistState();
+		disableOmpSpeechConfig();
+		stopSpeaking(ctx);
+		stopListener(ctx);
+		persistMonoState();
+		updateStatus(ctx);
+		updateMonoStatus(ctx);
+	};
+
+	pi.registerCommand("pk-speak", {
+		description: "Hard-stop pk-speak voice replies and the wake listener",
+		getArgumentCompletions: (prefix) => {
+			const options = ["stop", "off", "on", "status", "quiet", "silence", "shush"];
+			const matches = options.filter((opt) => opt.startsWith(prefix));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+		},
+		handler: async (args, ctx) => {
+			lastCtx = ctx;
+			const lower = args.trim().toLowerCase();
+
+			if (!lower || lower === "stop" || lower === "off" || lower === "quiet" || lower === "silence" || lower === "shush") {
+				hardStopPkSpeak(ctx);
+				ctx.ui.notify("pk-speak stopped: speech disabled and wake listener stopped", "info");
+				return;
+			}
+
+			if (lower === "on" || lower === "enable" || lower === "start") {
+				clearRootVoiceDisable();
+				enableOmpSpeechConfig();
+				speakState.enabled = true;
+				persistState();
+				setPhase("ready", ctx);
+				updateStatus(ctx);
+				ctx.ui.notify(`pk-speak enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
+				return;
+			}
+
+			if (lower === "status") {
+				const rewriteStatus = isRewriteEnabled(getSpeakRuntimeState()) ? "rewrite on" : "rewrite off";
+				const monoStatus = monoActive
+					? voiceInputActive
+						? "listener active"
+						: "listener waiting for wake"
+					: "listener off";
+				ctx.ui.notify(
+					`pk-speak: speech ${speakState.enabled ? "on" : "off"} (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}); ${monoStatus}`,
+					"info",
+				);
+				return;
+			}
+
+			ctx.ui.notify("Usage: /pk-speak [stop|off|on|status]", "error");
 		},
 	});
 

@@ -36,6 +36,7 @@ test("session routing persists across reloads", async () => {
 			aliases: {
 				One: "/sessions/bugfix.jsonl",
 			},
+			archivedPaths: [],
 		});
 		assert.ok(loaded.updatedAt > 0);
 	} finally {
@@ -73,6 +74,7 @@ test("session routing loader ignores malformed records", async () => {
 				Good: "/sessions/good.jsonl",
 			},
 			aliases: {},
+			archivedPaths: [],
 		});
 	} finally {
 		if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;

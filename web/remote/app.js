@@ -5,6 +5,13 @@ export const STORAGE_REMEMBER = "piSpeakRemoteRememberToken";
 export const STORAGE_LAUNCH_PATH = "piSpeakRemoteLaunchPath";
 export const STORAGE_LIVE_MODE = "piSpeakRemoteLiveMode";
 
+export function buildRealtimeWebSocketUrl(origin, token = "") {
+	const url = new URL("/v1/live", origin);
+	url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+	if (token) url.searchParams.set("token", token);
+	return url.toString();
+}
+
 export function loadPersistedSettings({
 	queryToken = "",
 	queryLaunchPath = "",
@@ -74,6 +81,16 @@ if (typeof document !== "undefined") {
 		recentAgentSessions: [],
 		agentSnapshotAt: "",
 		workspacePath: "",
+		workspaceCurrent: "",
+		workspaceParent: "",
+		workspaceInitialized: false,
+		fileViewerReturnFocus: null,
+		liveSocket: null,
+		liveClientSequenceId: 0,
+		liveReplyBuffer: "",
+		liveAgentMessage: null,
+		liveSettleTimer: null,
+		pendingTerminalApprovals: {},
 	};
 
 	const els = {
@@ -86,6 +103,7 @@ if (typeof document !== "undefined") {
 		auth: document.getElementById("auth-pill"),
 		statusDot: document.getElementById("status-dot"),
 		statusNote: document.getElementById("status-note"),
+		terminalApprovals: document.getElementById("terminal-approvals"),
 		audioControlsWrapper: document.getElementById("audio-controls-wrapper"),
 		chatMessages: document.getElementById("chat-messages"),
 		transcript: document.getElementById("transcript-output"),
@@ -119,6 +137,8 @@ if (typeof document !== "undefined") {
 		tokenInput: document.getElementById("token-input"),
 		saveToken: document.getElementById("save-token-button"),
 		clearToken: document.getElementById("clear-token-button"),
+		launchOmpHub: document.getElementById("launch-omp-hub-button"),
+		launchColab: document.getElementById("launch-colab-button"),
 		rememberToken: document.getElementById("remember-token-toggle"),
 		audioToggle: document.getElementById("audio-toggle"),
 		autoplayToggle: document.getElementById("autoplay-toggle"),
@@ -150,8 +170,15 @@ if (typeof document !== "undefined") {
 		agentList: document.getElementById("agent-list"),
 		refreshAgents: document.getElementById("refresh-agents-button"),
 		workspaceEntries: document.getElementById("workspace-entries"),
-		workspaceBreadcrumb: document.getElementById("workspace-breadcrumb"),
 		workspaceRoot: document.getElementById("workspace-root"),
+		workspaceUp: document.getElementById("workspace-up"),
+		workspaceUse: document.getElementById("workspace-use"),
+		workspaceCurrentLabel: document.getElementById("workspace-current"),
+		fileViewer: document.getElementById("file-viewer"),
+		fileViewerTitle: document.getElementById("file-viewer-title"),
+		fileViewerMeta: document.getElementById("file-viewer-meta"),
+		fileViewerBody: document.getElementById("file-viewer-body"),
+		fileViewerClose: document.getElementById("file-viewer-close"),
 	};
 
 	function hasToken() {
@@ -213,6 +240,76 @@ if (typeof document !== "undefined") {
 		if (!text) return;
 		if (els.reply) els.reply.textContent = text.trim() ? text.trim() : "No reply yet.";
 		if (text && text.trim()) appendMessage("agent", text);
+	}
+
+	function renderTerminalApprovals() {
+		if (!els.terminalApprovals) return;
+		const approvals = Object.values(state.pendingTerminalApprovals);
+		els.terminalApprovals.innerHTML = "";
+		els.terminalApprovals.classList.toggle("hidden", approvals.length === 0);
+		for (const approval of approvals) {
+			const card = document.createElement("div");
+			card.className = "approval-card";
+			const body = document.createElement("div");
+			body.className = "approval-body";
+			const title = document.createElement("strong");
+			title.textContent = "Terminal approval";
+			const command = document.createElement("code");
+			command.textContent = approval.command || "(unknown command)";
+			const reason = document.createElement("span");
+			reason.className = "muted";
+			reason.textContent = approval.reason ? `Reason: ${approval.reason}` : "This command needs confirmation.";
+			const context = document.createElement("span");
+			context.className = "muted";
+			context.textContent = [
+				approval.cwd ? `CWD: ${approval.cwd}` : "",
+				approval.timeoutMs ? `Timeout: ${approval.timeoutMs}ms` : "",
+			].filter(Boolean).join(" - ");
+			body.appendChild(title);
+			body.appendChild(command);
+			body.appendChild(reason);
+			if (context.textContent) body.appendChild(context);
+			const actions = document.createElement("div");
+			actions.className = "approval-actions";
+			const approve = document.createElement("button");
+			approve.type = "button";
+			approve.textContent = "Approve";
+			approve.addEventListener("click", () => sendTerminalApproval(approval.approvalId, true));
+			const reject = document.createElement("button");
+			reject.type = "button";
+			reject.className = "secondary";
+			reject.textContent = "Reject";
+			reject.addEventListener("click", () => sendTerminalApproval(approval.approvalId, false));
+			actions.appendChild(approve);
+			actions.appendChild(reject);
+			card.appendChild(body);
+			card.appendChild(actions);
+			els.terminalApprovals.appendChild(card);
+		}
+	}
+
+	function rememberTerminalApproval(message) {
+		if (!message || !message.approvalId) return;
+		let parsed = {};
+		if (message.output) {
+			try { parsed = JSON.parse(message.output); } catch {}
+		}
+		state.pendingTerminalApprovals[message.approvalId] = {
+			approvalId: message.approvalId,
+			command: message.command || parsed.command || "",
+			reason: message.reason || parsed.reason || "",
+			cwd: message.cwd || parsed.cwd || "",
+			timeoutMs: message.timeoutMs || parsed.timeoutMs || 0,
+		};
+		renderTerminalApprovals();
+		appendMessage("system", `Approval needed: ${message.command || parsed.command || "terminal command"}`);
+		setStatus("Terminal approval needed.");
+	}
+
+	function clearTerminalApproval(approvalId) {
+		if (!approvalId) return;
+		delete state.pendingTerminalApprovals[approvalId];
+		renderTerminalApprovals();
 	}
 
 	function setRecordingStateBusy(isBusy) {
@@ -357,6 +454,28 @@ if (typeof document !== "undefined") {
 		}
 	}
 
+	function appendOrUpdateLiveReply(text) {
+		if (!els.chatMessages || !text) return;
+		state.liveReplyBuffer += text;
+		if (!state.liveAgentMessage || !els.chatMessages.contains(state.liveAgentMessage)) {
+			state.liveAgentMessage = document.createElement("div");
+			state.liveAgentMessage.className = "message agent";
+			els.chatMessages.appendChild(state.liveAgentMessage);
+		}
+		state.liveAgentMessage.textContent = state.liveReplyBuffer.trim();
+		els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+		if (els.reply) els.reply.textContent = state.liveReplyBuffer.trim() || "No reply yet.";
+	}
+
+	function scheduleLiveTurnSettled() {
+		if (state.liveSettleTimer) window.clearTimeout(state.liveSettleTimer);
+		state.liveSettleTimer = window.setTimeout(() => {
+			state.liveSettleTimer = null;
+			setRecordingStateBusy(false);
+			setStatus("Live turn complete.");
+		}, 1500);
+	}
+
 	function renderAgents() {
 		if (!els.agentList) return;
 		if (!state.discoveredAgents.length && !state.runningAgents.length && !state.recentAgentSessions.length) {
@@ -458,8 +577,10 @@ if (typeof document !== "undefined") {
 	function startEventStream() {
 		if (state.eventSource) return;
 		if (!els.eventLog || !els.eventStatus) return;
-		const url = `/v1/events?since=${state.eventLog.length}`;
-		const es = new EventSource(url);
+		const url = new URL("/v1/events", window.location.origin);
+		url.searchParams.set("since", String(state.eventLog.length));
+		if (state.token) url.searchParams.set("token", state.token);
+		const es = new EventSource(url.toString());
 		state.eventSource = es;
 		es.onopen = () => {
 			if (els.eventStatus) els.eventStatus.className = "status-dot ready";
@@ -503,51 +624,128 @@ if (typeof document !== "undefined") {
 	}
 
 	/* -------- Workspace Browser -------- */
+	function formatBytes(n) {
+		if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return "";
+		if (n < 1024) return `${n} B`;
+		if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+		return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+	}
+
 	async function renderWorkspace(path) {
 		if (!els.workspaceEntries) return;
 		state.workspacePath = path || "";
+		els.workspaceEntries.textContent = "Loading…";
 		try {
-			const payload = await apiFetch(`/v1/workspace?path=${encodeURIComponent(state.workspacePath)}`);
-			const entries = payload && Array.isArray(payload.workspace) ? payload.workspace : [];
-			els.workspaceEntries.innerHTML = "";
-			for (const entry of entries) {
-				const div = document.createElement("div");
-				div.className = "workspace-entry";
-				div.textContent = `${entry.type === "directory" ? "📁" : "📄"} ${entry.name}`;
-				if (entry.type === "directory") {
-					div.addEventListener("click", () => renderWorkspace(entry.path));
+			const payload = await apiFetch(`/v1/workspace?path=${encodeURIComponent(path || "")}`);
+			const ws = payload && payload.workspace ? payload.workspace : {};
+			// Seed the browser to the agent working directory once on first open so a
+			// broadened PI_SPEAK_WORKSPACE_ROOT still lands in the project. Later "Root"
+			// navigations (path "") must still reach the real root, so this runs once.
+			if (!state.workspaceInitialized) {
+				state.workspaceInitialized = true;
+				if (!path && ws.defaultPath && ws.defaultPath !== ws.current) {
+					return renderWorkspace(ws.defaultPath);
 				}
-				els.workspaceEntries.appendChild(div);
 			}
-			renderBreadcrumb(state.workspacePath);
+			state.workspaceCurrent = ws.current || "";
+			state.workspaceParent = ws.parent || "";
+			state.workspacePath = ws.current || path || "";
+			if (els.workspaceCurrentLabel) els.workspaceCurrentLabel.textContent = ws.current || "—";
+			if (els.workspaceUp) els.workspaceUp.disabled = !ws.parent;
+			if (els.workspaceUse) els.workspaceUse.disabled = !state.workspaceCurrent;
+			const entries = Array.isArray(ws.entries) ? ws.entries : [];
+			els.workspaceEntries.innerHTML = "";
+			if (entries.length === 0) {
+				els.workspaceEntries.textContent = "Empty folder.";
+			}
+			for (const entry of entries) {
+				const button = document.createElement("button");
+				button.type = "button";
+				button.className = "workspace-entry";
+				if (entry.type === "directory") {
+					button.classList.add("is-directory");
+					button.textContent = `📁 ${entry.name}`;
+					button.addEventListener("click", () => renderWorkspace(entry.path));
+				} else {
+					button.classList.add("is-file");
+					const name = document.createElement("span");
+					name.className = "workspace-entry-name";
+					name.textContent = `📄 ${entry.name}`;
+					const size = document.createElement("span");
+					size.className = "workspace-entry-size";
+					size.textContent = formatBytes(entry.size);
+					button.appendChild(name);
+					button.appendChild(size);
+					button.addEventListener("click", () => openFileViewer(entry.path, entry.name));
+				}
+				els.workspaceEntries.appendChild(button);
+			}
+			if (ws.truncated) {
+				const note = document.createElement("div");
+				// .muted (not .workspace-current) so the full message wraps instead of
+				// being clipped by ellipsis truncation.
+				note.className = "muted";
+				note.textContent = "Showing first 2000 entries — open a narrower folder to see the rest.";
+				els.workspaceEntries.appendChild(note);
+			}
 		} catch (error) {
 			els.workspaceEntries.textContent = String(error.message || error);
+			// Reset chrome so actionable controls don't contradict the error state.
+			state.workspaceCurrent = "";
+			state.workspaceParent = "";
+			if (els.workspaceCurrentLabel) els.workspaceCurrentLabel.textContent = "—";
+			if (els.workspaceUp) els.workspaceUp.disabled = true;
+			if (els.workspaceUse) els.workspaceUse.disabled = true;
 		}
 	}
 
-	function renderBreadcrumb(path) {
-		if (!els.workspaceBreadcrumb) return;
-		els.workspaceBreadcrumb.innerHTML = "";
-		const rootBtn = document.createElement("button");
-		rootBtn.className = "secondary";
-		rootBtn.type = "button";
-		rootBtn.textContent = "Root";
-		rootBtn.addEventListener("click", () => renderWorkspace(""));
-		els.workspaceBreadcrumb.appendChild(rootBtn);
-		if (!path) return;
-		const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
-		let acc = "";
-		for (const part of parts) {
-			acc += "/" + part;
-			const btn = document.createElement("button");
-			btn.className = "secondary";
-			btn.type = "button";
-			btn.textContent = part;
-			btn.addEventListener("click", (() => {
-				const p = acc;
-				return () => renderWorkspace(p);
-			})());
-			els.workspaceBreadcrumb.appendChild(btn);
+	async function openFileViewer(path, name) {
+		if (!els.fileViewer) return;
+		setStatus("Opening file…");
+		try {
+			const payload = await apiFetch(`/v1/workspace/file?path=${encodeURIComponent(path)}`);
+			const file = payload && payload.file ? payload.file : {};
+			if (els.fileViewerTitle) els.fileViewerTitle.textContent = file.name || name || "File";
+			if (els.fileViewerMeta) {
+				let meta = `${formatBytes(file.size)} · ${file.path || path}`;
+				if (file.binary) meta += " · binary";
+				if (file.truncated) meta += " · truncated (showing first 512 KB)";
+				els.fileViewerMeta.textContent = meta;
+			}
+			if (els.fileViewerBody) {
+				els.fileViewerBody.textContent = file.binary
+					? "Binary file — preview not available."
+					: file.content || "";
+				els.fileViewerBody.scrollTop = 0;
+			}
+			// Save the trigger so focus can return when the dialog closes.
+			state.fileViewerReturnFocus = document.activeElement;
+			els.fileViewer.classList.remove("hidden");
+			// #file-viewer is a sibling of #app-root, so making the app inert/aria-hidden
+			// hides everything behind the dialog without hiding the dialog itself.
+			if (els.appRoot) {
+				els.appRoot.inert = true;
+				els.appRoot.setAttribute("aria-hidden", "true");
+			}
+			document.body.style.overflow = "hidden";
+			els.fileViewerClose?.focus();
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+		}
+	}
+
+	function closeFileViewer() {
+		if (!els.fileViewer) return;
+		els.fileViewer.classList.add("hidden");
+		if (els.appRoot) {
+			els.appRoot.inert = false;
+			els.appRoot.removeAttribute("aria-hidden");
+		}
+		document.body.style.overflow = "";
+		const returnFocus = state.fileViewerReturnFocus;
+		state.fileViewerReturnFocus = null;
+		if (returnFocus && typeof returnFocus.focus === "function" && document.contains(returnFocus)) {
+			returnFocus.focus();
 		}
 	}
 
@@ -909,6 +1107,125 @@ if (typeof document !== "undefined") {
 		});
 	}
 
+	function closeLiveSocket() {
+		if (!state.liveSocket) return;
+		try { state.liveSocket.close(); } catch {}
+		state.liveSocket = null;
+	}
+
+	function handleLiveSocketMessage(event) {
+		if (typeof event.data !== "string") return;
+		let message;
+		try {
+			message = JSON.parse(event.data);
+		} catch {
+			return;
+		}
+		if (message.type === "start") {
+			setStatus("Live session connected.");
+			return;
+		}
+		if (message.type === "transcript" && message.text) {
+			appendOrUpdateLiveReply(message.text);
+			scheduleLiveTurnSettled();
+			return;
+		}
+		if (message.type === "tool_start") {
+			setStatus(message.command ? `Tool requested: ${message.command}` : "Tool requested.");
+			return;
+		}
+		if (message.type === "tool_approval_required") {
+			rememberTerminalApproval(message);
+			return;
+		}
+		if (message.type === "tool_approval_resolved") {
+			clearTerminalApproval(message.approvalId);
+			appendMessage("system", message.message || "Terminal approval resolved.");
+			setStatus(message.message || "Terminal approval resolved.");
+			return;
+		}
+		if (message.type === "tool_complete") {
+			setStatus("Tool completed.");
+			scheduleLiveTurnSettled();
+			return;
+		}
+		if (message.type === "error") {
+			setStatus(message.message || "Live session error.", "error");
+			setRecordingStateBusy(false);
+		}
+	}
+
+	function ensureLiveSocket() {
+		if (state.liveSocket && (state.liveSocket.readyState === WebSocket.OPEN || state.liveSocket.readyState === WebSocket.CONNECTING)) {
+			return state.liveSocket;
+		}
+		const socket = new WebSocket(buildRealtimeWebSocketUrl(window.location.origin, state.token));
+		state.liveSocket = socket;
+		socket.addEventListener("message", handleLiveSocketMessage);
+		socket.addEventListener("close", () => {
+			if (state.liveSocket === socket) state.liveSocket = null;
+		});
+		socket.addEventListener("error", () => {
+			setStatus("Live socket connection failed.", "error");
+		});
+		return socket;
+	}
+
+	function sendLiveControl(payload) {
+		const socket = ensureLiveSocket();
+		const send = () => {
+			state.liveClientSequenceId += 1;
+			socket.send(JSON.stringify({ ...payload, clientSequenceId: state.liveClientSequenceId }));
+		};
+		if (socket.readyState === WebSocket.OPEN) {
+			send();
+			return Promise.resolve();
+		}
+		return new Promise((resolve, reject) => {
+			const onOpen = () => {
+				cleanup();
+				send();
+				resolve();
+			};
+			const onError = () => {
+				cleanup();
+				reject(new Error("Live socket connection failed."));
+			};
+			const cleanup = () => {
+				socket.removeEventListener("open", onOpen);
+				socket.removeEventListener("error", onError);
+			};
+			socket.addEventListener("open", onOpen);
+			socket.addEventListener("error", onError);
+		});
+	}
+
+	function sendTerminalApproval(approvalId, approved) {
+		if (!approvalId) return;
+		void sendLiveControl({
+			type: approved ? "terminal_approve" : "terminal_reject",
+			approvalId,
+		}).catch((error) => {
+			setStatus(String(error.message || error), "error");
+		});
+	}
+
+	async function submitLiveText(text) {
+		setStatus("Sending live text turn...");
+		setRecordingStateBusy(true);
+		appendMessage("user", text);
+		state.liveReplyBuffer = "";
+		state.liveAgentMessage = null;
+		try {
+			await sendLiveControl({ type: "text", text });
+			if (els.textInput) els.textInput.value = "";
+			setStatus("Live turn sent.");
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
+			setRecordingStateBusy(false);
+		}
+	}
+
 	function ensureTimerState() {
 		const active = state.recording;
 		if (state.turnInProgress) {
@@ -944,6 +1261,10 @@ if (typeof document !== "undefined") {
 			setStatus("Enter text before sending.", "error");
 			return;
 		}
+		if (state.liveMode) {
+			await submitLiveText(text);
+			return;
+		}
 		setStatus("Sending text turn...");
 		setRecordingStateBusy(true);
 		appendMessage("user", text);
@@ -974,6 +1295,22 @@ if (typeof document !== "undefined") {
 			setStatus(String(error.message || error), "error");
 		} finally {
 			setRecordingStateBusy(false);
+		}
+	}
+
+	async function launchSession(body, pendingMessage) {
+		captureSettings();
+		if (state.launchPath.trim()) body.cwd = state.launchPath.trim();
+		setStatus(pendingMessage);
+		try {
+			const payload = await apiFetch("/v1/sessions/launch", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			setStatus(payload && payload.message ? payload.message : "Launch started.");
+		} catch (error) {
+			setStatus(String(error.message || error), "error");
 		}
 	}
 
@@ -1206,6 +1543,7 @@ if (typeof document !== "undefined") {
 	});
 	els.clearToken?.addEventListener("click", () => {
 		state.token = "";
+		closeLiveSocket();
 		if (els.tokenInput) els.tokenInput.value = "";
 		if (els.onboardingToken) els.onboardingToken.value = "";
 		saveSettings();
@@ -1240,6 +1578,12 @@ if (typeof document !== "undefined") {
 		captureSettings();
 		saveSettings();
 	});
+	els.launchOmpHub?.addEventListener("click", () => {
+		void launchSession({ hubOnly: true }, "Launching OMPK hub...");
+	});
+	els.launchColab?.addEventListener("click", () => {
+		void launchSession({ targetNode: "colab" }, "Launching Colab...");
+	});
 	els.rememberToken?.addEventListener("change", () => {
 		captureSettings();
 		saveSettings();
@@ -1260,6 +1604,7 @@ if (typeof document !== "undefined") {
 	});
 	els.liveModeToggle?.addEventListener("change", () => {
 		captureSettings();
+		if (!state.liveMode) closeLiveSocket();
 		saveSettings();
 		updateRecordingUi();
 	});
@@ -1289,6 +1634,52 @@ if (typeof document !== "undefined") {
 	els.aliasButton?.addEventListener("click", doSessionAlias);
 	els.removeButton?.addEventListener("click", doSessionRemove);
 	els.workspaceRoot?.addEventListener("click", () => renderWorkspace(""));
+	els.workspaceUp?.addEventListener("click", () => {
+		if (state.workspaceParent) renderWorkspace(state.workspaceParent);
+	});
+	els.workspaceUse?.addEventListener("click", () => {
+		if (!state.workspaceCurrent) return;
+		// Persist only the launch path; avoid captureSettings() which re-reads the
+		// whole settings form (including the auth token) from the DOM.
+		state.launchPath = state.workspaceCurrent;
+		if (els.launchPathInput) els.launchPathInput.value = state.workspaceCurrent;
+		saveSettings();
+		setStatus(`Working directory set: ${state.workspaceCurrent}`);
+	});
+	els.fileViewerClose?.addEventListener("click", closeFileViewer);
+	els.fileViewer?.addEventListener("click", (event) => {
+		if (event.target === els.fileViewer) closeFileViewer();
+	});
+	document.addEventListener("keydown", (event) => {
+		// Only intercept keys while the file viewer modal is open.
+		if (!els.fileViewer || els.fileViewer.classList.contains("hidden")) return;
+		if (event.key === "Escape") {
+			closeFileViewer();
+			return;
+		}
+		if (event.key === "Tab") {
+			// Trap focus inside the dialog by wrapping between its focusable elements.
+			const focusable = Array.from(
+				els.fileViewer.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+			).filter((node) => !node.disabled);
+			if (focusable.length === 0) {
+				event.preventDefault();
+				return;
+			}
+			const first = focusable[0];
+			const last = focusable[focusable.length - 1];
+			const active = document.activeElement;
+			if (event.shiftKey) {
+				if (active === first || !els.fileViewer.contains(active)) {
+					event.preventDefault();
+					last.focus();
+				}
+			} else if (active === last || !els.fileViewer.contains(active)) {
+				event.preventDefault();
+				first.focus();
+			}
+		}
+	});
 
 	loadSettings();
 	updateRecordingUi();

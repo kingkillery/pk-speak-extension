@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const tts = await import("../dist/tts.js");
 
@@ -47,6 +50,28 @@ test("sag provider is available only with sag and ElevenLabs auth", async () => 
 	});
 });
 
+test("edge provider can be selected from the bundled dependency", async () => {
+	await withEnv({
+		PI_SPEAK_TTS_PROVIDER: "edge",
+	}, async () => {
+		assert.equal(tts.resolveTtsProvider(), "edge");
+	});
+});
+
+test("gemini provider uses Gemini 3.1 Flash TTS by default", async () => {
+	await withEnv({
+		PI_SPEAK_TTS_PROVIDER: "gemini",
+		GOOGLE_API_KEY: "test-gemini-key",
+		PI_SPEAK_GEMINI_TTS_MODEL: undefined,
+	}, async () => {
+		assert.equal(tts.resolveTtsProvider(), "gemini");
+		const diagnostics = tts.getTtsDiagnostics();
+		assert.equal(diagnostics.providers.gemini.available, true);
+		assert.equal(diagnostics.providers.gemini.model, "gemini-3.1-flash-tts-preview");
+		assert.equal(JSON.stringify(diagnostics).includes("test-gemini-key"), false);
+	});
+});
+
 test("sanitizeForSpeech strips markdown, code, links, and emoji for every runtime", () => {
 	const input = [
 		"# Heading",
@@ -83,6 +108,18 @@ test("sanitizeForSpeech is idempotent on already-clean text", () => {
 	assert.equal(tts.sanitizeForSpeech(tts.sanitizeForSpeech(clean)), clean);
 });
 
+test("sanitizeForSpeech preserves snake_case identifiers but still strips word-bounded _emphasis_", () => {
+	// Regression: intraword underscores were treated as markdown emphasis, mangling
+	// "snake_case_word" into "snakecaseword" (and joining the words) when spoken.
+	const out = tts.sanitizeForSpeech("call really_long_identifier_name and foo_bar(), then _emphasize_ this");
+	assert.match(out, /really_long_identifier_name/, "snake_case identifier kept intact");
+	assert.match(out, /foo_bar/, "snake_case with parens kept intact");
+	assert.match(out, /\bemphasize\b/, "word-bounded _emphasis_ still unwrapped");
+	assert.equal(out.includes("_emphasize_"), false, "emphasis markers removed");
+	// Asterisk emphasis is still stripped (it may be intraword in markdown).
+	assert.equal(tts.sanitizeForSpeech("this is *bold* now"), "this is bold now");
+});
+
 test("sanitize can be disabled and is reflected in diagnostics", async () => {
 	await withEnv({ PI_SPEAK_SANITIZE: undefined }, async () => {
 		assert.equal(tts.isSanitizeEnabled(), true);
@@ -107,4 +144,249 @@ test("sag diagnostics expose command and auth availability without secrets", asy
 		assert.equal(diagnostics.providers.sag.command, process.execPath);
 		assert.equal(JSON.stringify(diagnostics).includes("test-key"), false);
 	});
+});
+
+test("higgs provider is available only when reference audio is configured", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-higgs-"));
+	const referencePath = join(tempDir, "reference.wav");
+	try {
+		await writeFile(referencePath, Buffer.from([0, 1, 2, 3]));
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "higgs",
+			PI_SPEAK_HIGGS_REFERENCE_AUDIO: undefined,
+		}, async () => {
+			assert.notEqual(tts.resolveTtsProvider(), "higgs");
+		});
+
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "higgs",
+			PI_SPEAK_HIGGS_REFERENCE_AUDIO: referencePath,
+		}, async () => {
+			assert.equal(tts.resolveTtsProvider(), "higgs");
+			const diagnostics = tts.getTtsDiagnostics();
+			assert.equal(diagnostics.providers.higgs.available, true);
+			assert.equal(diagnostics.providers.higgs.referenceAudioConfigured, true);
+		});
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("higgs writes speech through the gradio provider hook", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-higgs-synth-"));
+	const referencePath = join(tempDir, "reference.wav");
+	const outputPath = join(tempDir, "higgs.mp3");
+	let seenText = "";
+	try {
+		await writeFile(referencePath, Buffer.from([0, 1, 2, 3]));
+		tts.testOverrides.synthesizeHiggs = async (text, path) => {
+			seenText = text;
+			await writeFile(path, "higgs audio");
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "higgs",
+			PI_SPEAK_HIGGS_REFERENCE_AUDIO: referencePath,
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			const result = await tts.synthesizeToFile({
+				text: "spoken by higgs",
+				outputPath,
+				state: { provider: "higgs", rewriteEnabled: false },
+			});
+			assert.equal(result.provider, "higgs");
+			assert.equal(seenText, "spoken by higgs");
+			assert.equal(await readFile(outputPath, "utf8"), "higgs audio");
+		});
+	} finally {
+		tts.testOverrides.synthesizeHiggs = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("stable-audio writes generated prompt audio through the gradio provider hook", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-stable-audio-"));
+	const outputPath = join(tempDir, "stable.mp3");
+	let seenPrompt = "";
+	try {
+		tts.testOverrides.synthesizeStableAudio = async (text, path) => {
+			seenPrompt = text;
+			await writeFile(path, "stable audio");
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "stable-audio",
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			const result = await tts.synthesizeToFile({
+				text: "short alert sound",
+				outputPath,
+				state: { provider: "stable-audio", rewriteEnabled: false },
+			});
+			assert.equal(result.provider, "stable-audio");
+			assert.equal(seenPrompt, "short alert sound");
+			assert.equal(await readFile(outputPath, "utf8"), "stable audio");
+			assert.equal(tts.getTtsDiagnostics().providers.stableAudio.available, true);
+		});
+	} finally {
+		tts.testOverrides.synthesizeStableAudio = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("gemini writes speech through the provider hook and exposes wav mime", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-gemini-tts-"));
+	const outputPath = join(tempDir, "gemini.mp3");
+	let seenText = "";
+	try {
+		const wavHeader = Buffer.alloc(44);
+		wavHeader.write("RIFF", 0, "ascii");
+		wavHeader.write("WAVE", 8, "ascii");
+		tts.testOverrides.synthesizeGemini = async (text, path) => {
+			seenText = text;
+			await writeFile(path, wavHeader);
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "gemini",
+			GOOGLE_API_KEY: "test-gemini-key",
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			const result = await tts.synthesizeToFile({
+				text: "spoken by gemini",
+				outputPath,
+				state: { provider: "gemini", rewriteEnabled: false },
+			});
+			assert.equal(result.provider, "gemini");
+			assert.equal(seenText, "spoken by gemini");
+			assert.equal(tts.getAudioMimeType(outputPath), "audio/wav");
+		});
+	} finally {
+		tts.testOverrides.synthesizeGemini = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("sag writes spoken text to stdin without including it in argv", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-sag-"));
+	const previousCwd = process.cwd();
+	const outputPath = join(tempDir, "capture.json");
+	const spokenText = "spoken text sentinel that must only travel over stdin";
+	const speakScript = [
+		"import { writeFileSync } from 'node:fs';",
+		"let stdin = '';",
+		"process.stdin.setEncoding('utf8');",
+		"process.stdin.on('data', chunk => { stdin += chunk; });",
+		"process.stdin.on('end', () => {",
+		"  const outputIndex = process.argv.indexOf('--output');",
+		"  if (outputIndex < 0) throw new Error('missing --output');",
+		"  writeFileSync(process.argv[outputIndex + 1], JSON.stringify({ argv: process.argv.slice(2), stdin }));",
+		"});",
+	].join("\n");
+
+	try {
+		await writeFile(join(tempDir, "speak"), speakScript);
+		process.chdir(tempDir);
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "sag",
+			PI_SPEAK_SAG_PATH: process.execPath,
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+			ELEVENLABS_API_KEY: "test-key",
+		}, async () => {
+			await tts.synthesizeToFile({
+				text: spokenText,
+				outputPath,
+				state: { provider: "sag", rewriteEnabled: false },
+			});
+		});
+
+		const capture = JSON.parse(await readFile(outputPath, "utf8"));
+		assert.equal(capture.stdin, spokenText);
+		assert.equal(capture.argv.includes(spokenText), false);
+		assert.equal(JSON.stringify(capture.argv).includes(spokenText), false);
+		assert.deepEqual(capture.argv.slice(-2), ["--output", outputPath]);
+	} finally {
+		process.chdir(previousCwd);
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+
+test("synthesizeToFile falls back to edge by default when primary provider fails", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-tts-fallback-default-"));
+	const outputPath = join(tempDir, "out.mp3");
+	let elevenLabsCalled = false;
+	let edgeCalled = false;
+	try {
+		tts.testOverrides.synthesizeElevenLabs = async () => {
+			elevenLabsCalled = true;
+			throw new Error("ElevenLabs Rate Limit (429)");
+		};
+		tts.testOverrides.synthesizeEdge = async (_text, path) => {
+			edgeCalled = true;
+			await writeFile(path, "edge-audio");
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "elevenlabs",
+			ELEVENLABS_API_KEY: "test-key",
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			const result = await tts.synthesizeToFile({
+				text: "fallback default path",
+				outputPath,
+				state: { provider: "elevenlabs", rewriteEnabled: false },
+			});
+			assert.equal(elevenLabsCalled, true);
+			assert.equal(edgeCalled, true);
+			assert.equal(result.provider, "edge");
+			assert.equal(await readFile(outputPath, "utf8"), "edge-audio");
+		});
+	} finally {
+		tts.testOverrides.synthesizeElevenLabs = null;
+		tts.testOverrides.synthesizeEdge = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("synthesizeToFile allowProviderFallback:false surfaces primary failure without Edge", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-tts-fallback-strict-"));
+	const outputPath = join(tempDir, "out.mp3");
+	let elevenLabsCalled = false;
+	let edgeCalled = false;
+	try {
+		tts.testOverrides.synthesizeElevenLabs = async () => {
+			elevenLabsCalled = true;
+			throw new Error("ElevenLabs Rate Limit (429)");
+		};
+		tts.testOverrides.synthesizeEdge = async () => {
+			edgeCalled = true;
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "elevenlabs",
+			ELEVENLABS_API_KEY: "test-key",
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			await assert.rejects(
+				() => tts.synthesizeToFile({
+					text: "strict provider path",
+					outputPath,
+					state: { provider: "elevenlabs", rewriteEnabled: false },
+					allowProviderFallback: false,
+				}),
+				(error) => {
+					assert.match(String(error?.message || error), /ElevenLabs Rate Limit \(429\)/);
+					return true;
+				},
+			);
+			assert.equal(elevenLabsCalled, true);
+			assert.equal(edgeCalled, false);
+		});
+	} finally {
+		tts.testOverrides.synthesizeElevenLabs = null;
+		tts.testOverrides.synthesizeEdge = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
 });

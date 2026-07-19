@@ -54,8 +54,8 @@ function buildOpenAiCompatibleHeaders(apiKey: string) {
 		Authorization: `Bearer ${apiKey}`,
 		"Content-Type": "application/json",
 	};
-	const referer = process.env.PI_SPEAK_HTTP_REFERER || process.env.OPENROUTER_HTTP_REFERER || "https://github.com/prest/pi-speak-extension";
-	const title = process.env.PI_SPEAK_APP_TITLE || process.env.OPENROUTER_APP_TITLE || "pi-speak-extension";
+	const referer = process.env.PI_SPEAK_HTTP_REFERER || process.env.OPENROUTER_HTTP_REFERER || "https://github.com/kingkillery/pk-speak-extension";
+	const title = process.env.PI_SPEAK_APP_TITLE || process.env.OPENROUTER_APP_TITLE || "pk-speak-extension";
 	if (referer) headers["HTTP-Referer"] = referer;
 	if (title) headers["X-Title"] = title;
 	return headers;

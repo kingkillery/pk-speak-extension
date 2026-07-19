@@ -74,6 +74,18 @@ test("execution router honors an explicit provider override for dispatchable tur
 	});
 });
 
+test("execution router honors an explicit Claude provider override", async () => {
+	await withEnv({ AGENT_PROVIDER: "pi", PI_SPEAK_EXECUTION_ROUTER_MODE: "auto" }, async () => {
+		const plan = planConversationExecution(summary(["inspect the repo"]), {
+			provider: "claude",
+		});
+		assert.equal(plan.dispatch, true);
+		assert.equal(plan.backend, "claude");
+		assert.equal(plan.reason, "dispatch-claude");
+		assert.match(plan.rationale, /Claude/);
+	});
+});
+
 test("execution router marks routine Pi work as fast-plus-tools", async () => {
 	const plan = planConversationExecution(summary(["inspect current status"]));
 	assert.equal(plan.dispatch, true);
@@ -116,4 +128,19 @@ test("execution router marks clarify cases as fast triage", async () => {
 	assert.equal(plan.routeClass, "fast");
 	assert.equal(plan.costTier, "T0");
 	assert.equal(plan.latencyBudgetMs, 50);
+});
+
+test("weak defer route reflects the reducer confidence instead of a constant", () => {
+	// Bare "later" is a weak DEFER_KEYWORD (not an explicit defer phrase), so it
+	// hits the soft-defer branch. Its confidence must track summary.confidence,
+	// not the old hard-coded Math.max(0.1, 0.05) === 0.1.
+	const high = planConversationExecution({ ...summary(["ping the build later"]), confidence: 0.8 });
+	assert.equal(high.backend, "defer");
+	assert.equal(high.reason, "defer");
+	assert.equal(high.confidence, 0.8, "should reflect the 0.8 reducer confidence, not 0.1");
+
+	// And it is floored at 0.1 when the reducer is very unsure.
+	const low = planConversationExecution({ ...summary(["ping the build later"]), confidence: 0.02 });
+	assert.equal(low.backend, "defer");
+	assert.equal(low.confidence, 0.1, "floored at 0.1");
 });

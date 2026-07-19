@@ -47,6 +47,24 @@ android {
       signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
+
+  // "standard" is the regular phone/tablet build (LCD, full animations).
+  // "boox" is the Onyx Boox Palma e-ink build: a separate launchable app
+  // (applicationId .boox so it installs side-by-side) whose UI lives entirely
+  // in src/boox/ -- pure black/white, no animations, large touch targets.
+  flavorDimensions += "device"
+  productFlavors {
+    create("standard") {
+      dimension = "device"
+      buildConfigField("Boolean", "IS_EINK", "false")
+    }
+    create("boox") {
+      dimension = "device"
+      applicationIdSuffix = ".boox"
+      versionNameSuffix = "-eink"
+      buildConfigField("Boolean", "IS_EINK", "true")
+    }
+  }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
@@ -56,6 +74,15 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
+}
+
+// Pin Robolectric unit tests to JDK 21 so SDK 36 sandboxes are stable in Gradle, CI, and IDE runs.
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+  javaLauncher.set(
+    javaToolchains.launcherFor {
+      languageVersion.set(org.gradle.jvm.toolchain.JavaLanguageVersion.of(21))
+    }
+  )
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -101,6 +128,7 @@ dependencies {
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
+  implementation(libs.zxing.android.embedded)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

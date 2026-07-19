@@ -1,11 +1,11 @@
 ---
-title: "pi-speak-extension Overview"
+title: "pk-speak-extension Overview"
 type: synthesis
-tags: [pi-speak-extension, voice-control, remote-control, typescript, android]
+tags: [pk-speak-extension, voice-control, remote-control, typescript, android]
 status: in-progress
 ---
 
-# pi-speak-extension
+# pk-speak-extension
 
 ## Purpose
 A cross-platform voice + remote-control extension for `pi-coding-agent` with three main surfaces:
@@ -61,6 +61,10 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
   - `wiki/`, `.llm-wiki/`, `.brv/`, `scripts/`, `kade/`, `.agent*`, `.agents*`, `.codex*`, `.claude*`
 
 ## Current work context
-- Working tree contains a large workspace sync commit that adds tooling, memory, and docs scaffolding plus core app updates.
-- A previous rebase attempt onto `origin/main` hit content conflicts in Android UI/domain files and is currently paused until resolution strategy is confirmed.
-- Current remote-control work adds provider parity, runtime Telegram setup, shared default remote token handling, Android connection modes, and Bluetooth local-link onboarding through `/remote setup bluetooth`.
+- `main` includes PR #13, "feat: bring Android app to functional parity with the web remote", merged on 2026-07-02 as `35fed0a`.
+- The post-merge verifier run added local follow-up fixes for Android gateway archive/recover wiring, EventSource query-token auth, malformed gateway URL handling, workspace truncation display, and legacy agents-only inventory rendering.
+- Latest validation evidence from the run: `npm test` passed 333 tests; Android `:app:testStandardDebugUnitTest :app:compileBooxDebugKotlin :app:assembleStandardDebug` succeeded; `git diff --check` returned exit 0 with only LF/CRLF warnings.
+- See `wiki/sessions/2026-07-02-pr13-android-gateway-parity.md` for the run summary, skipped findings, and local changed-file list.
+
+## Recent Durable Updates
+- 2026-07-13: Created concept [[herdr-agent-hub- Module]]

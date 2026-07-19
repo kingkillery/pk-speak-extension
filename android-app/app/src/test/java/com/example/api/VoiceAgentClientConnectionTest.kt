@@ -28,6 +28,7 @@ class VoiceAgentClientConnectionTest {
 
   @Before
   fun setUp() {
+    System.setProperty("is_testing", "true")
     context = ApplicationProvider.getApplicationContext()
     context.getSharedPreferences("pi_speak_prefs", Context.MODE_PRIVATE).edit().clear().commit()
     prefs = AppPreferences(context)
@@ -56,6 +57,42 @@ class VoiceAgentClientConnectionTest {
   }
 
   @Test
+  fun gatewayOpsMethodsHandleMalformedGatewayUrl() = kotlinx.coroutines.runBlocking {
+    prefs.targetIpAddress = "http://[::1"
+    val client = VoiceAgentClient(context, prefs)
+
+    assertNull(client.getRoute())
+    assertFalse(client.setRoute("pk1").ok)
+    assertNull(client.getRouteSlots())
+    assertNull(client.getAgentInventory())
+    assertNull(client.listWorkspace("C:/dev"))
+    assertTrue(client.readWorkspaceFile("C:/dev/file.txt").error?.contains("File preview failed") == true)
+    assertTrue(client.archiveGatewaySession("C:/dev/session.jsonl").contains("Session archive failed"))
+  }
+
+  @Test
+  fun listWorkspace_preservesTruncatedFlag() {
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/workspace") { exchange ->
+      val body = """
+        {"ok":true,"workspace":{"root":"C:/dev","current":"C:/dev","parent":null,"defaultPath":"C:/dev","truncated":true,
+        "entries":[{"name":"repo","path":"C:/dev/repo","type":"directory"}]}}
+      """.trimIndent().toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    val client = VoiceAgentClient(context, prefs)
+
+    val listing = client.listWorkspace("C:/dev")
+
+    assertTrue(listing?.truncated == true)
+    assertEquals(1, listing?.entries?.size)
+  }
+
+  @Test
   fun tryAutoConnect_replacesStaleTargetWithLocalhostAdbReverseGateway() {
     val server = try {
       startGatewayServer(8767)
@@ -76,6 +113,168 @@ class VoiceAgentClientConnectionTest {
       server.stop(0)
       servers.remove(server)
     }
+  }
+
+  @Test
+  fun tryAutoConnect_prefersAdvertisedTailscaleBaseUrlWhenConfigured() {
+    val server = try {
+      startGatewayServer(
+        8767,
+        descriptor = """{"app":"pi-speak","authRequired":false,"pairingRequired":false,"baseUrls":["http://192.168.1.10:8767","http://100.64.216.11:8767"],"routing":{"currentSession":"Warp"}}"""
+      )
+    } catch (e: BindException) {
+      null
+    }
+    assumeTrue("localhost:8767 is occupied by another service", server != null)
+    prefs.connectionMode = "Tailscale"
+    prefs.targetIpAddress = "http://192.0.2.99:8767"
+    val client = VoiceAgentClient(context, prefs)
+
+    val result = client.tryAutoConnect(forceVerify = true)
+
+    assertTrue(result.connected)
+    assertEquals("http://100.64.216.11:8767", result.baseUrl)
+    assertEquals("http://100.64.216.11:8767", prefs.targetIpAddress)
+    assertEquals("Warp", prefs.codexSessionName)
+    server?.let {
+      it.stop(0)
+      servers.remove(it)
+    }
+  }
+
+  @Test
+  fun getWarpControlSnapshot_parsesPsmuxSessionsAndPanes() = kotlinx.coroutines.runBlocking {
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/warp") { exchange ->
+      val body = """
+        {
+          "ok": true,
+          "warp": {
+            "available": true,
+            "sameTailnet": true,
+            "requestRemoteAddress": "100.64.1.2",
+            "warpRemoteBaseUrl": "http://100.64.216.11:8767",
+            "psmux": {
+              "available": true,
+              "executable": "psmux.exe",
+              "sessions": [
+                {
+                  "name": "warp-phone",
+                  "attached": "0",
+                  "windows": [
+                    {
+                      "session": "warp-phone",
+                      "index": "0",
+                      "name": "main",
+                      "active": true,
+                      "panes": [
+                        {"session":"warp-phone","window":"0","pane":"0","paneId":"%1","active":true,"command":"pwsh","title":"Warp"}
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      """.trimIndent().toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "secret-token"
+    val client = VoiceAgentClient(context, prefs)
+
+    val snapshot = client.getWarpControlSnapshot()
+
+    assertTrue(snapshot?.available == true)
+    assertTrue(snapshot?.sameTailnet == true)
+    assertEquals("http://100.64.216.11:8767", snapshot?.warpRemoteBaseUrl)
+    assertEquals(1, snapshot?.paneCount)
+    assertEquals("warp-phone", snapshot?.sessions?.first()?.name)
+    assertEquals("%1", snapshot?.sessions?.first()?.windows?.first()?.panes?.first()?.paneId)
+  }
+
+  @Test
+  fun createWarpTab_postsCwdToGateway() = kotlinx.coroutines.runBlocking {
+    var seenBody = ""
+    var seenToken = ""
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/warp/tab") { exchange ->
+      seenToken = exchange.requestHeaders.getFirst("X-Pi-Speak-Token") ?: ""
+      seenBody = exchange.requestBody.bufferedReader().use { it.readText() }
+      val body = """{"ok":true,"message":"Opened Warp tab."}""".toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "secret-token"
+    val client = VoiceAgentClient(context, prefs)
+
+    val message = client.createWarpTab("C:\\dev\\Desktop-Projects\\warp")
+
+    assertEquals("Opened Warp tab.", message)
+    assertEquals("secret-token", seenToken)
+    assertTrue(seenBody.contains(""""cwd":"C:\\dev\\Desktop-Projects\\warp""""))
+  }
+
+  @Test
+  fun openWarpTabConfig_postsNameToGateway() = kotlinx.coroutines.runBlocking {
+    var seenBody = ""
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/warp/tab-config") { exchange ->
+      seenBody = exchange.requestBody.bufferedReader().use { it.readText() }
+      val body = """{"ok":true,"message":"Opened Warp tab config phone_remote."}""".toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "secret-token"
+    val client = VoiceAgentClient(context, prefs)
+
+    val message = client.openWarpTabConfig("phone_remote", newWindow = true)
+
+    assertEquals("Opened Warp tab config phone_remote.", message)
+    assertTrue(seenBody.contains(""""name":"phone_remote""""))
+    assertTrue(seenBody.contains(""""newWindow":true"""))
+  }
+
+  @Test
+  fun sendTextTurnDetailed_postsOmpProviderWorkspaceAndModel() = kotlinx.coroutines.runBlocking {
+    var seenBody = ""
+    var seenToken = ""
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/turn/text") { exchange ->
+      seenToken = exchange.requestHeaders.getFirst("X-Pi-Speak-Token") ?: ""
+      seenBody = exchange.requestBody.bufferedReader().use { it.readText() }
+      val body = """{"replyText":"model received"}""".toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "secret-token"
+    prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
+    prefs.codexSessionName = "main"
+    prefs.workspacePath = "C:\\dev\\Desktop-Projects\\oh-my-pk-fork"
+    prefs.agentModel = "gpt-test"
+    val client = VoiceAgentClient(context, prefs)
+
+    val result = client.sendTextTurnDetailed("/model")
+
+    assertEquals("model received", result.replyText)
+    assertEquals("secret-token", seenToken)
+    assertTrue(seenBody.contains("\"agentProvider\":\"oh-my-pk\""))
+    assertTrue(seenBody.contains("\"target\":\"main\""))
+    assertTrue(seenBody.contains("\"cwd\":\"C:\\\\dev\\\\Desktop-Projects\\\\oh-my-pk-fork\""))
+    assertTrue(seenBody.contains("\"model\":\"gpt-test\""))
   }
 
   @Test
@@ -105,7 +304,22 @@ class VoiceAgentClientConnectionTest {
                 "ready": true,
                 "isReady": true,
                 "activity": "idle",
-                "aliases": ["one", "ready"]
+                "aliases": ["one", "ready"],
+                "kind": "background",
+                "source": "oh-my-pk",
+                "model": "gpt-5",
+                "role": "reviewer",
+                "createdAt": 1782208800000,
+                "lastActivity": 1782212400000,
+                "subagents": [
+                  {
+                    "id": "background:abc123/lint-worker",
+                    "name": "lint-worker",
+                    "status": "parked",
+                    "sessionPath": "C:\\Users\\prest\\.omp\\agent\\sessions\\ready\\lint-worker.jsonl",
+                    "activity": "background subagent"
+                  }
+                ]
               }
             ]
           }
@@ -139,6 +353,16 @@ class VoiceAgentClientConnectionTest {
     assertEquals("idle", session.activity)
     assertEquals(listOf("one", "ready"), session.aliases)
     assertEquals("C:\\dev\\Ready", session.displayCwd)
+    assertEquals("background", session.kind)
+    assertEquals("oh-my-pk", session.source)
+    assertEquals("gpt-5", session.model)
+    assertEquals("reviewer", session.role)
+    assertEquals(1782208800000, session.createdAt)
+    assertEquals(1782212400000, session.lastActivity)
+    assertEquals(1, session.subagents.size)
+    assertEquals("lint-worker", session.subagents.first().name)
+    assertEquals("parked", session.subagents.first().status)
+    assertEquals("background subagent", session.subagents.first().activity)
   }
 
   @Test
@@ -225,7 +449,37 @@ class VoiceAgentClientConnectionTest {
     assertTrue(seenBody.contains(""""cwd":"C:\\dev\\Ready""""))
   }
 
-  private fun startGatewayServer(port: Int = 0): HttpServer {
+  @Test
+  fun launchColabWorkspace_postsTargetNodeAndWorkspace() = kotlinx.coroutines.runBlocking {
+    var seenBody = ""
+    var seenToken = ""
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/v1/sessions/launch") { exchange ->
+      seenToken = exchange.requestHeaders.getFirst("X-Pi-Speak-Token") ?: ""
+      seenBody = exchange.requestBody.bufferedReader().use { it.readText() }
+      val body = """{"ok":true,"message":"Launching Colab deployment colab-test."}""".toByteArray()
+      exchange.sendResponseHeaders(200, body.size.toLong())
+      exchange.responseBody.use { it.write(body) }
+    }
+    server.start()
+    servers.add(server)
+    prefs.targetIpAddress = "http://127.0.0.1:${server.address.port}"
+    prefs.remoteToken = "secret-token"
+    prefs.workspacePath = "C:\\dev\\Desktop-Projects\\pi-speak-extension"
+    val client = VoiceAgentClient(context, prefs)
+
+    val message = client.launchColabWorkspace()
+
+    assertEquals("Launching Colab deployment colab-test.", message)
+    assertEquals("secret-token", seenToken)
+    assertTrue(seenBody.contains(""""targetNode":"colab""""))
+    assertTrue(seenBody.contains(""""cwd":"C:\\dev\\Desktop-Projects\\pi-speak-extension""""))
+  }
+
+  private fun startGatewayServer(
+    port: Int = 0,
+    descriptor: String = """{"app":"pi-speak","routing":{"currentSession":"Main-Project-Alpha"}}"""
+  ): HttpServer {
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
     server.createContext("/health") { exchange ->
       val body = """{"ok":true,"app":"pi-speak","authRequired":true}""".toByteArray()
@@ -233,7 +487,7 @@ class VoiceAgentClientConnectionTest {
       exchange.responseBody.use { it.write(body) }
     }
     server.createContext("/.well-known/pi-speak") { exchange ->
-      val body = """{"app":"pi-speak","routing":{"currentSession":"Main-Project-Alpha"}}""".toByteArray()
+      val body = descriptor.toByteArray()
       exchange.sendResponseHeaders(200, body.size.toLong())
       exchange.responseBody.use { it.write(body) }
     }

@@ -2,26 +2,29 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Warm "paper" palette inspired by the Claude mobile aesthetic.
-val Canvas = Color(0xFFF4F1E9) // warm cream app background
-val SurfacePaper = Color(0xFFFFFFFF) // cards, pills, composer
-val SurfaceSubtle = Color(0xFFF0ECE2) // inset / secondary fills
-val SurfaceMuted = Color(0xFFE9E3D6) // pressed / muted chips
-val SelectedFill = Color(0xFFEDE7DB) // selected nav row pill
+// Sage & Clay: a warm, spacious agent-hub palette. Sage carries "live"/primary
+// UI state (tabs, connected status, nav selection); clay is the action accent
+// (record/send, avatars). Both are colored deliberately — this build no longer
+// keeps the accent monochrome.
+val Canvas = Color(0xFFF7F6F0) // warm sage-tinted off-white app background
+val SurfacePaper = Color(0xFFFEFDF9) // primary cards, composer, sheets
+val SurfaceSubtle = Color(0xFFEDEDE1) // secondary panels and empty states
+val SurfaceMuted = Color(0xFFE3E3D3) // disabled controls and pressed chips
+val SelectedFill = Color(0xFFE3E8DA) // selected nav row / tab pill (sage wash)
 
-val Ink = Color(0xFF211C16) // primary text (warm near-black)
-val InkMuted = Color(0xFF6E665A) // secondary text
-val Line = Color(0xFFE3DCCC) // hairline borders
+val Ink = Color(0xFF2B2E24) // primary text (olive-tinted near-black)
+val InkMuted = Color(0xFF767A64) // secondary text
+val Line = Color(0xFFDEDECD) // quiet dividers and borders
 
-// Accent: terracotta / rust (matches the send button + "New chat").
-val Accent = Color(0xFFC2542F)
+// Accent is warm clay/terracotta; live connection state carries sage.
+val Accent = Color(0xFFC1653E)
 val OnAccent = Color(0xFFFFFFFF)
-val AccentSoft = Color(0xFFFBF1EC)
+val AccentSoft = Color(0xFFF7EBE6)
 
-val Success = Color(0xFF2E7D52)
-val SuccessSoft = Color(0xFFDCEEE0)
-val Warn = Color(0xFFC97E1A)
-val Error = Color(0xFFB3261E)
+val Success = Color(0xFF5F7548) // sage — also the "live"/primary UI color
+val SuccessSoft = Color(0xFFEAEDE0)
+val Warn = Color(0xFF9C6B1E)
+val Error = Color(0xFFB23B23)
 
 // Back-compat aliases (older references expect these names).
 val Surface = Canvas
@@ -36,4 +39,4 @@ val OnPrimaryContainer = Ink
 val OnAccentLegacy = OnAccent
 val AccentContainer = AccentSoft
 val OnError = Color(0xFFFFFFFF)
-val ErrorContainer = Color(0xFFF9DAD5)
+val ErrorContainer = Color(0xFFF5E6E2)

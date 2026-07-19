@@ -1,10 +1,12 @@
 import type { ConversationReducerSummary } from "./remote-turn-manager.js";
 
-export type ExecutionBackend = "pi" | "codex" | "shell" | "memory" | "wiki" | "defer";
+export type ExecutionBackend = "pi" | "codex" | "claude" | "oh-my-pk" | "shell" | "memory" | "wiki" | "defer";
 
 export type ExecutionRouteReason =
 	| "dispatch-pi"
 	| "dispatch-codex"
+	| "dispatch-claude"
+	| "dispatch-oh-my-pk"
 	| "dispatch-shell"
 	| "dispatch-memory"
 	| "dispatch-wiki"
@@ -40,7 +42,7 @@ type RouteClass = NonNullable<ConversationExecutionPlan["routeClass"]>;
 type RouteRiskLevel = NonNullable<ConversationExecutionPlan["riskLevel"]>;
 type RouteCostTier = NonNullable<ConversationExecutionPlan["costTier"]>;
 
-type ExecutionRouterMode = "auto" | "pi" | "codex";
+type ExecutionRouterMode = "auto" | "pi" | "codex" | "claude" | "oh-my-pk";
 
 const SHELL_KEYWORDS = [
 	"bash",
@@ -407,9 +409,11 @@ function findKeywordSignals(text: string, keywords: string[]) {
 function readExecutionMode() {
 	const configuredMode = process.env.PI_SPEAK_EXECUTION_ROUTER_MODE;
 	const mode = (configuredMode || "").trim().toLowerCase();
-	if (mode === "pi" || mode === "codex" || mode === "auto") return mode as ExecutionRouterMode;
+	if (mode === "pi" || mode === "codex" || mode === "claude" || mode === "oh-my-pk" || mode === "auto") return mode as ExecutionRouterMode;
+	if (mode === "ompk" || mode === "oh-my-pi" || mode === "omp") return "oh-my-pk";
 	const provider = (process.env.AGENT_PROVIDER || "").trim().toLowerCase();
-	if (provider === "pi" || provider === "codex") return provider as Exclude<ExecutionRouterMode, "auto">;
+	if (provider === "pi" || provider === "codex" || provider === "claude" || provider === "oh-my-pk") return provider as Exclude<ExecutionRouterMode, "auto">;
+	if (provider === "ompk" || provider === "oh-my-pi" || provider === "omp") return "oh-my-pk";
 	return "auto";
 }
 
@@ -476,7 +480,13 @@ function detectSignalRoute(summary: ConversationReducerSummary): RouteSignal | u
 		return {
 			backend: "defer",
 			reason: "defer",
-			confidence: Math.max(0.1, 0.05),
+			// Weak defer signal (plain "later"/"hold" keywords, not an explicit defer
+			// phrase): keep it deliberately low but reflect the reducer's actual
+			// confidence rather than a hard-coded constant. The previous
+			// `Math.max(0.1, 0.05)` was always 0.1 — a typo that discarded
+			// summary.confidence (every sibling weak route uses it), surfacing
+			// meaningless telemetry on this branch.
+			confidence: Math.max(0.1, summary.confidence),
 			rationale: `I detected follow-up/defer intent (${defer.slice(0, 2).join(", ")}).`,
 		};
 	}
@@ -536,7 +546,7 @@ function classifyRoute(plan: Omit<ConversationExecutionPlan, "routeClass" | "ris
 	const lowConfidence = summary.confidence < 0.62;
 	const routeClass: RouteClass = !plan.dispatch
 		? "fast"
-		: plan.backend === "codex" || slowSignals.length > 0 || multiAction || lowConfidence || riskSignals.length > 0
+		: plan.backend === "codex" || plan.backend === "claude" || slowSignals.length > 0 || multiAction || lowConfidence || riskSignals.length > 0
 			? "slow-think"
 			: plan.backend === "pi"
 				? "fast-plus-tools"
@@ -550,7 +560,7 @@ function classifyRoute(plan: Omit<ConversationExecutionPlan, "routeClass" | "ris
 	const costTier: RouteCostTier = routeClass === "fast" ? "T0" : routeClass === "fast-plus-tools" ? "T1" : riskLevel === "high" ? "T3" : "T2";
 	const escalationReason = routeClass === "slow-think"
 		? [
-				plan.backend === "codex" ? "file-changing coding workflow" : "",
+				plan.backend === "codex" || plan.backend === "claude" ? "file-changing coding workflow" : "",
 				multiAction ? "multiple action items" : "",
 				lowConfidence ? "medium confidence route" : "",
 				slowSignals.length ? `complexity signal: ${slowSignals[0]}` : "",
@@ -588,7 +598,7 @@ export function planConversationExecution(
 	options: {
 		mode?: ExecutionRouterMode;
 		targetName?: string;
-		provider?: "pi" | "codex";
+		provider?: "pi" | "codex" | "claude" | "oh-my-pk";
 	} = {},
 ): ConversationExecutionPlan {
 	const mode = options.mode || readExecutionMode();
@@ -622,9 +632,15 @@ export function planConversationExecution(
 		return withRouteMetadata({
 			dispatch: true,
 			backend: options.provider,
-			reason: options.provider === "codex" ? "dispatch-codex" : "dispatch-pi",
+			reason: options.provider === "codex"
+				? "dispatch-codex"
+				: options.provider === "claude"
+					? "dispatch-claude"
+					: options.provider === "oh-my-pk"
+						? "dispatch-oh-my-pk"
+						: "dispatch-pi",
 			confidence: summary.confidence,
-			rationale: `Routing to ${options.provider === "codex" ? "Codex" : "Pi"} because the client selected that backend.${targetContext}`,
+			rationale: `Routing to ${describeBackend(options.provider)} because the client selected that backend.${targetContext}`,
 			actionForSeed: summary.actionItems[0] || "execute task",
 		}, summary);
 	}
@@ -638,6 +654,16 @@ export function planConversationExecution(
 			actionForSeed: summary.actionItems[0] || "execute task",
 		}, summary);
 	}
+	if (mode === "oh-my-pk") {
+		return withRouteMetadata({
+			dispatch: true,
+			backend: "oh-my-pk",
+			reason: "dispatch-oh-my-pk",
+			confidence: summary.confidence,
+			rationale: `Routing to Oh-my-pk for ${summary.actionItems.length} action item(s)${targetContext}.`,
+			actionForSeed: summary.actionItems[0] || "execute task",
+		}, summary);
+	}
 	if (mode === "codex") {
 		return withRouteMetadata({
 			dispatch: true,
@@ -645,6 +671,16 @@ export function planConversationExecution(
 			reason: "dispatch-codex",
 			confidence: summary.confidence,
 			rationale: `Routing to Codex for ${summary.actionItems.length} action item(s)${targetContext}.`,
+			actionForSeed: summary.actionItems[0] || "execute task",
+		}, summary);
+	}
+	if (mode === "claude") {
+		return withRouteMetadata({
+			dispatch: true,
+			backend: "claude",
+			reason: "dispatch-claude",
+			confidence: summary.confidence,
+			rationale: `Routing to Claude for ${summary.actionItems.length} action item(s)${targetContext}.`,
 			actionForSeed: summary.actionItems[0] || "execute task",
 		}, summary);
 	}
@@ -660,4 +696,11 @@ export function planConversationExecution(
 			: `Routing to Pi for planning/analysis on ${summary.actionItems.length} action item(s).${targetContext}`,
 		actionForSeed: summary.actionItems[0] || "execute task",
 	}, summary);
+}
+
+function describeBackend(backend: "pi" | "codex" | "claude" | "oh-my-pk") {
+	if (backend === "codex") return "Codex";
+	if (backend === "claude") return "Claude";
+	if (backend === "oh-my-pk") return "Oh-my-pk";
+	return "Pi";
 }

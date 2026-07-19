@@ -1,0 +1,4 @@
+interface:
+  display_name: "pk-speak"
+  short_description: "Speak useful CLI-agent status and run pk-speak voice/gateway commands."
+  default_prompt: "Use the pk-speak skill to speak concise status updates, wrap CLI commands, or explain realtime voice setup."

@@ -1,11 +1,18 @@
-# pi-speak-pk
+# pk-speak
 
-Voice, wake-word, and remote-control extensions for Pi / `pi-mono`.
+<<<<<<< HEAD
+A conversational assistant for Pi / `pi-mono` that uses voice, wake-word, and remote-control as input channels.
 
-This package turns Pi into a usable voice workstation, not just a text assistant with TTS bolted on. It gives you:
+pi-speak is a conversational assistant, not just a text assistant with TTS bolted on. The assistant can see all subagent state and the workspace, interview you to scope ambiguous requests, and ask for explicit approval before running any command that mutates a subagent, terminal, or file. Voice, the `PK` wake phrase, Telegram, and the mobile web/Android remote are all ways to reach the same assistant. It gives you:
+=======
+A conversational assistant for Pi / `pi-mono`, reachable over voice, phone, and browser remote.
 
+`pk-speak` runs a persistent conversational assistant that can see session and background-agent state and read the workspace on every turn, but never mutates anything — launching an agent, archiving a session, or running a command outside a small read-only allowlist — without your explicit approval. Voice (`/mono`), Telegram (`/phone`), and the browser/Android remote (`/remote`) are channels into that same assistant, not separate products. It gives you:
+>>>>>>> origin/main
+
+- a conversational assistant that reads subagent state and proposes commands for approval
 - spoken assistant replies with multiple TTS backends
-- the always-listening `PK` wake phrase flow
+- the always-listening `PK` wake phrase flow as a way to start a conversation
 - Telegram text and voice turns from your phone
 - a local HTTP control API
 - a built-in mobile web app at `/app/`
@@ -13,23 +20,52 @@ This package turns Pi into a usable voice workstation, not just a text assistant
 
 ## What To Use
 
-If you just want the shortest path:
+These are all input channels to the same conversational assistant. Pick the one that fits where you are:
 
 1. Local desktop voice: use `/speak on`
-2. Hands-free on the same machine: use `/mono on`
+2. Hands-free on the same machine: use `/mono on` (say `PK` to start a conversation)
 3. Remote from your phone with the least friction: use `/phone on`
 4. Remote from your phone with QR setup: use `/pk-remote`, then scan the QR from the Android phone
-5. Remote button grid on Android: use the bundled Unified Remote remote
+## Documentation
+
+- [Getting Started](./docs/GETTING_STARTED.md) — install, five voice paths, first session, TTS ladder, phone setup, session routing, Gemini Live
+- [Architecture](./docs/ARCHITECTURE.md) — subsystem map, data flow, provider model, HTTP API surface, Android/PWA clients, environment variables
+- [Troubleshooting](./docs/TROUBLESHOOTING.md) — 12 common problem areas with causes and fixes, plus a 5-command quick diagnostic checklist
+- [Session Operations](./docs/SESSION_OPERATIONS.md) — named sessions, wake routing, compact PK1/PK2 lanes
+- [Remote Operating Guide](./docs/REMOTE_OPERATING_GUIDE.md) — phone setup, Android app, web app, Tailscale/tunnel configuration
+- [Validation Checklist](./docs/REMOTE_VALIDATION_CHECKLIST.md) — full phone-focused pass/fail run sheet
+- [Codebase Map](./docs/CODEBASE_MAP.md) — file-level tour of the TypeScript source
+
 
 ## Install
 
-Install the extension:
+Install the Pi extension package inside Pi:
 
 ```text
-pi npm i pi-speak-pk
+pi npm i pi-pk-speak
 ```
 
 Reload Pi after install.
+
+For the standalone desktop/phone bootstrap package, install or run `pk-speak` from npm, then run:
+
+```text
+pi-speak-pk
+```
+
+That opens the first-time setup CLI. It chooses the coding backend (`codex`, `claude`, or `pi`), configures the voice/TTS provider, creates the gateway pairing token, and asks whether to include Android setup. After that, use:
+
+```text
+pk-speak doctor
+pk-speak speak "Build finished"
+pk-speak wrap -- codex
+pk-speak tray
+pk-speak mobile
+```
+
+`pk-speak speak` is the direct sag-like TTS command for hooks and CLI agents. `pk-speak wrap` runs any CLI command and speaks start/finish notices without requiring the phone gateway. `pk-speak tray` starts the Windows tray plus gateway. `pk-speak gateway` starts the headless gateway directly. `pk-speak mobile` prints the Android download/setup QR.
+
+Package split details are in [docs/PACKAGE_SPLIT.md](./docs/PACKAGE_SPLIT.md).
 
 ## Quick Start
 
@@ -44,9 +80,10 @@ Reload Pi after install.
 If you do nothing else, `auto` provider selection will try available backends in this order:
 
 1. `legacy` via `speak11`
-2. `elevenlabs`
-3. `openai`
-4. `edge`
+2. `gemini`
+3. `elevenlabs`
+4. `openai`
+5. `edge`
 
 If an earlier auto-selected backend fails at synthesis time, Pi now falls through to the next available provider instead of stopping on the first failure.
 
@@ -117,9 +154,23 @@ The web app:
 - stores the remote token in the current browser session by default
 - can explicitly remember the token on that device if you enable it in Settings
 
+The web app also has a **Workspace** tab for reviewing files and choosing where the agent runs:
+
+- browse the directory tree from the workspace root, stepping into folders and back up to the parent
+- tap a file to view its contents in a read-only viewer (preview is capped at the first 512 KB of large files, and binary files show a notice instead of bytes)
+- tap **Use this folder** to set the agent working directory, which becomes the launch path / `cwd` sent with text and voice turns
+
+By default the Workspace tab is rooted at the agent working directory (so the file viewer can't read files elsewhere on the machine). Set `PI_SPEAK_WORKSPACE_ROOT` on the gateway to widen or relocate that root — point it at a specific directory, or set it to `fs` to browse the whole drive/filesystem. The browser is confined to that root; paths outside it (and symlinks resolving outside it) are rejected.
+
 `/remote setup` prints the same QR and links as `/pk-remote`. Use `/remote setup bluetooth` or `/pk-remote bluetooth` when the phone is paired over Bluetooth networking/PAN.
 
 For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel. If the phone is paired over Bluetooth networking/PAN instead, use `/remote setup bluetooth`; the Android app treats that as a Bluetooth local-link profile and does not require Tailscale.
+
+The native Android app matches the web remote's control surface: session dashboard with rename / wake-alias / archive / remove, an OPS pane with the routing target picker (`/v1/route`), `PK1`/`PK2` route slots (`/v1/sessions/slots`), discovered agents (`/v1/agents`), a live session-event feed (`/v1/events`), and a workspace file browser with a read-only viewer (`/v1/workspace/file`).
+
+The Agent Hub tab's **Tasks** pane is a portal onto the same oh-my-pk background lanes, but hierarchical and actionable instead of flat and read-only: it lists each lane's subagents (`GET /v1/herdr/agents`), lets you send a message straight into a lane (`POST /v1/herdr/agent/:id/chat`) with a live transcript stream (`GET /v1/herdr/stream/:id`), archive a lane with a two-step confirm (`POST /v1/herdr/agent/:id/kill`), and launch a brand-new task anywhere with a free-form prompt/model/provider (`POST /v1/sessions/launch`) instead of only the fixed "Launch Hub" / "Launch Colab" presets. The e-ink (Boox) build exposes the same launcher and per-lane chat/archive controls, minus the live transcript stream (EPD panels ghost badly under frequent partial redraws, so lane detail there refreshes on the same periodic poll as the rest of the Hub peek).
+
+When the active gateway is reachable over Tailscale, Android prefers advertised `100.64.0.0/10` base URLs and exposes a Warp / psmux control card in Discovery. That card calls `/v1/warp` to list open psmux sessions, tabs, and panes, `/v1/warp/tab` to open a native Warp tab via `warp://action/new_tab?path=...`, `/v1/warp/tab-config` to open a saved Warp Tab Config via `warp://tab_config/<name>`, and can create a detached psmux session or tab from the phone. Set `PI_SPEAK_WARP_REMOTE_BASE_URL` on the gateway to show the deployed Warp remote-control relay URL in the Android card.
 
 Optional Windows tray:
 
@@ -132,7 +183,7 @@ Right-click the tray icon and choose `Show setup QR code`. Scanning the QR opens
 NPM-installed tray/service path:
 
 ```text
-npx -p pi-speak-pk pi-speak-tray
+npx -p pk-speak pi-speak-tray
 ```
 
 Or, after global install:
@@ -142,6 +193,36 @@ pi-speak-tray --install-startup
 ```
 
 The tray keeps the headless gateway running in the background, restarts it if it exits, and exposes setup, APK download, status, settings, restart, and web remote actions from the tray menu.
+
+### Speak From Any CLI
+
+Use `pk-speak speak` when you want any command, hook, or coding agent to talk without starting the full phone gateway:
+
+```text
+pk-speak speak "Tests passed"
+git status --short | pk-speak speak --provider edge
+pk-speak speak --provider gemini "Gemini TTS is ready."
+pk-speak speak --provider sag "I need approval on this command."
+pk-speak speak --no-play --output reply.mp3 "Saved an audio artifact."
+```
+
+It reads text from arguments or stdin, uses the saved setup profile, and supports `auto`, `edge`, `gemini`, `elevenlabs`, `openai`, `sag`, and `legacy` providers. Use `--dry-run` to inspect what would be spoken without synthesizing audio.
+
+### Wrap Any CLI Agent
+
+Use `pk-speak wrap` when you want lifecycle voice notices around an arbitrary coding-agent CLI:
+
+```text
+pk-speak wrap -- codex
+pk-speak wrap --label "Claude Code" -- claude
+pk-speak wrap --provider sag -- npm test
+pk-speak wrap --capture -- npm test
+pk-speak wrap --no-speak -- node -e "console.log('ok')"
+```
+
+The wrapper preserves the child command's terminal and exit code. It speaks the start and finish/failure notices around the command instead of capturing and parsing all output, so interactive CLIs keep their normal TTY behavior. Use `--shell` only when you intentionally need shell syntax or shell built-ins.
+
+Use `--capture` for non-interactive commands when you want `pk-speak` to mirror output and classify important events. Capture mode prints and speaks compact notices for patterns such as approval prompts, input prompts, test failures, and errors. Keep capture off for fully interactive CLIs unless you are comfortable with stdout/stderr being piped instead of attached directly to the terminal.
 
 ### Gemini Live Smoke Test
 
@@ -153,13 +234,13 @@ set PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
 set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
 set GOOGLE_CLOUD_LOCATION=us-central1
 gcloud auth application-default login
-pi-speak-gemini-live-smoke --model gemini-2.5-flash-native-audio-preview-12-2025 --modality audio
+pi-speak-gemini-live-smoke --modality audio
 ```
 
 To run the tray/headless gateway through ElevenLabs voice, backed by Vertex AI Gemini text reasoning:
 
 ```text
-set REDACTED_ELEVENLABS_HISTORY_LINE<your-elevenlabs-key>
+REM Set ELEVENLABS_API_KEY in your shell before launch
 set PI_SPEAK_GEMINI_BACKEND=vertex
 set PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
 set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
@@ -178,7 +259,6 @@ set AGENT_PROVIDER=gemini-live
 set PI_SPEAK_GEMINI_BACKEND=vertex
 set GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
 set GOOGLE_CLOUD_LOCATION=us-central1
-set PI_SPEAK_GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
 pi-speak-gateway
 ```
 
@@ -194,6 +274,19 @@ Optional environment:
 - `PI_SPEAK_ELEVENLABS_VOICE_ID` selects the ElevenLabs voice
 
 Keep Gemini, Vertex, and ElevenLabs credentials server-side. Do not put them in the Android app or browser app.
+
+## The Conversational Assistant
+
+The real-time gateway (`realtime-gateway.ts`) runs a Gemini Live session that acts as a conversational assistant, not a voice command executor. The assistant:
+
+- can see all subagent state (`list_agents`, `get_agent`, `read_transcript`) and the workspace (`list_workspace`, `read_workspace_file`)
+- interviews you to scope ambiguous requests before acting
+- asks for explicit approval before any command that mutates a subagent, terminal, or file, using the `propose_command` tool, which returns a confirmation token and a human-readable description and does **not** execute until you approve
+- keeps replies short and conversational
+
+Mutating actions (`execute_terminal_command`, `launch_agent`, `chat_agent`, `kill_agent`, `archive_session`) are staged as proposals through the same approval registry used by the terminal and Agent Hub gateways. The assistant proposes; you approve; only then does it run.
+
+Voice (`/mono`, `/speak`), Telegram (`/phone`), and the mobile web/Android remote (`/remote`, `/pk-remote`) are all input channels to this same assistant. The wake phrase `PK` is how you start a conversation hands-free.
 
 ## Main Commands
 
@@ -212,6 +305,7 @@ Common examples:
 /speak test
 /speak providers
 /speak provider edge
+/speak provider gemini
 /speak provider openai
 /speak provider elevenlabs
 /speak rewrite on
@@ -224,6 +318,7 @@ Behavior:
 - the spoken version can optionally be rewritten for audio clarity
 - `/speak stop` interrupts playback without disabling speech mode
 
+<<<<<<< HEAD
 #### `/speak agent` — agent-driven speech
 
 `/speak agent` enables a different model: the agent itself decides what to say and emits a `pk-speak "..."` shell command inline at the end of its turn. There is no second LLM summarizer pass and no auto-speak watcher collecting the full reply. The sanitizer still runs. If the agent says nothing worth hearing, no audio fires.
@@ -287,10 +382,24 @@ args = []
 ```
 
 Ready-to-paste config snippets for all three runtimes are in the `integrations/` directory.
+=======
+
+### `/pk-speak`
+
+Hard-stop for voice chatter. Unlike `/speak stop` (interrupt current playback only), `/pk-speak stop` disables speech mode and stops the wake listener.
+
+```text
+/pk-speak stop
+/pk-speak status
+/pk-speak on
+```
+
+Aliases for stop: `off`, `quiet`, `silence`, `shush`.
+>>>>>>> origin/main
 
 ### `/mono`
 
-Controls the wake-word listener.
+Controls the wake-word listener — the hands-free way to start a conversation with the assistant.
 
 ```text
 /mono on
@@ -358,7 +467,7 @@ Behavior:
 
 ### `/sess`
 
-Named sessions, wake aliases, and routing summaries for voice control.
+Named sessions, wake aliases, and routing summaries for the assistant. Sessions are assistant-managed: the conversational assistant can switch between them (`switch_session`), inspect them (`get_session_info`), and archive/recover them (`archive_session`) — always asking for approval before mutating.
 
 ```text
 /sess
@@ -394,27 +503,42 @@ For operator details, see:
 
 ## Architecture
 
-There are six main subsystems:
+The conversational assistant is the center; voice, wake-word, Telegram, and the mobile remote are input/output channels around it. There are seven main subsystems:
 
 1. `index.ts`
    The extension entrypoint. Registers commands, persists state, owns wake-word routing, and coordinates TTS, STT, Telegram, and HTTP control.
 
-2. `tts.ts`
-   Multi-provider speech synthesis. Supports `legacy`, `edge`, `openai`, `elevenlabs`, and `auto`.
+2. `realtime-gateway.ts`
+   The conversational assistant core. Runs a Gemini Live session with read-only subagent/workspace tools and a `propose_command` approval flow. Voice, phone, and remote turns all reach this assistant.
 
-3. `stt.ts` and `listener/stt_worker.py`
-   Remote voice transcription for uploaded audio. `auto` prefers OpenAI when an API key is present, otherwise a warm local `faster-whisper` worker process.
+3. `tts.ts`
+   Multi-provider speech synthesis (the assistant's voice). Supports `legacy`, `edge`, `gemini`, `openai`, `elevenlabs`, `sag`, `higgs`, `stable-audio`, and `auto`.
 
-4. `listener/listener.py`
-   The always-on two-tier listener:
+4. `stt.ts` and `listener/stt_worker.py`
+   Remote voice transcription for uploaded audio. `PI_SPEAK_REMOTE_STT_PROVIDER` accepts `auto|local|openai|elevenlabs|google`. `auto` prefers ElevenLabs/OpenAI when keys are present, otherwise a warm local `faster-whisper` worker.
+
+5. `listener/listener.py`
+   The always-on two-tier listener (wake-phrase detection is how you start a conversation with the assistant):
    - Tier 1: `faster-whisper` tiny for wake-phrase detection
    - Tier 2: `faster-whisper` for actual speech transcription
 
-5. `phone-bridge.ts`
-   Telegram transport for remote text and voice notes.
+6. `phone-bridge.ts`
+   Telegram transport for remote text and voice notes (a channel to reach the assistant from your phone).
 
-6. `control-server.ts`
+7. `control-server.ts`
    Local HTTP API, audio artifact serving, and the built-in mobile app host.
+
+## Conversational Assistant Mode
+
+`realtime-gateway.ts` runs the live-voice conversational assistant. It can call read-only tools on every turn — `list_sessions`, `get_session_info`, `list_agent_hub_agents`, `get_agent_hub_agent`, `browse_workspace`, `read_workspace_file` — to see real session, background-agent, and workspace state before answering.
+
+Anything that mutates state goes through operator approval first:
+
+- `execute_terminal_command` outside the read-only allowlist
+- `launch_agent` when it actually launches an agent (not just opening the hub)
+- `archive_session` (archive or recover)
+
+The assistant calls the tool normally; if the action needs approval, the client shows what is about to happen and waits for an explicit approve/reject before anything runs. Nothing is claimed as done until a real tool result confirms it.
 
 ## Remote Paths
 
@@ -538,6 +662,9 @@ GET  /v1/diagnostics
 GET  /v1/route
 POST /v1/route
 
+GET  /v1/workspace?path=<absolute-path>
+GET  /v1/workspace/file?path=<absolute-path>
+
 GET  /v1/mono/status
 POST /v1/mono/on
 POST /v1/mono/off
@@ -657,14 +784,15 @@ What it is not good at:
 ### Core
 
 ```text
-AGENT_PROVIDER=pi|codex|elevenlabs|gemini|gemini-live
+AGENT_PROVIDER=pi|codex|claude|elevenlabs|gemini|gemini-live
 CODEX_BIN=codex
+CLAUDE_BIN=claude
 PI_BIN=pi
 AGENT_MODEL=
-PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex
+PI_SPEAK_EXECUTION_ROUTER_MODE=auto|pi|codex|claude
 AGENT_CWD=
 AGENT_WORKSPACE=
-PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
+PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|gemini|openai|elevenlabs|sag|higgs|stable-audio
 PI_SPEAK_REWRITE_ENABLED=true|false
 PI_SPEAK_WAKE_PHRASE=PK
 PI_SPEAK_MONO_ACTIVITY_TIMEOUT=15
@@ -674,7 +802,9 @@ PI_SPEAK_WAKE_FUZZY_MAX_DISTANCE=0|1|2              # optional override
 PI_SPEAK_WAKE_COMPACT_PREFIX_ENABLED=true|false     # optional override
 ```
 
-If `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, explicit `AGENT_PROVIDER=pi` or `AGENT_PROVIDER=codex` controls which backend remote turns dispatch to. Set the router mode to `auto` when you want the conversation router to choose Pi or Codex from the reduced task.
+If `PI_SPEAK_EXECUTION_ROUTER_MODE` is unset, explicit `AGENT_PROVIDER=pi`, `AGENT_PROVIDER=codex`, or `AGENT_PROVIDER=claude` controls which backend remote turns dispatch to. Set the router mode to `auto` when you want the conversation router to choose from the reduced task, while phone/app-selected provider overrides still win for that turn.
+
+The gateway provider contract currently treats `codex` and `claude` as resumable CLI session providers. Recent Codex and Claude sessions can show resume commands in the mobile/session dashboard, while `pi` remains a direct turn provider without stored-session resume support.
 
 ### Rewrite
 
@@ -700,9 +830,9 @@ PI_SPEAK_OPENAI_BASE_URL=https://api.openai.com/v1
 ### ElevenLabs
 
 ```text
-ELEVENLABS_API_KEY_REDACTED
-REDACTED_ELEVENLABS_HISTORY_LINE
-REDACTED_ELEVENLABS_HISTORY_LINE
+# ELEVENLABS_API_KEY is read from your environment
+PI_SPEAK_ELEVENLABS_VOICE_ID=<voice-id>
+PI_SPEAK_ELEVENLABS_MODEL_ID=eleven_flash_v2_5
 ```
 
 ### Vertex AI Gemini
@@ -712,11 +842,36 @@ PI_SPEAK_GEMINI_BACKEND=vertex
 PI_SPEAK_VERTEX_API_KEY=<optional-vertex-api-key>
 GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
 GOOGLE_CLOUD_LOCATION=us-central1
-PI_SPEAK_GEMINI_TEXT_MODEL=gemini-2.5-flash
-PI_SPEAK_GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+PI_SPEAK_GEMINI_TEXT_MODEL=gemini-3.5-flash
+PI_SPEAK_GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
+PI_SPEAK_TTS_PROVIDER=gemini
+PI_SPEAK_GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview
+PI_SPEAK_GEMINI_TTS_VOICE=Kore
 ```
 
 Run `gcloud auth application-default login` on the machine hosting the tray/gateway, or set `PI_SPEAK_VERTEX_API_KEY` to a Vertex AI API key. Enable the Vertex AI API on the Cloud project.
+
+### Google Cloud Speech-to-Text
+
+`google` is Google Cloud Speech-to-Text v2 using Google Cloud ADC from `gcloud auth application-default login`, not Gemini TTS. `PI_SPEAK_VERTEX_API_KEY` does not authenticate Speech STT. One-time setup on the host:
+
+```text
+gcloud auth application-default login
+gcloud services enable speech.googleapis.com --project <your-gcloud-project>
+```
+
+Project resolution order: `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, `PI_SPEAK_VERTEX_PROJECT`, then ADC discovery.
+
+```text
+GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
+# optional:
+PI_SPEAK_GOOGLE_STT_LOCATION=global
+PI_SPEAK_GOOGLE_STT_MODEL=chirp_3
+PI_SPEAK_STT_LANGUAGE=en-US
+PI_SPEAK_REMOTE_STT_PROVIDER=google
+```
+
+`PI_SPEAK_STT_LANGUAGE` feeds both Google and ElevenLabs STT. Defaults differ: Google uses `en-US`; ElevenLabs uses `en`.
 
 ### Edge TTS
 
@@ -736,7 +891,7 @@ WHISPER_MODEL=tiny
 WHISPER_DEVICE=cpu
 WHISPER_COMPUTE=int8
 PI_SPEAK_REMOTE_WHISPER_MODEL=base
-PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai
+PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai|elevenlabs|google
 ```
 
 `PI_SPEAK_PYTHON` and `PI_SPEAK_SPEAK11_PATH` are now the first-class override path for local Python audio setups. When they are unset, Pi scans the normal Windows user-site `Python*/Scripts` locations before falling back to PATH resolution.
@@ -796,6 +951,7 @@ Check these in order:
 2. `/remote token`
 3. `PI_SPEAK_REMOTE_STT_PROVIDER`
 4. OpenAI key or local whisper setup
+5. For `google` STT: Google Cloud ADC (`gcloud auth application-default login`), Speech-to-Text API enabled, and a resolvable project (`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `PI_SPEAK_VERTEX_PROJECT`, then ADC discovery). `PI_SPEAK_VERTEX_API_KEY` does not authenticate Speech STT.
 
 ### Speech is using the wrong provider
 
@@ -804,7 +960,7 @@ Check:
 ```text
 /speak status
 /speak providers
-/speak provider edge
+/speak provider gemini
 ```
 
 ### Telegram pairing is stuck
@@ -820,7 +976,11 @@ Then link again with the fresh code.
 
 ## Testing
 
+Synthetic `/v1/live` text smoke: `node ./dist/scripts/synthetic-live-smoke.js --dry-run` (or omit `--dry-run` against a running gateway).
+TTS/STT provider latency (after `npm run build`): `node dist/scripts/benchmark-tts.js --dry-run --text "hello"` and `node dist/scripts/benchmark-stt.js --dry-run --audio-file <wav> --providers google`. Dry-run prints the plan only (no JSON, no provider calls). Default STT providers stay `local openai elevenlabs`.
+
 Run the automated production-readiness checks with:
+
 
 ```text
 npm test
@@ -856,6 +1016,7 @@ For a compact operator worksheet, use `docs/REMOTE_VALIDATION_RUN_SHEET.md`.
 ## Files You Will Care About
 
 - [index.ts](./index.ts)
+- [realtime-gateway.ts](./realtime-gateway.ts)
 - [tts.ts](./tts.ts)
 - [pk-speak.ts](./pk-speak.ts)
 - [pk-speak-mcp.ts](./pk-speak-mcp.ts)

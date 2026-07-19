@@ -13,6 +13,17 @@ data class GatewaySessionDashboard(
     val sessions: List<GatewaySessionEntry> = emptyList()
 )
 
+data class GatewaySessionSubagentEntry(
+    val id: String = "",
+    val name: String = "",
+    val status: String? = null,
+    val sessionPath: String? = null,
+    val cwd: String? = null,
+    val activity: String? = null,
+    val createdAt: Long? = null,
+    val lastActivity: Long? = null
+)
+
 data class GatewaySessionEntry(
     val name: String = "",
     val path: String? = null,
@@ -28,7 +39,16 @@ data class GatewaySessionEntry(
     val ready: Boolean = false,
     val isReady: Boolean = false,
     val activity: String? = null,
-    val aliases: List<String> = emptyList()
+    val aliases: List<String> = emptyList(),
+    val archived: Boolean = false,
+    val stale: Boolean = false,
+    val kind: String? = null,
+    val source: String? = null,
+    val model: String? = null,
+    val role: String? = null,
+    val createdAt: Long? = null,
+    val lastActivity: Long? = null,
+    val subagents: List<GatewaySessionSubagentEntry> = emptyList()
 ) {
     val displayCwd: String
         get() = workingDirectory?.takeIf { it.isNotBlank() }

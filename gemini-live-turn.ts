@@ -1,12 +1,34 @@
-import { GoogleGenAI, Modality, type LiveServerMessage } from "@google/genai";
+import { GoogleGenAI, Modality, Type, type LiveServerMessage, type LiveServerToolCall } from "@google/genai";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RemoteTurnResult } from "./remote-turn-manager.js";
 
-const DEFAULT_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025";
-const DEFAULT_TEXT_MODEL = "gemini-2.5-flash";
+const DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview";
+const DEFAULT_VERTEX_LIVE_MODEL = "gemini-3.1-flash-live-preview";
+const DEFAULT_TEXT_MODEL = "gemini-3.5-flash";
 const DEFAULT_TIMEOUT_MS = 45000;
+// Vertex Live (BidiGenerateContent) wants v1beta1; the developer API wants v1beta.
+const DEFAULT_VERTEX_API_VERSION = "v1beta1";
+// Vertex serves Gemini Live publisher models from the `global` location, not regional ones.
+const DEFAULT_VERTEX_LIVE_LOCATION = "global";
+
+export const GEMINI_LIVE_MODEL_OPTIONS = [
+	"gemini-3.1-flash-live-preview",
+	"gemini-live-2.5-flash-native-audio",
+	"gemini-2.5-flash-native-audio-preview-12-2025",
+] as const;
+
+export const GEMINI_TEXT_MODEL_OPTIONS = [
+	"gemini-3.5-flash",
+	"9router/ag/gemini-3-5-flash-high",
+	"gemini-3.1-flash-lite",
+	"gemini-2.5-flash",
+] as const;
+
+export const GEMINI_TTS_MODEL_OPTIONS = [
+	"gemini-3.1-flash-tts-preview",
+] as const;
 
 type GeminiBackend = "developer-api" | "vertex";
 
@@ -15,12 +37,25 @@ export function isGeminiLiveConfigured(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export function getGeminiLiveModel(env: NodeJS.ProcessEnv = process.env) {
-	return env.PI_SPEAK_GEMINI_LIVE_MODEL?.trim() || DEFAULT_LIVE_MODEL;
+	const override = env.PI_SPEAK_GEMINI_LIVE_MODEL?.trim();
+	if (override) return override;
+	return getGeminiBackend(env) === "vertex" ? DEFAULT_VERTEX_LIVE_MODEL : DEFAULT_LIVE_MODEL;
+}
+
+// Vertex Live requires apiVersion v1beta1; the generic PI_SPEAK_GEMINI_API_VERSION
+// (often v1beta or v1) is correct for the developer API but breaks the Vertex Live
+// websocket handshake. Resolve per-backend, honoring an explicit Vertex-only override.
+export function getGeminiApiVersion(backend: GeminiBackend, env: NodeJS.ProcessEnv = process.env) {
+	if (backend === "vertex") {
+		return env.PI_SPEAK_VERTEX_API_VERSION?.trim() || DEFAULT_VERTEX_API_VERSION;
+	}
+	return env.PI_SPEAK_GEMINI_API_VERSION?.trim() || "v1beta";
 }
 
 export function getGeminiBackend(env: NodeJS.ProcessEnv = process.env): GeminiBackend {
 	const configured = (env.PI_SPEAK_GEMINI_BACKEND || env.GOOGLE_GENAI_BACKEND || "").trim().toLowerCase();
 	if (configured === "vertex" || configured === "vertexai" || configured === "gcloud") return "vertex";
+	if (configured === "developer-api" || configured === "developer" || configured === "api") return "developer-api";
 	if (isTruthy(env.GOOGLE_GENAI_USE_VERTEXAI) || isTruthy(env.GOOGLE_GENAI_USE_ENTERPRISE)) return "vertex";
 	if (env.PI_SPEAK_VERTEX_API_KEY) return "vertex";
 	if (!env.GOOGLE_API_KEY && !env.GEMINI_API_KEY && getVertexConfig(env)) return "vertex";
@@ -34,15 +69,25 @@ function getVertexConfig(env: NodeJS.ProcessEnv = process.env) {
 	return { project, location };
 }
 
-function createGeminiClient(env: NodeJS.ProcessEnv = process.env, apiVersion = env.PI_SPEAK_GEMINI_API_VERSION || "v1beta") {
-	if (getGeminiBackend(env) === "vertex") {
+export function createGeminiClient(
+	env: NodeJS.ProcessEnv = process.env,
+	options: { live?: boolean } = {},
+) {
+	const backend = getGeminiBackend(env);
+	const apiVersion = getGeminiApiVersion(backend, env);
+	if (backend === "vertex") {
 		const vertex = getVertexConfig(env);
 		if (vertex) {
+			// Vertex Live publisher models are served from `global`; regional locations
+			// resolve fine for text/generateContent but reject the Live websocket.
+			const location = options.live
+				? env.PI_SPEAK_VERTEX_LIVE_LOCATION?.trim() || DEFAULT_VERTEX_LIVE_LOCATION
+				: vertex.location;
 			return {
 				ai: new GoogleGenAI({
 					vertexai: true,
 					project: vertex.project,
-					location: vertex.location,
+					location,
 					apiVersion,
 				}),
 				backend: "vertex" as const,
@@ -78,10 +123,9 @@ export async function runGeminiTextTurn(
 	prompt: string,
 	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
 ): Promise<RemoteTurnResult> {
-	const apiVersion = process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta";
 	const client = options.apiKey
-		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion }), backend: "developer-api" as const }
-		: createGeminiClient(process.env, apiVersion);
+		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion: getGeminiApiVersion("developer-api") }), backend: "developer-api" as const }
+		: createGeminiClient(process.env);
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), options.timeoutMs || DEFAULT_TIMEOUT_MS);
 	try {
@@ -102,15 +146,28 @@ export async function runGeminiTextTurn(
 	}
 }
 
+export type GeminiToolHandler = (name: string, args: Record<string, unknown>) => Promise<string>;
+
+const OMP_FUNCTION_DECLARATION = {
+	name: "run_coding_task",
+	description: "Execute a coding/system task via the oh-my-pk agent. Use for file ops, code generation, running tests, reading files, or any concrete action. Returns the agent's text output.",
+	parameters: {
+		type: Type.OBJECT,
+		properties: {
+			task: { type: Type.STRING, description: "The task description for the coding agent." },
+		},
+		required: ["task"],
+	},
+};
+
 export async function runGeminiLiveTurn(
 	prompt: string,
-	options: { apiKey?: string; model?: string; timeoutMs?: number } = {},
+	options: { apiKey?: string; model?: string; timeoutMs?: number; toolHandler?: GeminiToolHandler } = {},
 ): Promise<RemoteTurnResult> {
 	const model = options.model || getGeminiLiveModel();
-	const apiVersion = process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta";
 	const client = options.apiKey
-		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion }), backend: "developer-api" as const }
-		: createGeminiClient(process.env, apiVersion);
+		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion: getGeminiApiVersion("developer-api") }), backend: "developer-api" as const }
+		: createGeminiClient(process.env, { live: true });
 	const ai = client.ai;
 	const audioChunks: Buffer[] = [];
 	let audioMimeType = "audio/pcm;rate=24000";
@@ -119,6 +176,25 @@ export async function runGeminiLiveTurn(
 	let turnComplete = false;
 	let session: Awaited<ReturnType<typeof ai.live.connect>> | undefined;
 	const timeoutMs = options.timeoutMs || Number.parseInt(process.env.PI_SPEAK_GEMINI_LIVE_TIMEOUT_MS || String(DEFAULT_TIMEOUT_MS), 10);
+	const withTools = !!options.toolHandler;
+
+	const handleToolCall = async (toolCall: LiveServerToolCall) => {
+		if (!session || !options.toolHandler) return;
+		const functionResponses: Array<{ id: string; name: string; response: { output: string } }> = [];
+		for (const fc of toolCall.functionCalls || []) {
+			if (!fc.id || !fc.name) continue;
+			let output: string;
+			try {
+				output = await options.toolHandler(fc.name, (fc.args || {}) as Record<string, unknown>);
+			} catch (err) {
+				output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+			}
+			functionResponses.push({ id: fc.id, name: fc.name, response: { output } });
+		}
+		if (functionResponses.length > 0) {
+			session.sendToolResponse({ functionResponses });
+		}
+	};
 
 	const result = await new Promise<RemoteTurnResult>((resolve, reject) => {
 		let settled = false;
@@ -157,13 +233,19 @@ export async function runGeminiLiveTurn(
 		};
 		const timer = setTimeout(finish, timeoutMs);
 
+		const config: Parameters<typeof ai.live.connect>[0]["config"] = {
+			responseModalities: [Modality.AUDIO],
+			outputAudioTranscription: {},
+			systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT ||
+				(withTools
+					? "You are a voice assistant for a coding workflow. For conversational questions, reply directly and briefly. For tasks that require file access, code execution, or system actions, call run_coding_task with the task description and narrate the result naturally."
+					: "You are a concise voice coding assistant."),
+			...(withTools ? { tools: [{ functionDeclarations: [OMP_FUNCTION_DECLARATION] }] } : {}),
+		};
+
 		ai.live.connect({
 			model,
-			config: {
-				responseModalities: [Modality.AUDIO],
-				outputAudioTranscription: {},
-				systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || "You are a concise voice coding assistant.",
-			},
+			config,
 			callbacks: {
 				onopen: () => {},
 				onmessage: (message: LiveServerMessage) => {
@@ -173,6 +255,10 @@ export async function runGeminiLiveTurn(
 						if (!part.inlineData?.data) continue;
 						if (part.inlineData.mimeType) audioMimeType = part.inlineData.mimeType;
 						audioChunks.push(Buffer.from(part.inlineData.data, "base64"));
+					}
+					if (message.toolCall) {
+						handleToolCall(message.toolCall).catch(fail);
+						return;
 					}
 					if (message.serverContent?.turnComplete) {
 						turnComplete = true;

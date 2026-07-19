@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Overrides the standard app_name for the e-ink flavor so the launcher label
+         distinguishes the two side-by-side installs. -->
+    <string name="app_name">pi-speak E-Ink</string>
+</resources>

@@ -6,6 +6,8 @@ export type PersistedSessionRouting = {
 	updatedAt: number;
 	sessions: Record<string, string>;
 	aliases: Record<string, string>;
+	/** Full session paths the user has archived (track-and-hide; reversible). */
+	archivedPaths: string[];
 };
 
 function getStoreRootDir() {
@@ -50,6 +52,15 @@ function sanitizeRecord(value: unknown): Record<string, string> {
 	return clean;
 }
 
+function sanitizeStringArray(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const seen = new Set<string>();
+	for (const entry of value) {
+		if (typeof entry === "string" && entry.trim()) seen.add(entry);
+	}
+	return [...seen];
+}
+
 export function loadPersistedSessionRouting(): PersistedSessionRouting {
 	const stored = readJsonFile(getSessionRoutingStorePath()) as Partial<PersistedSessionRouting> | undefined;
 	return {
@@ -57,15 +68,21 @@ export function loadPersistedSessionRouting(): PersistedSessionRouting {
 		updatedAt: typeof stored?.updatedAt === "number" ? stored.updatedAt : 0,
 		sessions: sanitizeRecord(stored?.sessions),
 		aliases: sanitizeRecord(stored?.aliases),
+		archivedPaths: sanitizeStringArray(stored?.archivedPaths),
 	};
 }
 
-export function persistSessionRouting(state: { sessions: Record<string, string>; aliases: Record<string, string> }) {
+export function persistSessionRouting(state: {
+	sessions: Record<string, string>;
+	aliases: Record<string, string>;
+	archivedPaths?: string[];
+}) {
 	ensureStoreDir();
 	writeJsonFile(getSessionRoutingStorePath(), {
 		version: 1,
 		updatedAt: Date.now(),
 		sessions: { ...state.sessions },
 		aliases: { ...state.aliases },
+		archivedPaths: sanitizeStringArray(state.archivedPaths),
 	});
 }

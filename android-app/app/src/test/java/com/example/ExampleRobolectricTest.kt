@@ -16,6 +16,7 @@ class ExampleRobolectricTest {
   fun `read string from context`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val appName = context.getString(R.string.app_name)
-    assertEquals("Pi Speak", appName)
+    val expectedName = if (context.packageName.endsWith(".boox")) "pi-speak E-Ink" else "Pi Speak"
+    assertEquals(expectedName, appName)
   }
 }

@@ -79,17 +79,47 @@ export function discoverAgentInventory(options: { recentLimit?: number } = {}): 
 		running,
 		recent: mergeRecentSessions([
 			...discoverCodexRecentSessions(recentLimit),
-			...discoverRecentAgentSessions(recentLimit),
+			...discoverClaudeRecentSessions(recentLimit),
 		]).slice(0, recentLimit),
 	};
 }
 
+let inventoryRefreshInFlight = false;
+
+function refreshInventorySnapshot(): AgentDiscoverySnapshot {
+	const snapshot = discoverAgentInventory();
+	cachedInventory = { at: Date.now(), snapshot };
+	return snapshot;
+}
+
+function scheduleInventoryRefresh(): void {
+	if (inventoryRefreshInFlight) return;
+	inventoryRefreshInFlight = true;
+	// Defer the heavy discovery (PowerShell process scan + jsonl reads) off the
+	// request path so the dashboard returns the last snapshot instantly and only
+	// pays the scan cost asynchronously (serve-stale-while-revalidate).
+	setImmediate(() => {
+		try {
+			refreshInventorySnapshot();
+		} catch {
+			// Keep the previous snapshot on refresh failure.
+		} finally {
+			inventoryRefreshInFlight = false;
+		}
+	});
+}
+
 export function discoverAgentInventoryCached(ttlMs = DEFAULT_AGENT_DISCOVERY_TTL_MS): AgentDiscoverySnapshot {
 	const now = Date.now();
-	if (cachedInventory && now - cachedInventory.at < ttlMs) return cachedInventory.snapshot;
-	const snapshot = discoverAgentInventory();
-	cachedInventory = { at: now, snapshot };
-	return snapshot;
+	// ttlMs === 0 forces a fresh, blocking scan (callers that need
+	// up-to-the-moment data, e.g. resume resolution).
+	if (ttlMs <= 0) return refreshInventorySnapshot();
+	if (cachedInventory) {
+		if (now - cachedInventory.at >= ttlMs) scheduleInventoryRefresh();
+		return cachedInventory.snapshot;
+	}
+	// No snapshot yet: the very first call must block to return real data.
+	return refreshInventorySnapshot();
 }
 
 function discoverRunningAgentProcesses(): RunningAgentProcess[] {
@@ -166,33 +196,6 @@ function discoverRunningAgentProcesses(): RunningAgentProcess[] {
 	}
 }
 
-function discoverRecentAgentSessions(limit: number): RecentAgentSession[] {
-	try {
-		const output = execFileSync("sm", ["sessions", "list", "--json", "-n", String(Math.max(0, limit))], {
-			encoding: "utf8",
-			windowsHide: true,
-			timeout: 10000,
-		}).trim();
-		if (!output) return [];
-		const parsed = JSON.parse(output);
-		const rows = Array.isArray(parsed) ? parsed : [parsed];
-		return rows
-			.map((row) => ({
-				provider: stringValue(row.provider) || "agent",
-				path: stringValue(row.path),
-				sessionId: stringValue(row.session_id) || undefined,
-				title: stringValue(row.title) || undefined,
-				updatedAt: typeof row.updated_at === "string" || row.updated_at === null ? row.updated_at : undefined,
-				cwd: stringValue(row.cwd) || undefined,
-				cwdBasename: stringValue(row.cwd_basename) || stringValue(row.cwdBasename) || undefined,
-				sourceHint: stringValue(row.source_hint) || undefined,
-			}))
-			.filter((session) => !!session.path);
-	} catch {
-		return [];
-	}
-}
-
 function discoverCodexRecentSessions(limit: number): RecentAgentSession[] {
 	const root = join(homedir(), ".codex", "sessions");
 	if (!existsSync(root)) return [];
@@ -217,6 +220,58 @@ function discoverCodexRecentSessions(limit: number): RecentAgentSession[] {
 				sourceHint: "codex-session",
 			};
 		});
+}
+
+function discoverClaudeRecentSessions(limit: number): RecentAgentSession[] {
+	const root = join(homedir(), ".claude", "projects");
+	if (!existsSync(root)) return [];
+	const files: { path: string; mtimeMs: number; updatedAt: string }[] = [];
+	collectJsonlFiles(root, files);
+	return files
+		.sort((left, right) => right.mtimeMs - left.mtimeMs)
+		.slice(0, Math.max(0, limit))
+		.map((file) => {
+			const meta = readClaudeSessionMeta(file.path);
+			const cwd = stringValue(meta.cwd);
+			const cwdBasename = cwd ? cwd.replace(/^.*[\\/]/, "") : undefined;
+			const sessionId = meta.sessionId || file.path.replace(/^.*[\\/]/, "").replace(/\.jsonl$/i, "");
+			return {
+				provider: "claude",
+				path: file.path,
+				sessionId,
+				title: cwdBasename ? `Claude: ${cwdBasename}` : "Claude session",
+				updatedAt: file.updatedAt,
+				cwd: cwd || undefined,
+				cwdBasename,
+				sourceHint: "claude-session",
+			};
+		});
+}
+
+function readClaudeSessionMeta(path: string): { cwd: string; sessionId: string } {
+	// Claude jsonl records carry `cwd`/`sessionId` on the first handful of lines,
+	// not necessarily line 1. Read a small prefix and scan up to 16 lines so the
+	// per-file cost stays in the sub-millisecond range (vs. the 2.8s `sm` spawn).
+	let cwd = "";
+	let sessionId = "";
+	const prefix = readFilePrefix(path, 32 * 1024);
+	if (!prefix) return { cwd, sessionId };
+	const lines = prefix.split("\n");
+	for (let i = 0; i < lines.length && i < 16; i++) {
+		const line = lines[i].trim();
+		if (!line) continue;
+		try {
+			const parsed = JSON.parse(line);
+			if (parsed && typeof parsed === "object") {
+				if (!cwd) cwd = stringValue((parsed as Record<string, unknown>).cwd);
+				if (!sessionId) sessionId = stringValue((parsed as Record<string, unknown>).sessionId);
+				if (cwd && sessionId) break;
+			}
+		} catch {
+			// Skip partial trailing line or malformed record.
+		}
+	}
+	return { cwd, sessionId };
 }
 
 function collectJsonlFiles(dir: string, files: { path: string; mtimeMs: number; updatedAt: string }[]): void {
@@ -256,15 +311,13 @@ function readCodexSessionMeta(path: string): Record<string, unknown> | undefined
 	return undefined;
 }
 
-function readFileFirstLine(path: string, maxBytes: number): string {
+function readFilePrefix(path: string, maxBytes: number): string {
 	let fd: number | undefined;
 	try {
 		fd = openSync(path, "r");
 		const buffer = Buffer.alloc(maxBytes);
 		const bytes = readSync(fd, buffer, 0, maxBytes, 0);
-		const prefix = buffer.subarray(0, bytes).toString("utf8");
-		const newline = prefix.indexOf("\n");
-		return (newline >= 0 ? prefix.slice(0, newline) : prefix).trim();
+		return buffer.subarray(0, bytes).toString("utf8");
 	} catch {
 		return "";
 	} finally {
@@ -272,6 +325,13 @@ function readFileFirstLine(path: string, maxBytes: number): string {
 			try { closeSync(fd); } catch {}
 		}
 	}
+}
+
+function readFileFirstLine(path: string, maxBytes: number): string {
+	const prefix = readFilePrefix(path, maxBytes);
+	if (!prefix) return "";
+	const newline = prefix.indexOf("\n");
+	return (newline >= 0 ? prefix.slice(0, newline) : prefix).trim();
 }
 
 function mergeRecentSessions(sessions: RecentAgentSession[]): RecentAgentSession[] {

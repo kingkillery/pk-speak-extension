@@ -10,19 +10,34 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import com.example.ui.theme.Canvas as CanvasColor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -46,14 +61,33 @@ import com.example.api.GatewaySessionDashboard
 import com.example.api.GatewaySessionEntry
 import com.example.api.GatewaySessionErrorKind
 import com.example.api.GatewaySessionException
+import com.example.api.GatewayRouteUpdate
 import com.example.api.VoiceAgentClient
 import com.example.api.RemoteSlashCommand
+import com.example.audio.StreamingPcmPlayer
+import com.example.audio.StreamingPcmRecorder
 import com.example.audio.AudioHelper
 import com.example.audio.TtsHelper
 import com.example.data.AppPreferences
 import com.example.data.ChatMessage
 import com.example.data.RecordedSession
 import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.theme.Accent
+import com.example.ui.theme.AccentSoft
+import com.example.ui.theme.Error
+import com.example.ui.theme.ErrorContainer
+import com.example.ui.theme.Ink
+import com.example.ui.theme.InkMuted
+import com.example.ui.theme.Line
+import com.example.ui.theme.SelectedFill
+import com.example.ui.theme.Success
+import com.example.ui.theme.SuccessSoft
+import com.example.ui.theme.SurfaceMuted
+import com.example.ui.theme.SurfacePaper
+import com.example.ui.theme.SurfaceSubtle
+import com.example.ui.theme.Warn
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
@@ -61,11 +95,17 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import android.media.AudioRecord
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
+import okhttp3.WebSocket
+import okio.ByteString
 
 class MainActivity : ComponentActivity() {
     private lateinit var audioHelper: AudioHelper
@@ -89,7 +129,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFFF4F1E9))
+                        .background(CanvasColor)
                 ) { innerPadding ->
                     PiSpeakConsoleScreen(
                         audioHelper = audioHelper,
@@ -110,34 +150,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleDeepLink(intent: Intent?) {
-        intent?.data?.let { uri ->
-            if (uri.scheme == "pi-speak" && uri.host == "setup") {
-                val baseUrl = uri.getQueryParameter("base_url")
-                val token = uri.getQueryParameter("token")
-                val profileName = uri.getQueryParameter("profile_name") ?: uri.getQueryParameter("machine_id")
-                val connectionMode = uri.getQueryParameter("connection_mode")
-                val defaultTarget = uri.getQueryParameter("default_target")
-                    ?: uri.getQueryParameter("target")
-                    ?: uri.getQueryParameter("session")
-                val agentProvider = uri.getQueryParameter("agent_provider")
-                val workspaceRoot = uri.getQueryParameter("workspace_root")
-                val workspacePath = uri.getQueryParameter("workspace_path")
-
-                baseUrl?.let { appPreferences.targetIpAddress = it.trim().trimEnd('/') }
-                token?.takeIf { it.isNotBlank() }?.let { appPreferences.remoteToken = it }
-                profileName?.let { appPreferences.machineProfileName = it }
-                defaultTarget?.takeIf { it.isNotBlank() }?.let { appPreferences.codexSessionName = it }
-                workspaceRoot?.takeIf { it.isNotBlank() }?.let { appPreferences.workspaceRoot = it }
-                workspacePath?.takeIf { it.isNotBlank() }?.let { appPreferences.workspacePath = it }
-                connectionMode?.let { appPreferences.connectionMode = it }
-                when (agentProvider?.lowercase()) {
-                    "codex", "pi" -> appPreferences.activeAgent = "Local Codex (Pi)"
-                    "elevenlabs" -> appPreferences.activeAgent = "Gateway Voice (ElevenLabs)"
-                    "gemini", "gemini-live", "vertex" -> appPreferences.activeAgent = "Gateway Gemini (Vertex AI)"
-                }
-                Log.d("MainActivity", "Successfully processed zero-touch onboarding QR link: base_url=$baseUrl, profile=$profileName, target=$defaultTarget")
-            }
-        }
+        val setup = parseSetupDeepLink(intent?.data) ?: return
+        applySetupDeepLink(appPreferences, setup)
+        Log.d(
+            "MainActivity",
+            "Successfully processed zero-touch onboarding QR link: base_url=${setup.baseUrl}, profile=${setup.profileName}, target=${setup.defaultTarget}"
+        )
     }
 
     override fun onDestroy() {
@@ -172,6 +190,7 @@ fun PiSpeakConsoleScreen(
             chatMessages = prefs.getChatMessages(studioConversationKey)
         )
     }
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     // Synchronize agent state
     LaunchedEffect(selectedAgent) {
@@ -184,7 +203,7 @@ fun PiSpeakConsoleScreen(
         "studio" -> "Studio"
         "discovery" -> "Discover"
         "commands" -> "Commands"
-        "sessions" -> "Sessions"
+        "sessions" -> "Agent Hub"
         "settings" -> "Configure"
         else -> "Pi Speak"
     }
@@ -200,51 +219,62 @@ fun PiSpeakConsoleScreen(
         }
     }
 
+    // Health polling only runs while the app is visible (STARTED); it pauses in the
+    // background instead of hitting the gateway every 5s for the life of the process.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     LaunchedEffect(Unit) {
-        var unreachableSinceMs: Long? = null
-        var lastLoggedConnectionStatus = ""
-        while (true) {
-            val healthy = client.pingHealth()
-            if (healthy) {
-                unreachableSinceMs = null
-                studioState.isGatewayConnected = true
-                studioState.isReconnecting = false
-                studioState.connectionStatusText = "Connected"
-                studioState.connectionBannerText = ""
-            } else {
-                val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
-                unreachableSinceMs = firstFailureMs
-                studioState.isGatewayConnected = false
-                studioState.isReconnecting = true
-                studioState.connectionStatusText = "Reconnecting..."
-                val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
-                codexSessionName = prefs.codexSessionName
-                if (result.connected) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var unreachableSinceMs: Long? = null
+            var lastLoggedConnectionStatus = ""
+            while (true) {
+                val startTime = System.currentTimeMillis()
+                val healthy = client.pingHealth()
+                val latency = System.currentTimeMillis() - startTime
+                if (healthy) {
                     unreachableSinceMs = null
                     studioState.isGatewayConnected = true
                     studioState.isReconnecting = false
+                    studioState.connectionLatencyMs = latency
                     studioState.connectionStatusText = "Connected"
                     studioState.connectionBannerText = ""
                 } else {
-                    val elapsedMs = System.currentTimeMillis() - firstFailureMs
-                    studioState.isReconnecting = elapsedMs <= 10_000L
-                    studioState.connectionStatusText = if (studioState.isReconnecting) "Searching for gateway..." else "Gateway unreachable"
-                    if (studioState.connectionBannerText.isBlank()) {
-                        studioState.connectionBannerText = result.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+                    val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
+                    unreachableSinceMs = firstFailureMs
+                    studioState.isGatewayConnected = false
+                    studioState.isReconnecting = true
+                    studioState.connectionStatusText = "Reconnecting..."
+                    val reconnectStartTime = System.currentTimeMillis()
+                    val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+                    val reconnectLatency = System.currentTimeMillis() - reconnectStartTime
+                    codexSessionName = prefs.codexSessionName
+                    if (result.connected) {
+                        unreachableSinceMs = null
+                        studioState.isGatewayConnected = true
+                        studioState.isReconnecting = false
+                        studioState.connectionLatencyMs = reconnectLatency
+                        studioState.connectionStatusText = "Connected"
+                        studioState.connectionBannerText = ""
+                    } else {
+                        val elapsedMs = System.currentTimeMillis() - firstFailureMs
+                        studioState.isReconnecting = elapsedMs <= 10_000L
+                        studioState.connectionStatusText = if (studioState.isReconnecting) "Searching for gateway..." else "Gateway unreachable"
+                        if (studioState.connectionBannerText.isBlank()) {
+                            studioState.connectionBannerText = result.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+                        }
                     }
                 }
+                if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
+                    lastLoggedConnectionStatus = studioState.connectionStatusText
+                    Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
+                }
+                delay(5_000)
             }
-            if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
-                lastLoggedConnectionStatus = studioState.connectionStatusText
-                Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
-            }
-            delay(5_000)
         }
     }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        scrimColor = Color(0x66211C16),
+        scrimColor = Ink.copy(alpha = 0.4f),
         drawerContent = {
             PiSpeakDrawer(
                 activeTab = currentTab,
@@ -265,12 +295,12 @@ fun PiSpeakConsoleScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFFF4F1E9))
+            .background(CanvasColor)
     ) {
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Top bar: menu / serif title / settings (Claude "paper" header)
+            // Slim top bar: menu / title+status / settings (Claude Code mobile style)
             HeaderSection(
                 title = tabTitle,
                 sessionName = codexSessionName,
@@ -278,15 +308,17 @@ fun PiSpeakConsoleScreen(
                 isGatewayConnected = studioState.isGatewayConnected,
                 isReconnecting = studioState.isReconnecting,
                 connectionStatusText = studioState.connectionStatusText,
+                connectionLatencyMs = studioState.connectionLatencyMs,
                 onSettingsClick = { currentTab = "settings" }
             )
 
-            // Content Container with smooth fade effects
+            // Content container. Studio renders edge-to-edge like a chat surface;
+            // the list-style tabs keep a small gutter.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .padding(horizontal = 16.dp)
+                    .padding(horizontal = if (currentTab == "studio") 0.dp else 12.dp)
             ) {
                 when (currentTab) {
                     "studio" -> StudioTabContent(
@@ -332,29 +364,13 @@ fun PiSpeakConsoleScreen(
                     )
                 }
             }
-
-            // Android standard decoration indicator at bottom
-            Spacer(modifier = Modifier.height(12.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(width = 120.dp, height = 4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(Color(0xFFE3DCCC))
-                )
-            }
         }
         ConnectionErrorBanner(
             message = studioState.connectionBannerText,
             onDismiss = { studioState.connectionBannerText = "" },
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 76.dp, start = 16.dp, end = 16.dp)
+                .padding(top = 60.dp, start = 16.dp, end = 16.dp)
         )
     }
     }
@@ -368,85 +384,81 @@ fun HeaderSection(
     isGatewayConnected: Boolean,
     isReconnecting: Boolean,
     connectionStatusText: String,
+    connectionLatencyMs: Long = -1L,
     onSettingsClick: () -> Unit
 ) {
     val connectionColor = gatewayConnectionIndicatorColor(isGatewayConnected, isReconnecting)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        // Menu (opens the navigation drawer)
-        Box(
+    val statusLabel = "$connectionStatusText | Codex: $sessionName"
+    // Flat, slim app bar (Claude Code mobile style): icon / title+status / icon,
+    // separated from content by a hairline instead of a floating card.
+    Column(modifier = Modifier.fillMaxWidth().background(CanvasColor)) {
+        Row(
             modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .clickable { onMenuClick() },
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(text = "≡", color = Color(0xFF211C16), fontSize = 22.sp)
-        }
-
-        Column(
-            modifier = Modifier.weight(1f),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+            IconButton(onClick = onMenuClick) {
+                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = Ink)
+            }
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 2.dp),
             ) {
                 Text(
                     text = title,
-                    color = Color(0xFF211C16),
-                    style = MaterialTheme.typography.titleLarge,
+                    color = Ink,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(text = "⌄", color = Color(0xFF6E665A), fontSize = 16.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(connectionColor)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = statusLabel,
+                        color = InkMuted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (isGatewayConnected && connectionLatencyMs >= 0L) {
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "${connectionLatencyMs}ms",
+                            color = connectionColor,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
             }
-            Spacer(modifier = Modifier.height(2.dp))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(connectionColor)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "$connectionStatusText | Codex: $sessionName",
-                    color = Color(0xFF6E665A),
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+            IconButton(onClick = onSettingsClick) {
+                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = InkMuted)
             }
         }
-
-        // Settings
         Box(
             modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .clickable { onSettingsClick() },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(text = "⚙", color = Color(0xFF211C16), fontSize = 18.sp)
-        }
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Line)
+        )
     }
 }
 
 fun gatewayConnectionIndicatorColor(isGatewayConnected: Boolean, isReconnecting: Boolean): Color = when {
-    isGatewayConnected -> Color(0xFF22C55E)
-    isReconnecting -> Color(0xFFF59E0B)
-    else -> Color(0xFFEF4444)
+    isGatewayConnected -> Success
+    isReconnecting -> Warn
+    else -> Error
 }
+
 
 @Composable
 fun ConnectionErrorBanner(
@@ -461,9 +473,9 @@ fun ConnectionErrorBanner(
         modifier = modifier
     ) {
         Surface(
-            color = Color(0xFF3A2424),
+            color = Error,
             shape = RoundedCornerShape(12.dp),
-            border = BorderStroke(1.dp, Color(0xFF7F1D1D)),
+            border = BorderStroke(1.dp, Error),
             shadowElevation = 4.dp
         ) {
             Row(
@@ -474,21 +486,22 @@ fun ConnectionErrorBanner(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFFEF4444))
+                        .background(ErrorContainer)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = message,
-                    color = Color(0xFFFFD7D7),
+                    color = SurfacePaper,
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
                     modifier = Modifier.weight(1f)
                 )
                 TextButton(
                     onClick = onDismiss,
+                    modifier = Modifier.heightIn(min = 44.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                 ) {
-                    Text("Dismiss", color = Color(0xFFFFD7D7), fontSize = 11.sp)
+                    Text("Dismiss", color = SurfacePaper, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -505,8 +518,8 @@ fun PiSpeakDrawer(
     onSettings: () -> Unit
 ) {
     ModalDrawerSheet(
-        drawerContainerColor = Color(0xFFF4F1E9),
-        drawerContentColor = Color(0xFF211C16),
+        drawerContainerColor = CanvasColor,
+        drawerContentColor = Ink,
         drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
         modifier = Modifier.fillMaxWidth(0.84f)
     ) {
@@ -518,7 +531,7 @@ fun PiSpeakDrawer(
             Spacer(modifier = Modifier.height(18.dp))
             Text(
                 text = "Pi Speak",
-                color = Color(0xFF211C16),
+                color = Ink,
                 style = MaterialTheme.typography.headlineMedium,
                 modifier = Modifier.padding(horizontal = 6.dp)
             )
@@ -526,7 +539,7 @@ fun PiSpeakDrawer(
 
             // Accent "New session" action (mirrors Claude's "New chat")
             DrawerRow(
-                glyph = "＋",
+                glyph = "+",
                 label = "New session",
                 selected = false,
                 accent = true,
@@ -534,17 +547,17 @@ fun PiSpeakDrawer(
             )
 
             Spacer(modifier = Modifier.height(4.dp))
-            DrawerRow(glyph = "◉", label = "Studio", selected = activeTab == "studio") { onSelect("studio") }
-            DrawerRow(glyph = "⊚", label = "Discover", selected = activeTab == "discovery") { onSelect("discovery") }
+            DrawerRow(glyph = "St", label = "Studio", selected = activeTab == "studio", mono = true) { onSelect("studio") }
+            DrawerRow(glyph = "Di", label = "Discover", selected = activeTab == "discovery", mono = true) { onSelect("discovery") }
             DrawerRow(glyph = "</>", label = "Commands", selected = activeTab == "commands", mono = true) { onSelect("commands") }
-            DrawerRow(glyph = "≣", label = "Sessions", selected = activeTab == "sessions") { onSelect("sessions") }
-            DrawerRow(glyph = "⚙", label = "Configure", selected = activeTab == "settings") { onSelect("settings") }
+            DrawerRow(glyph = "Hub", label = "Agent Hub", selected = activeTab == "sessions", mono = true) { onSelect("sessions") }
+            DrawerRow(glyph = "Cfg", label = "Configure", selected = activeTab == "settings", mono = true) { onSelect("settings") }
 
             if (recents.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(18.dp))
                 Text(
                     text = "Recent turns",
-                    color = Color(0xFF6E665A),
+                    color = InkMuted,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.5.sp,
@@ -555,7 +568,7 @@ fun PiSpeakDrawer(
                         val label = session.transcriptionText.ifBlank { "Untitled turn" }
                         Text(
                             text = label,
-                            color = Color(0xFF211C16),
+                            color = Ink,
                             fontSize = 14.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -570,7 +583,7 @@ fun PiSpeakDrawer(
             }
 
             Spacer(modifier = Modifier.weight(1f))
-            Divider(color = Color(0xFFE3DCCC))
+            Divider(color = Line)
             // Profile footer with settings cog
             Row(
                 modifier = Modifier
@@ -584,12 +597,12 @@ fun PiSpeakDrawer(
                     modifier = Modifier
                         .size(34.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFFC2542F)),
+                        .background(Accent),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = profileName.take(2).uppercase().ifBlank { "PI" },
-                        color = Color(0xFFFFFFFF),
+                        color = SurfacePaper,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -597,14 +610,14 @@ fun PiSpeakDrawer(
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
                     text = profileName.ifBlank { "Pi Speak" },
-                    color = Color(0xFF211C16),
+                    color = Ink,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Text(text = "⚙", color = Color(0xFF6E665A), fontSize = 18.sp)
+                Text(text = "Tune", color = InkMuted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             }
             Spacer(modifier = Modifier.height(10.dp))
         }
@@ -621,14 +634,14 @@ private fun DrawerRow(
     onClick: () -> Unit
 ) {
     val contentColor = when {
-        accent -> Color(0xFFC2542F)
-        else -> Color(0xFF211C16)
+        accent -> Accent
+        else -> Ink
     }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) Color(0xFFEDE7DB) else Color.Transparent)
+            .background(if (selected) SelectedFill else Color.Transparent)
             .clickable { onClick() }
             .padding(horizontal = 12.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -673,6 +686,92 @@ class StudioRuntimeState(
     var isReconnecting by mutableStateOf(true)
     var connectionStatusText by mutableStateOf("Searching for gateway...")
     var connectionBannerText by mutableStateOf("")
+    var connectionLatencyMs by mutableLongStateOf(-1L)
+    var isRealtimeActive by mutableStateOf(false)
+    var isRealtimeConnected by mutableStateOf(false)
+    val pendingTerminalApprovals = mutableStateListOf<TerminalApprovalPrompt>()
+}
+
+data class TerminalApprovalPrompt(
+    val approvalId: String,
+    val command: String,
+    val cwd: String,
+    val reason: String,
+    val timeoutMs: Int
+)
+
+@Composable
+fun TerminalApprovalCard(
+    approval: TerminalApprovalPrompt,
+    onApprove: () -> Unit,
+    onReject: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = AccentSoft,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, Warn)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "Terminal approval needed",
+                color = Accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.3.sp
+            )
+            Text(
+                text = approval.command.ifBlank { "(unknown command)" },
+                color = Ink,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontFamily = FontFamily.Monospace
+            )
+            val details = listOfNotNull(
+                approval.reason.takeIf { it.isNotBlank() }?.let { "Reason: $it" },
+                approval.cwd.takeIf { it.isNotBlank() }?.let { "CWD: $it" },
+                approval.timeoutMs.takeIf { it > 0 }?.let { "Timeout: ${it}ms" }
+            )
+            if (details.isNotEmpty()) {
+                Text(
+                    text = details.joinToString("\n"),
+                    color = InkMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onReject,
+                    border = BorderStroke(1.dp, Error),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.heightIn(min = 44.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Text("Reject", color = Error, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = onApprove,
+                    colors = ButtonDefaults.buttonColors(containerColor = Success),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.heightIn(min = 44.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Text("Approve", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -685,13 +784,51 @@ fun StudioTabContent(
     runtimeState: StudioRuntimeState,
     appScope: CoroutineScope
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val permissionState = rememberPermissionState(permission = Manifest.permission.RECORD_AUDIO)
     val scope = appScope
     val state = runtimeState
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+
+    // ─── Live (Gemini realtime) session state ────────────────────────────
+    val liveSessionRef = remember { mutableStateOf<RealtimeVoiceSession?>(null) }
+    val liveRecorderRef = remember { mutableStateOf<StreamingPcmRecorder?>(null) }
+    val livePlayerRef = remember { mutableStateOf<StreamingPcmPlayer?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            liveRecorderRef.value?.stop()
+            liveSessionRef.value?.disconnect()
+            livePlayerRef.value?.stop()
+        }
+    }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "recordingPulse")
+    val recordingScale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.08f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
 
     // Live decibels state for custom drawing
     val amplitudeList = remember { mutableStateListOf<Float>().apply { addAll(List(16) { 0.1f }) } }
     var liveAmplitudeJob by remember { mutableStateOf<Job?>(null) }
+
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(state.chatMessages.size, state.transcription, state.isProcessing, state.isRecording, state.latestReply) {
+        val layoutInfo = listState.layoutInfo
+        val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (!shouldFollowConversationTail(lastVisibleIndex, layoutInfo.totalItemsCount)) return@LaunchedEffect
+        val totalCount = state.chatMessages.size + 10
+        if (totalCount > 10) {
+            listState.animateScrollToItem(totalCount)
+        }
+    }
 
     // Real-time synchronized simulated transcription stream
     var wordStreamJob by remember { mutableStateOf<Job?>(null) }
@@ -747,6 +884,139 @@ fun StudioTabContent(
                 state.connectionBannerText = reconnect.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
             }
         }
+    }
+
+    fun stopLiveSession() {
+        liveRecorderRef.value?.stop()
+        liveSessionRef.value?.disconnect()
+        livePlayerRef.value?.stop()
+        liveSessionRef.value = null
+        liveRecorderRef.value = null
+        livePlayerRef.value = null
+        state.isRealtimeActive = false
+        state.isRealtimeConnected = false
+        state.pendingTerminalApprovals.clear()
+    }
+
+    fun startLiveSession() {
+        val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+        val player = StreamingPcmPlayer()
+        val recorder = StreamingPcmRecorder(context)
+        val session = RealtimeVoiceSession(
+            prefs = prefs,
+            listener = object : RealtimeVoiceSessionListener {
+                override fun onConnected(sessionId: String) {
+                    player.start()
+                    try {
+                        recorder.start { seqId, pcm ->
+                            liveSessionRef.value?.sendAudioChunk(seqId, pcm)
+                            // Client-side VAD barge-in: interrupt assistant speech when the
+                            // user starts talking over it (configurable in Settings).
+                            if (player.isPlaying && sharedPrefs.getBoolean("vad_enabled", true)) {
+                                val threshold = sharedPrefs.getFloat("vad_threshold", 1500f).toInt()
+                                if (pcmPeakAmplitude(pcm) > threshold) {
+                                    liveSessionRef.value?.sendInterrupt()
+                                    player.stop()
+                                    player.start()
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        scope.launch {
+                            appendChat("system", "[live] Mic failed to start: ${e.message}")
+                        }
+                    }
+                    scope.launch {
+                        state.isRealtimeConnected = true
+                        appendChat("system", "[live] Connected: $sessionId")
+                    }
+                }
+
+                override fun onAudioChunk(seqId: Int, pcm: ByteArray) {
+                    player.write(seqId, pcm)
+                }
+
+                override fun onTranscript(text: String) {
+                    scope.launch { state.transcription = text }
+                }
+                override fun onTranscriptComplete() = Unit
+
+                override fun onInterrupt() {
+                    player.stop()
+                    player.start()
+                }
+
+                override fun onToolStart(name: String) {
+                    scope.launch { appendChat("system", "[tool] $name") }
+                }
+
+                override fun onToolComplete(name: String, output: String) {
+                    scope.launch { appendChat("system", "[tool done] $name: ${output.take(200)}") }
+                }
+
+                override fun onApprovalRequired(
+                    approvalId: String,
+                    command: String,
+                    reason: String,
+                    cwd: String,
+                    timeoutMs: Int
+                ) {
+                    scope.launch {
+                        state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
+                        state.pendingTerminalApprovals.add(
+                            TerminalApprovalPrompt(
+                                approvalId = approvalId,
+                                command = command,
+                                cwd = cwd,
+                                reason = reason,
+                                timeoutMs = timeoutMs
+                            )
+                        )
+                        state.latestReply = "Terminal approval needed."
+                    }
+                }
+
+                override fun onApprovalResolved(approvalId: String) {
+                    scope.launch {
+                        state.pendingTerminalApprovals.removeAll { it.approvalId == approvalId }
+                    }
+                }
+
+                override fun onError(message: String) {
+                    scope.launch {
+                        state.latestReply = "Realtime error: $message"
+                        appendChat("system", "[live error] $message")
+                        recorder.stop()
+                        player.stop()
+                        liveSessionRef.value = null
+                        liveRecorderRef.value = null
+                        livePlayerRef.value = null
+                        state.isRealtimeActive = false
+                        state.isRealtimeConnected = false
+                    }
+                }
+
+                override fun onDisconnected() {
+                    scope.launch {
+                        if (state.isRealtimeActive) {
+                            appendChat("system", "[live] Disconnected.")
+                            recorder.stop()
+                            player.stop()
+                        }
+                        liveSessionRef.value = null
+                        liveRecorderRef.value = null
+                        livePlayerRef.value = null
+                        state.isRealtimeActive = false
+                        state.isRealtimeConnected = false
+                    }
+                }
+            }
+        )
+        liveSessionRef.value = session
+        liveRecorderRef.value = recorder
+        livePlayerRef.value = player
+        state.isRealtimeActive = true
+        session.connect()
     }
 
     fun stopCurrentTurn() {
@@ -807,6 +1077,7 @@ fun StudioTabContent(
 
     val recordTriggerAction = {
         if (!state.isRecording && !state.isProcessing) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
             ttsHelper.stop()
             audioHelper.stopPlayback()
             state.playingMessageId = null
@@ -821,6 +1092,7 @@ fun StudioTabContent(
 
     val stopAndSendAction = {
         if (state.isRecording) {
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
             state.isRecording = false
             liveAmplitudeJob?.cancel()
             wordStreamJob?.cancel()
@@ -832,11 +1104,19 @@ fun StudioTabContent(
                 state.isProcessing = true
                 var progressJob: Job? = null
                 try {
-                    val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
-                    if (elapsedMs in 0 until minimumVoiceCaptureMs) {
-                        delay(minimumVoiceCaptureMs - elapsedMs)
+                    // stopRecording joins the WAV writer thread (up to 1.5s) — keep it off main.
+                    // On cancellation mid-delay the recorder must still be shut down, or the
+                    // WAV writer thread keeps the mic open until the next recording starts.
+                    val stoppedCleanly = try {
+                        val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
+                        if (elapsedMs in 0 until minimumVoiceCaptureMs) {
+                            delay(minimumVoiceCaptureMs - elapsedMs)
+                        }
+                        withContext(Dispatchers.IO) { audioHelper.stopRecording() }
+                    } catch (e: CancellationException) {
+                        withContext(NonCancellable + Dispatchers.IO) { audioHelper.stopRecording() }
+                        throw e
                     }
-                    val stoppedCleanly = audioHelper.stopRecording()
                     val file = audioHelper.getRecordedFile("turn.wav")
                     Log.d("MainActivity", "Voice recording stopped: stoppedCleanly=$stoppedCleanly, exists=${file.exists()}, bytes=${file.length()}")
                     if (stoppedCleanly && file.exists() && file.length() >= 12_000) {
@@ -932,534 +1212,104 @@ fun StudioTabContent(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top
-    ) {
-        // Minimal status pill at top
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = when {
-                    state.isRecording -> "● Recording"
-                    state.stopStatusText == "Stopping..." -> "● Stopping..."
-                    state.isProcessing -> "● Agent working..."
-                    else -> "● Idle"
-                },
-                color = if (state.isRecording) Color(0xFFC2542F) else Color(0xFF6E665A),
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 8.dp)
-            )
-            if (state.chatMessages.isNotEmpty()) {
-                TextButton(
-                    onClick = {
-                        prefs.clearChatMessages(state.conversationKey)
-                        state.chatMessages = emptyList()
-                        state.transcription = ""
-                        state.latestReply = ""
-                        state.progressText = ""
-                    },
-                    enabled = !state.isProcessing,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                ) {
-                    Text("Clear", color = Color(0xFF8E9199), fontSize = 11.sp)
-                }
-            }
-        }
-
-        // Live Real-Time Transcribe & Response View Card
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(top = 8.dp, bottom = 10.dp)
-        ) {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
-            ) {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    if (state.chatMessages.isNotEmpty()) {
-                        item {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "CONVERSATION LOG",
-                                    color = Color(0xFFC2542F),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp
-                                )
-                                TextButton(
-                                    onClick = {
-                                        prefs.clearChatMessages(state.conversationKey)
-                                        state.chatMessages = emptyList()
-                                        state.transcription = ""
-                                        state.latestReply = ""
-                                        state.progressText = ""
-                                    },
-                                    enabled = !state.isProcessing,
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                                ) {
-                                    Text("Clear", color = Color(0xFF6E665A), fontSize = 10.sp)
-                                }
-                            }
-                        }
-                        items(state.chatMessages, key = { it.id }) { message ->
-                            val isUser = message.role == "user"
-                            val isProgress = message.role == "progress"
-                            val isPlayingThisMessage = state.playingMessageId == message.id
-                            Column(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
-                            ) {
-                                Text(
-                                    text = when (message.role) {
-                                        "user" -> "YOU"
-                                        "assistant" -> prefs.activeAgent.uppercase()
-                                        "progress" -> "PROGRESS"
-                                        else -> "SYSTEM"
-                                    },
-                                    color = when (message.role) {
-                                        "user" -> Color(0xFFC2542F)
-                                        "assistant" -> Color(0xFF2E7D52)
-                                        "progress" -> Color(0xFF6E665A)
-                                        else -> Color(0xFFB3261E)
-                                    },
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 0.5.sp
-                                )
-                                Spacer(modifier = Modifier.height(3.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth(if (isUser) 0.86f else 1f)
-                                        .background(
-                                            when {
-                                                isUser -> Color(0xFFFBF1EC)
-                                                isProgress -> Color(0xFFF0ECE2)
-                                                else -> Color(0xFFF0ECE2)
-                                            },
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .border(
-                                            1.dp,
-                                            if (isProgress) Color(0xFFE3DCCC) else Color(0xFFE3DCCC),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .padding(10.dp)
-                                ) {
-                                    Column {
-                                        Text(
-                                            text = message.text,
-                                            color = if (isProgress) Color(0xFF6E665A) else Color(0xFF211C16),
-                                            fontSize = if (isProgress) 11.sp else 13.sp,
-                                            lineHeight = if (isProgress) 16.sp else 19.sp,
-                                            fontFamily = if (message.role == "assistant") FontFamily.Monospace else FontFamily.Default
-                                        )
-                                        if (!isProgress) {
-                                            Spacer(modifier = Modifier.height(6.dp))
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.End,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(
-                                                    text = if (isPlayingThisMessage) "Stop" else "Play",
-                                                    color = if (isPlayingThisMessage) Color(0xFFC2542F) else Color(0xFF6E665A),
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    modifier = Modifier.clickable {
-                                                        if (isPlayingThisMessage) {
-                                                            audioHelper.stopPlayback()
-                                                            ttsHelper.stop()
-                                                            state.playingMessageId = null
-                                                        } else {
-                                                            audioHelper.stopPlayback()
-                                                            ttsHelper.stop()
-                                                            state.playingMessageId = message.id
-                                                            val audioPath = message.audioPath
-                                                            if (!audioPath.isNullOrBlank() && java.io.File(audioPath).exists()) {
-                                                                audioHelper.startPlayback(audioPath) {
-                                                                    if (state.playingMessageId == message.id) {
-                                                                        state.playingMessageId = null
-                                                                    }
-                                                                }
-                                                            } else {
-                                                                ttsHelper.speak(message.text) {
-                                                                    if (state.playingMessageId == message.id) {
-                                                                        state.playingMessageId = null
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (state.transcription.isNotEmpty()) {
-                        item {
-                            Column {
-                                Text(
-                                    text = "TRANSCRIPT STREAM",
-                                    color = Color(0xFFC2542F),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "${state.transcription}...",
-                                    color = Color(0xFF211C16),
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
-
-                    if (state.isProcessing) {
-                        item {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 16.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                CircularProgressIndicator(
-                                    color = Color(0xFFC2542F),
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                if (prefs.showTurnProgress && state.progressText.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    Text(
-                                        text = state.progressText,
-                                        color = Color(0xFF211C16),
-                                        fontSize = 12.sp,
-                                        lineHeight = 17.sp,
-                                        textAlign = TextAlign.Center
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(12.dp))
-                                OutlinedButton(
-                                    onClick = { stopCurrentTurn() },
-                                    enabled = state.stopStatusText != "Stopping...",
-                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFB3261E)),
-                                    border = BorderStroke(1.dp, Color(0xFFC2542F)),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Text(
-                                        if (state.stopStatusText == "Stopping...") "Stopping..." else "Stop turn",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    if (state.latestReply.isNotEmpty() && !state.isProcessing) {
-                        item {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 8.dp)
-                            ) {
-                                Divider(color = Color(0xFFE3DCCC), modifier = Modifier.padding(vertical = 8.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "CODEX DEPLOYER REPLY",
-                                        color = Color(0xFF2E7D52),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        letterSpacing = 1.sp
-                                    )
-                                    Text(
-                                        text = prefs.activeAgent,
-                                        color = Color(0xFF6E665A),
-                                        fontSize = 10.sp
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                if (prefs.showTurnProgress && state.progressText.isNotBlank()) {
-                                    Text(
-                                        text = state.progressText,
-                                        color = Color(0xFF6E665A),
-                                        fontSize = 11.sp,
-                                        lineHeight = 16.sp
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                }
-                                Text(
-                                    text = "\"${state.latestReply}\"",
-                                    color = Color(0xFF211C16),
-                                    fontSize = 15.sp,
-                                    lineHeight = 22.sp,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                            }
-                        }
-                    }
-                    // Empty State Guidelines
-                    if (state.transcription.isEmpty() && state.latestReply.isEmpty()) {
-                        item {
-                            Column(
-                                modifier = Modifier
-                                    .fillParentMaxSize()
-                                    .alpha(0.6f),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                Text(
-                                    text = "Ready for input transmission.",
-                                    color = Color(0xFF6E665A),
-                                    fontSize = 14.sp
-                                )
-                                Text(
-                                    text = if (prefs.transmissionMode == "PTT")
-                                        "Long press the tactical pad below to talk."
-                                    else "Tap the tactical pad below to toggle mic.",
-                                    color = Color(0xFF6E665A),
-                                    fontSize = 12.sp,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Claude-style composer: rounded paper card with prompt + action row.
-        val context = androidx.compose.ui.platform.LocalContext.current
-        val sendTextAction: () -> Unit = sendText@{
-            if (state.textInputState.trim().isEmpty() || state.isProcessing) return@sendText
-            val promptText = state.textInputState.trim()
-            state.textInputState = ""
-            state.turnGeneration += 1
-            val myTurnGeneration = state.turnGeneration
-            state.stopStatusText = ""
-            val job = scope.launch {
-                state.isProcessing = true
-                state.transcription = promptText
+    // context declared at the top of StudioTabContent
+    val sendTextAction: () -> Unit = sendText@{
+        if (state.textInputState.trim().isEmpty() || state.isProcessing) return@sendText
+        val promptText = state.textInputState.trim()
+        state.textInputState = ""
+        state.turnGeneration += 1
+        val myTurnGeneration = state.turnGeneration
+        state.stopStatusText = ""
+        val job = scope.launch {
+            state.isProcessing = true
+            state.transcription = promptText
+            ttsHelper.stop()
+            audioHelper.stopPlayback()
+            state.playingMessageId = null
+            setProgress("Sending text to gateway.")
+            appendChat("user", promptText)
+            try {
+                val result = client.sendTextTurnDetailed(promptText)
+                if (myTurnGeneration != state.turnGeneration) return@launch
                 ttsHelper.stop()
-                audioHelper.stopPlayback()
-                state.playingMessageId = null
-                setProgress("Sending text to gateway.")
-                appendChat("user", promptText)
-                try {
-                    val result = client.sendTextTurnDetailed(promptText)
-                    if (myTurnGeneration != state.turnGeneration) return@launch
-                    ttsHelper.stop()
-                    if (result.connectionError) {
-                        state.latestReply = ""
-                        handleGatewayConnectionError(result.replyText)
-                        return@launch
-                    }
-                    state.transcription = result.transcript
-                    val finalProgressText = result.progress.joinToString("\n")
-                    state.progressText = finalProgressText
-                    state.latestReply = result.replyText
-
-                    // Try to fetch audio synthesized voice if using ElevenLabs
-                    val replyVoiceFile = File(context.cacheDir, "elevenlabs_reply.mp3")
-                    val path = if (replyVoiceFile.exists()) replyVoiceFile.absolutePath else null
-                    if (result.progress.isNotEmpty()) {
-                        appendChat("progress", finalProgressText, result.progress)
-                    }
-                    appendChat("assistant", result.replyText, result.progress, path)
-
-                    // Save session record
-                    val sessionRecord = RecordedSession(
-                        id = UUID.randomUUID().toString(),
-                        timestamp = System.currentTimeMillis(),
-                        durationSeconds = 1,
-                        recordingPath = "",
-                        transcriptionText = result.transcript,
-                        replyText = result.replyText,
-                        replyAudioPath = path,
-                        voiceAgent = prefs.activeAgent
-                    )
-                    prefs.addRecordedSession(sessionRecord)
-
-                    if (path != null) {
-                        audioHelper.startPlayback(path)
-                    } else if (prefs.autoSpeakEnabled && state.latestReply.isNotEmpty()) {
-                        ttsHelper.speak(state.latestReply)
-                    }
-                } catch (_: CancellationException) {
-                    if (myTurnGeneration == state.turnGeneration) {
-                        state.stopStatusText = "Local request cancelled."
-                        setProgress("Local request cancelled.")
-                    }
-                } catch (e: Exception) {
-                    if (myTurnGeneration == state.turnGeneration) {
-                        state.latestReply = "System error contacting local node: ${e.localizedMessage}"
-                    }
-                } finally {
-                    if (myTurnGeneration == state.turnGeneration) {
-                        state.activeTurnJob = null
-                        state.isProcessing = false
-                    }
+                if (result.connectionError) {
+                    state.latestReply = ""
+                    handleGatewayConnectionError(result.replyText)
+                    return@launch
                 }
-            }
-            state.activeTurnJob = job
-        }
+                state.transcription = result.transcript
+                val finalProgressText = result.progress.joinToString("\n")
+                state.progressText = finalProgressText
+                state.latestReply = result.replyText
 
-        val canSend = state.textInputState.trim().isNotEmpty() && !state.isProcessing
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 12.dp),
-            color = Color(0xFFFFFFFF),
-            shape = RoundedCornerShape(26.dp),
-            border = BorderStroke(1.dp, Color(0xFFE3DCCC)),
-            shadowElevation = 2.dp
-        ) {
-            Column(
-                modifier = Modifier.padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 10.dp)
-            ) {
-                BasicTextField(
-                    value = state.textInputState,
-                    onValueChange = { state.textInputState = it },
-                    enabled = !state.isProcessing,
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color(0xFF211C16)),
-                    cursorBrush = SolidColor(Color(0xFFC2542F)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 28.dp, max = 140.dp),
-                    decorationBox = { inner ->
-                        if (state.textInputState.isEmpty()) {
-                            Text(
-                                text = "Message Pi Speak…",
-                                color = Color(0xFF6E665A),
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                        }
-                        inner()
-                    }
+                val replyVoiceFile = File(context.cacheDir, "elevenlabs_reply.mp3")
+                val path = if (replyVoiceFile.exists()) replyVoiceFile.absolutePath else null
+                if (result.progress.isNotEmpty()) {
+                    appendChat("progress", finalProgressText, result.progress)
+                }
+                appendChat("assistant", result.replyText, result.progress, path)
+
+                val sessionRecord = RecordedSession(
+                    id = UUID.randomUUID().toString(),
+                    timestamp = System.currentTimeMillis(),
+                    durationSeconds = 1,
+                    recordingPath = "",
+                    transcriptionText = result.transcript,
+                    replyText = result.replyText,
+                    replyAudioPath = path,
+                    voiceAgent = prefs.activeAgent
                 )
+                prefs.addRecordedSession(sessionRecord)
 
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    // "</> Code" affordance — primes a slash command in the field.
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), RoundedCornerShape(16.dp))
-                            .clickable(enabled = !state.isProcessing) {
-                                if (!state.textInputState.startsWith("/")) {
-                                    state.textInputState = "/" + state.textInputState
-                                }
-                            }
-                            .padding(horizontal = 12.dp, vertical = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("</>", color = Color(0xFF6E665A), fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Code", color = Color(0xFF211C16), fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        // Voice capture lives in the composer so the chat history keeps the screen.
-                        Box(
-                            modifier = Modifier
-                                .height(44.dp)
-                                .widthIn(min = 72.dp)
-                                .clip(CircleShape)
-                                .background(if (state.isRecording) Color(0xFFC2542F) else Color(0xFFF4F1E9))
-                                .border(BorderStroke(1.dp, Color(0xFFE3DCCC)), CircleShape)
-                                .pointerInput(prefs.transmissionMode, permissionState.status.isGranted, state.isProcessing) {
-                                    detectTapGestures(
-                                        onPress = {
-                                            if (state.isProcessing) return@detectTapGestures
-                                            if (!permissionState.status.isGranted) {
-                                                permissionState.launchPermissionRequest()
-                                                return@detectTapGestures
-                                            }
-                                            if (prefs.transmissionMode == "PTT") {
-                                                recordTriggerAction()
-                                                tryAwaitRelease()
-                                                stopAndSendAction()
-                                            }
-                                        },
-                                        onTap = {
-                                            if (state.isProcessing) return@detectTapGestures
-                                            if (!permissionState.status.isGranted) {
-                                                permissionState.launchPermissionRequest()
-                                            } else if (prefs.transmissionMode == "TOGGLE") {
-                                                if (state.isRecording) stopAndSendAction() else recordTriggerAction()
-                                            }
-                                        }
-                                    )
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = if (state.isRecording) "Stop" else "Talk",
-                                color = if (state.isRecording) Color.White else Color(0xFF211C16),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        // Round terracotta send button.
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(if (canSend) Color(0xFFC2542F) else Color(0xFFE9E3D6))
-                                .clickable(enabled = canSend) { sendTextAction() },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "↑",
-                                color = if (canSend) Color(0xFFFFFFFF) else Color(0xFF6E665A),
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
+                if (path != null) {
+                    audioHelper.startPlayback(path)
+                } else if (prefs.autoSpeakEnabled && state.latestReply.isNotEmpty()) {
+                    ttsHelper.speak(state.latestReply)
+                }
+            } catch (_: CancellationException) {
+                if (myTurnGeneration == state.turnGeneration) {
+                    state.stopStatusText = "Local request cancelled."
+                    setProgress("Local request cancelled.")
+                }
+            } catch (e: Exception) {
+                if (myTurnGeneration == state.turnGeneration) {
+                    state.latestReply = "System error contacting local node: ${e.localizedMessage}"
+                }
+            } finally {
+                if (myTurnGeneration == state.turnGeneration) {
+                    state.activeTurnJob = null
+                    state.isProcessing = false
                 }
             }
         }
+        state.activeTurnJob = job
     }
+
+    StudioCockpitLayout(
+        state = state,
+        prefs = prefs,
+        listState = listState,
+        recordingScale = recordingScale,
+        permissionState = permissionState,
+        liveSessionRef = liveSessionRef,
+        livePlayerRef = livePlayerRef,
+        audioHelper = audioHelper,
+        ttsHelper = ttsHelper,
+        haptic = haptic,
+        onClearConversation = {
+            prefs.clearChatMessages(state.conversationKey)
+            state.chatMessages = emptyList()
+            state.transcription = ""
+            state.latestReply = ""
+            state.progressText = ""
+        },
+        onStopCurrentTurn = { stopCurrentTurn() },
+        onStartLiveSession = { startLiveSession() },
+        onStopLiveSession = { stopLiveSession() },
+        onRecordTrigger = { recordTriggerAction() },
+        onStopAndSend = { stopAndSendAction() },
+        onSendText = sendTextAction,
+    )
 }
 
 @Composable
@@ -1506,21 +1356,21 @@ fun CommandsTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+                color = SurfacePaper,
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Line)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text(
-                        text = "Slash Command Connector",
-                        color = Color(0xFF211C16),
+                        text = "Slash command connector",
+                        color = Ink,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Gateway: ${prefs.machineProfileName}",
-                        color = Color(0xFF6E665A),
+                        color = InkMuted,
                         fontSize = 11.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1530,16 +1380,16 @@ fun CommandsTabContent(
                         OutlinedTextField(
                             value = customCommand,
                             onValueChange = { customCommand = it },
-                            placeholder = { Text("/sess status", color = Color(0xFF6E665A), fontSize = 12.sp) },
+                            placeholder = { Text("/sess status", color = InkMuted, fontSize = 12.sp) },
                             singleLine = true,
                             enabled = !isRunning,
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = Color(0xFFC2542F),
-                                unfocusedBorderColor = Color(0xFFE3DCCC),
-                                focusedTextColor = Color(0xFF211C16),
-                                unfocusedTextColor = Color(0xFF211C16),
-                                focusedContainerColor = Color(0xFFF0ECE2),
-                                unfocusedContainerColor = Color(0xFFF0ECE2)
+                                focusedBorderColor = Accent,
+                                unfocusedBorderColor = Line,
+                                focusedTextColor = Ink,
+                                unfocusedTextColor = Ink,
+                                focusedContainerColor = SurfaceSubtle,
+                                unfocusedContainerColor = SurfaceSubtle
                             ),
                             modifier = Modifier.weight(1f)
                         )
@@ -1548,10 +1398,11 @@ fun CommandsTabContent(
                             onClick = { runCommand(customCommand) },
                             enabled = customCommand.trim().isNotEmpty() && !isRunning,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFC2542F),
-                                contentColor = Color(0xFFFFFFFF)
+                                containerColor = Accent,
+                                contentColor = SurfacePaper
                             ),
-                            shape = RoundedCornerShape(10.dp)
+                            modifier = Modifier.heightIn(min = 44.dp),
+                            shape = RoundedCornerShape(12.dp)
                         ) {
                             Text("Run", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
@@ -1560,7 +1411,7 @@ fun CommandsTabContent(
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
                             text = statusText,
-                            color = if (statusText.startsWith("Command failed")) Color(0xFFB3261E) else Color(0xFF211C16),
+                            color = if (statusText.startsWith("Command failed")) Error else Ink,
                             fontSize = 12.sp,
                             maxLines = 5,
                             overflow = TextOverflow.Ellipsis
@@ -1578,7 +1429,7 @@ fun CommandsTabContent(
                         .height(120.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(color = Color(0xFFC2542F))
+                    CircularProgressIndicator(color = Accent)
                 }
             }
         }
@@ -1586,14 +1437,14 @@ fun CommandsTabContent(
         items(commands, key = { it.name }) { command ->
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+                color = SurfacePaper,
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Line)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text(
                         text = "/${command.name}",
-                        color = Color(0xFFC2542F),
+                        color = Accent,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace
@@ -1602,7 +1453,7 @@ fun CommandsTabContent(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = command.description,
-                            color = Color(0xFF211C16),
+                            color = Ink,
                             fontSize = 12.sp
                         )
                     }
@@ -1610,7 +1461,7 @@ fun CommandsTabContent(
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = command.usage,
-                            color = Color(0xFF6E665A),
+                            color = InkMuted,
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace
                         )
@@ -1626,9 +1477,9 @@ fun CommandsTabContent(
                                     onClick = { runCommand(example) },
                                     enabled = !isRunning,
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(8.dp),
-                                    border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+                                    modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, Line)
                                 ) {
                                     Text(
                                         text = example,
@@ -1645,1196 +1496,14 @@ fun CommandsTabContent(
                             onClick = { runCommand("/${command.name}") },
                             enabled = !isRunning,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFC2542F),
+                                containerColor = Accent,
                                 contentColor = Color.White
                             ),
-                            shape = RoundedCornerShape(8.dp)
+                            modifier = Modifier.heightIn(min = 44.dp),
+                            shape = RoundedCornerShape(12.dp)
                         ) {
                             Text("Run /${command.name}", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun SessionsTabContent(
-    client: VoiceAgentClient,
-    audioHelper: AudioHelper,
-    ttsHelper: TtsHelper,
-    prefs: AppPreferences,
-    onRemoteSessionSelected: (GatewaySessionEntry, GatewaySessionDashboard) -> Unit
-) {
-    var selectedPane by remember { mutableStateOf("gateway") }
-
-    Column(
-        modifier = Modifier.fillMaxSize()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 12.dp, bottom = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(
-                onClick = { selectedPane = "gateway" },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedPane == "gateway") Color(0xFF2E7D52) else Color(0xFFE9E3D6),
-                    contentColor = if (selectedPane == "gateway") Color.White else Color(0xFF211C16)
-                ),
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                Text("Gateway Sessions", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            }
-            Button(
-                onClick = { selectedPane = "history" },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedPane == "history") Color(0xFF2E7D52) else Color(0xFFE9E3D6),
-                    contentColor = if (selectedPane == "history") Color.White else Color(0xFF211C16)
-                ),
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(10.dp)
-            ) {
-                Text("Local Turn History", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-
-        if (selectedPane == "gateway") {
-            GatewaySessionsPane(
-                client = client,
-                prefs = prefs,
-                onRemoteSessionSelected = onRemoteSessionSelected,
-                modifier = Modifier.weight(1f)
-            )
-        } else {
-            LocalTurnHistoryPane(
-                audioHelper = audioHelper,
-                ttsHelper = ttsHelper,
-                prefs = prefs,
-                modifier = Modifier.weight(1f)
-            )
-        }
-    }
-}
-
-@Composable
-fun GatewaySessionsPane(
-    client: VoiceAgentClient,
-    prefs: AppPreferences,
-    onRemoteSessionSelected: (GatewaySessionEntry, GatewaySessionDashboard) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var state by remember { mutableStateOf<GatewaySessionsUiState>(GatewaySessionsUiState.Idle) }
-    val scope = rememberCoroutineScope()
-    val context = androidx.compose.ui.platform.LocalContext.current
-
-    fun refresh() {
-        state = GatewaySessionsUiState.Loading
-        scope.launch {
-            state = try {
-                val dashboard = client.getSessionDashboard()
-                if (dashboard.sessions.isEmpty()) GatewaySessionsUiState.Empty else GatewaySessionsUiState.Loaded(dashboard)
-            } catch (e: GatewaySessionException) {
-                when (e.kind) {
-                    GatewaySessionErrorKind.Unauthorized -> GatewaySessionsUiState.Unauthorized
-                    GatewaySessionErrorKind.Unsupported -> GatewaySessionsUiState.Unsupported
-                    else -> GatewaySessionsUiState.Error(e.message ?: "Could not load gateway sessions.")
-                }
-            } catch (e: Exception) {
-                GatewaySessionsUiState.Error(e.message ?: "Could not load gateway sessions.")
-            }
-        }
-    }
-
-    LaunchedEffect(prefs.targetIpAddress, prefs.remoteToken) {
-        refresh()
-    }
-
-    Column(modifier = modifier.fillMaxSize()) {
-        GatewaySessionsHeader(
-            prefs = prefs,
-            state = state,
-            onRefresh = { refresh() }
-        )
-
-        when (val currentState = state) {
-            GatewaySessionsUiState.Idle,
-            GatewaySessionsUiState.Loading -> GatewaySessionsStatus("Loading gateway sessions...")
-            GatewaySessionsUiState.Empty -> GatewaySessionsStatus("No gateway sessions found.")
-            GatewaySessionsUiState.Unauthorized -> GatewaySessionsStatus("Gateway token required or invalid. Check Configure.")
-            GatewaySessionsUiState.Unsupported -> GatewaySessionsStatus("This gateway does not expose the session dashboard.")
-            is GatewaySessionsUiState.Error -> GatewaySessionsStatus(currentState.message)
-            is GatewaySessionsUiState.Loaded -> LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(bottom = 12.dp)
-            ) {
-                items(currentState.dashboard.sessions, key = { it.canonicalSessionPath ?: it.name }) { entry ->
-                    GatewaySessionRow(
-                        entry = entry,
-                        dashboard = currentState.dashboard,
-                        prefs = prefs,
-                        onUse = {
-                            onRemoteSessionSelected(entry, currentState.dashboard)
-                            android.widget.Toast.makeText(
-                                context,
-                                if (entry.isRouteCapableIn(currentState.dashboard)) "Gateway session target selected." else "Gateway workspace selected.",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        onResume = if (entry.resumable) {
-                            {
-                                scope.launch {
-                                    val message = client.resumeGatewaySession(entry)
-                                    refresh()
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        message,
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
-                        } else {
-                            null
-                        }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun GatewaySessionsHeader(
-    prefs: AppPreferences,
-    state: GatewaySessionsUiState,
-    onRefresh: () -> Unit
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 10.dp),
-        color = Color(0xFFFFFFFF),
-        shape = RoundedCornerShape(14.dp),
-        border = BorderStroke(1.dp, Color(0xFFE3DCCC))
-    ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("GATEWAY SESSIONS", color = Color(0xFFC2542F), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text("Gateway: ${prefs.targetIpAddress.ifBlank { "not configured" }}", color = Color(0xFF211C16), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Target: ${prefs.codexSessionName}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Workspace: ${prefs.workspacePath}", color = Color(0xFF6E665A), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (state is GatewaySessionsUiState.Loaded) {
-                    val dashboard = state.dashboard
-                    Text(
-                        "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | Store: ${dashboard.storePath ?: "unknown"}",
-                        color = Color(0xFF6E665A),
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-            OutlinedButton(
-                onClick = onRefresh,
-                enabled = state !is GatewaySessionsUiState.Loading,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-            ) {
-                Text("Refresh", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
-@Composable
-fun GatewaySessionsStatus(message: String) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = message,
-            color = Color(0xFF6E665A),
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(24.dp)
-        )
-    }
-}
-
-@Composable
-fun GatewaySessionRow(
-    entry: GatewaySessionEntry,
-    dashboard: GatewaySessionDashboard,
-    prefs: AppPreferences,
-    onUse: () -> Unit,
-    onResume: (() -> Unit)? = null
-) {
-    val isRouteCapable = entry.isRouteCapableIn(dashboard)
-    val isSelectedFile = prefs.selectedGatewaySessionPath.isNotBlank() && prefs.selectedGatewaySessionPath == entry.canonicalSessionPath
-    val isSelectedTarget = isRouteCapable && prefs.codexSessionName == entry.name
-    val borderColor = when {
-        isSelectedTarget -> Color(0xFF2E7D52)
-        isSelectedFile -> Color(0xFFC2542F)
-        else -> Color(0xFFE3DCCC)
-    }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = Color.White,
-        shape = RoundedCornerShape(14.dp),
-        border = BorderStroke(1.dp, borderColor)
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = entry.name.ifBlank { "Unnamed session" },
-                        color = Color(0xFF211C16),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(
-                        text = entry.displayCwd,
-                        color = Color(0xFF6E665A),
-                        fontSize = 12.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Text(
-                    text = entry.activity ?: "saved",
-                    color = if (isRouteCapable) Color(0xFF2E7D52) else Color(0xFF6E665A),
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .background(Color(0xFFF0ECE2), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (entry.isCurrentIn(dashboard)) GatewaySessionBadge("current", Color(0xFF2E7D52))
-                if (entry.isReadyIn(dashboard)) GatewaySessionBadge("ready", Color(0xFFC97E1A))
-                entry.provider?.takeIf { it.isNotBlank() }?.let { GatewaySessionBadge(it, Color(0xFF3C6E71)) }
-                entry.sessionId?.takeIf { it.isNotBlank() }?.let { GatewaySessionBadge("resume id", Color(0xFF6E665A)) }
-                if (entry.aliases.isNotEmpty()) GatewaySessionBadge("aliases: ${entry.aliases.joinToString(", ")}", Color(0xFF6E665A))
-                if (!isRouteCapable) GatewaySessionBadge("workspace only", Color(0xFF6E665A))
-                if (entry.resumable) GatewaySessionBadge("resumable", Color(0xFF2E7D52))
-            }
-
-            val path = entry.canonicalSessionPath
-            if (!path.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "sessionPath: $path",
-                    color = Color(0xFF8A8174),
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onUse,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isRouteCapable) Color(0xFF2E7D52) else Color(0xFFC2542F),
-                        contentColor = Color.White
-                    ),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
-                    modifier = Modifier.height(34.dp)
-                ) {
-                    Text(if (isRouteCapable) "Use as target" else "Use workspace", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-                if (onResume != null) {
-                    OutlinedButton(
-                        onClick = onResume,
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 5.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        Text("Resume", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun GatewaySessionBadge(text: String, color: Color) {
-    Text(
-        text = text,
-        color = color,
-        fontSize = 9.sp,
-        fontWeight = FontWeight.Bold,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
-            .background(color.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
-            .border(1.dp, color.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 6.dp, vertical = 3.dp)
-    )
-}
-
-sealed interface GatewaySessionsUiState {
-    data object Idle : GatewaySessionsUiState
-    data object Loading : GatewaySessionsUiState
-    data class Loaded(val dashboard: GatewaySessionDashboard) : GatewaySessionsUiState
-    data object Empty : GatewaySessionsUiState
-    data object Unauthorized : GatewaySessionsUiState
-    data object Unsupported : GatewaySessionsUiState
-    data class Error(val message: String) : GatewaySessionsUiState
-}
-
-fun applyGatewaySessionSelection(
-    entry: GatewaySessionEntry,
-    dashboard: GatewaySessionDashboard,
-    prefs: AppPreferences
-) {
-    val cwd = entry.workingDirectory?.takeIf { it.isNotBlank() }
-        ?: entry.cwd?.takeIf { it.isNotBlank() }
-    prefs.selectedGatewaySessionPath = entry.canonicalSessionPath.orEmpty()
-    if (!cwd.isNullOrBlank()) {
-        prefs.workspacePath = cwd
-    }
-    if (entry.isRouteCapableIn(dashboard) && entry.name.isNotBlank()) {
-        prefs.codexSessionName = entry.name
-    }
-}
-
-@Composable
-fun LocalTurnHistoryPane(
-    audioHelper: AudioHelper,
-    ttsHelper: TtsHelper,
-    prefs: AppPreferences,
-    modifier: Modifier = Modifier
-) {
-    var sessionsList by remember { mutableStateOf(prefs.getRecordedSessions()) }
-    var activePlaybackId by remember { mutableStateOf<String?>(null) }
-
-    fun refreshList() {
-        sessionsList = prefs.getRecordedSessions()
-    }
-
-    if (sessionsList.isEmpty()) {
-        Box(
-            modifier = modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "No local turn history yet.",
-                    color = Color(0xFF6E665A),
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Transmit a voice or text turn to start logging sessions.",
-                    color = Color(0xFF6E665A),
-                    fontSize = 12.sp
-                )
-            }
-        }
-    } else {
-        LazyColumn(
-            modifier = modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(vertical = 12.dp)
-        ) {
-            items(sessionsList, key = { it.id }) { item ->
-                val isPlaying = activePlaybackId == item.id
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = Color(0xFFFFFFFF),
-                    shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.dp, if (isPlaying) Color(0xFF2E7D52) else Color(0xFFE3DCCC))
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "SESSION TURN #${item.id.take(4).uppercase()}",
-                                color = Color(0xFFC2542F),
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.5.sp
-                            )
-                            Text(
-                                text = item.voiceAgent,
-                                color = Color(0xFF6E665A),
-                                fontSize = 10.sp
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Prompt: \"${item.transcriptionText}\"",
-                            color = Color(0xFF211C16),
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFFF0ECE2), RoundedCornerShape(8.dp))
-                                .padding(8.dp)
-                        ) {
-                            Text(
-                                text = item.replyText,
-                                color = Color(0xFF211C16),
-                                fontSize = 13.sp,
-                                fontFamily = FontFamily.Monospace,
-                                maxLines = 4,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                // Real-time Tape Playback action
-                                Button(
-                                    onClick = {
-                                        if (isPlaying) {
-                                            audioHelper.stopPlayback()
-                                            activePlaybackId = null
-                                        } else {
-                                            activePlaybackId = item.id
-                                            audioHelper.startPlayback(item.recordingPath) {
-                                                activePlaybackId = null
-                                            }
-                                        }
-                                    },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (isPlaying) Color(0xFFB3261E) else Color(0xFFC2542F),
-                                        contentColor = if (isPlaying) Color.White else Color(0xFFFFFFFF)
-                                    ),
-                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                                    modifier = Modifier.height(32.dp)
-                                ) {
-                                    Text(
-                                        text = if (isPlaying) "Stop Tape" else "Play Tape",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-
-                                if (item.replyAudioPath != null) {
-                                    Button(
-                                        onClick = {
-                                            if (isPlaying) {
-                                                audioHelper.stopPlayback()
-                                                activePlaybackId = null
-                                            } else {
-                                                activePlaybackId = item.id
-                                                audioHelper.startPlayback(item.replyAudioPath) {
-                                                    activePlaybackId = null
-                                                }
-                                            }
-                                        },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = Color(0xFF1B7A5A),
-                                            contentColor = Color.White
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                                        modifier = Modifier.height(32.dp)
-                                    ) {
-                                        Text(
-                                            text = "Play Synthetic Response",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                } else {
-                                    Button(
-                                        onClick = {
-                                            ttsHelper.speak(item.replyText)
-                                        },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = Color(0xFFC2542F),
-                                            contentColor = Color.White
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                                        modifier = Modifier.height(32.dp)
-                                    ) {
-                                        Text(
-                                            text = "Speak Reply",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            }
-
-                            // Delete Action
-                            IconButton(
-                                onClick = {
-                                    prefs.deleteRecordedSession(item.id)
-                                    refreshList()
-                                },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Text("🗑", color = Color(0xFFB3261E), fontSize = 16.sp)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SettingsTabContent(
-    prefs: AppPreferences,
-    onConfigChanged: () -> Unit
-) {
-    var agentType by remember(prefs.activeAgent) { mutableStateOf(prefs.activeAgent) }
-    var codexSessionName by remember(prefs.codexSessionName) { mutableStateOf(prefs.codexSessionName) }
-    var machineProfileName by remember(prefs.machineProfileName) { mutableStateOf(prefs.machineProfileName) }
-    var elevenLabsApiKey by remember(prefs.elevenLabsApiKey) { mutableStateOf(prefs.elevenLabsApiKey) }
-    var elevenLabsVoiceId by remember(prefs.elevenLabsVoiceId) { mutableStateOf(prefs.elevenLabsVoiceId) }
-    var transmissionMode by remember(prefs.transmissionMode) { mutableStateOf(prefs.transmissionMode) }
-    var targetIpAddress by remember(prefs.targetIpAddress) { mutableStateOf(prefs.targetIpAddress) }
-    var remoteToken by remember(prefs.remoteToken) { mutableStateOf(prefs.remoteToken) }
-    var connectionMode by remember(prefs.connectionMode) { mutableStateOf(prefs.connectionMode) }
-    var showTurnProgress by remember(prefs.showTurnProgress) { mutableStateOf(prefs.showTurnProgress) }
-    var speakTurnProgress by remember(prefs.speakTurnProgress) { mutableStateOf(prefs.speakTurnProgress) }
-    var workspaceRoot by remember(prefs.workspaceRoot) { mutableStateOf(prefs.workspaceRoot) }
-    var workspacePath by remember(prefs.workspacePath) { mutableStateOf(prefs.workspacePath) }
-    var workspaceEntries by remember { mutableStateOf<List<com.example.api.WorkspaceEntry>>(emptyList()) }
-    var workspaceParent by remember { mutableStateOf<String?>(null) }
-    var workspaceLoading by remember { mutableStateOf(false) }
-    var connectionTesting by remember { mutableStateOf(false) }
-    var connectionReport by remember { mutableStateOf<com.example.api.ConnectionTestReport?>(null) }
-    val scope = rememberCoroutineScope()
-    val context = androidx.compose.ui.platform.LocalContext.current
-
-    val agents = listOf("Local Codex (Pi)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-        contentPadding = PaddingValues(vertical = 12.dp)
-    ) {
-        item {
-            Text(
-                text = "VOICE ENGINE CONTROL MATRIX",
-                color = Color(0xFF6E665A),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp
-            )
-        }
-
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(
-                    1.dp,
-                    when {
-                        connectionReport?.ok == true -> Color(0xFF2E7D52)
-                        connectionReport != null -> Color(0xFFC2542F)
-                        else -> Color(0xFFE3DCCC)
-                    }
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Connection Test",
-                                color = Color(0xFF211C16),
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(3.dp))
-                            Text(
-                                text = connectionReport?.summary ?: "Check gateway reachability, setup token, workspace, and capabilities.",
-                                color = when {
-                                    connectionReport?.ok == true -> Color(0xFF2E7D52)
-                                    connectionReport != null -> Color(0xFFB3261E)
-                                    else -> Color(0xFF6E665A)
-                                },
-                                fontSize = 11.sp,
-                                lineHeight = 15.sp
-                            )
-                        }
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    connectionTesting = true
-                                    connectionReport = com.example.api.VoiceAgentClient(context, prefs).testConnection()
-                                    connectionTesting = false
-                                }
-                            },
-                            enabled = !connectionTesting,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFC2542F),
-                                contentColor = Color(0xFFFFFFFF)
-                            ),
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Text(if (connectionTesting) "Testing" else "Test", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    val report = connectionReport
-                    if (report != null) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        report.checks.forEach { check ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .padding(top = 4.dp)
-                                        .size(8.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            when (check.status) {
-                                                "ok" -> Color(0xFF2E7D52)
-                                                "warn" -> Color(0xFFC97E1A)
-                                                else -> Color(0xFFC2542F)
-                                            }
-                                        )
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = check.label,
-                                        color = Color(0xFF211C16),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        text = check.detail,
-                                        color = Color(0xFF6E665A),
-                                        fontSize = 10.sp,
-                                        lineHeight = 14.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Active Voice Agent Matrix Config
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Active Voice Agent",
-                        color = Color(0xFF211C16),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    agents.forEach { agent ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(40.dp)
-                                .clickable {
-                                    agentType = agent
-                                    prefs.activeAgent = agent
-                                    onConfigChanged()
-                                }
-                        ) {
-                            RadioButton(
-                                selected = (agentType == agent),
-                                onClick = {
-                                    agentType = agent
-                                    prefs.activeAgent = agent
-                                    onConfigChanged()
-                                },
-                                colors = RadioButtonDefaults.colors(
-                                    selectedColor = Color(0xFFC2542F),
-                                    unselectedColor = Color(0xFF6E665A)
-                                )
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = agent, color = Color(0xFF211C16), fontSize = 14.sp)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Tactical Trigger Setup
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Microphone Action Strategy",
-                        color = Color(0xFF211C16),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        listOf("PTT" to "Hold To Talk", "TOGGLE" to "Click To mic Toggle").forEach { (mode, label) ->
-                            val isSelected = transmissionMode == mode
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .padding(horizontal = 4.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) Color(0xFFF4F1E9) else Color(0x22B8AF9A))
-                                    .clickable {
-                                        transmissionMode = mode
-                                        prefs.transmissionMode = mode
-                                        onConfigChanged()
-                                    }
-                                    .padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    color = if (isSelected) Color(0xFFC2542F) else Color(0xFF6E665A),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Checkbox(
-                            checked = showTurnProgress,
-                            onCheckedChange = {
-                                showTurnProgress = it
-                                prefs.showTurnProgress = it
-                                onConfigChanged()
-                            }
-                        )
-                        Text(text = "Show turn progress text", color = Color(0xFF211C16), fontSize = 13.sp)
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Checkbox(
-                            checked = speakTurnProgress,
-                            onCheckedChange = {
-                                speakTurnProgress = it
-                                prefs.speakTurnProgress = it
-                                onConfigChanged()
-                            }
-                        )
-                        Text(text = "Speak periodic progress updates", color = Color(0xFF211C16), fontSize = 13.sp)
-                    }
-                }
-            }
-        }
-
-        // Connection IP & Codex Session Targets Configuration
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Remote Codex Matrix Profile",
-                        color = Color(0xFF211C16),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Machine profile label
-                    Text(text = "Machine Profile Name", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = machineProfileName,
-                        onValueChange = {
-                            machineProfileName = it
-                            prefs.machineProfileName = it
-                            onConfigChanged()
-                        },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFC2542F),
-                            unfocusedBorderColor = Color(0xFFE3DCCC),
-                            focusedTextColor = Color(0xFF211C16),
-                            unfocusedTextColor = Color(0xFF211C16)
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Session tag
-                    Text(text = "Target Session Name", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = codexSessionName,
-                        onValueChange = {
-                            codexSessionName = it
-                            prefs.codexSessionName = it
-                            onConfigChanged()
-                        },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFC2542F),
-                            unfocusedBorderColor = Color(0xFFE3DCCC),
-                            focusedTextColor = Color(0xFF211C16),
-                            unfocusedTextColor = Color(0xFF211C16)
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Gateway IP Address
-                    Text(text = "Local Gateway URL host", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = targetIpAddress,
-                        onValueChange = {
-                            targetIpAddress = it
-                            prefs.targetIpAddress = it
-                            onConfigChanged()
-                        },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFC2542F),
-                            unfocusedBorderColor = Color(0xFFE3DCCC),
-                            focusedTextColor = Color(0xFF211C16),
-                            unfocusedTextColor = Color(0xFF211C16)
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Text(text = "Workspace Folder", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = workspacePath,
-                        onValueChange = {
-                            workspacePath = it
-                            prefs.workspacePath = it
-                            onConfigChanged()
-                        },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFC2542F),
-                            unfocusedBorderColor = Color(0xFFE3DCCC),
-                            focusedTextColor = Color(0xFF211C16),
-                            unfocusedTextColor = Color(0xFF211C16)
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text(workspaceRoot, color = Color(0xFF6E665A)) }
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        TextButton(
-                            onClick = {
-                                scope.launch {
-                                    workspaceLoading = true
-                                    val listing = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                        com.example.api.VoiceAgentClient(context, prefs).listWorkspace(workspaceRoot)
-                                    }
-                                    if (listing != null) {
-                                        workspaceRoot = listing.root
-                                        workspacePath = listing.current
-                                        workspaceParent = listing.parent
-                                        workspaceEntries = listing.entries
-                                        prefs.workspaceRoot = listing.root
-                                        prefs.workspacePath = listing.current
-                                        onConfigChanged()
-                                    }
-                                    workspaceLoading = false
-                                }
-                            }
-                        ) { Text("Browse root") }
-                        TextButton(
-                            enabled = workspaceParent != null,
-                            onClick = {
-                                val parent = workspaceParent ?: return@TextButton
-                                scope.launch {
-                                    workspaceLoading = true
-                                    val listing = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                        com.example.api.VoiceAgentClient(context, prefs).listWorkspace(parent)
-                                    }
-                                    if (listing != null) {
-                                        workspacePath = listing.current
-                                        workspaceParent = listing.parent
-                                        workspaceEntries = listing.entries
-                                        prefs.workspacePath = listing.current
-                                        onConfigChanged()
-                                    }
-                                    workspaceLoading = false
-                                }
-                            }
-                        ) { Text("Up") }
-                    }
-                    if (workspaceLoading) {
-                        Text(text = "Loading folders...", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    }
-                    workspaceEntries.take(12).forEach { entry ->
-                        Text(
-                            text = entry.name,
-                            color = Color(0xFFC2542F),
-                            fontSize = 12.sp,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    scope.launch {
-                                        workspaceLoading = true
-                                        val listing = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                            com.example.api.VoiceAgentClient(context, prefs).listWorkspace(entry.path)
-                                        }
-                                        if (listing != null) {
-                                            workspacePath = listing.current
-                                            workspaceParent = listing.parent
-                                            workspaceEntries = listing.entries
-                                            prefs.workspacePath = listing.current
-                                            onConfigChanged()
-                                        }
-                                        workspaceLoading = false
-                                    }
-                                }
-                                .padding(vertical = 6.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Gateway Auth Token
-                    Text(text = "Gateway Authentication Token", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = remoteToken,
-                        onValueChange = {
-                            remoteToken = it
-                            prefs.remoteToken = it
-                            onConfigChanged()
-                        },
-                        visualTransformation = PasswordVisualTransformation(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFC2542F),
-                            unfocusedBorderColor = Color(0xFFE3DCCC),
-                            focusedTextColor = Color(0xFF211C16),
-                            unfocusedTextColor = Color(0xFF211C16)
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Default Gateway Network Interface
-                    Text(text = "Default Gateway Network Interface", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        listOf("Tailscale" to "Tailscale", "Bluetooth" to "Bluetooth", "Manual" to "Manual").forEach { (mode, label) ->
-                            val isSelected = connectionMode == mode
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .padding(horizontal = 4.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) Color(0xFFF4F1E9) else Color(0x22B8AF9A))
-                                    .clickable {
-                                        connectionMode = mode
-                                        prefs.connectionMode = mode
-                                        onConfigChanged()
-                                    }
-                                    .padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = label,
-                                    color = if (isSelected) Color(0xFFC2542F) else Color(0xFF6E665A),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ElevenLabs API Security and voice synthesis wiring fields (Requested)
-        item {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "ElevenLabs API Wiring Hub",
-                        color = Color(0xFF211C16),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // api key input fields (Must be masked unless requested)
-                    Text(text = "ElevenLabs API Key", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = elevenLabsApiKey,
-                        onValueChange = {
-                            elevenLabsApiKey = it
-                            prefs.elevenLabsApiKey = it
-                            onConfigChanged()
-                        },
-                        visualTransformation = PasswordVisualTransformation(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFC2542F),
-                            unfocusedBorderColor = Color(0xFFE3DCCC),
-                            focusedTextColor = Color(0xFF211C16),
-                            unfocusedTextColor = Color(0xFF211C16)
-                        ),
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("Unset / Local Built-In Only", color = Color(0xFF6E665A)) }
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // voice id selector input
-                    Text(text = "ElevenLabs Custom Voice ID", color = Color(0xFF6E665A), fontSize = 11.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = elevenLabsVoiceId,
-                        onValueChange = {
-                            elevenLabsVoiceId = it
-                            prefs.elevenLabsVoiceId = it
-                            onConfigChanged()
-                        },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color(0xFFC2542F),
-                            unfocusedBorderColor = Color(0xFFE3DCCC),
-                            focusedTextColor = Color(0xFF211C16),
-                            unfocusedTextColor = Color(0xFF211C16)
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            }
-        }
-
-        // Tactical Voice Synthesis Feedback Control
-        item {
-            var autoSpeak by remember(prefs.autoSpeakEnabled) { mutableStateOf(prefs.autoSpeakEnabled) }
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "System Voice Feedback Loop",
-                        color = Color(0xFF211C16),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Auto-Speak Audio Replies",
-                                color = Color(0xFF211C16),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Instantly synthesize incoming responses out loud via phone speakers or active synthesizer node.",
-                                color = Color(0xFF6E665A),
-                                fontSize = 11.sp
-                            )
-                        }
-                        Switch(
-                            checked = autoSpeak,
-                            onCheckedChange = {
-                                autoSpeak = it
-                                prefs.autoSpeakEnabled = it
-                                onConfigChanged()
-                            },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color(0xFFC2542F),
-                                checkedTrackColor = Color(0xFFC2542F),
-                                uncheckedThumbColor = Color(0xFF6E665A),
-                                uncheckedTrackColor = Color(0xFFF4F1E9)
-                            )
-                        )
                     }
                 }
             }
@@ -2869,8 +1538,20 @@ fun WaveformBars(
             val offset = startX + (i * (barWidth + spacing))
             val topY = (height - barHeight) / 2f
             
+            val colorBrush = if (active) {
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    colors = listOf(Accent, Accent.copy(alpha = 0.55f)),
+                    startY = topY,
+                    endY = topY + barHeight
+                )
+            } else {
+                androidx.compose.ui.graphics.Brush.linearGradient(
+                    colors = listOf(Accent.copy(alpha = 0.2f), Accent.copy(alpha = 0.1f))
+                )
+            }
+            
             drawRoundRect(
-                color = if (active) Color(0xFFD98E66) else Color(0x33C2542F),
+                brush = colorBrush,
                 topLeft = androidx.compose.ui.geometry.Offset(offset, topY),
                 size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
                 cornerRadius = CornerRadius(barWidth / 2, barWidth / 2)
@@ -2907,19 +1588,19 @@ fun ScanningRadarGraphic(modifier: Modifier = Modifier) {
 
         // Draw background radar concentric circles
         drawCircle(
-            color = Color(0xFFC2542F).copy(alpha = 0.15f),
+            color = Accent.copy(alpha = 0.15f),
             radius = maxRadius * 0.4f,
             center = center,
             style = Stroke(width = 1.dp.toPx())
         )
         drawCircle(
-            color = Color(0xFFC2542F).copy(alpha = 0.15f),
+            color = Accent.copy(alpha = 0.15f),
             radius = maxRadius * 0.7f,
             center = center,
             style = Stroke(width = 1.dp.toPx())
         )
         drawCircle(
-            color = Color(0xFFC2542F).copy(alpha = 0.15f),
+            color = Accent.copy(alpha = 0.15f),
             radius = maxRadius,
             center = center,
             style = Stroke(width = 1.dp.toPx())
@@ -2927,7 +1608,7 @@ fun ScanningRadarGraphic(modifier: Modifier = Modifier) {
 
         // Pulsating wave line
         drawCircle(
-            color = Color(0xFFC2542F).copy(alpha = opacity),
+            color = Accent.copy(alpha = opacity),
             radius = maxRadius * radiusRatio,
             center = center,
             style = Stroke(width = 2.dp.toPx())
@@ -2935,7 +1616,7 @@ fun ScanningRadarGraphic(modifier: Modifier = Modifier) {
 
         // Center beacon dot
         drawCircle(
-            color = Color(0xFFC2542F),
+            color = Accent,
             radius = 4.dp.toPx(),
             center = center
         )
@@ -2952,6 +1633,10 @@ fun DiscoveryTabContent(
     var isScanning by remember { mutableStateOf(false) }
     var machines by remember { mutableStateOf<List<com.example.api.DiscoveredMachine>>(emptyList()) }
     var selectedMachine by remember { mutableStateOf<com.example.api.DiscoveredMachine?>(null) }
+    var warpSnapshot by remember { mutableStateOf<com.example.api.WarpControlSnapshot?>(null) }
+    var warpStatusText by remember { mutableStateOf("Warp bridge not loaded.") }
+    var warpLoading by remember { mutableStateOf(false) }
+    var warpTabConfigName by remember { mutableStateOf("phone_remote") }
     val context = androidx.compose.ui.platform.LocalContext.current
 
     // Trigger automatic network scan on tab launch for seamless UX
@@ -2963,6 +1648,12 @@ fun DiscoveryTabContent(
             isScanning = false
             // Automatically select the first online machine
             selectedMachine = machines.firstOrNull { it.status == "online" } ?: machines.firstOrNull()
+            warpLoading = true
+            warpSnapshot = client.getWarpControlSnapshot()
+            warpStatusText = warpSnapshot?.let {
+                if (it.available) "Warp bridge ready: ${it.sessions.size} psmux sessions, ${it.paneCount} panes." else "Warp bridge reachable; psmux is not available."
+            } ?: "Warp bridge unavailable on active gateway."
+            warpLoading = false
         }
     }
 
@@ -2977,9 +1668,9 @@ fun DiscoveryTabContent(
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFFFFFFF),
+                color = SurfacePaper,
                 shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFFE3DCCC))
+                border = BorderStroke(1.dp, Line)
             ) {
                 Row(
                     modifier = Modifier.padding(16.dp),
@@ -2988,15 +1679,15 @@ fun DiscoveryTabContent(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Pi Speak Server Discovery",
-                            color = Color(0xFF211C16),
+                            text = "Pi Speak server discovery",
+                            color = Ink,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = if (isScanning) "Finding Pi Speak gateways on LAN and Tailscale..." else "Discovery finds machines. Scan the setup QR once to pair.",
-                            color = if (isScanning) Color(0xFFC2542F) else Color(0xFF6E665A),
+                            color = if (isScanning) Accent else InkMuted,
                             fontSize = 11.sp,
                             fontWeight = if (isScanning) FontWeight.SemiBold else FontWeight.Normal
                         )
@@ -3016,10 +1707,10 @@ fun DiscoveryTabContent(
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFC2542F),
+                                containerColor = Accent,
                                 contentColor = Color.White
                             ),
-                            shape = RoundedCornerShape(10.dp)
+                            shape = RoundedCornerShape(12.dp)
                         ) {
                             Text("Scan", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
@@ -3036,18 +1727,170 @@ fun DiscoveryTabContent(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "DETECTED PI SPEAK SERVERS",
-                    color = Color(0xFF6E665A),
+                    text = "Detected Pi Speak servers",
+                    color = InkMuted,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.8.sp
                 )
                 Text(
-                    text = "Active Gateway: ${prefs.targetIpAddress}",
-                    color = Color(0xFFC2542F),
+                    text = "Active gateway: ${prefs.targetIpAddress}",
+                    color = Accent,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold
                 )
+            }
+        }
+
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = SurfacePaper,
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Line)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Warp / psmux control",
+                                color = Ink,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = warpStatusText,
+                                color = if (warpSnapshot?.available == true) Success else InkMuted,
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp
+                            )
+                            warpSnapshot?.warpRemoteBaseUrl?.let { url ->
+                                Text(
+                                    text = "Warp relay: $url",
+                                    color = InkMuted,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            warpSnapshot?.let { snapshot ->
+                                Text(
+                                    text = "Connection: ${if (snapshot.sameTailnet) "Tailscale" else "gateway"} • ${prefs.targetIpAddress} • ${snapshot.warpUriScheme}://",
+                                    color = InkMuted,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                snapshot.psmuxError?.let { error ->
+                                    Text(
+                                        text = "psmux: $error",
+                                        color = Accent,
+                                        fontSize = 10.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    warpLoading = true
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                    warpStatusText = warpSnapshot?.let {
+                                        if (it.available) "Warp bridge ready: ${it.sessions.size} psmux sessions, ${it.paneCount} panes." else "Warp bridge reachable; psmux is not available."
+                                    } ?: "Warp bridge unavailable on active gateway."
+                                    warpLoading = false
+                                }
+                            },
+                            enabled = !warpLoading,
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.White),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(if (warpLoading) "Loading" else "Refresh", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = warpTabConfigName,
+                        onValueChange = { warpTabConfigName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Warp tab config", fontSize = 11.sp) },
+                        placeholder = { Text("phone_remote", fontSize = 11.sp) },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    warpStatusText = client.createWarpTab(prefs.workspacePath)
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                }
+                            }
+                        ) { Text("New Warp tab") }
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    warpStatusText = client.openWarpTabConfig(warpTabConfigName.trim())
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                }
+                            },
+                            enabled = warpTabConfigName.isNotBlank()
+                        ) { Text("Open Warp config") }
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    val name = "phone-${System.currentTimeMillis()}"
+                                    warpStatusText = client.createWarpPsmuxSession(name, prefs.workspacePath)
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                }
+                            }
+                        ) { Text("New psmux session") }
+                        val firstSession = warpSnapshot?.sessions?.firstOrNull()?.name
+                        TextButton(
+                            enabled = firstSession != null,
+                            onClick = {
+                                val session = firstSession ?: return@TextButton
+                                scope.launch {
+                                    val name = "phone-${System.currentTimeMillis()}"
+                                    warpStatusText = client.createWarpPsmuxWindow(session, name, prefs.workspacePath)
+                                    warpSnapshot = client.getWarpControlSnapshot()
+                                }
+                            }
+                        ) { Text("New psmux tab") }
+                    }
+                    warpSnapshot?.sessions?.take(6)?.forEach { session ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Session ${session.name}",
+                            color = Ink,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        session.windows.take(4).forEach { window ->
+                            Text(
+                                text = "  tab ${window.index}: ${window.name}",
+                                color = InkMuted,
+                                fontSize = 11.sp
+                            )
+                            window.panes.take(8).forEach { pane ->
+                                Text(
+                                    text = "    pane ${pane.paneId.ifBlank { pane.pane }} ${if (pane.active) "• active" else ""} ${pane.command ?: ""}",
+                                    color = if (pane.active) Success else InkMuted,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -3060,7 +1903,30 @@ fun DiscoveryTabContent(
                         .height(140.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(color = Color(0xFFC2542F))
+                    CircularProgressIndicator(color = Accent)
+                }
+            }
+        } else if (machines.isEmpty()) {
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "No Pi Speak servers found yet.",
+                        color = InkMuted,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Tap Scan to probe LAN and Tailscale, or run /pk-remote on the host to pair.",
+                        color = InkMuted,
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
         } else {
@@ -3086,11 +1952,11 @@ fun DiscoveryTabContent(
                                     onSessionSelected(prefs.codexSessionName, machine.ip)
                                 }
                             },
-                        color = if (isMachineSelected) Color(0xFFFBF1EC) else Color(0xFFFFFFFF),
-                        shape = RoundedCornerShape(14.dp),
+                        color = if (isMachineSelected) AccentSoft else SurfacePaper,
+                        shape = RoundedCornerShape(16.dp),
                         border = BorderStroke(
                             width = 1.dp,
-                            color = if (isMachineSelected) Color(0xFFC2542F) else Color(0xFFE3DCCC)
+                            color = if (isMachineSelected) Accent else Line
                         )
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
@@ -3104,12 +1970,12 @@ fun DiscoveryTabContent(
                                         modifier = Modifier
                                             .size(8.dp)
                                             .clip(CircleShape)
-                                            .background(if (isOnline) Color(0xFF2E7D52) else Color(0xFF6E665A))
+                                            .background(if (isOnline) Success else InkMuted)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = machine.name,
-                                        color = if (isOnline) Color(0xFF211C16) else Color(0xFF6E665A),
+                                        color = if (isOnline) Ink else InkMuted,
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -3117,12 +1983,12 @@ fun DiscoveryTabContent(
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isOnline) Color(0xFFDCEEE0) else Color(0xFFE9E3D6))
+                                        .background(if (isOnline) SuccessSoft else SurfaceMuted)
                                         .padding(horizontal = 6.dp, vertical = 2.dp)
                                 ) {
                                     Text(
-                                        text = if (isOnline) "${machine.latencyMs}ms" else "OFFLINE",
-                                        color = if (isOnline) Color(0xFF2E7D52) else Color(0xFF6E665A),
+                                        text = if (isOnline) "${machine.latencyMs}ms" else "Offline",
+                                        color = if (isOnline) Success else InkMuted,
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -3132,14 +1998,14 @@ fun DiscoveryTabContent(
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = "Endpoint: ${machine.ip}",
-                                color = Color(0xFF6E665A),
+                                color = InkMuted,
                                 fontSize = 11.sp
                             )
                             if (needsSetupQr) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
                                     text = "Setup required: scan the QR from /pk-remote on this computer.",
-                                    color = Color(0xFFC2542F),
+                                    color = Accent,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -3153,14 +2019,14 @@ fun DiscoveryTabContent(
                             ) {
                                 Text(
                                     text = "${machine.activeSessions.size} AI sessions cached",
-                                    color = Color(0xFF6E665A),
+                                    color = InkMuted,
                                     fontSize = 11.sp
                                 )
 
                                 if (needsSetupQr) {
                                     Text(
-                                        text = "PAIR WITH QR",
-                                        color = Color(0xFFC2542F),
+                                        text = "Pair with QR",
+                                        color = Accent,
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -3171,36 +2037,36 @@ fun DiscoveryTabContent(
                                                 modifier = Modifier
                                                     .size(12.dp)
                                                     .clip(CircleShape)
-                                                    .background(Color(0xFF2E7D52)),
+                                                    .background(Success),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 Text(
                                                     text = "✓",
-                                                    color = Color.Black,
+                                                    color = Color.White,
                                                     fontSize = 8.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
                                             }
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Text(
-                                                text = "ACTIVE GATEWAY",
-                                                color = Color(0xFF2E7D52),
+                                                text = "Active gateway",
+                                                color = Success,
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold
                                             )
                                         }
                                     } else {
                                         Text(
-                                            text = "TAP TO ROTATE GATEWAY",
-                                            color = Color(0xFFC2542F),
+                                            text = "Tap to rotate gateway",
+                                            color = Accent,
                                             fontSize = 9.sp,
                                             fontWeight = FontWeight.Bold
                                         )
                                     }
                                 } else {
                                     Text(
-                                        text = "HOST UNREACHABLE",
-                                        color = Color(0xFFB3261E),
+                                        text = "Host unreachable",
+                                        color = Error,
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -3218,8 +2084,8 @@ fun DiscoveryTabContent(
             item {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "RUNNING SESSIONS ON ${currentMachine.name.uppercase()}",
-                    color = Color(0xFF6E665A),
+                    text = "Running sessions on ${currentMachine.name}",
+                    color = InkMuted,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.8.sp,
@@ -3231,11 +2097,11 @@ fun DiscoveryTabContent(
                 item {
                     val isSessionActive = prefs.codexSessionName == session.sessionId && prefs.targetIpAddress == currentMachine.ip
                     val badgeColor = when (session.engineType.uppercase()) {
-                        "CODEX" -> Color(0xFF2E7D52)
-                        "AGY" -> Color(0xFFC97E1A)
-                        "CLAUDE" -> Color(0xFFA855F7)
-                        "KIMI" -> Color(0xFF3B82F6)
-                        else -> Color(0xFF6E665A)
+                        "CODEX" -> Success
+                        "AGY" -> Warn
+                        "CLAUDE" -> Accent
+                        "KIMI" -> Ink
+                        else -> InkMuted
                     }
 
                     Surface(
@@ -3249,11 +2115,11 @@ fun DiscoveryTabContent(
                                     android.widget.Toast.LENGTH_SHORT
                                 ).show()
                             },
-                        color = if (isSessionActive) Color(0xFFDCEEE0) else Color(0xFFF0ECE2),
+                        color = if (isSessionActive) SuccessSoft else SurfaceSubtle,
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(
                             width = 1.dp,
-                            color = if (isSessionActive) Color(0xFF2E7D52) else Color(0xFFE3DCCC)
+                            color = if (isSessionActive) Success else Line
                         )
                     ) {
                         Row(
@@ -3265,9 +2131,9 @@ fun DiscoveryTabContent(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Box(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(4.dp))
+                                            .clip(RoundedCornerShape(8.dp))
                                             .background(badgeColor.copy(alpha = 0.15f))
-                                            .border(1.dp, badgeColor, RoundedCornerShape(4.dp))
+                                            .border(1.dp, badgeColor, RoundedCornerShape(8.dp))
                                             .padding(horizontal = 6.dp, vertical = 2.dp)
                                     ) {
                                         Text(
@@ -3280,7 +2146,7 @@ fun DiscoveryTabContent(
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text = session.sessionId,
-                                        color = Color(0xFF211C16),
+                                        color = Ink,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -3288,7 +2154,7 @@ fun DiscoveryTabContent(
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = session.description,
-                                    color = Color(0xFF6E665A),
+                                    color = InkMuted,
                                     fontSize = 11.sp
                                 )
                             }
@@ -3297,13 +2163,13 @@ fun DiscoveryTabContent(
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(6.dp))
-                                        .background(Color(0xFFDCEEE0))
-                                        .border(1.dp, Color(0xFF2E7D52), RoundedCornerShape(6.dp))
+                                        .background(SuccessSoft)
+                                        .border(1.dp, Success, RoundedCornerShape(6.dp))
                                         .padding(horizontal = 8.dp, vertical = 4.dp)
                                 ) {
                                     Text(
-                                        text = "✓ MOUNTED",
-                                        color = Color(0xFF2E7D52),
+                                        text = "Mounted",
+                                        color = Success,
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -3319,12 +2185,12 @@ fun DiscoveryTabContent(
                                         ).show()
                                     },
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFFE9E3D6),
-                                        contentColor = Color(0xFF6E665A)
+                                        containerColor = SurfaceMuted,
+                                        contentColor = InkMuted
                                     ),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.height(28.dp)
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.heightIn(min = 44.dp)
                                 ) {
                                     Text("Mount", fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                 }
@@ -3343,7 +2209,7 @@ fun DiscoveryTabContent(
                 ) {
                     Text(
                         text = "Selected target is currently offline. Cannot mount active context tunnels.",
-                        color = Color(0xFFB3261E),
+                        color = Error,
                         fontSize = 12.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         fontWeight = FontWeight.SemiBold
@@ -3352,4 +2218,17 @@ fun DiscoveryTabContent(
             }
         }
     }
+}
+
+/** Peak |amplitude| of little-endian 16-bit mono PCM; used for live-mode VAD barge-in. */
+private fun pcmPeakAmplitude(pcm: ByteArray): Int {
+    var peak = 0
+    var i = 0
+    while (i + 1 < pcm.size) {
+        val sample = (((pcm[i + 1].toInt() and 0xFF) shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toInt()
+        val magnitude = if (sample < 0) -sample else sample
+        if (magnitude > peak) peak = magnitude
+        i += 2
+    }
+    return peak
 }

@@ -1,6 +1,12 @@
 # AGENTS.md - pi-speak-pk Extension
 
-Extension development context for `pi-speak-pk` — voice, wake-word, and remote-control extension for pi-coding-agent.
+<<<<<<< HEAD
+Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent that uses voice, wake-word, and remote-control as input channels. The assistant can read all subagent state and the workspace, interview the user to scope work, and propose commands that only execute after explicit approval. Voice (`/mono`, `PK` wake phrase), Telegram (`/phone`), and the mobile/web remote (`/remote`, `/pk-remote`) are all ways to reach the same assistant.
+=======
+Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent, reachable over voice, wake-word, phone, and browser/Android remote.
+
+The assistant (`realtime-gateway.ts`) has broad read-only access to sessions, background agents, and the workspace on every turn (workspace reads stay confined to `PI_SPEAK_WORKSPACE_ROOT`, are capped in size, and refuse secret-shaped paths), but never mutates anything without explicit operator approval. See "Conversational Assistant Mode" in `README.md` and the approval-flow notes below.
+>>>>>>> origin/main
 
 ## Build
 
@@ -22,6 +28,8 @@ npm test         # Run tests
 | `pk-speak-mcp.ts` | Stdio MCP server (`dist/pk-speak-mcp.js`, bin `pk-speak-mcp`); thin adapter that shells out to the `pk-speak` CLI; exposes one `speak` tool with `{ text, voice? }` input; all diagnostics go to stderr |
 | `audio-playback.ts` | Exports `getPlayerInvocation` (pure, platform-aware) and `playAudio` (cross-platform spawn); shared between the extension and the CLI |
 | `index.ts` | Extension entrypoint, command registration, state management |
+| `server-app.ts` | `pi-speak-server` — one-command desktop app: ensures the gateway, opens the loopback-only `/connect` pairing window (Edge app mode), `--install-shortcut` for Desktop/Start Menu |
+| `pairing.ts` | Shared pairing primitives: persistent install auth token (`%LOCALAPPDATA%/pi-speak/http-token`) + phone-facing base-URL discovery (Tailscale-first); used by the control server, tray, and server app |
 | `voice-routing.ts` | Normalized route matching, compact numeric route families, and conflict helpers |
 | `session-routing.ts` | Session naming, alias helpers, summaries, removal helpers, and the `buildSessionDashboard` selector shared with the pane |
 | `session-routing-store.ts` | Durable routing persistence |
@@ -35,24 +43,34 @@ npm test         # Run tests
 | `ui/hooks/useSessionStore.ts` | Pane polling hook + pure `pollTick` helpers |
 | `ui/selectors.ts` | Pane read-side bridge over `buildSessionDashboard` |
 | `voice-session-command.ts` | Natural spoken session-command parsing |
-| `tts.ts` | Multi-provider TTS (edge, openai, elevenlabs, legacy) |
+| `tts.ts` | Multi-provider TTS (edge, gemini, openai, elevenlabs, legacy) |
 | `stt.ts` | Remote voice transcription |
 | `phone-bridge.ts` | Telegram transport |
 | `control-server.ts` | HTTP API + mobile web app server |
+| `agent-hub-dashboard.ts` | Scans Oh-my-pk session roots and merges active background lanes into the route dashboard; also `findOhMyPiBackgroundSessionPath` for resolving an archived lane's name back to a file |
+| `agent-hub-actions.ts` | Pure helpers: `archiveOhMyPiBackgroundSession`, `buildOhMyPiLaunchArgv` for `/v1/sessions/launch` and `/v1/sessions/remove` |
+| `herdr-agent-hub-gateway.ts` | `AgentHubGateway` — chat/kill/revive/stream request handling for `/v1/herdr/agent*`, shared by every `AgentHubBinding` (disk-only fallback or live) |
+| `herdr-agent-hub-live.ts` | The real (mutating) `AgentHubBinding`: chat submits a normal turn targeted at the lane's name, kill archives it, revive recovers it — no invented IPC with the external oh-my-pk binary |
+| `realtime-gateway.ts` | The conversational assistant core. Runs a Gemini Live session with read-only subagent/workspace tools (`list_agents`, `get_agent`, `read_transcript`, `list_workspace`, `read_workspace_file`) and a `propose_command` approval flow. Voice, phone, and remote turns all reach this assistant. |
+| `realtime-terminal-approval.ts` | Original terminal-command approval registry used by the realtime gateway |
+| `realtime-command-approval.ts` | Extended approval registry covering terminal, chat, kill, and launch command proposals. `propose_command` stages a mutation and returns a confirmation token; the assistant only executes after the user approves. |
 | `listener/listener.py` | Always-on wake-word listener (faster-whisper wake detection + transcription) |
-| `web/remote/index.html` | Mobile web app |
+| `realtime-gateway.ts` | Live-voice conversational assistant over Gemini Live: `REALTIME_SYSTEM_PROMPT` persona, `buildRealtimeTools` tool surface (read-only session/agent-hub/workspace tools + approval-gated mutating tools), tool-call dispatch |
+| `realtime-terminal-approval.ts` / `realtime-terminal-command.ts` | Approval registry + safety classifier for `execute_terminal_command` (raw shell command, read-only allowlist vs. confirm) |
+| `realtime-command-approval.ts` | Approval registry for non-terminal mutating tool calls (`launch_agent`, `archive_session`), keyed by kind+description rather than a command string |
 
 ## TTS Provider Logic
 
 Auto-resolution order:
 1. `legacy` — local speak11 (requires Python deps)
-2. `elevenlabs` — requires `ELEVENLABS_API_KEY`
-3. `openai` — requires `PI_SPEAK_OPENAI_KEY` (dedicated, not general LLM key)
-4. `edge` — works immediately (bundled `node-edge-tts`)
+2. `gemini` — requires Google API key or Vertex AI configuration
+3. `elevenlabs` — requires `ELEVENLABS_API_KEY`
+4. `openai` — requires `PI_SPEAK_OPENAI_KEY` (dedicated, not general LLM key)
+5. `edge` — works immediately (bundled `node-edge-tts`)
 
 ## Important Patterns
 
-- **API keys for audio**: Use dedicated keys (`PI_SPEAK_OPENAI_KEY`, `ELEVENLABS_API_KEY`) not the general LLM keys
+- **API keys for audio**: Use dedicated keys (`PI_SPEAK_OPENAI_KEY`, `ELEVENLABS_API_KEY`) or Google Gemini/Vertex credentials for Gemini TTS
 - **Edge TTS**: Bundled via `node-edge-tts`, no external deps needed
 - **Local voice (`/mono`)**: Requires Python stack with `faster-whisper`, `sounddevice`, `numpy`
 - **Wake sensitivity**: Use `PI_SPEAK_WAKE_SENSITIVITY=low|medium|high` as the main operator control for how forgiving `PK` activation should be; use the lower-level fuzzy and compact env vars only as overrides
@@ -64,14 +82,23 @@ Auto-resolution order:
 - **`pk-speak-mcp.ts`**: a thin stdio MCP adapter. It MUST NOT reimplement TTS in-process. Resolve `pk-speak.js` as a sibling of the compiled `pk-speak-mcp.js` via `fileURLToPath(import.meta.url)` + `dirname`. Spawn `process.execPath + [ pkSpeakPath, ...(voice ? ["--voice", voice] : []), text ]`. Capture exit code; non-zero → MCP error result; zero → `{ content: [{ type: "text", text: "Spoke." }] }`. Never write to stdout except JSON-RPC — all diagnostics go to `console.error`.
 - **Operator UX**: `/sess` should surface the compact-lane summary inline, `/sess slots` should show the explicit PK1/PK2 lane ownership view, and `/sess ui` should launch the Ink management pane in a separate terminal so it does not steal the pi-coding-agent TTY.
 - **Phone setup UX**: `/pk-remote` is the shortest Android setup path. It should start the HTTP gateway if needed, choose public/Tailscale/LAN URLs in that order, and print a QR for the native `pi-speak://setup` deep link.
+- **Android control-surface parity**: the native app mirrors the web remote against the same gateway endpoints — session mutations (`/v1/sessions/rename|alias|archive|remove`), route target (`/v1/route`), compact slots (`/v1/sessions/slots`), agent discovery (`/v1/agents`), the SSE event feed (`/v1/events`), and the workspace file viewer (`/v1/workspace/file`). Client parsing lives in `android-app/.../api/GatewayOps.kt` (pure, unit-tested) and the SSE tail in `api/GatewayEventStream.kt`; when a new gateway endpoint is added for the web remote, extend those instead of burying JSON parsing in `MainActivity.kt`.
+- **Agent Hub portal (Tasks pane)**: the hierarchical lane → subagent tree, chat/archive, and general task launcher live behind `/v1/herdr/agent*` + `/v1/sessions/launch`. Android models/parsers are `api/GatewayHub.kt`, the per-agent SSE tail is `api/HerdrAgentStream.kt`, and both flavors' UI lives in `HubPortalComposables.kt` (standard) and inline in `BooxMainActivity.kt`'s `HubPane`/`HubSessionRow` (e-ink). Revive is intentionally NOT wired into either UI: an archived lane is invisible to the same dashboard scan that lists agents, so there is no reachable state in this tree from which reviving would find anything — `VoiceAgentClient.reviveHubAgent` stays available for a future surface that tracks archived-lane names persistently.
+- **Agent hub launch**: `POST /v1/sessions/launch` spawns a fresh Oh-my-pk agent via `ompk --cwd <dir> [--model/--provider/--session-dir] -- <prompt>` or opens the Agent Hub via `ompk bg` (`hubOnly: true`). Defaults to `AGENT_CWD` → `AGENT_WORKSPACE` → `process.cwd()` when the payload omits `cwd`, so set `AGENT_CWD=C:/dev/Desktop-Projects/oh-my-pk-fork` (or use the Boox/PWA UI which sends the workspace cwd) to land in the fork. The argv is built by `buildOhMyPiLaunchArgv` (testable in `tests/agent-hub-actions.test.mjs`); the spawn helper in `index.ts` reuses the resume pattern and appends a `sess.launch` event. Legacy `oh-my-pi`/`omp` provider names and env vars remain accepted as aliases.
+
+- **Workspace browse + file read**: The PWA Workspace tab uses `GET /v1/workspace?path=...` (lists a directory; `entries` now include files as well as directories with `name`/`path`/`type` and `size` on files) and the read-only `GET /v1/workspace/file?path=...` (returns `name`/`path`/`size`/`truncated`/`binary`/`content`, capped at the first 512 KB, empty content for binary files). Both are confined to `PI_SPEAK_WORKSPACE_ROOT`, which **defaults to the agent working directory** (`getDefaultWorkspacePath`: `AGENT_CWD`/`AGENT_WORKSPACE`/`process.cwd()`) rather than the whole drive, since the file endpoint reads file contents under that root; set it to a directory to widen, or to `fs` for the drive root. Containment uses a lexical `..` guard plus a realpath check (symlinks/junctions resolving outside root are rejected), the listing is streamed and capped at 2000 entries (`truncated` flag), and Windows reserved device names (CON/NUL/COM1…) are rejected. These expose the `workspace-browse` and `workspace-file-read` capabilities; "Use this folder" sets the launch `cwd` for turns. Endpoints/capabilities live in `control-server.ts` (`/v1/workspace`, `/v1/workspace/file`).
 - **Pane write path**: All pane-driven mutations flow through `loadPersistedSessionRouting` → pure helper in `session-routing.ts` → `persistSessionRouting` → `appendSessionEvent(kind, "admin", payload)`. The extension watches the routing store mtime and reloads in-process state on external writes.
+- **Conversational assistant approval boundary**: `execute_terminal_command` outside the read-only allowlist, `launch_agent` when it actually launches (as opposed to `hubOnly`/no-prompt, which just opens the hub — the `hubOnly`/prompt/`targetNode` decision is the pure, unit-tested `isNavigationalLaunch` helper), and `archive_session` all defer their tool response, send `tool_approval_required` over the realtime WS, and only run after the client sends `terminal_approve`/`terminal_reject` (terminal) or `command_approve`/`command_reject` (everything else). Every request/resolve/execution-result step for both flows is appended to the shared `realtime-terminal-audit.ts` JSONL trail (`terminal.*` / `command.*` kinds) via `appendTerminalAudit`. Read-only tools (`list_sessions`, `get_session_info`, `list_agent_hub_agents`, `get_agent_hub_agent`, `browse_workspace`, `read_workspace_file`) never require approval, but `read_workspace_file` refuses (`looksLikeSecretPath` in `realtime-terminal-command.ts`) to return content for paths that look like credentials/keys (`.env*`, `id_rsa`/`id_ed25519`, `*.pem`/`*.key`/etc.) so secrets can't be narrated into a voice conversation. `agentHubGateway` on `ControlServer` is intentionally typed `Pick<AgentHubGateway, "snapshot" | "detail">` for external (realtime-gateway) callers — the full mutating instance stays on the private `_agentHubGateway` field, used only by the HTTP `/v1/herdr/agent*` routes. When adding a new mutating tool, gate it the same way instead of executing inline.
 - **Remote audio**: Browser mic requires HTTPS origin (use Tailscale Serve or tunnel)
 
 ## Testing
 
 ```bash
-npm test   # Non-local auth, rate limiting, body size, audio expiry, etc.
+npm test               # Non-local auth, rate limiting, body size, audio expiry, etc.
+npm run test:realtime-live   # End-to-end: real handleRealtimeGateway dispatch against a fake Gemini Live connection
 ```
+
+`npm test` (`tests/*.test.mjs`) covers plenty of real integration behavior generally (non-local auth, rate limiting, body size, audio expiry, etc.), but for the realtime conversational-assistant gateway specifically it only covers pure helpers in isolation — e.g. `buildRealtimeTools`, `isNavigationalLaunch`, `looksLikeSecretPath`, the approval registries. It does not exercise the actual onmessage tool-call switch in `realtime-gateway.ts`. `npm run test:realtime-live` (`tests/integration/*.test.mjs`, requires Node's `--experimental-test-module-mocks`, kept out of the default `tests/*.test.mjs` glob on purpose) fakes `@google/genai`'s `GoogleGenAI`/`live.connect` and drives the real `handleRealtimeGateway` entrypoint end to end: a read-only tool call answers immediately with no approval step; a mutating call (`launch_agent`/`archive_session`) defers behind `tool_approval_required` and only actually runs after a `command_approve` control message, never after `command_reject`; approvals/executions land in the real on-disk audit trail; `read_workspace_file` refuses a secret-shaped path without touching disk and returns real content for an ordinary one. Extend this file (not just the pure-helper tests) when changing the approval-gating wiring itself, not just the logic it calls.
 
 ## Release
 

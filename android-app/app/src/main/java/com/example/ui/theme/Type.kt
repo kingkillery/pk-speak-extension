@@ -6,31 +6,32 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-// Serif for large headings (the Claude "paper" look); sans for everything else.
+// Default (platform sans) for headings — the Sage & Clay identity trades the
+// old literary-paper serif for a friendlier, more spacious voice.
 val Typography =
   Typography(
     displaySmall = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = FontFamily.Default,
         fontSize = 40.sp,
-        fontWeight = FontWeight.Normal,
+        fontWeight = FontWeight.SemiBold,
         lineHeight = 44.sp,
     ),
     headlineLarge = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = FontFamily.Default,
         fontSize = 30.sp,
-        fontWeight = FontWeight.Normal,
+        fontWeight = FontWeight.SemiBold,
         lineHeight = 36.sp,
     ),
     headlineMedium = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = FontFamily.Default,
         fontSize = 24.sp,
-        fontWeight = FontWeight.Normal,
+        fontWeight = FontWeight.SemiBold,
         lineHeight = 30.sp,
     ),
     titleLarge = TextStyle(
-        fontFamily = FontFamily.Serif,
+        fontFamily = FontFamily.Default,
         fontSize = 22.sp,
-        fontWeight = FontWeight.Normal,
+        fontWeight = FontWeight.SemiBold,
         lineHeight = 28.sp,
     ),
     titleMedium = TextStyle(

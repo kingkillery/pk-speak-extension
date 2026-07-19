@@ -1,4 +1,4 @@
-export type AgentProviderName = "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
+export type AgentProviderName = "pi" | "codex" | "claude" | "oh-my-pk" | "gemini" | "gemini-live" | "elevenlabs" | "9router";
 
 export type AgentPromptMode = "turn" | "steer" | "followUp";
 
@@ -15,8 +15,18 @@ export type AgentResponseChunk = {
 	text: string;
 };
 
+export type AgentProviderCapabilities = {
+	textTurns: boolean;
+	voiceTurns: boolean;
+	audioReplies: boolean;
+	routing: boolean;
+	steering: boolean;
+	resumableSessions: boolean;
+};
+
 export interface AgentProvider {
 	readonly name: AgentProviderName;
+	readonly capabilities?: Partial<AgentProviderCapabilities>;
 	start?(): Promise<void>;
 	stop?(): Promise<void>;
 	sendPrompt(prompt: string, options?: AgentPromptOptions): AsyncIterable<AgentResponseChunk>;
@@ -25,7 +35,9 @@ export interface AgentProvider {
 export type AgentProviderConfig = {
 	provider: AgentProviderName;
 	codexBin: string;
+	claudeBin: string;
 	piBin: string;
+	ompBin: string;
 	model?: string;
 	approvalPolicy: string;
 	sandbox: string;
@@ -35,6 +47,10 @@ export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env)
 	const configuredProvider = (env.AGENT_PROVIDER || "pi").trim().toLowerCase();
 	const provider: AgentProviderName = configuredProvider === "codex"
 		? "codex"
+		: configuredProvider === "claude"
+			? "claude"
+		: configuredProvider === "oh-my-pk" || configuredProvider === "ompk" || configuredProvider === "oh-my-pi" || configuredProvider === "omp"
+			? "oh-my-pk"
 		: configuredProvider === "gemini" || configuredProvider === "gemini-live"
 			? configuredProvider
 			: configuredProvider === "elevenlabs"
@@ -44,7 +60,13 @@ export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env)
 	return {
 		provider,
 		codexBin: env.CODEX_BIN?.trim() || "codex",
+		claudeBin: env.CLAUDE_BIN?.trim() || "claude",
 		piBin: env.PI_BIN?.trim() || "pi",
+		ompBin: env.PI_SPEAK_OH_MY_PK_BIN?.trim()
+			|| env.OMPK_BIN?.trim()
+			|| env.PI_SPEAK_OH_MY_PI_BIN?.trim()
+			|| env.OMP_BIN?.trim()
+			|| "ompk",
 		model,
 		approvalPolicy: env.AGENT_APPROVAL_POLICY?.trim() || env.CODEX_APPROVAL_POLICY?.trim() || "never",
 		sandbox: env.AGENT_SANDBOX?.trim() || env.CODEX_SANDBOX?.trim() || "danger-full-access",

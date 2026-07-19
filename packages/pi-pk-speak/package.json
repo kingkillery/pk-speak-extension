@@ -1,0 +1,52 @@
+{
+  "name": "pi-pk-speak",
+  "version": "0.2.11",
+  "type": "module",
+  "description": "Pi extension for conversational PK Speak voice, wake-word, mobile, and session routing.",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "speech",
+    "voice",
+    "remote-control",
+    "pk-speak"
+  ],
+  "main": "dist/index.js",
+  "bin": {
+    "pi-speak-admin": "dist/ui/admin.js",
+    "pi-speak-gateway": "dist/headless-gateway.js",
+    "pi-speak-tray": "dist/persistent-tray.js",
+    "pi-speak-qr": "scripts/qr-setup.mjs"
+  },
+  "files": [
+    "dist",
+    "!dist/pk-speak.*",
+    "!dist/pi-speak-pk.*",
+    "web",
+    "assets",
+    "android-app/.build-outputs/app-debug.apk",
+    "listener",
+    "!listener/__pycache__",
+    "!listener/**/*.pyc",
+    "unified-remote",
+    "scripts/qr-setup.mjs",
+    "SKILL.md",
+    "CHANGELOG.md",
+    "README.md"
+  ],
+  "dependencies": {
+    "@google/genai": "^1.52.0",
+    "bonjour-service": "^1.4.0",
+    "ink": "^7.0.0",
+    "node-edge-tts": "^1.2.10",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.5"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

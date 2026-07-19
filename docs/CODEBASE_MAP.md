@@ -129,7 +129,7 @@ PI_SPEAK_GEMINI_BACKEND=vertex
 PI_SPEAK_VERTEX_API_KEY=<optional Vertex AI API key>
 GOOGLE_CLOUD_PROJECT=<Vertex AI project>
 GOOGLE_CLOUD_LOCATION=<Vertex AI location>
-REDACTED_ELEVENLABS_HISTORY_LINE<server-side ElevenLabs key>
+# ELEVENLABS_API_KEY is read from your environment
 ```
 
 Android clients should not call AI Studio or hold Gemini API keys. They send text/voice turns to the tray/gateway, which can use ElevenLabs and Vertex AI server-side.

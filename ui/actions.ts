@@ -39,7 +39,7 @@ export function renameSession(input: RenameSessionInput): ActionResult<RenameSes
 	const named = setNamedSession(persisted.sessions, nextName, input.sessionPath);
 	if (!named.ok) return { ok: false, error: named.error };
 
-	persistSessionRouting({ sessions: named.sessions, aliases: persisted.aliases });
+	persistSessionRouting({ sessions: named.sessions, aliases: persisted.aliases, archivedPaths: persisted.archivedPaths });
 	appendSessionEvent("sess.rename", "admin", {
 		from: previousName,
 		to: nextName,
@@ -72,7 +72,7 @@ export function addWakeAlias(input: AddWakeAliasInput): ActionResult<AddWakeAlia
 	const persisted = loadPersistedSessionRouting();
 	const sessionName = findSessionNameByPath(input.sessionPath, persisted.sessions) ?? "(unnamed)";
 	const next = setWakeAlias(persisted.aliases, alias, input.sessionPath);
-	persistSessionRouting({ sessions: persisted.sessions, aliases: next.aliases });
+	persistSessionRouting({ sessions: persisted.sessions, aliases: next.aliases, archivedPaths: persisted.archivedPaths });
 	appendSessionEvent("alias.add", "admin", {
 		alias: next.alias,
 		name: sessionName,
@@ -97,7 +97,7 @@ export function removeWakeAlias(input: RemoveWakeAliasInput): ActionResult<{ ali
 	const persisted = loadPersistedSessionRouting();
 	const cleared = clearWakeAlias(persisted.aliases, alias);
 	if (!cleared.ok) return { ok: false, error: `Wake alias "${alias}" not found.` };
-	persistSessionRouting({ sessions: persisted.sessions, aliases: cleared.aliases });
+	persistSessionRouting({ sessions: persisted.sessions, aliases: cleared.aliases, archivedPaths: persisted.archivedPaths });
 	appendSessionEvent("alias.remove", "admin", { alias: cleared.alias });
 	return { ok: true, alias: cleared.alias };
 }
@@ -164,7 +164,11 @@ export function confirmRemoveSession(
 		persisted.aliases,
 		input.sessionPath,
 	);
-	persistSessionRouting({ sessions: removal.sessions, aliases: removal.aliases });
+	persistSessionRouting({
+		sessions: removal.sessions,
+		aliases: removal.aliases,
+		archivedPaths: persisted.archivedPaths.filter((path) => path !== input.sessionPath),
+	});
 	appendSessionEvent("sess.remove", "admin", {
 		name: input.pending.sessionName,
 		path: input.sessionPath,

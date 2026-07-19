@@ -1,19 +1,33 @@
-import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, createReadStream, existsSync, mkdirSync, opendirSync, openSync, readFileSync, realpathSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import dgram, { type Socket as UdpSocket } from "node:dgram";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomBytes, randomUUID } from "node:crypto";
-import { dirname, join, parse, resolve } from "node:path";
-import { hostname, networkInterfaces, platform } from "node:os";
+import { randomUUID } from "node:crypto";
+import { basename, dirname, join, parse, resolve } from "node:path";
+import { hostname, platform } from "node:os";
 import QRCode from "qrcode";
+import { getOrCreateInstallAuthToken, getReachableBaseUrls, isTailscaleIpv4, pickPhoneFacingBaseUrl } from "./pairing.js";
 import Bonjour from "bonjour-service";
+import { WebSocketServer, WebSocket } from "ws";
+import "./realtime-types.js";
+import { abortAllActiveTTS } from "./tts.js";
 import { BusyError, type RemoteTurnSource, RemoteTurnResult } from "./remote-turn-manager.js";
 import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
 import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
 import type { SessionDashboard, CompactRouteSlot } from "./session-routing.js";
 import type { AgentDiscoverySnapshot } from "./agent-discovery.js";
+import { getPiSpeakConfigDir } from "./setup-config.js";
+import { buildHerdrSnapshot, readHerdrPane, sendHerdrAgent, sendHerdrPane, type HerdrAgentSendPayload, type HerdrPaneReadResult, type HerdrPaneSendPayload, type HerdrSnapshot } from "./herdr-client.js";
+import { createDiskFallbackBinding } from "./herdr-agent-hub-disk.js";
+import { AgentHubGateway, type AgentHubBinding } from "./herdr-agent-hub-gateway.js";
+import { parseHubAgentId, parseHubChatRequest, parseHubKillConfirm } from "./herdr-agent-hub-schema.js";
+import { buildOhMyPiAgentHubDashboardCached } from "./agent-hub-dashboard.js";
+
+const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
 export type ControlServerState = {
+
 	enabled: boolean;
 	host?: string;
 	port?: number;
@@ -25,6 +39,13 @@ export type ControlActionResult = {
 	message: string;
 	[key: string]: unknown;
 };
+
+function actionResultStatus(result: ControlActionResult): number {
+	const status = result.status;
+	return typeof status === "number" && Number.isInteger(status) && status >= 200 && status <= 599
+		? status
+		: result.ok ? 200 : 400;
+}
 
 export type SessionRenamePayload = {
 	sessionPath: string;
@@ -47,6 +68,31 @@ export type SessionResumePayload = {
 	cwd?: string;
 };
 
+export type SessionLaunchPayload = {
+	cwd?: string;
+	prompt?: string;
+	model?: string;
+	provider?: string;
+	sessionDir?: string;
+	hubOnly?: boolean;
+	targetNode?: string;
+};
+
+export type HubPublishPayload = {
+	sessionPath: string;
+	cwd?: string;
+};
+
+export type HubResumePayload = {
+	link: string;
+	cwd?: string;
+};
+
+export type SessionArchivePayload = {
+	sessionPath?: string;
+	action?: "archive" | "recover";
+};
+
 export type RemoteSlashCommand = {
 	name: string;
 	description?: string;
@@ -55,10 +101,13 @@ export type RemoteSlashCommand = {
 	source?: "extension" | "prompt" | "skill" | "builtin";
 };
 
+export type GatewayAgentProvider = "pi" | "codex" | "claude" | "oh-my-pk";
+export type ControlAgentProvider = GatewayAgentProvider | "gemini" | "gemini-live" | "elevenlabs" | "9router";
+
 export type ControlServerStatus = {
 	agent?: {
-		provider: "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
-		configuredProvider?: "pi" | "codex" | "gemini" | "gemini-live" | "elevenlabs";
+		provider: ControlAgentProvider;
+		configuredProvider?: ControlAgentProvider;
 		model?: string;
 		capabilities: {
 			textTurns: boolean;
@@ -116,10 +165,59 @@ export type DiscoveryDiagnostics = {
 	lastError?: string;
 };
 
+export type WarpPsmuxPane = {
+	session: string;
+	window: string;
+	pane: string;
+	paneId: string;
+	active: boolean;
+	command?: string;
+	title?: string;
+};
+
+export type WarpPsmuxWindow = {
+	session: string;
+	index: string;
+	name: string;
+	active: boolean;
+	panes: WarpPsmuxPane[];
+};
+
+export type WarpPsmuxSession = {
+	name: string;
+	windows: WarpPsmuxWindow[];
+	attached?: string;
+};
+
+export type WarpControlSnapshot = {
+	available: boolean;
+	sameTailnet: boolean;
+	requestRemoteAddress: string;
+	warpRemoteBaseUrl?: string;
+	warpUriScheme: string;
+	psmux: {
+		available: boolean;
+		executable: string;
+		sessions: WarpPsmuxSession[];
+		error?: string;
+	};
+};
+
 export type WorkspaceEntry = {
 	name: string;
 	path: string;
-	type: "directory";
+	type: "directory" | "file";
+	size?: number;
+};
+
+export type CollabLinkSnapshot = {
+	active: boolean;
+	webLink?: string;
+	webViewLink?: string;
+	link?: string;
+	viewLink?: string;
+	view?: boolean;
+	startedAt?: string;
 };
 
 export type ControlServerOptions = {
@@ -148,7 +246,9 @@ export type ControlServerOptions = {
 		target?: string,
 		cwd?: string,
 		mode?: "auto" | "live",
-		agentProvider?: "pi" | "codex",
+		agentProvider?: GatewayAgentProvider,
+		model?: string,
+		clientKey?: string,
 	) => Promise<RemoteTurnResult>;
 	onVoiceTurn: (
 		buffer: Buffer,
@@ -157,7 +257,9 @@ export type ControlServerOptions = {
 		target?: string,
 		cwd?: string,
 		mode?: "auto" | "live",
-		agentProvider?: "pi" | "codex",
+		agentProvider?: GatewayAgentProvider,
+		model?: string,
+		clientKey?: string,
 	) => Promise<RemoteTurnResult>;
 	onTurnCancel?: () => Promise<ControlActionResult> | ControlActionResult;
 	getSessionDashboard?: () => SessionDashboard;
@@ -166,8 +268,27 @@ export type ControlServerOptions = {
 	onSessionAlias?: (body: SessionAliasPayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionRemove?: (body: SessionRemovePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
+	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
+	onSessionArchive?: (body: SessionArchivePayload) => Promise<ControlActionResult> | ControlActionResult;
+	onHubPublish?: (body: HubPublishPayload) => Promise<ControlActionResult> | ControlActionResult;
+	onHubResume?: (body: HubResumePayload) => Promise<ControlActionResult> | ControlActionResult;
+	isHubHandoffReady?: () => boolean;
+	/** Select (sessionPath) or deselect (null) the ompk resume session for a client. */
+	onOmpSelectSession?: (clientKey: string, sessionPath: string | null) => { ok: boolean; error?: string } | void;
+	onOmpGetSelectedSession?: (clientKey: string) => string | null;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
+	getHerdrSnapshot?: () => Promise<HerdrSnapshot>;
+	readHerdrPane?: (paneId: string | undefined, lines: number | undefined) => Promise<HerdrPaneReadResult>;
+	sendHerdrPane?: (payload: HerdrPaneSendPayload | undefined) => Promise<ControlActionResult>;
+	sendHerdrAgent?: (payload: HerdrAgentSendPayload | undefined) => Promise<ControlActionResult>;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
+	agentHub?: AgentHubBinding;
+	onRealtimeConnection?: (ws: WebSocket) => void;
+	onBrainstorm?: (
+		buffer: Buffer,
+		mimeType: string | undefined,
+		cwd?: string,
+	) => Promise<{ ok: boolean; text: string; formatted: string; filePath: string }>;
 };
 
 type AudioArtifact = {
@@ -276,11 +397,27 @@ export class ControlServer {
 	private readonly onSessionAlias?: ControlServerOptions["onSessionAlias"];
 	private readonly onSessionRemove?: ControlServerOptions["onSessionRemove"];
 	private readonly onSessionResume?: ControlServerOptions["onSessionResume"];
+	private readonly onSessionLaunch?: ControlServerOptions["onSessionLaunch"];
+	private readonly onSessionArchive?: ControlServerOptions["onSessionArchive"];
+	private readonly onHubPublish?: ControlServerOptions["onHubPublish"];
+	private readonly onHubResume?: ControlServerOptions["onHubResume"];
+	private readonly isHubHandoffReady: NonNullable<ControlServerOptions["isHubHandoffReady"]>;
+	private readonly onOmpSelectSession?: ControlServerOptions["onOmpSelectSession"];
+	private readonly onOmpGetSelectedSession?: ControlServerOptions["onOmpGetSelectedSession"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
 	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
+	private readonly getHerdrSnapshot: NonNullable<ControlServerOptions["getHerdrSnapshot"]>;
+	private readonly readHerdrPane: NonNullable<ControlServerOptions["readHerdrPane"]>;
+	private readonly sendHerdrPane: NonNullable<ControlServerOptions["sendHerdrPane"]>;
+	private readonly sendHerdrAgent: NonNullable<ControlServerOptions["sendHerdrAgent"]>;
+	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
+	private readonly onBrainstorm?: ControlServerOptions["onBrainstorm"];
+	private wss?: WebSocketServer;
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
+	private readonly _agentHubGateway: AgentHubGateway;
+	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
 		udpEnabled: false,
@@ -314,8 +451,35 @@ export class ControlServer {
 		this.onSessionAlias = options.onSessionAlias;
 		this.onSessionRemove = options.onSessionRemove;
 		this.onSessionResume = options.onSessionResume;
+		this.onSessionLaunch = options.onSessionLaunch;
+		this.onSessionArchive = options.onSessionArchive;
+		this.onHubPublish = options.onHubPublish;
+		this.onHubResume = options.onHubResume;
+		this.isHubHandoffReady = options.isHubHandoffReady || (() => false);
+		this.onOmpSelectSession = options.onOmpSelectSession;
+		this.onOmpGetSelectedSession = options.onOmpGetSelectedSession;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
+		this.getHerdrSnapshot = options.getHerdrSnapshot || (() => buildHerdrSnapshot());
+		this.readHerdrPane = options.readHerdrPane || ((paneId, lines) => readHerdrPane(paneId, lines));
+		this.sendHerdrPane = options.sendHerdrPane || ((payload) => sendHerdrPane(payload));
+		this.sendHerdrAgent = options.sendHerdrAgent || ((payload) => sendHerdrAgent(payload));
 		this.tailSessionEvents = options.tailSessionEvents;
+		this.onRealtimeConnection = options.onRealtimeConnection;
+		this._agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
+		this.onBrainstorm = options.onBrainstorm;
+	}
+
+	// Read-only view for the conversational realtime gateway: a genuinely
+	// narrow runtime object exposing only snapshot/detail, not chat/kill/
+	// revive/stream. The Pick<> return type alone only narrows at compile
+	// time -- the realtime gateway holds this behind an `any`-typed `server`
+	// reference, so returning `this._agentHubGateway` directly would still let
+	// a future (or buggy) realtime tool reach the mutating methods at runtime.
+	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail"> {
+		return {
+			snapshot: () => this._agentHubGateway.snapshot(),
+			detail: (id, tailLines) => this._agentHubGateway.detail(id, tailLines),
+		};
 	}
 
 	getRuntimeState() {
@@ -352,6 +516,51 @@ export class ControlServer {
 			});
 		});
 
+		this.wss = new WebSocketServer({ noServer: true });
+		this.wss.on("connection", (ws) => {
+			ws.on("message", async (data, isBinary) => {
+				if (!isBinary) {
+					try {
+						const msg = JSON.parse(data.toString());
+						if (msg.type === "interrupt") {
+							console.log("[Barge-in] Intercepted interrupt signal from client. Aborting synthesis and agent turns.");
+							if (this.onTurnCancel) {
+								await this.onTurnCancel();
+							}
+							abortAllActiveTTS();
+							if (ws.readyState === WebSocket.OPEN) {
+								ws.send(JSON.stringify({ type: "interrupt" }));
+							}
+						}
+					} catch (e) {
+						// ignore
+					}
+				}
+			});
+
+			if (this.onRealtimeConnection) {
+				this.onRealtimeConnection(ws);
+			} else {
+				ws.close(1011, "Realtime voice gateway is not active.");
+			}
+		});
+
+		this.server.on("upgrade", (req, socket, head) => {
+			const url = new URL(req.url || "", `http://${req.headers.host || "127.0.0.1"}`);
+			if (url.pathname === "/v1/live") {
+				if (!this.isAuthorized(req, url, true)) {
+					socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+					socket.destroy();
+					return;
+				}
+				this.wss!.handleUpgrade(req, socket, head, (ws) => {
+					this.wss!.emit("connection", ws, req);
+				});
+			} else {
+				socket.destroy();
+			}
+		});
+
 		await new Promise<void>((resolve, reject) => {
 			const server = this.server!;
 			server.once("error", reject);
@@ -365,7 +574,10 @@ export class ControlServer {
 			this.state.port = address.port;
 		}
 
-		this.cleanupTimer = setInterval(() => this.cleanupExpiredAudio(), CLEANUP_INTERVAL_MS);
+		this.cleanupTimer = setInterval(() => {
+			this.cleanupExpiredAudio();
+			this.cleanupStaleRateLimitBuckets();
+		}, CLEANUP_INTERVAL_MS);
 		this.cleanupTimer.unref?.();
 		this.onStateChange({ enabled: true, host, port: this.state.port, authToken });
 		await this.startDiscoveryResponder().catch((error) => {
@@ -387,6 +599,10 @@ export class ControlServer {
 			this.discoverySocket = undefined;
 		}
 		await this.stopMdnsAdvertisement();
+		if (this.wss) {
+			this.wss.close();
+			this.wss = undefined;
+		}
 		const server = this.server;
 		this.server = undefined;
 		await new Promise<void>((resolve) => {
@@ -399,6 +615,9 @@ export class ControlServer {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
 		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
 		this.applyCors(req, res, url);
+		if (url.pathname === "/v1/hub/publish" || url.pathname === "/v1/hub/resume") {
+			res.setHeader("Cache-Control", "no-store");
+		}
 
 		if (req.method === "OPTIONS") {
 			res.statusCode = 204;
@@ -416,15 +635,18 @@ export class ControlServer {
 				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 				return;
 			}
+			this.recordRemoteClient(req, url);
 			const id = decodeURIComponent(url.pathname.slice("/v1/audio/".length));
 			await this.handleAudioRequest(id, res);
 			return;
 		}
 
-		if (!this.isAuthorized(req, url, false)) {
+		const allowQueryToken = req.method === "GET" && url.pathname === "/v1/events";
+		if (!this.isAuthorized(req, url, allowQueryToken)) {
 			this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 			return;
 		}
+		this.recordRemoteClient(req, url);
 
 		const rateLimitError = this.checkRateLimit(req, url, localRequest);
 		if (rateLimitError) {
@@ -452,6 +674,18 @@ export class ControlServer {
 						allowedOrigins: [...this.allowedOrigins],
 					},
 					discovery: { ...this.discoveryDiagnostics },
+				},
+			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/pairing/status") {
+			this.writeJson(res, 200, {
+				ok: true,
+				lastRemoteClient: this.lastRemoteClient ?? null,
+				gateway: {
+					port: this.state.port ?? DEFAULT_PORT,
+					authRequired: !!this.state.authToken,
 				},
 			});
 			return;
@@ -499,6 +733,121 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/warp") {
+			this.writeJson(res, 200, { ok: true, warp: buildWarpControlSnapshot(req) });
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/warp/tab") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = openWarpTab(payload);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/warp/tab-config") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = openWarpTabConfig(payload);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/warp/psmux/session") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = createPsmuxSession(payload);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/warp/psmux/window") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = createPsmuxWindow(payload);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/herdr") {
+			this.writeJson(res, 200, { ok: true, herdr: await this.getHerdrSnapshot() });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/herdr/pane/read") {
+			const linesParam = url.searchParams.get("lines");
+			const lines = linesParam ? Number.parseInt(linesParam, 10) : undefined;
+			const result = await this.readHerdrPane(url.searchParams.get("paneId") || undefined, lines);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/herdr/pane/send") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = await this.sendHerdrPane(payload as HerdrPaneSendPayload | undefined);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/herdr/agents") {
+			const snapshot = await this._agentHubGateway.snapshot();
+			this.writeJson(res, 200, { ok: true, generatedAtMs: Date.now(), ...snapshot });
+			return;
+		}
+
+		{
+			const agentMatch = /^\/v1\/herdr\/agent\/([^/]+)(?:\/(chat|revive|kill))?$/.exec(url.pathname);
+			if (agentMatch) {
+				const id = parseHubAgentId(decodeURIComponent(agentMatch[1] ?? ""));
+				if (!id) {
+					this.writeJson(res, 400, { ok: false, code: "bad_id", error: "Malformed agent id." });
+					return;
+				}
+				const action = agentMatch[2];
+				if (req.method === "GET" && !action) {
+					const lines = parsePositiveInt(url.searchParams.get("lines"), 80);
+					const agent = await this._agentHubGateway.detail(id, Math.min(lines, 500));
+					if (!agent) { this.writeJson(res, 404, { ok: false, code: "not_found", error: `Unknown agent: ${id}` }); return; }
+					this.writeJson(res, 200, { ok: true, agent });
+					return;
+				}
+				if (req.method === "POST" && action === "chat") {
+					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+					const parsed = parseHubChatRequest(payload, getPrimaryHeaderValue(req.headers["x-pi-speak-idempotency-key"]));
+					if (!parsed) { this.writeJson(res, 400, { ok: false, code: "bad_request", error: "Body must be { text } (non-empty, <=8192 chars)." }); return; }
+					const result = await this._agentHubGateway.chat(id, parsed.text, parsed.idempotencyKey);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+				if (req.method === "POST" && action === "revive") {
+					const result = await this._agentHubGateway.revive(id);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+				if (req.method === "POST" && action === "kill") {
+					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+					const confirm = parseHubKillConfirm(payload ?? undefined);
+					const result = await this._agentHubGateway.kill(id, confirm?.confirmToken);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+			}
+		}
+
+		{
+			const streamMatch = /^\/v1\/herdr\/stream\/([^/]+)$/.exec(url.pathname);
+			if (req.method === "GET" && streamMatch) {
+				const id = parseHubAgentId(decodeURIComponent(streamMatch[1] ?? ""));
+				if (!id) { this.writeJson(res, 400, { ok: false, code: "bad_id", error: "Malformed agent id." }); return; }
+				const fromByte = parseNonNegativeInt(url.searchParams.get("fromByte"), 0);
+				// SSE: long-lived stream — don't apply REQUEST_TIMEOUT_MS here.
+				await this._agentHubGateway.stream(id, res, fromByte);
+				return;
+			}
+		}
+		if (req.method === "POST" && url.pathname === "/v1/herdr/agent/send") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = await this.sendHerdrAgent(payload as HerdrAgentSendPayload | undefined);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
 		if (req.method === "GET" && url.pathname === "/v1/commands") {
 			this.writeJson(res, 200, {
 				ok: true,
@@ -512,6 +861,22 @@ export class ControlServer {
 				ok: true,
 				workspace: listWorkspaceDirectory(url.searchParams.get("path") || undefined),
 			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/workspace/file") {
+			const result = readWorkspaceFile(url.searchParams.get("path") || undefined);
+			if (!result.ok) {
+				this.writeJson(res, result.status, { ok: false, error: result.error });
+				return;
+			}
+			const { ok: _ok, ...file } = result;
+			this.writeJson(res, 200, { ok: true, file });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/collab-link") {
+			this.writeJson(res, 200, { ok: true, collab: readCollabLink() });
 			return;
 		}
 
@@ -594,6 +959,42 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "POST" && url.pathname === "/v1/hub/publish") {
+			res.setHeader("Cache-Control", "no-store");
+			if (!this.onHubPublish) {
+				this.writeJson(res, 501, { ok: false, error: "Hub publish is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const sessionPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
+			const cwd = typeof payload?.cwd === "string" ? payload.cwd.trim() || undefined : undefined;
+			if (!sessionPath || (payload?.cwd !== undefined && typeof payload.cwd !== "string")) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: sessionPath is required and cwd must be a string." });
+				return;
+			}
+			const result = await this.onHubPublish({ sessionPath, cwd });
+			this.writeJson(res, actionResultStatus(result), result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/hub/resume") {
+			res.setHeader("Cache-Control", "no-store");
+			if (!this.onHubResume) {
+				this.writeJson(res, 501, { ok: false, error: "Hub resume is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const link = typeof payload?.link === "string" ? payload.link.trim() : "";
+			const cwd = typeof payload?.cwd === "string" ? payload.cwd.trim() || undefined : undefined;
+			if (!link || (payload?.cwd !== undefined && typeof payload.cwd !== "string")) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: link is required and cwd must be a string." });
+				return;
+			}
+			const result = await this.onHubResume({ link, cwd });
+			this.writeJson(res, actionResultStatus(result), result);
+			return;
+		}
+
 		if (req.method === "POST" && url.pathname === "/v1/sessions/resume") {
 			if (!this.onSessionResume) {
 				this.writeJson(res, 501, { ok: false, error: "Session resume is not available on this gateway." });
@@ -610,6 +1011,116 @@ export class ControlServer {
 			}
 			const result = await this.onSessionResume({ sessionPath, sessionId, provider, cwd });
 			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+		if (req.method === "POST" && url.pathname === "/v1/sessions/launch") {
+			if (!this.onSessionLaunch) {
+				this.writeJson(res, 501, { ok: false, error: "Session launch is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid JSON body." });
+				return;
+			}
+			const fieldTypes: Record<string, "string" | "boolean"> = {
+				cwd: "string",
+				prompt: "string",
+				model: "string",
+				provider: "string",
+				sessionDir: "string",
+				hubOnly: "boolean",
+				targetNode: "string",
+			};
+			for (const [field, expected] of Object.entries(fieldTypes)) {
+				if (payload[field] !== undefined && typeof payload[field] !== expected) {
+					this.writeJson(res, 400, { ok: false, error: `Invalid payload: ${field} must be a ${expected}.` });
+					return;
+				}
+			}
+			const cwd = typeof payload.cwd === "string" ? payload.cwd : undefined;
+			const prompt = typeof payload.prompt === "string" ? payload.prompt : undefined;
+			const model = typeof payload.model === "string" ? payload.model : undefined;
+			const provider = typeof payload.provider === "string" ? payload.provider : undefined;
+			const sessionDir = typeof payload.sessionDir === "string" ? payload.sessionDir : undefined;
+			const hubOnly = typeof payload.hubOnly === "boolean" ? payload.hubOnly : undefined;
+			const targetNode = typeof payload.targetNode === "string" ? payload.targetNode : undefined;
+			const result = await this.onSessionLaunch({ cwd, prompt, model, provider, sessionDir, hubOnly, targetNode });
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/sessions/archive") {
+			if (!this.onSessionArchive) {
+				this.writeJson(res, 501, { ok: false, error: "Session archive is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid JSON body." });
+				return;
+			}
+			const sessionPath = typeof payload.sessionPath === "string" ? payload.sessionPath : undefined;
+			if (!sessionPath) {
+				this.writeJson(res, 400, { ok: false, error: "sessionPath is required." });
+				return;
+			}
+			const action = payload.action === "recover" ? "recover" : "archive";
+			const result = await this.onSessionArchive({ sessionPath, action });
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/projects") {
+			const base = url.searchParams.get("base")?.trim()
+				|| process.env.PI_SPEAK_PROJECTS_BASE?.trim()
+				|| (() => {
+					const cwd = getDefaultWorkspacePath();
+					const parent = dirname(resolve(cwd));
+					return parent;
+				})();
+			const projects: string[] = [];
+			try {
+				const dir = opendirSync(resolve(base));
+				try {
+					let dirent = dir.readSync();
+					while (dirent) {
+						if (dirent.isDirectory() && !dirent.name.startsWith(".")) {
+							projects.push(dirent.name);
+						}
+						dirent = dir.readSync();
+					}
+				} finally {
+					dir.closeSync();
+				}
+			} catch {}
+			projects.sort((a, b) => a.localeCompare(b));
+			this.writeJson(res, 200, { ok: true, base: resolve(base), projects });
+			return;
+		}
+
+		if (req.method === "POST" && (url.pathname === "/v1/ompk/select-session" || url.pathname === "/v1/omp/select-session")) {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const rawPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
+			const explicitClient = typeof payload?.clientId === "string" ? payload.clientId : undefined;
+			const clientKey = this.clientKey(req, explicitClient);
+			// Empty sessionPath (or clear:true) deselects this client's ompk session,
+			// returning it to normal backend routing.
+			const clear = payload?.clear === true || rawPath.length === 0;
+			const sessionPath = clear ? null : rawPath;
+			const result = this.onOmpSelectSession?.(clientKey, sessionPath);
+			if (result && result.ok === false) {
+				this.writeJson(res, 400, { ok: false, error: result.error || "Invalid ompk session." });
+				return;
+			}
+			this.writeJson(res, 200, { ok: true, sessionPath, cleared: clear });
+			return;
+		}
+
+		if (req.method === "GET" && (url.pathname === "/v1/ompk/selected-session" || url.pathname === "/v1/omp/selected-session")) {
+			const clientKey = this.clientKey(req, url.searchParams.get("clientId") || undefined);
+			const sessionPath = this.onOmpGetSelectedSession?.(clientKey) ?? null;
+			this.writeJson(res, 200, { ok: true, sessionPath });
 			return;
 		}
 
@@ -667,7 +1178,8 @@ export class ControlServer {
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
 			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider));
+			const model = parseModelOverride(url.searchParams.get("model"));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -689,7 +1201,8 @@ export class ControlServer {
 			const target = typeof payload?.target === "string" ? payload.target.trim() || undefined : undefined;
 			const cwd = getLaunchCwdFromPayload(payload);
 			const agentProvider = parseAgentProviderOverride(typeof payload?.agentProvider === "string" ? payload.agentProvider : undefined);
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider));
+			const model = parseModelOverride(typeof payload?.model === "string" ? payload.model : undefined);
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, typeof payload?.clientId === "string" ? payload.clientId : undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -706,8 +1219,26 @@ export class ControlServer {
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
 			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
-			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider));
+			const model = parseModelOverride(url.searchParams.get("model"));
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/brainstorm") {
+			if (!this.onBrainstorm) {
+				this.writeJson(res, 501, { ok: false, error: "Brainstorming mode is not available on this gateway." });
+				return;
+			}
+			const mimeType = getPrimaryHeaderValue(req.headers["content-type"]);
+			if (!isSupportedVoiceContentType(mimeType)) {
+				this.writeJson(res, 415, { ok: false, error: `Unsupported voice content type: ${mimeType || "unknown"}` });
+				return;
+			}
+			const buffer = await this.readBinaryBody(req, VOICE_BODY_LIMIT_BYTES);
+			const cwd = getLaunchCwdFromUrl(url);
+			const result = await this.withTimeout(this.onBrainstorm(buffer, mimeType, cwd));
+			this.writeJson(res, 200, result);
 			return;
 		}
 
@@ -731,6 +1262,18 @@ export class ControlServer {
 
 		if (url.pathname === "/" || url.pathname === "/app") {
 			this.redirect(res, "/app/");
+			return true;
+		}
+
+		if (url.pathname === "/connect" || url.pathname === "/connect/") {
+			// The connect page renders the pairing QR (which embeds the auth token),
+			// so it is strictly loopback-only: the desktop window on this machine.
+			const remote = normalizeRemoteAddress(req.socket.remoteAddress || "");
+			if (!isLoopback(remote) || !isLoopbackHost(url.hostname)) {
+				this.writeJson(res, 403, { ok: false, error: "The connect page is only available on this machine (open http://127.0.0.1 locally)." });
+				return true;
+			}
+			await this.handleConnectPage(req, url, res);
 			return true;
 		}
 
@@ -919,12 +1462,30 @@ export class ControlServer {
 				textTurn: "/v1/turn/text",
 				voiceTurn: "/v1/turn/voice",
 				cancelTurn: "/v1/turn/cancel",
+				brainstorm: "/v1/brainstorm",
 				route: "/v1/route",
 				workspace: "/v1/workspace",
+				workspaceFile: "/v1/workspace/file",
+				collabLink: "/v1/collab-link",
 				sessions: "/v1/sessions",
+				sessionLaunch: "/v1/sessions/launch",
+				hubPublish: "/v1/hub/publish",
+				hubResume: "/v1/hub/resume",
 				slots: "/v1/sessions/slots",
 				agents: "/v1/agents",
 				events: "/v1/events",
+				warp: "/v1/warp",
+				warpTab: "/v1/warp/tab",
+				warpTabConfig: "/v1/warp/tab-config",
+				warpPsmuxSession: "/v1/warp/psmux/session",
+				herdr: "/v1/herdr",
+				herdrPaneRead: "/v1/herdr/pane/read",
+				herdrPaneSend: "/v1/herdr/pane/send",
+				herdrAgentSend: "/v1/herdr/agent/send",
+				herdrAgents: "/v1/herdr/agents",
+				herdrAgent: "/v1/herdr/agent/:id",
+				herdrStream: "/v1/herdr/stream/:id",
+				warpPsmuxWindow: "/v1/warp/psmux/window",
 			},
 			capabilities: [
 				"text-turn",
@@ -933,6 +1494,11 @@ export class ControlServer {
 				"routing",
 				"slash-commands",
 				"workspace-browse",
+				"workspace-file-read",
+				"collab-link",
+				"session-launch",
+				...(this.onHubPublish && this.onHubResume && this.isHubHandoffReady() ? ["hub-handoff"] : []),
+				"colab-launch",
 				"turn-cancel",
 				"progress-events",
 				"pwa",
@@ -941,12 +1507,15 @@ export class ControlServer {
 				"route-slots",
 				"session-mutations",
 				"agent-discovery",
-				"event-stream",
+				"psmux-control",
+				"herdr-control",
+				"agent-hub",
 			],
 			agent: status.agent
 				? {
 					provider: status.agent.provider,
 					configuredProvider: status.agent.configuredProvider,
+					model: status.agent.model,
 					capabilities: status.agent.capabilities,
 				}
 				: undefined,
@@ -981,9 +1550,14 @@ export class ControlServer {
 		if (defaultTarget) {
 			setupParams.set("default_target", defaultTarget);
 		}
+		if (status.agent?.model) {
+			setupParams.set("agent_model", status.agent.model);
+		}
 		const agentProvider = status.agent?.provider;
 		if (agentProvider === "pi"
 			|| agentProvider === "codex"
+			|| agentProvider === "claude"
+			|| agentProvider === "oh-my-pk"
 			|| agentProvider === "elevenlabs"
 			|| agentProvider === "gemini"
 			|| agentProvider === "gemini-live") {
@@ -1010,6 +1584,49 @@ export class ControlServer {
 			apkQrSvg,
 			status,
 			apkAvailable: existsSync(ANDROID_APK_PATH),
+		}));
+	}
+
+	/**
+	 * Desktop pairing page (loopback-only). Shows the pi-speak://setup QR with the
+	 * phone-facing base URL + persistent token, and live "phone connected" status
+	 * polled from /v1/pairing/status. This is the window `pi-speak-server` opens.
+	 */
+	private async handleConnectPage(req: IncomingMessage, url: URL, res: ServerResponse) {
+		const port = this.state.port ?? DEFAULT_PORT;
+		const token = this.state.authToken || "";
+		const status = this.getStatus();
+		const phoneBaseUrl = pickPhoneFacingBaseUrl(port);
+		const profileName = url.searchParams.get("profile_name")
+			|| process.env.PI_SPEAK_PROFILE_NAME?.trim()
+			|| (hostname() || "Pi Speak");
+		const setupParams = new URLSearchParams({
+			base_url: phoneBaseUrl,
+			machine_id: getStableServerId(),
+			profile_name: profileName,
+			connection_mode: isTailscaleHostname(new URL(phoneBaseUrl).hostname) ? "tailscale" : "manual",
+			workspace_root: getWorkspaceRoot(),
+			workspace_path: getDefaultWorkspacePath(),
+		});
+		if (token) setupParams.set("token", token);
+		const defaultTarget = status.remote.defaultTarget || status.remote.currentSession || "";
+		if (defaultTarget) setupParams.set("default_target", defaultTarget);
+		const appSetupUrl = `pi-speak://setup?${setupParams.toString()}`;
+		const setupPageUrl = new URL(`/setup${token ? `?token=${encodeURIComponent(token)}` : ""}`, phoneBaseUrl).toString();
+		const apkUrl = new URL("/download/pi-speak.apk", phoneBaseUrl).toString();
+		const qrSvg = await QRCode.toString(appSetupUrl, { type: "svg", errorCorrectionLevel: "M", margin: 2, width: 300 });
+		res.statusCode = 200;
+		res.setHeader("Content-Type", "text/html; charset=utf-8");
+		res.setHeader("Cache-Control", "no-store");
+		res.end(renderConnectHtml({
+			profileName,
+			phoneBaseUrl,
+			appSetupUrl,
+			setupPageUrl,
+			apkUrl,
+			apkAvailable: existsSync(ANDROID_APK_PATH),
+			reachableUrls: getReachableBaseUrls(port),
+			qrSvg,
 		}));
 	}
 
@@ -1098,15 +1715,36 @@ export class ControlServer {
 		return false;
 	}
 
+	private recordRemoteClient(req: IncomingMessage, url: URL) {
+		// Pairing-status polls are how UIs *observe* connection state; they must
+		// never count as the phone activity they are trying to detect.
+		if (url.pathname === "/v1/pairing/status") return;
+		const remote = normalizeRemoteAddress(req.socket.remoteAddress || "");
+		if (!remote || isLoopback(remote)) return;
+		this.lastRemoteClient = {
+			at: Date.now(),
+			agent: getPrimaryHeaderValue(req.headers["user-agent"]) || undefined,
+			address: remote,
+		};
+	}
+
 	private isAuthorized(req: IncomingMessage, url: URL, allowQueryToken: boolean) {
 		const token = this.state.authToken || "";
 		if (!token) return true;
 		if (isLocalRequest(req, url)) return true;
-		const headerToken = getPrimaryHeaderValue(req.headers["x-pi-speak-token"]);
-		if (headerToken === token) return true;
-		const authHeader = getPrimaryHeaderValue(req.headers.authorization);
-		if (authHeader === `Bearer ${token}`) return true;
-		return allowQueryToken && url.searchParams.get("token") === token;
+		// Accept any token from PI_SPEAK_EXTRA_TOKEN (comma-separated) in addition to the primary.
+		const extraTokens = (process.env.PI_SPEAK_EXTRA_TOKEN || "")
+			.split(",").map(t => t.trim()).filter(Boolean);
+		const isValid = (presented: string) =>
+			presented === token || extraTokens.includes(presented);
+		const headerToken = getPrimaryHeaderValue(req.headers["x-pi-speak-token"]) || "";
+		if (headerToken && isValid(headerToken)) return true;
+		const authHeader = getPrimaryHeaderValue(req.headers.authorization) || "";
+		const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+		if (bearerToken && isValid(bearerToken)) return true;
+		if (!allowQueryToken) return false;
+		const queryToken = url.searchParams.get("token") || "";
+		return !!queryToken && isValid(queryToken);
 	}
 
 	private checkRateLimit(req: IncomingMessage, url: URL, localRequest: boolean) {
@@ -1152,6 +1790,19 @@ export class ControlServer {
 	private extractPresentedToken(req: IncomingMessage) {
 		return getPrimaryHeaderValue(req.headers["x-pi-speak-token"])
 			|| getBearerToken(getPrimaryHeaderValue(req.headers.authorization));
+	}
+
+	// Stable per-client key for scoping per-client state (e.g. ompk session
+	// selection). An explicit `clientId` (header or body) wins; otherwise derive
+	// from remote address + presented token so distinct devices/tokens are
+	// distinct clients. Mirrors the rate-limit bucket key.
+	private clientKey(req: IncomingMessage, explicit?: string): string {
+		const fromHeader = getPrimaryHeaderValue(req.headers["x-pi-speak-client"]);
+		const id = (explicit || fromHeader || "").trim();
+		if (id) return `id:${id}`;
+		const remote = req.socket.remoteAddress || "unknown";
+		const token = this.extractPresentedToken(req) || "anon";
+		return `${remote}:${token}`;
 	}
 
 	private async createTurnPayload(result: RemoteTurnResult) {
@@ -1208,6 +1859,20 @@ export class ControlServer {
 			if (artifact.expiresAt <= now) {
 				this.audioArtifacts.delete(id);
 				void rm(artifact.path, { force: true }).catch(() => {});
+			}
+		}
+	}
+
+	// Evict rate-limit buckets whose window has fully elapsed: an expired bucket is
+	// indistinguishable from a fresh one (checkRateLimit resets counters on a stale
+	// window), so dropping it is behavior-preserving and bounds the Map. Without this
+	// the Map grows once per distinct remoteAddress:token forever — a slow memory leak
+	// on a long-lived public/Tailscale gateway facing rotating IPs and probe tokens.
+	private cleanupStaleRateLimitBuckets() {
+		const now = Date.now();
+		for (const [key, bucket] of this.rateLimitBuckets.entries()) {
+			if (now - bucket.windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
+				this.rateLimitBuckets.delete(key);
 			}
 		}
 	}
@@ -1332,6 +1997,219 @@ export class ControlServer {
 	}
 }
 
+
+function buildWarpControlSnapshot(req: IncomingMessage): WarpControlSnapshot {
+	const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress || "");
+	const warpRemoteBaseUrl = process.env.PI_SPEAK_WARP_REMOTE_BASE_URL?.trim() || undefined;
+	const psmux = listPsmuxSessions();
+	return {
+		available: !!warpRemoteBaseUrl || psmux.available,
+		sameTailnet: isTailscaleIpv4(remoteAddress),
+		requestRemoteAddress: remoteAddress,
+		warpRemoteBaseUrl,
+		warpUriScheme: getWarpUriScheme(),
+		psmux,
+	};
+}
+
+function listPsmuxSessions(): WarpControlSnapshot["psmux"] {
+	const executable = getPsmuxExecutable();
+	const sessionsResult = runPsmux(["list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_attached}"]);
+	if (!sessionsResult.ok) {
+		return { available: false, executable, sessions: [], error: sessionsResult.error };
+	}
+	const sessions: WarpPsmuxSession[] = [];
+	for (const line of splitOutputLines(sessionsResult.stdout)) {
+		const parts = line.split("\t");
+		const parsed = parts.length > 1 ? undefined : parsePsmuxSessionLine(line);
+		const name = parts.length > 1 ? parts[0] : parsed?.name;
+		if (!name) continue;
+		sessions.push({
+			name,
+			attached: parts.length > 1 ? parts[2] : parsed?.attached,
+			windows: listPsmuxWindows(name),
+		});
+	}
+	return { available: true, executable, sessions };
+}
+
+function listPsmuxWindows(session: string): WarpPsmuxWindow[] {
+	const windowsResult = runPsmux(["list-windows", "-t", session, "-F", "#{window_index}\t#{window_name}\t#{window_active}"]);
+	if (!windowsResult.ok) return [];
+	const windows: WarpPsmuxWindow[] = [];
+	for (const line of splitOutputLines(windowsResult.stdout)) {
+		const parts = line.split("\t");
+		const parsed = parts.length > 1 ? undefined : parsePsmuxWindowLine(line);
+		const index = parts.length > 1 ? parts[0] : parsed?.index;
+		if (!index) continue;
+		windows.push({
+			session,
+			index,
+			name: (parts.length > 1 ? parts[1] : parsed?.name) || index,
+			active: parts.length > 1 ? parts[2] === "1" : !!parsed?.active,
+			panes: listPsmuxPanes(session, index),
+		});
+	}
+	return windows;
+}
+
+function listPsmuxPanes(session: string, windowIndex: string): WarpPsmuxPane[] {
+	const target = `${session}:${windowIndex}`;
+	const panesResult = runPsmux(["list-panes", "-t", target, "-F", "#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_current_command}\t#{pane_title}"]);
+	if (!panesResult.ok) return [];
+	const panes: WarpPsmuxPane[] = [];
+	for (const line of splitOutputLines(panesResult.stdout)) {
+		const parts = line.split("\t");
+		const parsed = parts.length > 1 ? undefined : parsePsmuxPaneLine(line);
+		const pane = parts.length > 1 ? parts[0] : parsed?.pane;
+		if (!pane) continue;
+		panes.push({
+			session,
+			window: windowIndex,
+			pane,
+			paneId: (parts.length > 1 ? parts[1] : parsed?.paneId) || "",
+			active: parts.length > 1 ? parts[2] === "1" : !!parsed?.active,
+			command: parts.length > 1 ? parts[3] || undefined : undefined,
+			title: parts.length > 1 ? parts[4] || undefined : undefined,
+		});
+	}
+	return panes;
+}
+
+function parsePsmuxSessionLine(line: string) {
+	const match = /^([^:]+):\s+(\d+)\s+windows?(?:\s+\(created\s+(.+)\))?/.exec(line);
+	if (!match) return undefined;
+	return { name: match[1], attached: undefined as string | undefined };
+}
+
+function parsePsmuxWindowLine(line: string) {
+	const match = /^(\d+):\s+(.+?)(\*)?\s+\(\d+\s+panes?\)/.exec(line);
+	if (!match) return undefined;
+	return { index: match[1], name: match[2].trim(), active: match[3] === "*" };
+}
+
+function parsePsmuxPaneLine(line: string) {
+	const match = /^(\d+):.*\s(%\d+)\s*(?:\((active)\))?/.exec(line);
+	if (!match) return undefined;
+	return { pane: match[1], paneId: match[2], active: match[3] === "active" };
+}
+function createPsmuxSession(payload: Record<string, unknown> | undefined): ControlActionResult {
+	const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+	if (!isSafePsmuxName(name)) {
+		return { ok: false, message: "Invalid psmux session name. Use 1-64 letters, numbers, dots, underscores, or dashes." };
+	}
+	const args = ["new-session", "-d", "-s", name];
+	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined);
+	if (cwd) args.push("-c", cwd);
+	const result = runPsmux(args);
+	return result.ok
+		? { ok: true, message: `Created psmux session ${name}.`, session: name }
+		: { ok: false, message: result.error || "Failed to create psmux session." };
+}
+
+function createPsmuxWindow(payload: Record<string, unknown> | undefined): ControlActionResult {
+	const session = typeof payload?.session === "string" ? payload.session.trim() : "";
+	const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+	if (!isSafePsmuxName(session)) {
+		return { ok: false, message: "Invalid psmux session target." };
+	}
+	if (name && !isSafePsmuxName(name)) {
+		return { ok: false, message: "Invalid psmux window name. Use 1-64 letters, numbers, dots, underscores, or dashes." };
+	}
+	const args = ["new-window", "-t", session];
+	if (name) args.push("-n", name);
+	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined);
+	if (cwd) args.push("-c", cwd);
+	const result = runPsmux(args);
+	return result.ok
+		? { ok: true, message: `Created psmux tab in ${session}.`, session, window: name || undefined }
+		: { ok: false, message: result.error || "Failed to create psmux tab." };
+}
+
+function openWarpTab(payload: Record<string, unknown> | undefined): ControlActionResult {
+	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined) || getDefaultWorkspacePath();
+	const newWindow = payload?.newWindow === true;
+	const scheme = getWarpUriScheme();
+	const action = newWindow ? "new_window" : "new_tab";
+	const uri = `${scheme}://action/${action}?path=${encodeURIComponent(cwd)}`;
+	const result = openLocalUri(uri);
+	return result.ok
+		? { ok: true, message: `Opened Warp ${newWindow ? "window" : "tab"}.`, uri, cwd }
+		: { ok: false, message: result.error || "Failed to open Warp URI.", uri, cwd };
+}
+
+function openWarpTabConfig(payload: Record<string, unknown> | undefined): ControlActionResult {
+	const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+	if (!isSafeWarpTabConfigName(name)) {
+		return { ok: false, message: "Invalid Warp tab config name. Use a .toml file stem with letters, numbers, dots, underscores, or dashes." };
+	}
+	const newWindow = payload?.newWindow === true;
+	const uri = `${getWarpUriScheme()}://tab_config/${encodeURIComponent(name)}${newWindow ? "?new_window=true" : ""}`;
+	const result = openLocalUri(uri);
+	return result.ok
+		? { ok: true, message: `Opened Warp tab config ${name}.`, uri, name }
+		: { ok: false, message: result.error || "Failed to open Warp tab config.", uri, name };
+}
+
+function getWarpUriScheme() {
+	const configured = process.env.PI_SPEAK_WARP_URI_SCHEME?.trim();
+	if (configured && /^[A-Za-z][A-Za-z0-9+.-]*$/.test(configured)) return configured;
+	return "warp";
+}
+
+function openLocalUri(uri: string) {
+	const override = process.env.PI_SPEAK_WARP_OPEN_BIN?.trim();
+	if (override) return runProcess(override, [uri], 3000);
+	if (platform() === "win32") return runProcess("rundll32.exe", ["url.dll,FileProtocolHandler", uri], 3000);
+	if (platform() === "darwin") return runProcess("open", [uri], 3000);
+	return runProcess("xdg-open", [uri], 3000);
+}
+
+function getPsmuxExecutable() {
+	return process.env.PI_SPEAK_PSMUX_BIN?.trim() || (platform() === "win32" ? "psmux.exe" : "tmux");
+}
+
+function runPsmux(args: string[]) {
+	const executable = getPsmuxExecutable();
+	const result = runProcess(executable, args, 3000);
+	return result.ok
+		? { ok: true as const, stdout: result.stdout, error: "" }
+		: { ok: false as const, stdout: result.stdout, error: result.error };
+}
+
+function runProcess(executable: string, args: string[], timeout: number) {
+	const result = spawnSync(executable, args, {
+		encoding: "utf8",
+		timeout,
+		windowsHide: true,
+	});
+	if (result.error) {
+		return { ok: false as const, stdout: "", error: result.error.message };
+	}
+	if (result.status !== 0) {
+		const error = (result.stderr || result.stdout || `${executable} exited with ${result.status}`).trim();
+		return { ok: false as const, stdout: result.stdout || "", error };
+	}
+	return { ok: true as const, stdout: result.stdout || "", error: "" };
+}
+
+function splitOutputLines(output: string) {
+	return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function isSafeWarpTabConfigName(value: string) {
+	return /^[A-Za-z0-9_.-]{1,128}(?:\.toml)?$/.test(value) && !value.includes("..");
+}
+
+function isSafePsmuxName(value: string) {
+	return /^[A-Za-z0-9_.-]{1,64}$/.test(value);
+}
+
+function normalizeExistingDirectory(value: string | undefined) {
+	if (!value) return undefined;
+	const resolved = resolve(value);
+	return safeStatDirectory(resolved) ? resolved : undefined;
+}
 class RequestLimitError extends Error {
 	constructor(message: string, readonly statusCode: number) {
 		super(message);
@@ -1362,10 +2240,17 @@ function parseRemoteTurnMode(value: string | null | undefined) {
 	return normalized === "live" ? "live" : "auto";
 }
 
-function parseAgentProviderOverride(value: string | null | undefined) {
+function parseAgentProviderOverride(value: string | null | undefined): GatewayAgentProvider | undefined {
 	const normalized = (value || "").trim().toLowerCase();
-	if (normalized === "pi" || normalized === "codex") return normalized;
+	if (normalized === "pi" || normalized === "codex" || normalized === "claude") return normalized;
+	if (normalized === "oh-my-pk" || normalized === "ompk" || normalized === "oh-my-pi" || normalized === "omp") return "oh-my-pk";
 	return undefined;
+}
+
+function parseModelOverride(value: string | null | undefined): string | undefined {
+	const trimmed = (value || "").trim();
+	if (!trimmed || trimmed.length > 160 || /[\s\x00-\x1f\x7f]/.test(trimmed)) return undefined;
+	return trimmed;
 }
 
 function isTruthy(value: string | null) {
@@ -1381,14 +2266,6 @@ function normalizeRemoteAddress(address: string) {
 	return address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
 }
 
-function isTailscaleIp(remoteAddress: string) {
-	// Tailscale uses the CGNAT range 100.64.0.0/10
-	const parts = remoteAddress.split(".");
-	if (parts.length !== 4) return false;
-	const first = parseInt(parts[0], 10);
-	const second = parseInt(parts[1], 10);
-	return first === 100 && second >= 64 && second <= 127;
-}
 
 function isLocalRequest(req: IncomingMessage, url: URL) {
 	const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress || "");
@@ -1403,6 +2280,100 @@ function isLocalRequest(req: IncomingMessage, url: URL) {
 function isLoopbackHost(hostname: string) {
 	const normalized = (hostname || "").toLowerCase();
 	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function renderConnectHtml({
+	profileName,
+	phoneBaseUrl,
+	appSetupUrl,
+	setupPageUrl,
+	apkUrl,
+	apkAvailable,
+	reachableUrls,
+	qrSvg,
+}: {
+	profileName: string;
+	phoneBaseUrl: string;
+	appSetupUrl: string;
+	setupPageUrl: string;
+	apkUrl: string;
+	apkAvailable: boolean;
+	reachableUrls: string[];
+	qrSvg: string;
+}): string {
+	const reachableRows = reachableUrls
+		.map((entry) => `<code>${escapeHtml(entry)}</code>`)
+		.join(" ");
+	return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Speak — Connect your phone</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
+main { max-width: 640px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: #8b949e; font-size: 14px; margin: 0 0 24px; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; }
+.qr { display: flex; justify-content: center; margin: 20px 0; }
+.qr > div { background: #ffffff; padding: 14px; border-radius: 10px; line-height: 0; }
+.status { display: flex; align-items: center; gap: 10px; font-size: 15px; margin: 4px 0 12px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: #d29922; animation: pulse 1.6s ease-in-out infinite; }
+.dot.ok { background: #3fb950; animation: none; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.meta { font-size: 13px; color: #8b949e; overflow-wrap: anywhere; margin: 6px 0; }
+code { background: #0d1117; border: 1px solid #30363d; padding: 2px 6px; border-radius: 5px; font-size: 12px; }
+button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+button:hover { border-color: #8b949e; }
+.steps { font-size: 14px; color: #c9d1d9; padding-left: 18px; margin: 0 0 8px; }
+.steps li { margin: 4px 0; }
+.footer { font-size: 12px; color: #6e7681; margin-top: 20px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Connect your phone</h1>
+<p class="sub">${escapeHtml(profileName)} &middot; ${escapeHtml(phoneBaseUrl)}</p>
+<section class="panel">
+<div class="status"><span class="dot" id="dot"></span><span id="statusText">Waiting for your phone&hellip;</span></div>
+<ol class="steps">
+<li>Install the Pi Speak app on your Android phone${apkAvailable ? ` (<a href="${escapeHtml(apkUrl)}" style="color:#58a6ff">APK</a>)` : ""}.</li>
+<li>Scan this QR code with the phone camera.</li>
+<li>Tap the <code>pi-speak://</code> link — the app configures itself and connects.</li>
+</ol>
+<div class="qr"><div>${qrSvg}</div></div>
+<p class="meta"><strong>No camera?</strong> Open <code id="setupUrl">${escapeHtml(setupPageUrl)}</code> on the phone <button onclick="copySetup()">Copy link</button></p>
+<p class="meta"><strong>Reachable at:</strong> ${reachableRows || "<code>no LAN/Tailscale address found</code>"}</p>
+</section>
+<p class="footer">This page (and the token inside the QR) is only served to this machine. Keep this window open to see when the phone connects.</p>
+</main>
+<script>
+var loadedAt = Date.now();
+function copySetup() {
+	var text = document.getElementById("setupUrl").textContent;
+	if (navigator.clipboard) { navigator.clipboard.writeText(text); }
+}
+function poll() {
+	fetch("/v1/pairing/status", { cache: "no-store" })
+		.then(function (res) { return res.json(); })
+		.then(function (data) {
+			var client = data && data.lastRemoteClient;
+			if (client && client.at >= loadedAt) {
+				document.getElementById("dot").className = "dot ok";
+				document.getElementById("statusText").textContent =
+					"Phone connected (" + (client.address || "remote") + ")";
+			}
+		})
+		.catch(function () {});
+}
+setInterval(poll, 2000);
+poll();
+</script>
+</body>
+</html>`;
 }
 
 function resolveRemoteAppDir() {
@@ -1542,96 +2513,234 @@ function getLaunchCwdFromUrl(url: URL) {
 }
 
 function getWorkspaceRoot() {
-	return process.env.PI_SPEAK_WORKSPACE_ROOT?.trim()
-		|| (platform() === "win32" ? parse(process.cwd()).root || "C:\\" : "/");
+	const explicit = process.env.PI_SPEAK_WORKSPACE_ROOT?.trim();
+	if (explicit) {
+		// "/" (or a drive root) is an explicit, deliberate opt-in to browse the whole filesystem.
+		if (explicit === "fs" || explicit === "*") {
+			return platform() === "win32" ? parse(process.cwd()).root || "C:\\" : "/";
+		}
+		return explicit;
+	}
+	// Default to the agent working directory rather than the whole drive. The
+	// authenticated /v1/workspace/file route reads file CONTENT confined to this
+	// root, so a permissive default would let any remote-token holder exfiltrate
+	// arbitrary files (SSH keys, .env, the pi-speak token itself). Opt in to a
+	// broader root with PI_SPEAK_WORKSPACE_ROOT (set it to "fs" for the drive root).
+	return getDefaultWorkspacePath();
 }
 
 function getDefaultWorkspacePath() {
 	return process.env.AGENT_CWD?.trim()
 		|| process.env.AGENT_WORKSPACE?.trim()
+		|| (platform() === "win32" ? DEFAULT_WINDOWS_WORKSPACE : "")
 		|| process.cwd();
 }
 
-function listWorkspaceDirectory(requestedPath?: string) {
+// Resolve symlinks/junctions and confirm the real path stays within the workspace
+// root. resolve()/isPathInsideRoot() are purely lexical, but statSync/readSync follow
+// links, so a link inside the root could otherwise expose files outside it. Returns the
+// canonical path when contained, otherwise undefined.
+function realPathInsideRoot(target: string, root: string): string | undefined {
+	let realTarget: string;
+	try {
+		realTarget = realpathSync(target);
+	} catch {
+		return undefined;
+	}
+	let realRoot: string;
+	try {
+		realRoot = realpathSync(root);
+	} catch {
+		realRoot = resolve(root);
+	}
+	return isPathInsideRoot(realTarget, realRoot) ? realTarget : undefined;
+}
+
+const WINDOWS_RESERVED_DEVICE_NAMES = new Set([
+	"CON", "PRN", "AUX", "NUL",
+	"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+	"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+]);
+
+// Windows resolves names like CON / NUL / COM1 to console/serial devices regardless of
+// directory, and reading one can block forever. Reject them before any stat/open.
+function isWindowsReservedDeviceName(pathOrName: string) {
+	if (platform() !== "win32") return false;
+	const base = basename(pathOrName);
+	const stem = base.split(".")[0].replace(/[ .]+$/, "").trim().toUpperCase();
+	return WINDOWS_RESERVED_DEVICE_NAMES.has(stem);
+}
+
+const WORKSPACE_LIST_MAX_ENTRIES = 2000;
+
+export function listWorkspaceDirectory(requestedPath?: string) {
 	const root = resolve(getWorkspaceRoot());
 	const requested = resolve(requestedPath?.trim() || root);
-	const currentPath = isPathInsideRoot(requested, root) ? requested : root;
-	const current = safeStatDirectory(currentPath) ? currentPath : root;
-	const entries: WorkspaceEntry[] = [];
+	// Lexical clamp first (cheap ../ guard), then confirm the real directory stays in
+	// root so a symlinked subdirectory cannot walk outside it.
+	const lexical = isPathInsideRoot(requested, root) ? requested : root;
+	const current = safeStatDirectory(lexical) && realPathInsideRoot(lexical, root) ? lexical : root;
+	const directories: WorkspaceEntry[] = [];
+	const files: WorkspaceEntry[] = [];
+	let truncated = false;
 	try {
-		for (const dirent of readdirSync(current, { withFileTypes: true })) {
-			if (!dirent.isDirectory()) continue;
-			if (dirent.name === "$RECYCLE.BIN" || dirent.name === "System Volume Information") continue;
-			const childPath = join(current, dirent.name);
-			entries.push({ name: dirent.name, path: childPath, type: "directory" });
+		const dir = opendirSync(current);
+		try {
+			// Stream entries with a hard cap so an enormous directory (node_modules,
+			// WinSxS, ...) can't pin the event loop or balloon the response.
+			let dirent = dir.readSync();
+			while (dirent) {
+				if (directories.length + files.length >= WORKSPACE_LIST_MAX_ENTRIES) {
+					truncated = true;
+					break;
+				}
+				const name = dirent.name;
+				if (name !== "$RECYCLE.BIN" && name !== "System Volume Information") {
+					const childPath = join(current, name);
+					if (dirent.isDirectory()) {
+						directories.push({ name, path: childPath, type: "directory" });
+					} else if (dirent.isFile()) {
+						let size: number | undefined;
+						try {
+							size = statSync(childPath).size;
+						} catch {}
+						files.push({ name, path: childPath, type: "file", size });
+					}
+				}
+				dirent = dir.readSync();
+			}
+		} finally {
+			dir.closeSync();
 		}
 	} catch {}
-	entries.sort((left, right) => left.name.localeCompare(right.name));
+	directories.sort((left, right) => left.name.localeCompare(right.name));
+	files.sort((left, right) => left.name.localeCompare(right.name));
 	const parent = current !== root ? dirname(current) : undefined;
 	return {
 		root,
 		current,
 		parent: parent && isPathInsideRoot(parent, root) ? parent : undefined,
 		defaultPath: getDefaultWorkspacePath(),
-		entries,
+		entries: [...directories, ...files],
+		truncated,
 	};
 }
 
-function getOrCreateInstallAuthToken() {
-	const tokenFile = getInstallAuthTokenPath();
-	try {
-		const existing = readFileSync(tokenFile, "utf8").trim();
-		if (existing.length >= 24) return existing;
-	} catch {
-		// Generate below.
-	}
-	const token = randomBytes(32).toString("base64url");
-	try {
-		mkdirSync(dirname(tokenFile), { recursive: true });
-		writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
-	} catch {
-		// Keep the server usable even when the config directory is read-only.
-	}
-	return token;
+const WORKSPACE_FILE_MAX_BYTES = 512 * 1024;
+
+// Decode a (possibly mid-stream) byte slice as UTF-8. When the slice was truncated at the
+// byte cap, drop a trailing partial multi-byte sequence so the preview doesn't end in U+FFFD.
+function decodeTextPreview(buffer: Buffer, truncated: boolean): string {
+	if (!truncated || buffer.length === 0) return buffer.toString("utf8");
+	let i = buffer.length - 1;
+	while (i >= 0 && (buffer[i] & 0xc0) === 0x80) i--; // skip continuation bytes (10xxxxxx)
+	if (i < 0) return buffer.toString("utf8");
+	const lead = buffer[i];
+	let seqLen = 1;
+	if ((lead & 0xe0) === 0xc0) seqLen = 2;
+	else if ((lead & 0xf0) === 0xe0) seqLen = 3;
+	else if ((lead & 0xf8) === 0xf0) seqLen = 4;
+	const available = buffer.length - i;
+	const end = available < seqLen ? i : buffer.length;
+	return buffer.subarray(0, end).toString("utf8");
 }
 
-function getInstallAuthTokenPath() {
-	const base = process.env.PI_SPEAK_CONFIG_DIR
-		|| process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "pi-speak")
-		|| process.env.APPDATA && join(process.env.APPDATA, "pi-speak")
-		|| join(process.cwd(), ".pi-speak");
-	return join(base, "http-token");
+export type WorkspaceFileResult =
+	| {
+		ok: true;
+		name: string;
+		path: string;
+		/** Symlink/junction-resolved canonical path, for callers that must gate on the real target rather than the (possibly innocuously-named) requested path. */
+		realPath: string;
+		size: number;
+		truncated: boolean;
+		binary: boolean;
+		content: string;
+	}
+	| { ok: false; status: number; error: string };
+
+export function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
+	const trimmed = requestedPath?.trim();
+	if (!trimmed) {
+		return { ok: false, status: 400, error: "A file path is required." };
+	}
+	const root = resolve(getWorkspaceRoot());
+	const target = resolve(trimmed);
+	if (!isPathInsideRoot(target, root)) {
+		return { ok: false, status: 403, error: "Path is outside the workspace root." };
+	}
+	if (isWindowsReservedDeviceName(target)) {
+		return { ok: false, status: 400, error: "Path is not a regular file." };
+	}
+	let stats;
+	try {
+		stats = statSync(target);
+	} catch {
+		return { ok: false, status: 404, error: "File not found." };
+	}
+	if (stats.isDirectory()) {
+		return { ok: false, status: 400, error: "Path is a directory, not a file." };
+	}
+	if (!stats.isFile()) {
+		return { ok: false, status: 400, error: "Path is not a regular file." };
+	}
+	// Symlink/junction hardening: the real (link-resolved) path must also stay in root.
+	const realTarget = realPathInsideRoot(target, root);
+	if (!realTarget) {
+		return { ok: false, status: 403, error: "Path is outside the workspace root." };
+	}
+	let buffer: Buffer;
+	try {
+		const fd = openSync(target, "r");
+		try {
+			const readLength = Math.min(stats.size, WORKSPACE_FILE_MAX_BYTES);
+			const scratch = Buffer.alloc(readLength);
+			const bytes = readSync(fd, scratch, 0, readLength, 0);
+			buffer = scratch.subarray(0, bytes);
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return { ok: false, status: 500, error: "Unable to read file." };
+	}
+	const binary = buffer.includes(0);
+	const truncated = stats.size > buffer.length;
+	return {
+		ok: true,
+		name: basename(target),
+		path: target,
+		realPath: realTarget,
+		size: stats.size,
+		truncated,
+		binary,
+		content: binary ? "" : decodeTextPreview(buffer, truncated),
+	};
+}
+
+function readCollabLink(): CollabLinkSnapshot {
+	try {
+		const file = join(getPiSpeakConfigDir(), "collab.json");
+		const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return { active: false };
+		}
+		const snapshot: CollabLinkSnapshot = { active: !!parsed.active };
+		if (typeof parsed.webLink === "string") snapshot.webLink = parsed.webLink;
+		if (typeof parsed.webViewLink === "string") snapshot.webViewLink = parsed.webViewLink;
+		if (typeof parsed.link === "string") snapshot.link = parsed.link;
+		if (typeof parsed.viewLink === "string") snapshot.viewLink = parsed.viewLink;
+		if (typeof parsed.view === "boolean") snapshot.view = parsed.view;
+		if (typeof parsed.startedAt === "string") snapshot.startedAt = parsed.startedAt;
+		return snapshot;
+	} catch {
+		return { active: false };
+	}
 }
 
 function getStableServerId() {
 	const explicit = process.env.PI_SPEAK_SERVER_ID?.trim();
 	if (explicit) return explicit;
 	return hostname() || "pi-speak";
-}
-
-function getReachableBaseUrls(port: number) {
-	const urls: string[] = [];
-	for (const entries of Object.values(networkInterfaces())) {
-		for (const entry of entries || []) {
-			if (entry.family !== "IPv4" || entry.internal) continue;
-			if (!isPrivateLanIpv4(entry.address) && !isTailscaleIpv4(entry.address)) continue;
-			urls.push(`http://${entry.address}:${port}/`);
-		}
-	}
-	return [...new Set(urls)];
-}
-
-function isPrivateLanIpv4(address: string) {
-	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
-	const [a, b] = parts;
-	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
-}
-
-function isTailscaleIpv4(address: string) {
-	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
-	return parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
 }
 
 function safeStatDirectory(path: string) {
@@ -1643,8 +2752,11 @@ function safeStatDirectory(path: string) {
 }
 
 function isPathInsideRoot(path: string, root: string) {
-	const normalizedPath = resolve(path).toLowerCase();
-	const normalizedRoot = resolve(root).toLowerCase();
+	// Case-fold only on Windows; POSIX filesystems are case-sensitive and folding there
+	// would conflate distinct directories (e.g. /srv/Data vs /srv/data).
+	const caseFold = platform() === "win32";
+	const normalizedPath = caseFold ? resolve(path).toLowerCase() : resolve(path);
+	const normalizedRoot = caseFold ? resolve(root).toLowerCase() : resolve(root);
 	const separator = platform() === "win32" ? "\\" : "/";
 	const rootWithSeparator = normalizedRoot.endsWith(separator) ? normalizedRoot : `${normalizedRoot}${separator}`;
 	return normalizedPath === normalizedRoot || normalizedPath.startsWith(rootWithSeparator);

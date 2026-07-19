@@ -853,6 +853,40 @@
 			font-size: 11px;
 		}
 
+		.terminal-approvals {
+			display: grid;
+			gap: 8px;
+		}
+		.approval-card {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			gap: 10px;
+			align-items: center;
+			padding: 10px;
+			border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line));
+			border-radius: 8px;
+			background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+		}
+		.approval-body {
+			display: grid;
+			gap: 4px;
+			min-width: 0;
+		}
+		.approval-body code {
+			display: block;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+			color: var(--ink);
+		}
+		.approval-actions {
+			display: flex;
+			gap: 8px;
+		}
+		.approval-actions button {
+			min-height: 36px;
+		}
+
 		.workspace-browser {
 			display: grid;
 			gap: 6px;
@@ -885,6 +919,111 @@
 		}
 		.workspace-entry:hover {
 			background: #f3f7f2;
+		}
+		.workspace-entry.is-file {
+			justify-content: space-between;
+			cursor: pointer;
+		}
+		.workspace-entry.is-file:hover {
+			background: var(--surface-row-hover);
+		}
+		.workspace-entry-name {
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.workspace-entry-size {
+			flex: 0 0 auto;
+			color: var(--muted);
+			font-size: 11px;
+		}
+		.workspace-current {
+			color: var(--muted);
+			font-size: 11px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		#workspace-up,
+		#workspace-use {
+			min-height: 28px;
+			padding: 0 8px;
+			font-size: 12px;
+		}
+		/* Entries are buttons for keyboard access; override the global primary look. */
+		button.workspace-entry {
+			width: 100%;
+			text-align: left;
+			background: var(--surface-row);
+			color: var(--ink);
+			border: 1px solid transparent;
+			border-radius: var(--radius-md);
+			font-weight: var(--weight-normal);
+			min-height: 0;
+			padding: 6px 8px;
+		}
+		button.workspace-entry:hover {
+			background: var(--surface-row-hover);
+		}
+		button.workspace-entry.is-file {
+			display: flex;
+			gap: 8px;
+			align-items: center;
+			justify-content: space-between;
+		}
+		#workspace-up:disabled,
+		#workspace-use:disabled,
+		button.workspace-entry:disabled {
+			cursor: not-allowed;
+		}
+		.file-viewer {
+			position: fixed;
+			inset: 0;
+			z-index: var(--z-overlay);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 16px;
+			background: rgba(0, 0, 0, 0.55);
+		}
+		.file-viewer-dialog {
+			display: flex;
+			flex-direction: column;
+			width: 100%;
+			max-width: 860px;
+			max-height: 80vh;
+			background: var(--surface);
+			border: 1px solid var(--line);
+			border-radius: var(--radius-md);
+			box-shadow: var(--shadow);
+			overflow: hidden;
+		}
+		.file-viewer-header {
+			display: flex;
+			gap: 12px;
+			align-items: flex-start;
+			justify-content: space-between;
+			padding: 12px 14px;
+			border-bottom: 1px solid var(--line);
+		}
+		.file-viewer-titles {
+			min-width: 0;
+		}
+		.file-viewer-meta {
+			color: var(--muted);
+			font-size: 12px;
+			word-break: break-all;
+		}
+		.file-viewer-body {
+			margin: 0;
+			padding: 14px;
+			overflow: auto;
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 12px;
+			line-height: 1.5;
+			white-space: pre-wrap;
+			word-break: break-word;
+			color: var(--ink);
 		}
 
 		/* Cancel button */
@@ -983,7 +1122,10 @@
 				<div class="workspace-browser" id="workspace-browser">
 					<div class="workspace-breadcrumb" id="workspace-breadcrumb">
 						<button id="workspace-root" class="secondary" type="button">Root</button>
+						<button id="workspace-up" class="secondary" type="button" disabled>Up</button>
+						<button id="workspace-use" class="secondary" type="button" disabled>Use this folder</button>
 					</div>
+					<div class="workspace-current" id="workspace-current">—</div>
 					<div class="workspace-entries" id="workspace-entries">Loading…</div>
 				</div>
 			</div>
@@ -993,6 +1135,7 @@
 			<div class="dock-inner">
 				<div class="dock-status">
 					<div id="status-note" class="status-note">Connecting...</div>
+					<div id="terminal-approvals" class="terminal-approvals hidden" aria-live="polite"></div>
 					<div class="audio-controls-wrapper hidden" id="audio-controls-wrapper">
 						<div class="audio-controls">
 							<audio id="reply-audio" controls preload="none" class="hidden"></audio>
@@ -1048,6 +1191,8 @@
 				<div class="settings-actions">
 					<button id="save-token-button" type="button">Save settings</button>
 					<button id="clear-token-button" class="secondary" type="button">Forget token</button>
+					<button id="launch-omp-hub-button" class="secondary" type="button">Launch OMPK Hub</button>
+					<button id="launch-colab-button" class="secondary" type="button">Launch Colab</button>
 					<button id="install-button" class="secondary hidden" type="button">Install</button>
 				</div>
 				<label class="toggle">
@@ -1064,6 +1209,19 @@
 				</label>
 			</div>
 		</details>
+	</div>
+
+	<div class="file-viewer hidden" id="file-viewer">
+		<div class="file-viewer-dialog" role="dialog" aria-modal="true" aria-labelledby="file-viewer-title">
+			<div class="file-viewer-header">
+				<div class="file-viewer-titles">
+					<strong id="file-viewer-title">File</strong>
+					<div id="file-viewer-meta" class="file-viewer-meta"></div>
+				</div>
+				<button id="file-viewer-close" class="secondary" type="button" aria-label="Close">Close</button>
+			</div>
+			<pre id="file-viewer-body" class="file-viewer-body" tabindex="0"></pre>
+		</div>
 	</div>
 
 	<script type="module" src="/app/app.js"></script>

@@ -50,6 +50,14 @@ android-app/local.properties
 # Ralph local session scratch
 scripts/ralph/.last-branch
 
+# pi-speak local runtime state (http token, routing store, etc.)
+.pi-speak/
+
+# session-routing-store.ts falls back to process.cwd() when LOCALAPPDATA/
+# APPDATA/TEMP are all unset (e.g. a Linux sandbox), landing routing/audit
+# runtime state directly in the repo root instead of a real user-data dir.
+pi-speak-pk/
+
 # Transient screen/testing dumps and CLI runtimes
 screen*.png
 archive/
@@ -70,6 +78,8 @@ artifacts/
 !.codex/skills/llm-as-verifier/**
 !.codex/skills/llm-wiki-skills/
 !.codex/skills/llm-wiki-skills/**
+!.codex/skills/pk-speak/
+!.codex/skills/pk-speak/**
 !.codex/skills/pokemon-benchmark/
 !.codex/skills/pokemon-benchmark/**
 .build-outputs/
@@ -78,6 +88,7 @@ artifacts/
 .codegraph/
 tmp-phone-turn.*
 
+<<<<<<< HEAD
 # Coverage output (rebuilt by npm run test:coverage)
 coverage/
 
@@ -91,3 +102,21 @@ handoff.md
 .handoff.md
 proprompt.md
 goals/
+=======
+# Local agent handoffs, planning scratch, and generated memory diagnostics
+.handoff.md
+handoff.md
+proprompt.md
+.prd/
+coverage/
+goals/
+.llm-wiki/skill-pipeline/failures/
+
+# Scratch files
+test-rl.js
+.tmp/
+
+# Generated multi-agent collaboration and planning artifacts
+.llm-router/
+.omo/
+>>>>>>> origin/main

@@ -3,6 +3,14 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { collectAgentResponse, resolveAgentProviderConfig } from "../dist/agent-provider.js";
+import {
+	buildAgentResumeArgs,
+	buildAgentResumeCommandPreview,
+	getAgentProviderCapabilities,
+	isResumableAgentSession,
+	normalizeAgentProviderName,
+	normalizeRunnableAgentProviderName,
+} from "../dist/agent-provider-registry.js";
 import { CodexAgentProvider } from "../dist/codex-agent-provider.js";
 import { PiAgentProvider } from "../dist/pi-agent-provider.js";
 
@@ -10,7 +18,9 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 	assert.deepEqual(resolveAgentProviderConfig({}), {
 		provider: "pi",
 		codexBin: "codex",
+		claudeBin: "claude",
 		piBin: "pi",
+		ompBin: "ompk",
 		model: undefined,
 		approvalPolicy: "never",
 		sandbox: "danger-full-access",
@@ -18,12 +28,16 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 	assert.deepEqual(resolveAgentProviderConfig({
 		AGENT_PROVIDER: "codex",
 		CODEX_BIN: "C:/tools/codex.cmd",
+		CLAUDE_BIN: "C:/tools/claude.cmd",
 		PI_BIN: "C:/tools/pi.cmd",
+		OMPK_BIN: "C:/tools/ompk.cmd",
 		AGENT_MODEL: "gpt-test",
 	}), {
 		provider: "codex",
 		codexBin: "C:/tools/codex.cmd",
+		claudeBin: "C:/tools/claude.cmd",
 		piBin: "C:/tools/pi.cmd",
+		ompBin: "C:/tools/ompk.cmd",
 		model: "gpt-test",
 		approvalPolicy: "never",
 		sandbox: "danger-full-access",
@@ -31,6 +45,60 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "gemini" }).provider, "gemini");
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "gemini-live" }).provider, "gemini-live");
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "elevenlabs" }).provider, "elevenlabs");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "claude" }).provider, "claude");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "oh-my-pk" }).provider, "oh-my-pk");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "ompk" }).provider, "oh-my-pk");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "oh-my-pi" }).provider, "oh-my-pk");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "omp" }).provider, "oh-my-pk");
+	assert.equal(resolveAgentProviderConfig({ PI_SPEAK_OH_MY_PK_BIN: "C:/tools/ompk-pref.cmd" }).ompBin, "C:/tools/ompk-pref.cmd");
+	assert.equal(resolveAgentProviderConfig({ PI_SPEAK_OH_MY_PI_BIN: "C:/tools/omp-pref.cmd" }).ompBin, "C:/tools/omp-pref.cmd");
+});
+
+test("agent provider registry normalizes provider names and aliases", () => {
+	assert.equal(normalizeAgentProviderName("OpenAI Codex"), "codex");
+	assert.equal(normalizeAgentProviderName("claude code"), "claude");
+	assert.equal(normalizeAgentProviderName("Gemini Live"), "gemini-live");
+	assert.equal(normalizeAgentProviderName("OMPK"), "oh-my-pk");
+	assert.equal(normalizeAgentProviderName("oh my pk"), "oh-my-pk");
+	assert.equal(normalizeAgentProviderName("OMP"), "oh-my-pk");
+	assert.equal(normalizeAgentProviderName("oh my pi"), "oh-my-pk");
+	assert.equal(normalizeRunnableAgentProviderName("gemini-live"), undefined);
+	assert.equal(normalizeRunnableAgentProviderName("claude code"), "claude");
+	assert.equal(normalizeRunnableAgentProviderName("ompk"), "oh-my-pk");
+	assert.equal(normalizeRunnableAgentProviderName("omp"), "oh-my-pk");
+	assert.equal(normalizeRunnableAgentProviderName("oh-my-pi"), "oh-my-pk");
+});
+
+test("agent provider registry exposes capabilities for routing status", () => {
+	assert.deepEqual(getAgentProviderCapabilities("codex"), {
+		textTurns: true,
+		voiceTurns: true,
+		audioReplies: true,
+		routing: true,
+		steering: true,
+		resumableSessions: true,
+	});
+	assert.equal(getAgentProviderCapabilities("claude").resumableSessions, true);
+	assert.equal(getAgentProviderCapabilities("pi").resumableSessions, false);
+});
+
+test("agent provider registry builds resume commands only for supported sessions", () => {
+	assert.equal(isResumableAgentSession("codex", "abc123"), true);
+	assert.equal(isResumableAgentSession("claude", "3b9f36cc-d3b7-4bbf-b5f2-fd46664d1bad"), true);
+	assert.equal(isResumableAgentSession("claude", "not-a-uuid"), false);
+	assert.deepEqual(buildAgentResumeArgs("codex", "abc123", "C:\\dev\\project"), ["resume", "-C", "C:\\dev\\project", "abc123"]);
+	assert.deepEqual(buildAgentResumeArgs("claude", "3b9f36cc-d3b7-4bbf-b5f2-fd46664d1bad", "C:\\dev\\project"), [
+		"--resume",
+		"3b9f36cc-d3b7-4bbf-b5f2-fd46664d1bad",
+	]);
+	assert.deepEqual(buildAgentResumeCommandPreview("codex", "abc123", "codex.cmd", "C:\\dev\\project"), [
+		"codex.cmd",
+		"resume",
+		"-C",
+		"C:\\dev\\project",
+		"abc123",
+	]);
+	assert.equal(buildAgentResumeCommandPreview("pi", "abc123", "pi.cmd"), undefined);
 });
 
 test("pi provider streams message updates and completes on agent end", async () => {

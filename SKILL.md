@@ -1,9 +1,13 @@
 ---
 name: pi-speak
+<<<<<<< HEAD
 description: "Pointer skill for pi-speak-pk. Use when the user wants spoken replies, wake-word listening, session-manager control, deterministic short voice routes like `PK one` / `PK1` vs `PK two` / `PK2`, agent-driven speech via `pk-speak` or the `pk-speak-mcp` MCP server, Telegram control, QR-based Android setup via `/pk-remote`, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
+=======
+description: "Pointer skill for pk-speak / pi-pk-speak. Use when the user wants spoken replies, wake-word listening, session-manager control, deterministic short voice routes like `PK one` / `PK1` vs `PK two` / `PK2`, Telegram control, QR-based Android setup via `/pk-remote`, or the browser remote. Start from the bridge doc and then jump to README and source as needed."
+>>>>>>> origin/main
 ---
 
-# pi-speak-pk
+# pk-speak / pi-pk-speak
 
 This is a pointer skill.
 
@@ -52,9 +56,14 @@ Examples of natural requests this skill should map cleanly:
 
 ## Main command families
 
+<<<<<<< HEAD
 - `/speak` → spoken replies and TTS settings; `/speak agent` for agent-driven speech via `pk-speak`
 - `pk-speak` CLI → synthesize and play text from any shell; used by the agent in `/speak agent` mode
 - `pk-speak-mcp` → optional stdio MCP server (thin adapter over the CLI) for clients that prefer tool-call integration; one `speak` tool, input `{ text, voice? }`
+=======
+- `/speak` → spoken replies and TTS settings
+- `/pk-speak` → hard-stop speech + wake listener (`/pk-speak stop`)
+>>>>>>> origin/main
 - `/mono` → local wake-word listener
 - `/sess` → session manager dashboard, session naming, switching, edit wrapper, aliases, removal, export, and `/sess ui` to open the interactive Ink pane in a new terminal
 - `/attn` → advanced multi-session ready-state broker controls
