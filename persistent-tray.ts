@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { networkInterfaces, platform, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import QRCode from "qrcode";
 import { applyPiSpeakSetupConfig } from "./setup-config.js";
+import { getOrCreateInstallAuthToken } from "./pairing.js";
 
 applyPiSpeakSetupConfig();
 
@@ -16,6 +16,7 @@ type TrayConfig = {
 	downloadUrl: string;
 	statusUrl: string;
 	browserUrl: string;
+	connectUrl: string;
 	baseUrl: string;
 	profileName: string;
 	cwd: string;
@@ -71,7 +72,7 @@ async function main() {
 	const baseUrlArg = args.baseUrl || args["base-url"];
 	const profileNameArg = args.profileName || args["profile-name"];
 	const baseUrl = normalizeBaseUrl(baseUrlArg || process.env.PI_SPEAK_TRAY_BASE_URL || process.env.PI_SPEAK_PUBLIC_BASE_URL || getDefaultBaseUrl());
-	const token = args.token || process.env.PI_SPEAK_HTTP_TOKEN || randomToken();
+	const token = args.token || process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
 	const profileName = profileNameArg || DEFAULT_PROFILE_NAME;
 	const iconPath = resolveTrayIconPath(repoRoot, args.icon || process.env.PI_SPEAK_TRAY_ICON);
 	const appSetupUrl = buildAppSetupUrl(baseUrl, token, profileName);
@@ -79,6 +80,10 @@ async function main() {
 	const downloadUrl = new URL("download/pi-speak.apk", baseUrl).toString();
 	const statusUrl = new URL("v1/diagnostics", baseUrl).toString();
 	const browserUrl = new URL("app/", baseUrl).toString();
+	const gatewayPort = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "", 10)
+		|| Number.parseInt(new URL(baseUrl).port, 10)
+		|| DEFAULT_PORT;
+	const connectUrl = `http://127.0.0.1:${gatewayPort}/connect`;
 	const tempDir = mkdtempSync(join(tmpdir(), "pi-speak-persistent-tray-"));
 	const htmlPath = join(tempDir, "pi-speak-setup.html");
 	const logPath = join(tempDir, "pi-speak-tray.log");
@@ -101,6 +106,7 @@ async function main() {
 		downloadUrl,
 		statusUrl,
 		browserUrl,
+		connectUrl,
 		baseUrl,
 		profileName,
 		cwd: repoRoot,
@@ -214,10 +220,6 @@ function resolveTrayIconPath(repoRoot: string, configured?: string): string {
 		join(dirname(resolve(process.argv[1] || ".")), "assets", "pi-speak-tray.ico"),
 	];
 	return candidates.find((candidate) => existsSync(candidate)) || "";
-}
-
-function randomToken(): string {
-	return randomBytes(24).toString("base64url");
 }
 
 function buildAppSetupUrl(baseUrl: string, token: string, profileName: string): string {
@@ -440,8 +442,27 @@ function Restart-TrayWithSettings {
 	[System.Windows.Forms.Application]::Exit()
 }
 
+function Get-EdgePath {
+	$candidates = @()
+	$pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+	if ($pf86) { $candidates += (Join-Path $pf86 "Microsoft\\Edge\\Application\\msedge.exe") }
+	if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles "Microsoft\\Edge\\Application\\msedge.exe") }
+	if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA "Microsoft\\Edge\\Application\\msedge.exe") }
+	foreach ($candidate in $candidates) { if (Test-Path -LiteralPath $candidate) { return $candidate } }
+	return $null
+}
+function Open-ConnectWindow {
+	$edge = Get-EdgePath
+	if ($edge) { Start-Process -FilePath $edge -ArgumentList ("--app=" + $config.connectUrl) }
+	else { Start-Process -FilePath $config.connectUrl }
+}
+$connectItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$connectItem.Text = "Open connect window (QR + live status)"
+$connectItem.Add_Click({ Open-ConnectWindow })
+[void]$menu.Items.Add($connectItem)
+
 $qrItem = New-Object System.Windows.Forms.ToolStripMenuItem
-$qrItem.Text = "Show phone setup"
+$qrItem.Text = "Show offline setup page"
 $qrItem.Add_Click({ Start-Process -FilePath $config.htmlPath })
 [void]$menu.Items.Add($qrItem)
 
@@ -502,7 +523,7 @@ $exitItem.Add_Click({
 [void]$menu.Items.Add($exitItem)
 
 $notify.ContextMenuStrip = $menu
-$notify.Add_DoubleClick({ Start-Process -FilePath $config.htmlPath })
+$notify.Add_DoubleClick({ Open-ConnectWindow })
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000

@@ -12,7 +12,7 @@ Save workflow:
 2. Classify the note type: `synthesis`, `concept`, `source`, `decision`, `session`, `entity`, or `question`.
 3. Prefer updating an existing page over creating a duplicate.
 4. Preserve citations/source links, caveats, open questions, related pages, and useful tags.
-5. Use `python scripts/llm_wiki_save.py --title "..." --type synthesis --body-file <file>` when a CLI save is appropriate, or perform the equivalent wiki write/update manually.
+5. If `.llm-wiki/config.json` resolves a packet vault, save via `python "<vault>/scripts/llm_wiki_save.py" --title "..." --type synthesis --body-file <file>` (or the equivalent provider workflow). For the default vault (designandbuilding-vault, no packet tree) write the note directly to `Projects/<PROJECT>/<topic>.md`. Either way update `wiki/index.md`, prepend `wiki/log.md`, refresh `wiki/hot.md` where they exist.
 6. Update `wiki/index.md`, prepend `wiki/log.md`, and refresh `wiki/hot.md`.
 
 For deep research, save by default unless the user opted out. For ordinary quick answers, offer to save only when the result has durable value.

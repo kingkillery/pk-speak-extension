@@ -17,6 +17,9 @@ export type PiSpeakSetupConfig = {
 	vertexApiKey?: string;
 	geminiTextModel?: string;
 	geminiLiveModel?: string;
+	minimaxApiKey?: string;
+	minimaxVoiceId?: string;
+	minimaxModel?: string;
 	remoteSttProvider?: string;
 	httpPort?: string;
 	httpToken?: string;
@@ -42,6 +45,9 @@ const ENV_TO_CONFIG: Array<[keyof PiSpeakSetupConfig, string]> = [
 	["vertexApiKey", "PI_SPEAK_VERTEX_API_KEY"],
 	["geminiTextModel", "PI_SPEAK_GEMINI_TEXT_MODEL"],
 	["geminiLiveModel", "PI_SPEAK_GEMINI_LIVE_MODEL"],
+	["minimaxApiKey", "MINIMAX_API_KEY"],
+	["minimaxVoiceId", "PI_SPEAK_MINIMAX_VOICE_ID"],
+	["minimaxModel", "PI_SPEAK_MINIMAX_MODEL"],
 	["remoteSttProvider", "PI_SPEAK_REMOTE_STT_PROVIDER"],
 	["httpPort", "PI_SPEAK_HTTP_PORT"],
 	["httpToken", "PI_SPEAK_HTTP_TOKEN"],

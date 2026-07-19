@@ -40,8 +40,8 @@ export type ConversationReducerSummary = {
 
 export type ConversationExecutionPlan = {
 	dispatch: boolean;
-	backend: "pi" | "codex" | "claude" | "oh-my-pi" | "shell" | "memory" | "wiki" | "defer";
-	reason: "dispatch-pi" | "dispatch-codex" | "dispatch-claude" | "dispatch-oh-my-pi" | "dispatch-shell" | "dispatch-memory" | "dispatch-wiki" | "defer" | "clarify";
+	backend: "pi" | "codex" | "claude" | "oh-my-pk" | "shell" | "memory" | "wiki" | "defer";
+	reason: "dispatch-pi" | "dispatch-codex" | "dispatch-claude" | "dispatch-oh-my-pk" | "dispatch-shell" | "dispatch-memory" | "dispatch-wiki" | "defer" | "clarify";
 	confidence: number;
 	rationale: string;
 	actionForSeed?: string;

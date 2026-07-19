@@ -4,8 +4,8 @@ Use this file as the operator bridge between natural wake phrases and the real `
 
 ## Core idea
 
-`/mono` listens for the wake phrase `PK`.
-After the wake phrase, Pi can optionally capture a session target before the spoken request.
+Wake phrases are how you start (or resume) a conversation with the assistant, not standalone commands. `/mono` listens for the wake phrase `PK`.
+After the wake phrase, Pi can optionally capture a session target before the spoken request — the assistant then routes into that session's conversation.
 
 Examples:
 

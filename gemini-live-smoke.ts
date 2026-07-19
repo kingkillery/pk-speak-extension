@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { GoogleGenAI, Modality, type LiveServerMessage } from "@google/genai";
+import { createGeminiClient, getGeminiApiVersion, getGeminiLiveModel, isGeminiLiveConfigured } from "./gemini-live-turn.js";
 
 const DEFAULT_MODEL = "gemini-3.1-flash-live-preview";
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -21,31 +22,32 @@ type SmokeResult = {
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-	if (!apiKey) {
-		throw new Error("Set GOOGLE_API_KEY before running the Gemini Live smoke test.");
+	if (!isGeminiLiveConfigured()) {
+		throw new Error(
+			"Configure Gemini Live first: set GOOGLE_API_KEY (developer API), or PI_SPEAK_GEMINI_BACKEND=vertex with GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION and gcloud ADC.",
+		);
 	}
-	const model = args.model || process.env.PI_SPEAK_GEMINI_LIVE_MODEL || DEFAULT_MODEL;
+	const model = args.model || getGeminiLiveModel();
 	const prompt = args.prompt || "Reply with exactly: gemini live ok";
 	const modality = normalizeModality(args.modality || process.env.PI_SPEAK_GEMINI_LIVE_MODALITY || "audio");
 	const timeoutMs = Number.parseInt(args.timeout || process.env.PI_SPEAK_GEMINI_LIVE_TIMEOUT_MS || String(DEFAULT_TIMEOUT_MS), 10);
-	const result = await runGeminiLiveSmoke({ apiKey, model, prompt, modality, timeoutMs });
+	const result = await runGeminiLiveSmoke({ model, prompt, modality, timeoutMs });
 	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 	if (!result.ok) process.exitCode = 1;
 }
 
 export async function runGeminiLiveSmoke(options: {
-	apiKey: string;
+	apiKey?: string;
 	model: string;
 	prompt: string;
 	modality: "TEXT" | "AUDIO";
 	timeoutMs?: number;
 }): Promise<SmokeResult> {
-	const apiVersion = process.env.PI_SPEAK_GEMINI_API_VERSION || "v1beta";
-	const ai = new GoogleGenAI({
-		apiKey: options.apiKey,
-		apiVersion,
-	});
+	const client = options.apiKey
+		? { ai: new GoogleGenAI({ apiKey: options.apiKey, apiVersion: getGeminiApiVersion("developer-api") }), backend: "developer-api" as const }
+		: createGeminiClient(process.env, { live: true });
+	const apiVersion = getGeminiApiVersion(client.backend);
+	const ai = client.ai;
 	let setupComplete = false;
 	let turnComplete = false;
 	let usageMetadata: unknown;
