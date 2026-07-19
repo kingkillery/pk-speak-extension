@@ -43,17 +43,16 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     @Volatile
     private var activeTurnCall: Call? = null
 
-    /**
-     * Sends a text turn to the current active agent.
-     * Returns a Pair of: (User Transcript, Agent Response Text)
-     */
-    suspend fun sendTextTurn(text: String): Pair<String, String> {
-        val targetAgent = prefs.activeAgent
-        Log.d("VoiceAgent", "Sending text turn using: $targetAgent")
-
-        return withContext(Dispatchers.IO) {
-            callLocalGatewayText(text)
-        }
+    companion object {
+        /**
+         * A voice turn falls back to a plain text turn (re-sending the local transcript) only
+         * on a definitive 429 rejection, where the gateway refused the turn without running it.
+         * A 502 or a connection error is ambiguous — the turn may already have executed before
+         * the reply was lost, and re-sending the prompt could run non-idempotent agent actions
+         * twice — so those are surfaced as errors instead of retried.
+         */
+        fun shouldFallBackToTextTurn(result: GatewayTurnResult): Boolean =
+            result.statusCode == 429
     }
 
     suspend fun sendTextTurnDetailed(text: String): GatewayTurnResult {
@@ -65,32 +64,6 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
-    /**
-     * Sends an audio file turn to the active agent.
-     * Returns a Pair of: (Recognized Transcription, Agent Response Text)
-     */
-    suspend fun sendVoiceTurn(audioFile: File, fallbackPrompt: String = ""): Pair<String, String> {
-        val targetAgent = prefs.activeAgent
-        Log.d("VoiceAgent", "Sending voice turn using: $targetAgent")
-
-        val result = withContext(Dispatchers.IO) {
-            callLocalGatewayVoice(audioFile)
-        }
-        val reply = result.second.lowercase()
-        if (reply.contains("operational status returned by remote: 502")
-            || reply.contains("operational status returned by remote: 429")
-            || reply.contains("voice transmission offline")
-            || reply.contains("gateway connection error")) {
-            val prompt = fallbackPrompt.trim()
-            if (prompt.isNotEmpty() && !prompt.equals("Listening...", ignoreCase = true)) {
-                return withContext(Dispatchers.IO) {
-                    callLocalGatewayText(prompt)
-                }
-            }
-        }
-        return result
-    }
-
     suspend fun sendVoiceTurnDetailed(audioFile: File, fallbackPrompt: String = ""): GatewayTurnResult {
         val targetAgent = prefs.activeAgent
         Log.d("VoiceAgent", "Sending voice turn using: $targetAgent")
@@ -98,11 +71,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         val result = withContext(Dispatchers.IO) {
             callLocalGatewayVoiceDetailed(audioFile)
         }
-        val reply = result.replyText.lowercase()
-        if (reply.contains("operational status returned by remote: 502")
-            || reply.contains("operational status returned by remote: 429")
-            || reply.contains("voice transmission offline")
-            || reply.contains("gateway connection error")) {
+        if (shouldFallBackToTextTurn(result)) {
             val prompt = fallbackPrompt.trim()
             if (prompt.isNotEmpty() && !prompt.equals("Listening...", ignoreCase = true)) {
                 return withContext(Dispatchers.IO) {
@@ -352,11 +321,6 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     }
 
     // --- PI SPEAK LOCAL REMOTE GATEWAY ---
-    private fun callLocalGatewayText(text: String): Pair<String, String> {
-        val result = callLocalGatewayTextDetailed(text)
-        return Pair(result.transcript, result.replyText)
-    }
-
     private fun callLocalGatewayTextDetailed(text: String): GatewayTurnResult {
         val gatewayUrl = "${gatewayBaseUrl()}/v1/turn/text"
         Log.d("VoiceAgent", "POST text turn to gateway: $gatewayUrl")
@@ -416,11 +380,6 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 activeTurnCall = null
             }
         }
-    }
-
-    private fun callLocalGatewayVoice(audioFile: File): Pair<String, String> {
-        val result = callLocalGatewayVoiceDetailed(audioFile)
-        return Pair(result.transcript, result.replyText)
     }
 
     private fun callLocalGatewayVoiceDetailed(audioFile: File): GatewayTurnResult {
@@ -525,18 +484,6 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 Log.e("VoiceAgent", "Gateway audio download failed: ${response.code}")
             }
         }
-    }
-
-    private fun simulateVoiceTranscription(): String {
-        val promptExamples = listOf(
-            "Review handleEvents on line 42 for leaks",
-            "Generate optimized unit test configurations for Gradle build speed",
-            "Recompile the release binary targets on main node",
-            "Connect physical debug shell on Tailscale subnet",
-            "Explain git status discrepancies in remote repository",
-            "Verify dependencies sync in libs.versions.toml"
-        )
-        return promptExamples.random()
     }
 
     suspend fun discoverMachines(): List<DiscoveredMachine> {
@@ -1420,6 +1367,190 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
             }
         }
     }
+
+    /**
+     * Launches a new oh-my-pk agent with an arbitrary prompt/model/provider, generalizing the
+     * hubOnly/colab presets above. POSTs to the same /v1/sessions/launch endpoint.
+     */
+    suspend fun launchSession(
+        cwd: String? = null,
+        prompt: String? = null,
+        model: String? = null,
+        provider: String? = null,
+        sessionDir: String? = null
+    ): String {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext "No gateway URL is configured."
+            val requestBody = JSONObject().apply {
+                put("cwd", cwd ?: prefs.workspacePath)
+                if (!prompt.isNullOrBlank()) put("prompt", prompt)
+                if (!model.isNullOrBlank()) put("model", model)
+                if (!provider.isNullOrBlank()) put("provider", provider)
+                if (!sessionDir.isNullOrBlank()) put("sessionDir", sessionDir)
+            }.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("$baseUrl/v1/sessions/launch")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(requestBody)
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                        return@withContext json.optString("error", json.optString("message", "Task launch failed: ${response.code}"))
+                    }
+                    json.optString("message", "Task launched.")
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "Task launch failed", e)
+                "Task launch failed: ${shortError(e)}"
+            }
+        }
+    }
+
+    /** Full lane -> subagent tree from the newer hierarchical Agent Hub API (/v1/herdr/agents). */
+    suspend fun getHubSnapshot(): HubSnapshot? {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext null
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/herdr/agents")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .get()
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@withContext null
+                    val json = JSONObject(response.body?.string() ?: "{}")
+                    if (!json.optBoolean("ok", false)) return@withContext null
+                    parseHubSnapshot(json)
+                }
+            } catch (e: Exception) {
+                Log.d("VoiceAgent", "Hub snapshot fetch failed: ${e.message}")
+                null
+            }
+        }
+    }
+
+    /** One hub agent's detail (including a transcript tail) by id. */
+    suspend fun getHubAgentDetail(id: String, lines: Int = 200): HubAgentDetail? {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext null
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v1/herdr/agent/${hubPathSegment(id)}?lines=$lines")
+                    .header("X-Pi-Speak-Token", prefs.remoteToken)
+                    .get()
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@withContext null
+                    val json = JSONObject(response.body?.string() ?: "{}")
+                    if (!json.optBoolean("ok", false)) return@withContext null
+                    parseHubAgentDetail(json)
+                }
+            } catch (e: Exception) {
+                Log.d("VoiceAgent", "Hub agent detail fetch failed: ${e.message}")
+                null
+            }
+        }
+    }
+
+    /** Submits a chat turn to a hub agent (background lanes only; subagents reject this). */
+    suspend fun sendHubAgentChat(id: String, text: String): HubActionResult {
+        return postHubAgentAction("chat", id, JSONObject().put("text", text), ::parseHubActionResult) {
+            HubActionResult(ok = false, error = "Message failed: ${it}")
+        }
+    }
+
+    /** Recovers an archived background lane. */
+    suspend fun reviveHubAgent(id: String): HubActionResult {
+        return postHubAgentAction("revive", id, JSONObject(), ::parseHubActionResult) {
+            HubActionResult(ok = false, error = "Revive failed: ${it}")
+        }
+    }
+
+    /**
+     * Archives a background lane. Call once with confirmToken = null to obtain a short-lived
+     * confirm token (the gateway returns 428 confirm_required), then call again with that
+     * token to actually archive it -- mirrors the terminal's two-step `/sess remove` gesture.
+     */
+    suspend fun killHubAgent(id: String, confirmToken: String? = null): HubKillOutcome {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext HubKillOutcome(ok = false, error = "No gateway URL is configured.")
+            val payload = JSONObject().apply { if (!confirmToken.isNullOrBlank()) put("confirmToken", confirmToken) }
+            val request = Request.Builder()
+                .url("$baseUrl/v1/herdr/agent/${hubPathSegment(id)}/kill")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    parseHubKillOutcome(json)
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "Hub agent kill failed", e)
+                HubKillOutcome(ok = false, error = "Kill failed: ${shortError(e)}")
+            }
+        }
+    }
+
+    private suspend fun postHubAgentAction(
+        action: String,
+        id: String,
+        payload: JSONObject,
+        parse: (JSONObject) -> HubActionResult,
+        onError: (String) -> HubActionResult
+    ): HubActionResult {
+        return withContext(Dispatchers.IO) {
+            val baseUrl = gatewayBaseUrl()
+            if (baseUrl.isBlank()) return@withContext onError("No gateway URL is configured.")
+            val request = Request.Builder()
+                .url("$baseUrl/v1/herdr/agent/${hubPathSegment(id)}/$action")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            try {
+                client.newCall(request).execute().use { response ->
+                    val body = response.body?.string() ?: "{}"
+                    val json = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+                    parse(json)
+                }
+            } catch (e: Exception) {
+                Log.e("VoiceAgent", "Hub agent $action failed", e)
+                onError(shortError(e))
+            }
+        }
+    }
+
+    /** Live transcript tail for one hub agent. Caller owns stop(). */
+    fun openHubAgentStream(
+        id: String,
+        fromByte: Long = 0L,
+        onAppend: (fromByte: Long, newSize: Long, text: String) -> Unit,
+        onStatus: (status: String, lastActivityMs: Long) -> Unit,
+        onStateChange: (connected: Boolean, detail: String) -> Unit
+    ): HerdrAgentStream {
+        val stream = HerdrAgentStream(
+            baseUrl = gatewayBaseUrl(),
+            token = prefs.remoteToken,
+            agentId = id,
+            startFromByte = fromByte,
+            onAppend = onAppend,
+            onStatus = onStatus,
+            onStateChange = onStateChange
+        )
+        stream.start()
+        return stream
+    }
+
+    /** Percent-encodes a hub agent id for use as a URL path segment ("/" -> %2F, " " -> %20). */
+    private fun hubPathSegment(id: String): String = urlParam(id).replace("+", "%20")
 
     suspend fun getCollabLink(): CollabLink {
         return withContext(Dispatchers.IO) {

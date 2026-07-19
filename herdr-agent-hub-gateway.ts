@@ -65,7 +65,11 @@ export class AgentHubGateway {
 			const seen = this.#idempotency.get(idempotencyKey);
 			if (seen && seen.expiresAt > Date.now()) return { ok: true, messageId: seen.messageId };
 		}
-		await this.#binding.chat(id, text);
+		try {
+			await this.#binding.chat(id, text);
+		} catch (error) {
+			return rejected(error);
+		}
 		const messageId = randomUUID();
 		if (idempotencyKey) {
 			this.#idempotency.set(idempotencyKey, { messageId, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
@@ -75,10 +79,18 @@ export class AgentHubGateway {
 
 	async revive(id: HubAgentId): Promise<HubActionOutcome> {
 		if (!this.#binding.canMutate) return offline();
+		// Deliberately does NOT 404 on a missing getAgent(id) result before trying the binding:
+		// a revivable (archived) lane is, by definition, invisible to the active-lane scan that
+		// getAgent() reads, so getAgent() finding nothing is the EXPECTED shape of the one case
+		// revive exists for. Only an agent that IS visible and already alive short-circuits here;
+		// everything else is left to the binding, which 404s itself via a thrown "not found".
 		const agent = await this.#binding.getAgent(id);
-		if (!agent) return notFound(id);
-		if (agent.status === "running" || agent.status === "idle") return { ok: true };
-		await this.#binding.revive(id);
+		if (agent && (agent.status === "running" || agent.status === "idle")) return { ok: true };
+		try {
+			await this.#binding.revive(id);
+		} catch (error) {
+			return rejected(error);
+		}
 		return { ok: true };
 	}
 
@@ -102,7 +114,11 @@ export class AgentHubGateway {
 			return { ok: false, status: 410, code: "confirm_expired", error: "Kill confirmation expired; request a new token." };
 		}
 		this.#confirms.delete(id);
-		await this.#binding.kill(id);
+		try {
+			await this.#binding.kill(id);
+		} catch (error) {
+			return rejected(error);
+		}
 		return { ok: true };
 	}
 
@@ -185,4 +201,8 @@ function offline(): HubActionOutcome {
 
 function notFound(id: HubAgentId): HubActionOutcome {
 	return { ok: false, status: 404, code: "not_found", error: `Unknown agent: ${id}` };
+}
+
+function rejected(error: unknown): HubActionOutcome {
+	return { ok: false, status: 400, code: "action_rejected", error: error instanceof Error ? error.message : String(error) };
 }

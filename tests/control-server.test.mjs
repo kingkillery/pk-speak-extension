@@ -92,6 +92,9 @@ async function withServer(overrides = {}, fn) {
 		onSessionResume: overrides.onSessionResume,
 		onSessionLaunch: overrides.onSessionLaunch,
 		onSessionArchive: overrides.onSessionArchive,
+		onHubPublish: overrides.onHubPublish,
+		onHubResume: overrides.onHubResume,
+		isHubHandoffReady: overrides.isHubHandoffReady,
 		onOmpSelectSession: overrides.onOmpSelectSession,
 		onOmpGetSelectedSession: overrides.onOmpGetSelectedSession,
 		getDiscoveredAgents: overrides.getDiscoveredAgents,
@@ -205,6 +208,7 @@ test("public health and discovery descriptor do not expose auth token", async ()
 		assert.equal(descriptor.endpoints.sessionLaunch, "/v1/sessions/launch");
 		assert.ok(descriptor.capabilities.includes("session-launch"));
 		assert.ok(descriptor.capabilities.includes("colab-launch"));
+		assert.equal(descriptor.capabilities.includes("hub-handoff"), false);
 		assert.doesNotMatch(discovery.body, /secret-token|P-K-Haxx1!/);
 	});
 });
@@ -316,7 +320,7 @@ test("phone setup page is public and includes install plus connect links", async
 		const response = await request({
 			port,
 			path: "/setup?token=secret-token&profile_name=Test%20Rig",
-			headers: { Host: `100.76.136.91:${port}` },
+			headers: { Host: `100.64.0.10:${port}` },
 		});
 		assert.equal(response.statusCode, 200);
 		assert.match(response.headers["content-type"], /text\/html/);
@@ -331,7 +335,7 @@ test("phone setup page is public and includes install plus connect links", async
 		const downloadRedirect = await request({
 			port,
 			path: "/download",
-			headers: { Host: `100.76.136.91:${port}` },
+			headers: { Host: `100.64.0.10:${port}` },
 		});
 		assert.equal(downloadRedirect.statusCode, 302);
 		assert.equal(downloadRedirect.headers.location, "/download/pi-speak.apk");
@@ -974,6 +978,99 @@ test("session remove endpoint invokes callback and returns result", async () => 
 	});
 });
 
+test("hub publish endpoint returns the fragment-bearing link without caching", async () => {
+	await withServer({
+		onHubPublish: async (payload) => ({
+			ok: true,
+			message: "published",
+			sessionPath: payload.sessionPath,
+			link: "https://relay.example/h/hub_alpha01#secret-key",
+		}),
+		onHubResume: async () => ({ ok: true, message: "resumed" }),
+		isHubHandoffReady: () => true,
+	}, async (port) => {
+		const discovery = await request({ port, path: "/.well-known/pi-speak" });
+		assert.equal(discovery.json().capabilities.includes("hub-handoff"), true);
+
+		const response = await request({
+			port,
+			path: "/v1/hub/publish",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ sessionPath: "C:\\sessions\\active.jsonl" }),
+		});
+		assert.equal(response.statusCode, 200);
+		assert.equal(response.headers["cache-control"], "no-store");
+		const body = await response.json();
+		assert.equal(body.link, "https://relay.example/h/hub_alpha01#secret-key");
+		assert.equal(body.sessionPath, "C:\\sessions\\active.jsonl");
+	});
+});
+
+test("hub resume endpoint keeps the submitted key out of its response", async () => {
+	const link = "https://relay.example/h/hub_alpha01#secret-key";
+	await withServer({
+		onHubResume: async (payload) => ({
+			ok: true,
+			message: "resumed",
+			sessionPath: "C:\\sessions\\imported.jsonl",
+			hubId: new URL(payload.link).pathname.split("/").at(-1),
+		}),
+	}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/hub/resume",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ link }),
+		});
+		assert.equal(response.statusCode, 200);
+		assert.equal(response.headers["cache-control"], "no-store");
+		assert.doesNotMatch(response.body, /secret-key/);
+		assert.equal((await response.json()).sessionPath, "C:\\sessions\\imported.jsonl");
+	});
+});
+
+test("hub handoff endpoints return 501 when no owner adapter is available", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/hub/publish",
+			method: "POST",
+			headers: {
+				Authorization: "Bearer secret-token",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ sessionPath: "C:\\sessions\\active.jsonl" }),
+		});
+		assert.equal(response.statusCode, 501);
+		assert.equal(response.headers["cache-control"], "no-store");
+	});
+});
+test("unauthorized hub responses are non-cacheable", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/hub/resume",
+			method: "POST",
+			headers: {
+				Host: "tailnet.example",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ link: "https://relay.example/h/hub_alpha01#secret-key" }),
+		});
+		assert.equal(response.statusCode, 401);
+		assert.equal(response.headers["cache-control"], "no-store");
+	});
+});
+
+
 test("session resume endpoint invokes callback and returns result", async () => {
 	await withServer({
 		onSessionResume: async (payload) => ({
@@ -993,14 +1090,14 @@ test("session resume endpoint invokes callback and returns result", async () => 
 			body: JSON.stringify({
 				provider: "codex",
 				sessionId: "abc123",
-				sessionPath: "C:\\Users\\prest\\.codex\\sessions\\session.jsonl",
+				sessionPath: "C:\\Users\\example\\.codex\\sessions\\session.jsonl",
 				cwd: "C:\\dev\\project",
 			}),
 		});
 		assert.equal(response.statusCode, 200);
 		const body = await response.json();
 		assert.equal(body.ok, true);
-		assert.equal(body.message, "resume:codex:abc123:C:\\Users\\prest\\.codex\\sessions\\session.jsonl:C:\\dev\\project");
+		assert.equal(body.message, "resume:codex:abc123:C:\\Users\\example\\.codex\\sessions\\session.jsonl:C:\\dev\\project");
 		assert.deepEqual(body.command, ["codex", "resume", "abc123"]);
 	});
 });
@@ -1285,7 +1382,7 @@ test("agents endpoint returns structured running agents and recent session paths
 			}],
 			recent: [{
 				provider: "codex",
-				path: "C:\\Users\\prest\\.codex\\sessions\\2026\\06\\01\\session.jsonl",
+				path: "C:\\Users\\example\\.codex\\sessions\\2026\\06\\01\\session.jsonl",
 				sessionId: "abc123",
 				title: "Recent session",
 				updatedAt: "2026-06-01T11:59:00.000Z",

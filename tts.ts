@@ -21,6 +21,11 @@ export type SynthesisOptions = {
 	outputPath: string;
 	state?: SpeakRuntimeState;
 	signal?: AbortSignal;
+	/**
+	 * When false, primary-provider failures are not retried via Edge.
+	 * Defaults to true so existing callers keep current fallback behavior.
+	 */
+	allowProviderFallback?: boolean;
 	onPhase?: (phase: SynthesisPhase) => void;
 	onLegacyProcess?: (process: ChildProcess | undefined) => void;
 };
@@ -1160,7 +1165,11 @@ export async function synthesizeToFile(options: SynthesisOptions): Promise<Synth
 					throw new Error(`Unsupported TTS provider: ${provider satisfies never}`);
 			}
 		} catch (error) {
-			if (provider === "openai" || provider === "gemini" || provider === "elevenlabs" || provider === "sag" || provider === "higgs" || provider === "stable-audio" || provider === "minimax") {
+			const allowProviderFallback = options.allowProviderFallback !== false;
+			if (
+				allowProviderFallback
+				&& (provider === "openai" || provider === "gemini" || provider === "elevenlabs" || provider === "sag" || provider === "higgs" || provider === "stable-audio" || provider === "minimax")
+			) {
 				console.warn(`[TTS Fallback] Primary provider '${provider}' failed: ${getErrorMessage(error)}. Falling back to 'edge' TTS. Metrics: { timestamp: ${Date.now()}, originalProvider: "${provider}", targetProvider: "edge", error: "${getErrorMessage(error)}" }`);
 				if (testOverrides.synthesizeEdge) {
 					await testOverrides.synthesizeEdge(spokenText, options.outputPath, localController.signal);

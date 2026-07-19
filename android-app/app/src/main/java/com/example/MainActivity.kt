@@ -14,6 +14,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import com.example.ui.theme.Canvas as CanvasColor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -33,8 +34,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -83,6 +86,8 @@ import com.example.ui.theme.SurfaceMuted
 import com.example.ui.theme.SurfacePaper
 import com.example.ui.theme.SurfaceSubtle
 import com.example.ui.theme.Warn
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
@@ -90,6 +95,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -123,7 +129,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFFF4F1E9))
+                        .background(CanvasColor)
                 ) { innerPadding ->
                     PiSpeakConsoleScreen(
                         audioHelper = audioHelper,
@@ -213,51 +219,56 @@ fun PiSpeakConsoleScreen(
         }
     }
 
+    // Health polling only runs while the app is visible (STARTED); it pauses in the
+    // background instead of hitting the gateway every 5s for the life of the process.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     LaunchedEffect(Unit) {
-        var unreachableSinceMs: Long? = null
-        var lastLoggedConnectionStatus = ""
-        while (true) {
-            val startTime = System.currentTimeMillis()
-            val healthy = client.pingHealth()
-            val latency = System.currentTimeMillis() - startTime
-            if (healthy) {
-                unreachableSinceMs = null
-                studioState.isGatewayConnected = true
-                studioState.isReconnecting = false
-                studioState.connectionLatencyMs = latency
-                studioState.connectionStatusText = "Connected"
-                studioState.connectionBannerText = ""
-            } else {
-                val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
-                unreachableSinceMs = firstFailureMs
-                studioState.isGatewayConnected = false
-                studioState.isReconnecting = true
-                studioState.connectionStatusText = "Reconnecting..."
-                val reconnectStartTime = System.currentTimeMillis()
-                val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
-                val reconnectLatency = System.currentTimeMillis() - reconnectStartTime
-                codexSessionName = prefs.codexSessionName
-                if (result.connected) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var unreachableSinceMs: Long? = null
+            var lastLoggedConnectionStatus = ""
+            while (true) {
+                val startTime = System.currentTimeMillis()
+                val healthy = client.pingHealth()
+                val latency = System.currentTimeMillis() - startTime
+                if (healthy) {
                     unreachableSinceMs = null
                     studioState.isGatewayConnected = true
                     studioState.isReconnecting = false
-                    studioState.connectionLatencyMs = reconnectLatency
+                    studioState.connectionLatencyMs = latency
                     studioState.connectionStatusText = "Connected"
                     studioState.connectionBannerText = ""
                 } else {
-                    val elapsedMs = System.currentTimeMillis() - firstFailureMs
-                    studioState.isReconnecting = elapsedMs <= 10_000L
-                    studioState.connectionStatusText = if (studioState.isReconnecting) "Searching for gateway..." else "Gateway unreachable"
-                    if (studioState.connectionBannerText.isBlank()) {
-                        studioState.connectionBannerText = result.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+                    val firstFailureMs = unreachableSinceMs ?: System.currentTimeMillis()
+                    unreachableSinceMs = firstFailureMs
+                    studioState.isGatewayConnected = false
+                    studioState.isReconnecting = true
+                    studioState.connectionStatusText = "Reconnecting..."
+                    val reconnectStartTime = System.currentTimeMillis()
+                    val result = withContext(Dispatchers.IO) { client.tryAutoConnect(forceVerify = true) }
+                    val reconnectLatency = System.currentTimeMillis() - reconnectStartTime
+                    codexSessionName = prefs.codexSessionName
+                    if (result.connected) {
+                        unreachableSinceMs = null
+                        studioState.isGatewayConnected = true
+                        studioState.isReconnecting = false
+                        studioState.connectionLatencyMs = reconnectLatency
+                        studioState.connectionStatusText = "Connected"
+                        studioState.connectionBannerText = ""
+                    } else {
+                        val elapsedMs = System.currentTimeMillis() - firstFailureMs
+                        studioState.isReconnecting = elapsedMs <= 10_000L
+                        studioState.connectionStatusText = if (studioState.isReconnecting) "Searching for gateway..." else "Gateway unreachable"
+                        if (studioState.connectionBannerText.isBlank()) {
+                            studioState.connectionBannerText = result.message.ifBlank { "Gateway is unreachable. Searching for a Pi Speak server." }
+                        }
                     }
                 }
+                if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
+                    lastLoggedConnectionStatus = studioState.connectionStatusText
+                    Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
+                }
+                delay(5_000)
             }
-            if (studioState.connectionStatusText != lastLoggedConnectionStatus) {
-                lastLoggedConnectionStatus = studioState.connectionStatusText
-                Log.d("PiSpeakConnection", "Gateway connection state: ${studioState.connectionStatusText}")
-            }
-            delay(5_000)
         }
     }
 
@@ -284,12 +295,12 @@ fun PiSpeakConsoleScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFFF4F1E9))
+            .background(CanvasColor)
     ) {
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Top bar: menu / serif title / settings (Claude "paper" header)
+            // Slim top bar: menu / title+status / settings (Claude Code mobile style)
             HeaderSection(
                 title = tabTitle,
                 sessionName = codexSessionName,
@@ -301,12 +312,13 @@ fun PiSpeakConsoleScreen(
                 onSettingsClick = { currentTab = "settings" }
             )
 
-            // Content Container with smooth fade effects
+            // Content container. Studio renders edge-to-edge like a chat surface;
+            // the list-style tabs keep a small gutter.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .padding(horizontal = 16.dp)
+                    .padding(horizontal = if (currentTab == "studio") 0.dp else 12.dp)
             ) {
                 when (currentTab) {
                     "studio" -> StudioTabContent(
@@ -352,29 +364,13 @@ fun PiSpeakConsoleScreen(
                     )
                 }
             }
-
-            // Android standard decoration indicator at bottom
-            Spacer(modifier = Modifier.height(12.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(width = 120.dp, height = 4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(Line)
-                )
-            }
         }
         ConnectionErrorBanner(
             message = studioState.connectionBannerText,
             onDismiss = { studioState.connectionBannerText = "" },
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 76.dp, start = 16.dp, end = 16.dp)
+                .padding(top = 60.dp, start = 16.dp, end = 16.dp)
         )
     }
     }
@@ -393,58 +389,39 @@ fun HeaderSection(
 ) {
     val connectionColor = gatewayConnectionIndicatorColor(isGatewayConnected, isReconnecting)
     val statusLabel = "$connectionStatusText | Codex: $sessionName"
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        color = SurfacePaper,
-        shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, Line),
-        shadowElevation = 1.dp,
-    ) {
+    // Flat, slim app bar (Claude Code mobile style): icon / title+status / icon,
+    // separated from content by a hairline instead of a floating card.
+    Column(modifier = Modifier.fillMaxWidth().background(CanvasColor)) {
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            TextButton(
-                onClick = onMenuClick,
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                colors = ButtonDefaults.textButtonColors(contentColor = Ink),
-            ) {
-                Text("Menu", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            IconButton(onClick = onMenuClick) {
+                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = Ink)
             }
-
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+                    .padding(horizontal = 2.dp),
             ) {
                 Text(
                     text = title,
                     color = Ink,
-                    style = MaterialTheme.typography.titleLarge,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(SurfaceSubtle)
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(7.dp)
+                            .size(6.dp)
                             .clip(CircleShape)
                             .background(connectionColor)
                     )
-                    Spacer(modifier = Modifier.width(7.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = statusLabel,
                         color = InkMuted,
@@ -453,7 +430,7 @@ fun HeaderSection(
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (isGatewayConnected && connectionLatencyMs >= 0L) {
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Text(
                             text = "${connectionLatencyMs}ms",
                             color = connectionColor,
@@ -463,23 +440,23 @@ fun HeaderSection(
                     }
                 }
             }
-
-            TextButton(
-                onClick = onSettingsClick,
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                colors = ButtonDefaults.textButtonColors(contentColor = Ink),
-            ) {
-                Text("Tune", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            IconButton(onClick = onSettingsClick) {
+                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = InkMuted)
             }
         }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Line)
+        )
     }
 }
 
 fun gatewayConnectionIndicatorColor(isGatewayConnected: Boolean, isReconnecting: Boolean): Color = when {
-    isGatewayConnected -> Color(0xFF2E7D52)
-    isReconnecting -> Color(0xFFC97E1A)
-    else -> Color(0xFFB3261E)
+    isGatewayConnected -> Success
+    isReconnecting -> Warn
+    else -> Error
 }
 
 
@@ -541,7 +518,7 @@ fun PiSpeakDrawer(
     onSettings: () -> Unit
 ) {
     ModalDrawerSheet(
-        drawerContainerColor = Color(0xFFF4F1E9),
+        drawerContainerColor = CanvasColor,
         drawerContentColor = Ink,
         drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
         modifier = Modifier.fillMaxWidth(0.84f)
@@ -844,6 +821,9 @@ fun StudioTabContent(
     val listState = rememberLazyListState()
 
     LaunchedEffect(state.chatMessages.size, state.transcription, state.isProcessing, state.isRecording, state.latestReply) {
+        val layoutInfo = listState.layoutInfo
+        val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        if (!shouldFollowConversationTail(lastVisibleIndex, layoutInfo.totalItemsCount)) return@LaunchedEffect
         val totalCount = state.chatMessages.size + 10
         if (totalCount > 10) {
             listState.animateScrollToItem(totalCount)
@@ -959,6 +939,7 @@ fun StudioTabContent(
                 override fun onTranscript(text: String) {
                     scope.launch { state.transcription = text }
                 }
+                override fun onTranscriptComplete() = Unit
 
                 override fun onInterrupt() {
                     player.stop()
@@ -1123,11 +1104,19 @@ fun StudioTabContent(
                 state.isProcessing = true
                 var progressJob: Job? = null
                 try {
-                    val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
-                    if (elapsedMs in 0 until minimumVoiceCaptureMs) {
-                        delay(minimumVoiceCaptureMs - elapsedMs)
+                    // stopRecording joins the WAV writer thread (up to 1.5s) — keep it off main.
+                    // On cancellation mid-delay the recorder must still be shut down, or the
+                    // WAV writer thread keeps the mic open until the next recording starts.
+                    val stoppedCleanly = try {
+                        val elapsedMs = System.currentTimeMillis() - recordingStartedAtMs
+                        if (elapsedMs in 0 until minimumVoiceCaptureMs) {
+                            delay(minimumVoiceCaptureMs - elapsedMs)
+                        }
+                        withContext(Dispatchers.IO) { audioHelper.stopRecording() }
+                    } catch (e: CancellationException) {
+                        withContext(NonCancellable + Dispatchers.IO) { audioHelper.stopRecording() }
+                        throw e
                     }
-                    val stoppedCleanly = audioHelper.stopRecording()
                     val file = audioHelper.getRecordedFile("turn.wav")
                     Log.d("MainActivity", "Voice recording stopped: stoppedCleanly=$stoppedCleanly, exists=${file.exists()}, bytes=${file.length()}")
                     if (stoppedCleanly && file.exists() && file.length() >= 12_000) {

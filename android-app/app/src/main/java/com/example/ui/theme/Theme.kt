@@ -4,9 +4,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 
-// Single warm "paper" scheme. Pi Speak always renders in the light Claude-style
-// aesthetic, independent of the system dark-mode setting, to keep its identity.
-private val PaperColorScheme =
+// Single warm "Sage & Clay" scheme. Pi Speak always renders in this light,
+// spacious aesthetic, independent of the system dark-mode setting, to keep
+// its identity.
+private val SageClayColorScheme =
   lightColorScheme(
     primary = Accent,
     onPrimary = OnAccent,
@@ -38,5 +39,5 @@ fun MyApplicationTheme(
   dynamicColor: Boolean = false,
   content: @Composable () -> Unit,
 ) {
-  MaterialTheme(colorScheme = PaperColorScheme, typography = Typography, content = content)
+  MaterialTheme(colorScheme = SageClayColorScheme, typography = Typography, content = content)
 }

@@ -1,4 +1,27 @@
+## 2026-07-14 - session: wt-001 conversational-assistant-pivot verification assist
+
+- Added `sessions/2026-07-14-wt001-conversational-assistant-assist.md` — verified colleague worktree wt-001 (branch `advisor/001-conversational-assistant-pivot`, commit `e5e5d21`): build clean, 371/372 tests; fixed + committed the unrelated Windows `spawn-shim` EPERM teardown flake as `62dd2bd` (rmSync maxRetries/retryDelay). Recorded branch open items (README pivot WIP, skill-sync churn) and the sibling-worktree `git -C` / `npm --prefix` workaround.
+- Linked from `wiki/index.md`. Direct-file writes (no Obsidian MCP write transport exposed this session).
+
+## 2026-07-13 - concept: Agent Harness Design reading list
+
+- Added `concepts/agent-harness-design.md` — curated reading list for the harness side of agentic systems (everything around the model: persistent execution, context governance, memory, skill routing, role coordination, supervision, runtime orchestration). Organized into three buckets — most relevant papers (Scaling the Harness in Agentic AI; Toward Executable, Verifiable, and Stateful Agent Systems; Interpreting Agentic Systems: Beyond Model Explanations; The Shift to Agentic AI: Evidence from Codex), benchmark and capability papers (Terminal-Bench, RE-Bench, Hierarchy of Agentic Capabilities, Forecasting Frontier Agent Capabilities), and practical harness engineering (philschmid 2026, Microsoft Agent Framework BUILD 2026, Claude context engineering cookbook). Includes a suggested reading order and a follow-up note about splitting into design/evaluation/safety buckets later. Cross-links to [[herdr-agent-hub- Module]] and the oh-my-pk fork snapshot.
+- Linked from `wiki/index.md`.
+
 # Wiki Log
+
+## 2026-07-13 - sync: agent hub portal, voice benchmarks, oh-my-pk fork snapshot
+
+- Rewrote `concepts/herdr-agent-hub-module.md`: module landed (`218ed8a`) and became an actionable Agent Hub portal via PR #19 (`819f6a2`) — live `AgentHubBinding` (chat/kill/revive), Android "Tasks" pane (`HubPortalComposables.kt`), e-ink inline chat/archive; disk fallback is now fallback-only; `revive` deliberately not surfaced in UI.
+- Added `concepts/pk-speak-voice-benchmarks.md`: TTS/STT benchmark harness (`scripts/benchmark-{tts,stt}.ts`), Google Cloud STT provider, persistent voice hard-stop aliases, Boox e-ink cockpit redesign + `RealtimeTranscript.kt` delta coalescing.
+- Added `syntheses/oh-my-pk-fork-2026-07.md`: remote-workspace Docker sandbox package vs environments-cloud (pkscloudenvs) SoT split, task-contract orchestration runtime, side-agent claim-fencing protocol, and uncommitted work (ompk-linear-agent Worker, /help recommender, multi-agent fork collaboration policy). Fork's own `.wiki/` remains SoT for fork internals.
+- Note: `scripts/llm_wiki_save.py` crashed (`args.contradicts` NoneType iteration in `conflict_section`) and mangled the title slug ("herdr-agent-hub- Module"); notes were written via the direct-file fallback with manual index/log updates. Update (same day): both bugs are now fixed in `scripts/llm_wiki_save.py` (guarded `contradicts` loop in `conflict_section`; slug sanitization drops unsafe chars and normalizes hyphen/space artifacts, so `herdr-agent-hub-* Module` resolves to the existing `herdr-agent-hub-module` stem). Fix verified end-to-end against a temp vault; left uncommitted.
+
+## [2026-07-13] save | herdr-agent-hub- Module
+- Type: concept
+- Location: wiki/concepts/herdr-agent-hub- Module.md
+- Action: created
+- Sources: pi-speak-extension PR #19 (819f6a2), herdr-agent-hub-live.ts
 
 ## 2026-07-02 - design: minimal connected-to-computer idle state
 
@@ -86,3 +109,8 @@
 - validation: validated (33)
 - kind: workflow
 - brief refs: .llm-wiki/skill-pipeline/briefs/20260506-223259--llm-as-a-verifier-cli-skill.md
+
+## 2026-07-13 - history: committed changes through 2026-07-13
+
+- Added [Recent History — 2026-06/07](syntheses/recent-history-2026-06-07.md), filling the June implementation gap and connecting the existing July concept pages to the committed source history (`81f2c88..5199341`).
+- Used direct-file fallback because no Obsidian wiki write transport was exposed; preserved the existing uncommitted wiki/script edits and did not edit raw sources.

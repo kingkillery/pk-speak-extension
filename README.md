@@ -1,8 +1,8 @@
 # pk-speak
 
-Voice, wake-word, and remote-control extensions for Pi / `pi-mono`.
+A conversational assistant for Pi / `pi-mono`, reachable over voice, phone, and browser remote.
 
-This package turns Pi into a usable voice workstation, not just a text assistant with TTS bolted on. It gives you:
+`pk-speak` runs a persistent conversational assistant that can see session and background-agent state and read the workspace on every turn, but never mutates anything — launching an agent, archiving a session, or running a command outside a small read-only allowlist — without your explicit approval. Voice (`/mono`), Telegram (`/phone`), and the browser/Android remote (`/remote`) are channels into that same assistant, not separate products. It gives you:
 
 - spoken assistant replies with multiple TTS backends
 - the always-listening `PK` wake phrase flow
@@ -19,7 +19,16 @@ If you just want the shortest path:
 2. Hands-free on the same machine: use `/mono on`
 3. Remote from your phone with the least friction: use `/phone on`
 4. Remote from your phone with QR setup: use `/pk-remote`, then scan the QR from the Android phone
-5. Remote button grid on Android: use the bundled Unified Remote remote
+## Documentation
+
+- [Getting Started](./docs/GETTING_STARTED.md) — install, five voice paths, first session, TTS ladder, phone setup, session routing, Gemini Live
+- [Architecture](./docs/ARCHITECTURE.md) — subsystem map, data flow, provider model, HTTP API surface, Android/PWA clients, environment variables
+- [Troubleshooting](./docs/TROUBLESHOOTING.md) — 12 common problem areas with causes and fixes, plus a 5-command quick diagnostic checklist
+- [Session Operations](./docs/SESSION_OPERATIONS.md) — named sessions, wake routing, compact PK1/PK2 lanes
+- [Remote Operating Guide](./docs/REMOTE_OPERATING_GUIDE.md) — phone setup, Android app, web app, Tailscale/tunnel configuration
+- [Validation Checklist](./docs/REMOTE_VALIDATION_CHECKLIST.md) — full phone-focused pass/fail run sheet
+- [Codebase Map](./docs/CODEBASE_MAP.md) — file-level tour of the TypeScript source
+
 
 ## Install
 
@@ -151,6 +160,8 @@ By default the Workspace tab is rooted at the agent working directory (so the fi
 For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel. If the phone is paired over Bluetooth networking/PAN instead, use `/remote setup bluetooth`; the Android app treats that as a Bluetooth local-link profile and does not require Tailscale.
 
 The native Android app matches the web remote's control surface: session dashboard with rename / wake-alias / archive / remove, an OPS pane with the routing target picker (`/v1/route`), `PK1`/`PK2` route slots (`/v1/sessions/slots`), discovered agents (`/v1/agents`), a live session-event feed (`/v1/events`), and a workspace file browser with a read-only viewer (`/v1/workspace/file`).
+
+The Agent Hub tab's **Tasks** pane is a portal onto the same oh-my-pk background lanes, but hierarchical and actionable instead of flat and read-only: it lists each lane's subagents (`GET /v1/herdr/agents`), lets you send a message straight into a lane (`POST /v1/herdr/agent/:id/chat`) with a live transcript stream (`GET /v1/herdr/stream/:id`), archive a lane with a two-step confirm (`POST /v1/herdr/agent/:id/kill`), and launch a brand-new task anywhere with a free-form prompt/model/provider (`POST /v1/sessions/launch`) instead of only the fixed "Launch Hub" / "Launch Colab" presets. The e-ink (Boox) build exposes the same launcher and per-lane chat/archive controls, minus the live transcript stream (EPD panels ghost badly under frequent partial redraws, so lane detail there refreshes on the same periodic poll as the rest of the Hub peek).
 
 When the active gateway is reachable over Tailscale, Android prefers advertised `100.64.0.0/10` base URLs and exposes a Warp / psmux control card in Discovery. That card calls `/v1/warp` to list open psmux sessions, tabs, and panes, `/v1/warp/tab` to open a native Warp tab via `warp://action/new_tab?path=...`, `/v1/warp/tab-config` to open a saved Warp Tab Config via `warp://tab_config/<name>`, and can create a detached psmux session or tab from the phone. Set `PI_SPEAK_WARP_REMOTE_BASE_URL` on the gateway to show the deployed Warp remote-control relay URL in the Android card.
 
@@ -414,7 +425,7 @@ There are six main subsystems:
    Multi-provider speech synthesis. Supports `legacy`, `edge`, `gemini`, `openai`, `elevenlabs`, `sag`, `higgs`, `stable-audio`, and `auto`.
 
 3. `stt.ts` and `listener/stt_worker.py`
-   Remote voice transcription for uploaded audio. `auto` prefers OpenAI when an API key is present, otherwise a warm local `faster-whisper` worker process.
+   Remote voice transcription for uploaded audio. `PI_SPEAK_REMOTE_STT_PROVIDER` accepts `auto|local|openai|elevenlabs|google`. `auto` prefers ElevenLabs/OpenAI when keys are present, otherwise a warm local `faster-whisper` worker.
 
 4. `listener/listener.py`
    The always-on two-tier listener:
@@ -426,6 +437,18 @@ There are six main subsystems:
 
 6. `control-server.ts`
    Local HTTP API, audio artifact serving, and the built-in mobile app host.
+
+## Conversational Assistant Mode
+
+`realtime-gateway.ts` runs the live-voice conversational assistant. It can call read-only tools on every turn — `list_sessions`, `get_session_info`, `list_agent_hub_agents`, `get_agent_hub_agent`, `browse_workspace`, `read_workspace_file` — to see real session, background-agent, and workspace state before answering.
+
+Anything that mutates state goes through operator approval first:
+
+- `execute_terminal_command` outside the read-only allowlist
+- `launch_agent` when it actually launches an agent (not just opening the hub)
+- `archive_session` (archive or recover)
+
+The assistant calls the tool normally; if the action needs approval, the client shows what is about to happen and waits for an explicit approve/reject before anything runs. Nothing is claimed as done until a real tool result confirms it.
 
 ## Remote Paths
 
@@ -738,6 +761,28 @@ PI_SPEAK_GEMINI_TTS_VOICE=Kore
 
 Run `gcloud auth application-default login` on the machine hosting the tray/gateway, or set `PI_SPEAK_VERTEX_API_KEY` to a Vertex AI API key. Enable the Vertex AI API on the Cloud project.
 
+### Google Cloud Speech-to-Text
+
+`google` is Google Cloud Speech-to-Text v2 using Google Cloud ADC from `gcloud auth application-default login`, not Gemini TTS. `PI_SPEAK_VERTEX_API_KEY` does not authenticate Speech STT. One-time setup on the host:
+
+```text
+gcloud auth application-default login
+gcloud services enable speech.googleapis.com --project <your-gcloud-project>
+```
+
+Project resolution order: `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, `PI_SPEAK_VERTEX_PROJECT`, then ADC discovery.
+
+```text
+GOOGLE_CLOUD_PROJECT=<your-gcloud-project>
+# optional:
+PI_SPEAK_GOOGLE_STT_LOCATION=global
+PI_SPEAK_GOOGLE_STT_MODEL=chirp_3
+PI_SPEAK_STT_LANGUAGE=en-US
+PI_SPEAK_REMOTE_STT_PROVIDER=google
+```
+
+`PI_SPEAK_STT_LANGUAGE` feeds both Google and ElevenLabs STT. Defaults differ: Google uses `en-US`; ElevenLabs uses `en`.
+
 ### Edge TTS
 
 ```text
@@ -756,7 +801,7 @@ WHISPER_MODEL=tiny
 WHISPER_DEVICE=cpu
 WHISPER_COMPUTE=int8
 PI_SPEAK_REMOTE_WHISPER_MODEL=base
-PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai
+PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai|elevenlabs|google
 ```
 
 `PI_SPEAK_PYTHON` and `PI_SPEAK_SPEAK11_PATH` are now the first-class override path for local Python audio setups. When they are unset, Pi scans the normal Windows user-site `Python*/Scripts` locations before falling back to PATH resolution.
@@ -816,6 +861,7 @@ Check these in order:
 2. `/remote token`
 3. `PI_SPEAK_REMOTE_STT_PROVIDER`
 4. OpenAI key or local whisper setup
+5. For `google` STT: Google Cloud ADC (`gcloud auth application-default login`), Speech-to-Text API enabled, and a resolvable project (`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `PI_SPEAK_VERTEX_PROJECT`, then ADC discovery). `PI_SPEAK_VERTEX_API_KEY` does not authenticate Speech STT.
 
 ### Speech is using the wrong provider
 
@@ -841,6 +887,7 @@ Then link again with the fresh code.
 ## Testing
 
 Synthetic `/v1/live` text smoke: `node ./dist/scripts/synthetic-live-smoke.js --dry-run` (or omit `--dry-run` against a running gateway).
+TTS/STT provider latency (after `npm run build`): `node dist/scripts/benchmark-tts.js --dry-run --text "hello"` and `node dist/scripts/benchmark-stt.js --dry-run --audio-file <wav> --providers google`. Dry-run prints the plan only (no JSON, no provider calls). Default STT providers stay `local openai elevenlabs`.
 
 Run the automated production-readiness checks with:
 

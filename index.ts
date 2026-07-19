@@ -4,10 +4,11 @@ import { spawnDetached } from "./spawn-shim.js";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir, networkInterfaces, platform, tmpdir } from "node:os";
+import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import QRCode from "qrcode";
 import { ControlServer, type ControlActionResult, type ControlServerState, type GatewayAgentProvider, type RemoteSlashCommand, type SessionLaunchPayload, type SessionRenamePayload, type SessionAliasPayload, type SessionRemovePayload } from "./control-server.js";
+import { publishOwnerHubSession, resumeOwnerHubSession } from "./hub-handoff.js";
 import { sendHerdrPane } from "./herdr-client.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type ConversationExecutionPlan, type ConversationReducerSummary, type RemoteTurnResult, type TurnProgressEvent, type TurnTimingSummary } from "./remote-turn-manager.js";
@@ -29,10 +30,12 @@ import {
 	setNamedSession,
 	setWakeAlias,
 } from "./session-routing.js";
-import { mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
+import { buildOhMyPiAgentHubDashboardCached, mergeOhMyPiAgentHubSessions } from "./agent-hub-dashboard.js";
 import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, normalizeOptionalString, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
+import { createLiveAgentHubBinding } from "./herdr-agent-hub-live.js";
 import { getSessionRoutingStorePath, loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { appendSessionEvent, tailSessionEvents, type SessionEventSource } from "./session-events.js";
+import { clearRootVoiceDisable, enableRootVoiceDisable, isRootVoiceDisabled } from "./pairing.js";
 import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached, resolveWindowsNpmShim } from "./agent-discovery.js";
@@ -157,13 +160,9 @@ const DEFAULT_ADB_REMOTE_HOST = process.env.PI_SPEAK_ADB_HTTP_HOST || "127.0.0.1
 const DEFAULT_ADB_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_ADB_HTTP_PORT || "8787", 10);
 const PUBLIC_REMOTE_BASE_URL = process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim() || "";
 const DEFAULT_REMOTE_AUTH_TOKEN = process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
-const TAILSCALE_APPSERVER_IP = "100.76.136.91";
-const TAILSCALE_MAC_IP = "100.76.176.119";
-const DEFAULT_BLUETOOTH_IP = "192.168.44.1";
-const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 const DEFAULT_AGENT_CWD = process.env.AGENT_CWD?.trim()
 	|| process.env.AGENT_WORKSPACE?.trim()
-	|| (platform() === "win32" ? DEFAULT_WINDOWS_WORKSPACE : "");
+	|| process.cwd();
 const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "speak",
@@ -224,8 +223,8 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "pk-speak",
 		description: "Hard-stop or control pk-speak voice replies and the wake listener",
-		usage: "/pk-speak [stop|off|on|status]",
-		examples: ["/pk-speak stop", "/pk-speak status", "/pk-speak off"],
+		usage: "/pk-speak [stop|off|quiet|silence|shush|on|status]",
+		examples: ["/pk-speak stop", "/pk-speak status", "/pk-speak off", "/pk-speak quiet"],
 		source: "extension",
 	},
 	{
@@ -480,27 +479,24 @@ function getDefaultTailscaleBaseUrl(port: number) {
 	if (configured) return normalizeBaseUrl(configured);
 	const detected = getReachableIpv4Addresses().tailscale[0];
 	if (detected) return `http://${detected}:${port}/`;
-	const address = platform() === "darwin" ? TAILSCALE_MAC_IP : TAILSCALE_APPSERVER_IP;
-	return `http://${address}:${port}/`;
+	return `http://127.0.0.1:${port}/`;
 }
 
 function getDefaultBluetoothBaseUrl(port: number) {
 	const configured = process.env.PI_SPEAK_BLUETOOTH_BASE_URL?.trim();
 	if (configured) return normalizeBaseUrl(configured);
-	return `http://${DEFAULT_BLUETOOTH_IP}:${port}/`;
+	const detected = getReachableIpv4Addresses().lan[0];
+	return `http://${detected || "127.0.0.1"}:${port}/`;
 }
 
 function getSetupProfileForBaseUrl(baseUrl: string, mode: "tailscale" | "bluetooth" = "tailscale") {
 	if (mode === "bluetooth") {
 		return { machineId: "bluetooth-local", profileName: "Bluetooth / local link", connectionMode: "bluetooth" };
 	}
-	if (baseUrl.includes(TAILSCALE_MAC_IP)) {
-		return { machineId: "tailscale-mac", profileName: "Mac", connectionMode: "tailscale" };
-	}
 	if (baseUrl.includes("192.168.") || baseUrl.includes("10.") || /172\.(1[6-9]|2\d|3[01])\./.test(baseUrl)) {
 		return { machineId: "local-lan", profileName: "Local network", connectionMode: "manual" };
 	}
-	return { machineId: "tailscale-appserver", profileName: "MSI / appserver", connectionMode: "tailscale" };
+	return { machineId: "tailscale", profileName: "Tailscale", connectionMode: "tailscale" };
 }
 
 function buildRemoteSetupUrls(
@@ -758,6 +754,38 @@ function isListenerEvent(value: unknown): value is ListenerEvent {
 		default:
 			return false;
 	}
+}
+
+
+function getOmpAgentConfigPath(): string | undefined {
+	const home = process.env.USERPROFILE || process.env.HOME;
+	if (!home) return undefined;
+	return join(home, ".omp", "agent", "config.yml");
+}
+
+function disableOmpSpeechConfig(): void {
+	const configPath = getOmpAgentConfigPath();
+	if (configPath && existsSync(configPath)) {
+		try {
+			const raw = readFileSync(configPath, "utf8");
+			const next = raw.replace(/(^speech:\s*\n\s*enabled:\s*)true\b/m, "$1false");
+			if (next !== raw) writeFileSync(configPath, next, "utf8");
+		} catch {}
+	}
+	// Keep omp + pi-speak sentinels in lockstep with hard-stop.
+	enableRootVoiceDisable();
+}
+
+function enableOmpSpeechConfig(): void {
+	const configPath = getOmpAgentConfigPath();
+	if (configPath && existsSync(configPath)) {
+		try {
+			const raw = readFileSync(configPath, "utf8");
+			const next = raw.replace(/(^speech:\s*\n\s*enabled:\s*)false\b/m, "$1true");
+			if (next !== raw) writeFileSync(configPath, next, "utf8");
+		} catch {}
+	}
+	clearRootVoiceDisable();
 }
 
 export default function speakExtension(pi: ExtensionAPI) {
@@ -1203,6 +1231,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const speakText = async (text: string, ctx?: any) => {
 		const trimmed = text.trim();
 		if (!speakState.enabled || !trimmed) return;
+		if (isRootVoiceDisabled()) return;
 
 		stopSpeaking(ctx);
 
@@ -1226,6 +1255,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 			});
 			speakingProcess = undefined;
 			if (abortController.signal.aborted) return;
+			if (!speakState.enabled || isRootVoiceDisabled()) {
+				cleanupAudioFiles();
+				setPhase("ready", ctx);
+				return;
+			}
 			if (!existsSync(outputPath)) {
 				throw new Error("Speech synthesis did not create an audio file");
 			}
@@ -2310,6 +2344,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		ctx?: any,
 	) => {
 		if (action === "on") {
+			clearRootVoiceDisable();
+			enableOmpSpeechConfig();
 			speakState.enabled = true;
 			persistState();
 			setPhase("ready", ctx);
@@ -2680,6 +2716,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 					return mergeOhMyPiAgentHubSessions(dashboard);
 				},
 				getCompactRouteSlots: () => buildCompactRouteSlots({ sessions: sessionRegistry, aliases: sessionWakeAliases }),
+				agentHub: createLiveAgentHubBinding({
+					dashboardFn: () => buildOhMyPiAgentHubDashboardCached(),
+					submitChatTurn: (text, target, cwd) =>
+						enqueuePhoneTurn("http-text", text, undefined, false, undefined, undefined, undefined, target, cwd),
+				}),
 				onSessionResume: (payload) => {
 					const rawProvider = payload.provider?.trim();
 					const provider = normalizeGatewayProviderOverride(rawProvider);
@@ -2701,6 +2742,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 					}
 				},
 				onSessionLaunch: (payload) => launchSessionTarget(payload, "admin"),
+				onHubPublish: (payload) => publishOwnerHubSession(lastCtx, payload),
+				onHubResume: (payload) => resumeOwnerHubSession(lastCtx, payload),
+				isHubHandoffReady: () => typeof lastCtx?.executeBuiltinCommand === "function",
 				onSessionArchive: (payload) => {
 					const sessionPath = payload.sessionPath;
 					if (!sessionPath) return { ok: false, message: "Session path is required." };
@@ -2925,7 +2969,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					updateMonoStatus(target);
 					const cue = playMonoCue("listening");
 					cue.on("error", () => {});
-					if (!speakState.enabled) {
+					if (!speakState.enabled && !isRootVoiceDisabled()) {
 						speakState.enabled = true;
 						persistState();
 						setPhase("ready", target);
@@ -3788,6 +3832,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const lower = raw.toLowerCase();
 
 			if (!raw || lower === "on" || lower === "enable" || lower === "start") {
+				clearRootVoiceDisable();
+				enableOmpSpeechConfig();
 				speakState.enabled = true;
 				persistState();
 				setPhase("ready", ctx);
@@ -3877,6 +3923,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const hardStopPkSpeak = (ctx: any) => {
 		speakState.enabled = false;
 		persistState();
+		disableOmpSpeechConfig();
 		stopSpeaking(ctx);
 		stopListener(ctx);
 		persistMonoState();
@@ -3887,7 +3934,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.registerCommand("pk-speak", {
 		description: "Hard-stop pk-speak voice replies and the wake listener",
 		getArgumentCompletions: (prefix) => {
-			const options = ["stop", "off", "on", "status", "quiet", "silence"];
+			const options = ["stop", "off", "on", "status", "quiet", "silence", "shush"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -3902,6 +3949,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (lower === "on" || lower === "enable" || lower === "start") {
+				clearRootVoiceDisable();
+				enableOmpSpeechConfig();
 				speakState.enabled = true;
 				persistState();
 				setPhase("ready", ctx);

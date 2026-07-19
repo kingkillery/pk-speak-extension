@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pk-skills1.local/schemas/g-kade/verification-result.schema.json",
+  "title": "g-kade Verification Result",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "contract_id": {"type": "string", "minLength": 1},
+    "artifact_exists": {"type": "boolean"},
+    "expected_behavior_demonstrated": {"type": "boolean"},
+    "tests_run": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "command": {"type": "string", "minLength": 1},
+          "exit_code": {"type": "integer"},
+          "result": {"type": "string", "minLength": 1}
+        },
+        "required": ["command", "exit_code", "result"]
+      },
+      "default": []
+    },
+    "static_checks": {"type": "array", "items": {"type": "string"}, "default": []},
+    "manual_inspection": {"type": "array", "items": {"type": "string"}, "default": []},
+    "unverified_items": {"type": "array", "items": {"type": "string"}, "default": []},
+    "regressions_checked": {"type": "array", "items": {"type": "string"}, "default": []},
+    "cleanup_completed": {"type": "boolean"},
+    "evidence_paths": {"type": "array", "items": {"type": "string"}, "default": []},
+    "verified_at": {"type": "string", "format": "date-time"},
+    "verified_by": {"type": "string", "minLength": 1}
+  },
+  "required": [
+    "contract_id",
+    "artifact_exists",
+    "expected_behavior_demonstrated",
+    "tests_run",
+    "static_checks",
+    "manual_inspection",
+    "unverified_items",
+    "regressions_checked",
+    "cleanup_completed",
+    "evidence_paths",
+    "verified_at",
+    "verified_by"
+  ]
+}

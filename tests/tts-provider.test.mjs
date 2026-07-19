@@ -311,3 +311,82 @@ test("sag writes spoken text to stdin without including it in argv", async () =>
 		await rm(tempDir, { recursive: true, force: true });
 	}
 });
+
+
+test("synthesizeToFile falls back to edge by default when primary provider fails", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-tts-fallback-default-"));
+	const outputPath = join(tempDir, "out.mp3");
+	let elevenLabsCalled = false;
+	let edgeCalled = false;
+	try {
+		tts.testOverrides.synthesizeElevenLabs = async () => {
+			elevenLabsCalled = true;
+			throw new Error("ElevenLabs Rate Limit (429)");
+		};
+		tts.testOverrides.synthesizeEdge = async (_text, path) => {
+			edgeCalled = true;
+			await writeFile(path, "edge-audio");
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "elevenlabs",
+			ELEVENLABS_API_KEY: "test-key",
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			const result = await tts.synthesizeToFile({
+				text: "fallback default path",
+				outputPath,
+				state: { provider: "elevenlabs", rewriteEnabled: false },
+			});
+			assert.equal(elevenLabsCalled, true);
+			assert.equal(edgeCalled, true);
+			assert.equal(result.provider, "edge");
+			assert.equal(await readFile(outputPath, "utf8"), "edge-audio");
+		});
+	} finally {
+		tts.testOverrides.synthesizeElevenLabs = null;
+		tts.testOverrides.synthesizeEdge = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("synthesizeToFile allowProviderFallback:false surfaces primary failure without Edge", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-tts-fallback-strict-"));
+	const outputPath = join(tempDir, "out.mp3");
+	let elevenLabsCalled = false;
+	let edgeCalled = false;
+	try {
+		tts.testOverrides.synthesizeElevenLabs = async () => {
+			elevenLabsCalled = true;
+			throw new Error("ElevenLabs Rate Limit (429)");
+		};
+		tts.testOverrides.synthesizeEdge = async () => {
+			edgeCalled = true;
+		};
+		await withEnv({
+			PI_SPEAK_TTS_PROVIDER: "elevenlabs",
+			ELEVENLABS_API_KEY: "test-key",
+			PI_SPEAK_REWRITE_ENABLED: "off",
+			PI_SPEAK_SANITIZE: "off",
+		}, async () => {
+			await assert.rejects(
+				() => tts.synthesizeToFile({
+					text: "strict provider path",
+					outputPath,
+					state: { provider: "elevenlabs", rewriteEnabled: false },
+					allowProviderFallback: false,
+				}),
+				(error) => {
+					assert.match(String(error?.message || error), /ElevenLabs Rate Limit \(429\)/);
+					return true;
+				},
+			);
+			assert.equal(elevenLabsCalled, true);
+			assert.equal(edgeCalled, false);
+		});
+	} finally {
+		tts.testOverrides.synthesizeElevenLabs = null;
+		tts.testOverrides.synthesizeEdge = null;
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});

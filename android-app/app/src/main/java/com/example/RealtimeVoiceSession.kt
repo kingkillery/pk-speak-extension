@@ -18,6 +18,7 @@ interface RealtimeVoiceSessionListener {
     fun onConnected(sessionId: String)
     fun onAudioChunk(seqId: Int, pcm: ByteArray)
     fun onTranscript(text: String)
+    fun onTranscriptComplete()
     fun onInterrupt()
     fun onToolStart(name: String)
     fun onToolComplete(name: String, output: String)
@@ -166,6 +167,9 @@ class RealtimeVoiceSession(
                 "transcript" -> {
                     listener.onTranscript(json.optString("text", ""))
                 }
+                "transcript_complete" -> {
+                    listener.onTranscriptComplete()
+                }
                 "interrupt" -> {
                     listener.onInterrupt()
                 }
@@ -253,12 +257,12 @@ class RealtimeVoiceSession(
         ws.send(msg.toString())
     }
 
-    fun rejectTerminal(approvalId: String) {
-        val ws = webSocket ?: return
+    fun rejectTerminal(approvalId: String): Boolean {
+        val ws = webSocket ?: return false
         val msg = JSONObject()
             .put("type", "terminal_reject")
             .put("approvalId", approvalId)
-        ws.send(msg.toString())
+        return ws.send(msg.toString())
     }
 
     fun disconnect() {

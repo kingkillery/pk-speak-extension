@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -13,12 +13,56 @@ import { dirname, join } from "node:path";
  * silently unpairs every phone.
  */
 
-export function getInstallAuthTokenPath(): string {
-	const base = process.env.PI_SPEAK_CONFIG_DIR
+export function getPiSpeakConfigDir(): string {
+	return process.env.PI_SPEAK_CONFIG_DIR
 		|| (process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "pi-speak"))
 		|| (process.env.APPDATA && join(process.env.APPDATA, "pi-speak"))
 		|| join(process.cwd(), ".pi-speak");
-	return join(base, "http-token");
+}
+
+export function getInstallAuthTokenPath(): string {
+	return join(getPiSpeakConfigDir(), "http-token");
+}
+
+/** Root kill-switch path shared across agents (`voice-disabled` under the config dir). */
+export function getRootVoiceDisablePath(): string {
+	return join(getPiSpeakConfigDir(), "voice-disabled");
+}
+
+/** omp built-in vocalizer hard-stop sentinel (`~/.omp/agent/speech-disabled`). */
+export function getOmpSpeechDisablePath(): string | undefined {
+	const home = process.env.USERPROFILE || process.env.HOME;
+	if (!home) return undefined;
+	return join(home, ".omp", "agent", "speech-disabled");
+}
+
+/** True when either hard-stop sentinel exists (pi-speak or omp). */
+export function isRootVoiceDisabled(): boolean {
+	if (existsSync(getRootVoiceDisablePath())) return true;
+	const omp = getOmpSpeechDisablePath();
+	return !!omp && existsSync(omp);
+}
+
+export function enableRootVoiceDisable(): void {
+	const path = getRootVoiceDisablePath();
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, "hard-stop\n", { encoding: "utf8" });
+	const omp = getOmpSpeechDisablePath();
+	if (omp) {
+		mkdirSync(dirname(omp), { recursive: true });
+		writeFileSync(omp, "hard-stop\n", { encoding: "utf8" });
+	}
+}
+
+export function clearRootVoiceDisable(): void {
+	for (const candidate of [getRootVoiceDisablePath(), getOmpSpeechDisablePath()]) {
+		if (!candidate) continue;
+		try {
+			unlinkSync(candidate);
+		} catch {
+			// absent is fine
+		}
+	}
 }
 
 export function getOrCreateInstallAuthToken(): string {

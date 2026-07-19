@@ -1,6 +1,6 @@
 # Session Operations
 
-This is the focused operator guide for `/sess` in `pi-speak-pk`.
+This is the focused operator guide for `/sess` in `pi-speak-pk`. `/sess` is how you manage the sessions the conversational assistant can see and route into — it does not itself mutate a session's contents; launching, archiving, or otherwise changing agent state through the assistant always goes through its own approval flow (see `README.md#conversational-assistant-mode`).
 
 ## Main commands
 
@@ -108,6 +108,8 @@ The native Android app and the browser remote both expose the same session-manag
 - watch the live voice/admin session-event log (`GET /v1/events`), the same feed the `/sess ui` pane tails
 
 The Android app groups these under the Agent Hub tab's OPS pane; per-session rename/alias/archive live on each expanded session lane.
+
+The Agent Hub tab's **Tasks** pane goes further for oh-my-pk background lanes specifically: it exposes the lane → subagent hierarchy, a live transcript stream, and a direct chat composer over `/v1/herdr/agent*` (`GET /v1/herdr/agents`, `POST /v1/herdr/agent/:id/chat`, `POST /v1/herdr/agent/:id/kill`, `GET /v1/herdr/stream/:id`), plus a general task launcher (`POST /v1/sessions/launch` with a free-form prompt/model/provider) instead of only the fixed hub/Colab presets. `kill` archives the lane (same effect as `/v1/sessions/archive`) rather than sending an OS signal — there is no live IPC into the external oh-my-pk binary, so chat is implemented as submitting a normal turn targeted at the lane's name, exactly like typing `PK <session-name>`.
 
 ## Management Pane
 

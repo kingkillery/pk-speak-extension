@@ -111,12 +111,12 @@ fun SettingsTabContent(
 
     val agents = listOf("Local Codex (Pi)", "Gateway OMPK (oh-my-pk)", "Gateway Claude (Claude Code)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
     val workspacePresets = listOf(
-        "C:/Dev" to AppPreferences.DEFAULT_WORKSPACE_PATH,
-        "SPWR Daily" to AppPreferences.SPWR_DAILY_WORKSPACE_PATH
+        "C:/Dev" to AppPreferences.DEFAULT_WORKSPACE_PATH
     )
     val modelPresets = listOf(
         "Gemini 3.1 Live" to "gemini-3.1-flash-live-preview",
         "Gemini 3.5 Flash" to "gemini-3.5-flash",
+        "9Router Gemini 3.5 Flash High" to "9router/ag/gemini-3-5-flash-high",
         "Server default" to "",
         "Legacy 2.5 Live" to "gemini-live-2.5-flash-native-audio"
     )
