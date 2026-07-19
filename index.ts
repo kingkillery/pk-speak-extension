@@ -2356,13 +2356,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 		ctx?: any,
 	) => {
 		if (action === "on") {
-<<<<<<< HEAD
-			setSpeakMode("on");
-=======
 			clearRootVoiceDisable();
 			enableOmpSpeechConfig();
-			speakState.enabled = true;
->>>>>>> origin/main
+			setSpeakMode("on");
 			persistState();
 			setPhase("ready", ctx);
 			return {
@@ -2995,13 +2991,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 					updateMonoStatus(target);
 					const cue = playMonoCue("listening");
 					cue.on("error", () => {});
-<<<<<<< HEAD
-					if (!speakState.enabled) {
+				if (!speakState.enabled && !isRootVoiceDisabled()) {
 						setSpeakMode("on");
-=======
-					if (!speakState.enabled && !isRootVoiceDisabled()) {
-						speakState.enabled = true;
->>>>>>> origin/main
 						persistState();
 						setPhase("ready", target);
 					}
@@ -3864,13 +3855,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const lower = raw.toLowerCase();
 
 			if (!raw || lower === "on" || lower === "enable" || lower === "start") {
-<<<<<<< HEAD
-				setSpeakMode("on");
-=======
 				clearRootVoiceDisable();
 				enableOmpSpeechConfig();
-				speakState.enabled = true;
->>>>>>> origin/main
+				setSpeakMode("on");
 				persistState();
 				setPhase("ready", ctx);
 				ctx.ui.notify(`Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");

@@ -1,12 +1,8 @@
 # AGENTS.md - pi-speak-pk Extension
 
-<<<<<<< HEAD
-Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent that uses voice, wake-word, and remote-control as input channels. The assistant can read all subagent state and the workspace, interview the user to scope work, and propose commands that only execute after explicit approval. Voice (`/mono`, `PK` wake phrase), Telegram (`/phone`), and the mobile/web remote (`/remote`, `/pk-remote`) are all ways to reach the same assistant.
-=======
 Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent, reachable over voice, wake-word, phone, and browser/Android remote.
 
 The assistant (`realtime-gateway.ts`) has broad read-only access to sessions, background agents, and the workspace on every turn (workspace reads stay confined to `PI_SPEAK_WORKSPACE_ROOT`, are capped in size, and refuse secret-shaped paths), but never mutates anything without explicit operator approval. See "Conversational Assistant Mode" in `README.md` and the approval-flow notes below.
->>>>>>> origin/main
 
 ## Build
 

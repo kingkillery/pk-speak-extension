@@ -117,12 +117,8 @@ interface ActiveSession {
 	serverSequenceId: number; // last assigned server sequence ID
 	disconnectTimeout?: NodeJS.Timeout;
 	pendingServerMessages: { seqId: number; isBinary: boolean; data: any }[];
-<<<<<<< HEAD
-=======
 	terminalApprovals: RealtimeTerminalApprovalRegistry;
-	pendingTerminalCalls: Map<string, PendingTerminalCall>;
->>>>>>> origin/main
-	commandApprovals: RealtimeCommandApprovalRegistry;
+	pendingTerminalCalls: Map<string, PendingTerminalCall>;	commandApprovals: RealtimeCommandApprovalRegistry;
 	pendingCommandCalls: Map<string, PendingCommandCall>;
 	provider: string;
 	model: string;
@@ -157,21 +153,12 @@ export const activeSessions = new Map<string, ActiveSession>();
 // acknowledge briefly and keep conversing instead of going silent, narrate progress
 // only when it receives an update, and never narrate SILENT-scheduled updates.
 export const REALTIME_SYSTEM_PROMPT = [
-<<<<<<< HEAD
-	"You are a conversational assistant that can see all subagent state and the workspace.",
-	"Before taking any action that mutates a subagent, terminal, or file, interview the user to scope ambiguous requests and then ask for explicit approval.",
-	"Use the propose_command tool when you want to run a mutating command; it returns a confirmation token and does not execute until the user approves.",
-	"Keep replies short and conversational.",
-	"When you fire a background tool (launch_agent, execute_terminal_command, etc.), acknowledge in one short sentence, then continue the conversation normally.",
-=======
 	"You are a conversational assistant with full read access to this workspace: sessions, background agents, and the filesystem.",
 	"Use your read-only tools (list_sessions, get_session_info, list_agent_hub_agents, get_agent_hub_agent, browse_workspace, read_workspace_file) freely and proactively to understand the real state before answering — never guess.",
 	"When a request is ambiguous or could mean more than one thing, ask a short clarifying question before acting instead of assuming.",
 	"Mutating actions — launching a background agent, archiving or recovering a session, or running a terminal command outside the read-only allowlist — always require the operator's explicit approval. Call the tool normally; if the result says it requires confirmation, tell the user what you are about to do and wait for them to approve or reject it before treating it as done.",
 	"Never claim an action completed until you receive a real tool result confirming it.",
-	"When you fire a background tool (launch_agent, execute_terminal_command), acknowledge in one short sentence, then continue the conversation normally.",
->>>>>>> origin/main
-	"Do not narrate a tool's progress unless you receive an explicit progress update.",
+	"When you fire a background tool (launch_agent, execute_terminal_command), acknowledge in one short sentence, then continue the conversation normally.",	"Do not narrate a tool's progress unless you receive an explicit progress update.",
 	"When a tool result arrives, announce it conversationally at the next natural pause.",
 	"Do not narrate background state refreshes delivered silently.",
 	"Keep replies short and conversational.",
@@ -533,18 +520,6 @@ async function resolveCommandApproval(
 	sendRealtimeToolResponse(activeSession, pending.call, outputText, { approvalId: approval.id, scheduling: FunctionResponseScheduling.INTERRUPT });
 }
 
-<<<<<<< HEAD
-function stageCommandProposal(
-	activeSession: ActiveSession,
-	call: { id: string; name: string; args?: unknown },
-	category: import("./realtime-command-approval.js").RealtimeCommandProposalCategory,
-	command: string,
-	description: string,
-	args?: Record<string, unknown>,
-	plan?: RealtimeTerminalCommandPlan,
-) {
-	const approval = activeSession.commandApprovals.request(category, command, description, args);
-=======
 // A launch_agent call is navigational (just opens the hub/dashboard, mutates
 // nothing) when hubOnly is set, or when there is neither a prompt nor a
 // targetNode to actually launch/deploy. A targetNode is always a deployment
@@ -567,9 +542,7 @@ function requestCommandApproval(
 	kind: RealtimeCommandKind,
 	description: string,
 ) {
-	const approval = activeSession.commandApprovals.request(kind, description);
->>>>>>> origin/main
-	const timeoutMs = Math.max(0, approval.expiresAt - Date.now());
+	const approval = activeSession.commandApprovals.request(kind, description);	const timeoutMs = Math.max(0, approval.expiresAt - Date.now());
 	const timer = setTimeout(() => {
 		resolveCommandApproval(activeSession, approval.id, false, "expired").catch((err) => {
 			sendToClient(activeSession, { type: "error", message: `Command approval expiry failed: ${err instanceof Error ? err.message : String(err)}` }, false);
@@ -577,370 +550,6 @@ function requestCommandApproval(
 	}, timeoutMs);
 	timer.unref?.();
 	activeSession.pendingCommandCalls.set(approval.id, {
-<<<<<<< HEAD
-		call: { ...call, args: call.args },
-		plan,
-		commandArgs: args,
-		timer,
-	});
-	sendToClient(activeSession, {
-		type: "tool_approval_required",
-		approvalId: approval.id,
-		name: call.name,
-		command,
-		description,
-		message: "Confirm to run this command.",
-	}, false);
-	return JSON.stringify({
-		ok: false,
-		requiresConfirmation: true,
-		approvalId: approval.id,
-		command,
-		description,
-		expiresInMs: timeoutMs,
-		message: "This command requires user approval.",
-	});
-}
-
-async function prepareAgentHubProposal(
-	activeSession: ActiveSession,
-	action: "chat" | "kill",
-	agentId: string,
-	text?: string,
-): Promise<{ ok: false; error: string } | { ok: true; token: string }> {
-	if (!activeSession.server || typeof activeSession.server.agentHubPropose !== "function") {
-		return { ok: false, error: "Agent hub proposal is not available." };
-	}
-	const result = await activeSession.server.agentHubPropose(action, agentId, text);
-	if (result.ok && result.confirmToken) {
-		return { ok: true, token: result.confirmToken };
-	}
-	return { ok: false, error: "result" in result && typeof result.error === "string" ? result.error : "Agent hub proposal was rejected." };
-}
-
-async function dispatchRealtimeToolCall(
-	activeSession: ActiveSession,
-	call: { id: string; name: string; args?: Record<string, unknown> },
-): Promise<{ outputText: string; deferToolResponse: boolean }> {
-	let outputText = "";
-	let deferToolResponse = false;
-	const server = activeSession.server;
-	try {
-		if (call.name === "execute_terminal_command") {
-			const command = call.args?.command as string;
-			if (!command) {
-				outputText = JSON.stringify({ ok: false, error: "Missing 'command' argument" });
-				appendTerminalAudit(activeSession, {
-					kind: "terminal.request",
-					toolCallId: call.id,
-					command: "",
-					action: "requires_confirmation",
-					reason: "missing-command",
-					cwd: getCurrentCwd(),
-				});
-				appendTerminalAudit(activeSession, {
-					kind: "terminal.execution_result",
-					toolCallId: call.id,
-					command: "",
-					action: "requires_confirmation",
-					reason: "missing-command",
-					cwd: getCurrentCwd(),
-					result: buildRealtimeTerminalAuditResult({
-						ok: false,
-						code: null,
-						skipped: "missing-command",
-						stderr: "Missing 'command' argument",
-					}),
-				});
-			} else {
-				const plan = buildRealtimeTerminalCommandPlan(command);
-				appendTerminalAudit(activeSession, {
-					kind: "terminal.request",
-					toolCallId: call.id,
-					...buildRealtimeTerminalPlanAuditFields(plan),
-					cwd: getCurrentCwd(),
-				});
-				if (plan.action !== "allow") {
-					outputText = stageCommandProposal(activeSession, call, "terminal", command, plan.reason, { command }, plan);
-					deferToolResponse = true;
-				} else if (activeSession.nonBlockingEnabled) {
-					deferToolResponse = true;
-					executeRealtimeTerminalCommand(activeSession, plan, call.id)
-						.then((result) => {
-							sendRealtimeToolResponse(activeSession, call, result, {
-								scheduling: FunctionResponseScheduling.WHEN_IDLE,
-							});
-						})
-						.catch((err) => {
-							sendRealtimeToolResponse(activeSession, call, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
-								scheduling: FunctionResponseScheduling.INTERRUPT,
-							});
-						});
-				} else {
-					outputText = await executeRealtimeTerminalCommand(activeSession, plan, call.id);
-				}
-			}
-		} else if (call.name === "propose_command") {
-			const commandType = call.args?.commandType as string;
-			const command = call.args?.command as string;
-			const description = call.args?.description as string;
-			const args = (call.args?.args as Record<string, unknown>) ?? {};
-			if (!commandType || !command || !description) {
-				outputText = JSON.stringify({ ok: false, error: "Missing commandType, command, or description." });
-			} else {
-				let plan: RealtimeTerminalCommandPlan | undefined;
-				if (commandType === "execute_terminal_command" && typeof args.command === "string") {
-					plan = buildRealtimeTerminalCommandPlan(args.command);
-				}
-				if (commandType === "chat" && typeof args.agentId === "string" && typeof args.text === "string") {
-					const proposal = await prepareAgentHubProposal(activeSession, "chat", args.agentId, args.text);
-					if (!proposal.ok) {
-						outputText = JSON.stringify({ ok: false, error: proposal.error });
-					} else {
-						outputText = stageCommandProposal(activeSession, call, "chat", command, description, { ...args, proposalToken: proposal.token });
-						deferToolResponse = true;
-					}
-				} else if (commandType === "kill" && typeof args.agentId === "string") {
-					const proposal = await prepareAgentHubProposal(activeSession, "kill", args.agentId);
-					if (!proposal.ok) {
-						outputText = JSON.stringify({ ok: false, error: proposal.error });
-					} else {
-						outputText = stageCommandProposal(activeSession, call, "kill", command, description, { ...args, proposalToken: proposal.token });
-						deferToolResponse = true;
-					}
-				} else {
-					outputText = stageCommandProposal(activeSession, call, commandType as any, command, description, args, plan);
-					deferToolResponse = true;
-				}
-			}
-		} else if (call.name === "list_agents") {
-			if (server && typeof server.agentHubSnapshot === "function") {
-				const snapshot = await server.agentHubSnapshot();
-				outputText = JSON.stringify({
-					ok: true,
-					generatedAtMs: Date.now(),
-					folders: snapshot.folders.map((f: any) => ({ key: f.key, name: f.name, laneCount: f.laneCount })),
-					agents: snapshot.agents.map((a: any) => ({
-						id: a.id,
-						name: a.displayName,
-						kind: a.kind,
-						status: a.status,
-						model: a.model,
-						cwd: a.cwd,
-						lastActivityMs: a.lastActivityMs,
-						needsAttention: a.needsAttention,
-					})),
-				});
-			} else {
-				outputText = JSON.stringify({ ok: false, error: "Agent hub snapshot is not available." });
-			}
-		} else if (call.name === "get_agent") {
-			const agentId = call.args?.agentId as string;
-			const lines = Math.min(Math.max(0, Number(call.args?.lines) || 80), 500);
-			if (!agentId) {
-				outputText = JSON.stringify({ ok: false, error: "Missing 'agentId' argument" });
-			} else if (server && typeof server.agentHubDetail === "function") {
-				const agent = await server.agentHubDetail(agentId, lines);
-				outputText = JSON.stringify({ ok: !!agent, agent });
-			} else {
-				outputText = JSON.stringify({ ok: false, error: "Agent hub detail is not available." });
-			}
-		} else if (call.name === "read_transcript") {
-			const agentId = call.args?.agentId as string;
-			const lines = Math.min(Math.max(0, Number(call.args?.lines) || 80), 500);
-			if (!agentId) {
-				outputText = JSON.stringify({ ok: false, error: "Missing 'agentId' argument" });
-			} else if (server && typeof server.agentHubDetail === "function") {
-				const agent = await server.agentHubDetail(agentId, lines);
-				outputText = JSON.stringify({ ok: !!agent, agentId, transcriptTail: agent?.transcriptTail ?? [], transcriptSize: agent?.transcriptSize ?? 0 });
-			} else {
-				outputText = JSON.stringify({ ok: false, error: "Agent hub detail is not available." });
-			}
-		} else if (call.name === "list_workspace") {
-			const path = call.args?.path as string | undefined;
-			if (server && typeof server.getWorkspaceDirectory === "function") {
-				outputText = JSON.stringify({ ok: true, workspace: server.getWorkspaceDirectory(path) });
-			} else {
-				outputText = JSON.stringify({ ok: false, error: "Workspace listing is not available." });
-			}
-		} else if (call.name === "read_workspace_file") {
-			const path = call.args?.path as string;
-			if (!path) {
-				outputText = JSON.stringify({ ok: false, error: "Missing 'path' argument" });
-			} else if (server && typeof server.getWorkspaceFile === "function") {
-				outputText = JSON.stringify(server.getWorkspaceFile(path));
-			} else {
-				outputText = JSON.stringify({ ok: false, error: "Workspace file read is not available." });
-			}
-		} else if (call.name === "switch_session") {
-			const name = call.args?.name as string;
-			if (!name) {
-				outputText = JSON.stringify({ ok: false, error: "Missing 'name' argument" });
-			} else {
-				const persisted = loadPersistedSessionRouting();
-				let matchedPath: string | undefined;
-				let matchedName: string | undefined;
-				for (const [sName, sPath] of Object.entries(persisted.sessions)) {
-					if (sName.toLowerCase() === name.toLowerCase()) {
-						matchedPath = sPath;
-						matchedName = sName;
-						break;
-					}
-				}
-				if (!matchedPath) {
-					for (const [alias, sPath] of Object.entries(persisted.aliases)) {
-						if (alias.toLowerCase() === name.toLowerCase()) {
-							matchedPath = sPath;
-							matchedName = findSessionNameByPath(sPath, persisted.sessions) || alias;
-							break;
-						}
-					}
-				}
-				if (!matchedPath) {
-					for (const sPath of Object.values(persisted.sessions)) {
-						if (sPath.toLowerCase() === name.toLowerCase() || sPath.toLowerCase().includes(name.toLowerCase())) {
-							matchedPath = sPath;
-							matchedName = findSessionNameByPath(sPath, persisted.sessions) || "path-match";
-							break;
-						}
-					}
-				}
-				if (!matchedPath) {
-					outputText = JSON.stringify({ ok: false, error: `Session not found: ${name}` });
-				} else {
-					const snapshots = readAttentionSnapshots();
-					const runningSession = snapshots.find(s => s.sessionPath === matchedPath);
-					if (runningSession) {
-						claimAttentionLeader(runningSession.sessionId);
-						if (server && typeof server.setRoutingTarget === "function") {
-							await server.setRoutingTarget(matchedName || matchedPath);
-						}
-						outputText = JSON.stringify({
-							ok: true,
-							message: `Switched routing target to active session: ${matchedName || matchedPath}`,
-							sessionPath: matchedPath,
-							sessionId: runningSession.sessionId,
-							active: true,
-						});
-					} else {
-						if (server && typeof server.onSessionResume === "function") {
-							const resumeRes = await server.onSessionResume({ sessionPath: matchedPath });
-							outputText = JSON.stringify({ ok: resumeRes.ok, message: resumeRes.message, sessionPath: matchedPath, active: false });
-						} else {
-							const inventory = discoverAgentInventoryCached();
-							const session = inventory.recent.find(s => s.path === matchedPath);
-							if (session) {
-								const executable = resolveResumeExecutable(session.provider);
-								const args = buildAgentResumeArgs(session.provider, session.sessionId || "", session.cwd);
-								if (executable && args) {
-									launchDetachedCli(executable, args, session.cwd || process.cwd(), `${session.provider} resume`);
-									outputText = JSON.stringify({
-										ok: true,
-										message: `Launching detached resume for ${session.provider} session.`,
-										sessionPath: matchedPath,
-										active: false,
-									});
-								} else {
-									outputText = JSON.stringify({ ok: false, error: `Unable to resume session: unsupported provider ${session.provider}` });
-								}
-							} else {
-								outputText = JSON.stringify({ ok: false, error: "Session found in routing store but not in recent resume inventory." });
-							}
-						}
-					}
-				}
-			}
-		} else if (call.name === "get_session_info") {
-			const persisted = loadPersistedSessionRouting();
-			const snapshots = readAttentionSnapshots();
-			const lease = readAttentionLeaderLease();
-			const cwd = getCurrentCwd();
-			outputText = JSON.stringify({
-				currentSession: lease?.ownerSessionId || "unknown",
-				currentCwd: cwd,
-				persistedSessions: persisted.sessions,
-				persistedAliases: persisted.aliases,
-				runningSnapshots: snapshots.map(s => ({
-					sessionId: s.sessionId,
-					sessionName: s.sessionName,
-					sessionPath: s.sessionPath,
-					pid: s.pid,
-					phase: s.phase,
-					waitingForAttention: s.waitingForAttention,
-				})),
-			});
-		} else if (call.name === "list_sessions") {
-			if (server && typeof server.getSessionDashboard === "function") {
-				const dashboard = server.getSessionDashboard();
-				outputText = JSON.stringify({
-					ok: true,
-					current: dashboard.current,
-					workspaces: (dashboard.workspaces || []).map((w: any) => ({
-						workspace: w.workspace,
-						sessions: w.sessions.map((s: any) => ({
-							name: s.name,
-							provider: s.provider,
-							stale: !!s.stale,
-							sessionPath: s.sessionPath,
-						})),
-					})),
-				});
-			} else {
-				outputText = JSON.stringify({ ok: false, error: "Session dashboard is not available." });
-			}
-		} else if (call.name === "launch_agent") {
-			const prompt = call.args?.prompt as string | undefined;
-			const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd();
-			const hubOnly = call.args?.hubOnly as boolean | undefined;
-			const targetNode = call.args?.targetNode as string | undefined;
-			const description = prompt ? `Launch agent: ${prompt}` : hubOnly ? "Open the agent hub" : targetNode === "colab" ? "Deploy workspace to Colab" : "Launch agent";
-			outputText = stageCommandProposal(activeSession, call, "launch", prompt || "launch_agent", description, { prompt, cwd, hubOnly, targetNode });
-			deferToolResponse = true;
-		} else if (call.name === "archive_session") {
-			const sessionPath = call.args?.sessionPath as string;
-			const action = (call.args?.action as string) === "recover" ? "recover" : "archive";
-			if (!sessionPath) {
-				outputText = JSON.stringify({ ok: false, error: "Missing 'sessionPath' argument" });
-			} else {
-				const description = `${action === "recover" ? "Recover" : "Archive"} session ${sessionPath}`;
-				outputText = stageCommandProposal(activeSession, call, "archive", `${action}:${sessionPath}`, description, { sessionPath, action });
-				deferToolResponse = true;
-			}
-		} else if (call.name === "chat_agent") {
-			const agentId = call.args?.agentId as string;
-			const text = call.args?.text as string;
-			if (!agentId || !text) {
-				outputText = JSON.stringify({ ok: false, error: "Missing 'agentId' or 'text' argument" });
-			} else {
-				const proposal = await prepareAgentHubProposal(activeSession, "chat", agentId, text);
-				if (!proposal.ok) {
-					outputText = JSON.stringify({ ok: false, error: proposal.error });
-				} else {
-					outputText = stageCommandProposal(activeSession, call, "chat", `Chat to ${agentId}: ${text}`, `Send message to ${agentId}`, { agentId, text, proposalToken: proposal.token });
-					deferToolResponse = true;
-				}
-			}
-		} else if (call.name === "kill_agent") {
-			const agentId = call.args?.agentId as string;
-			if (!agentId) {
-				outputText = JSON.stringify({ ok: false, error: "Missing 'agentId' argument" });
-			} else {
-				const proposal = await prepareAgentHubProposal(activeSession, "kill", agentId);
-				if (!proposal.ok) {
-					outputText = JSON.stringify({ ok: false, error: proposal.error });
-				} else {
-					outputText = stageCommandProposal(activeSession, call, "kill", `Kill agent ${agentId}`, `Archive (kill) agent ${agentId}`, { agentId, proposalToken: proposal.token });
-					deferToolResponse = true;
-				}
-			}
-		} else {
-			outputText = JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
-		}
-	} catch (err: any) {
-		outputText = JSON.stringify({ ok: false, error: err.message });
-	}
-	return { outputText, deferToolResponse };
-=======
 		call: { ...toolCall, args },
 		kind,
 		description,
@@ -1092,9 +701,7 @@ function resultLooksOk(outputText: string | undefined): boolean {
 		return typeof parsed?.ok === "boolean" ? parsed.ok : true;
 	} catch {
 		return true;
-	}
->>>>>>> origin/main
-}
+	}}
 
 function setupSocketHandlers(activeSession: ActiveSession) {
 	const ws = activeSession.ws;
@@ -1184,70 +791,11 @@ type ReconnectContext = {
 	priorSessionId: string;
 };
 
-<<<<<<< HEAD
-async function startNewSession(
-	ws: WebSocket,
-	server: any,
-	firstMsg?: any,
-	firstMsgIsBinary?: boolean,
-	reconnect?: ReconnectContext,
-) {
-	const sessionId = reconnect?.priorSessionId || ("sess_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 5));
-	const resumptionHandle = reconnect?.resumptionHandle;
-
-	// Resolve the model + client before touching session state. These can throw
-	// synchronously (bad config / missing credentials); catching here prevents an
-	// unhandled rejection from crashing the whole gateway process.
-	let model: string;
-	let clientConfig: ReturnType<typeof createGeminiClient>;
-	try {
-		model = getGeminiLiveModel();
-		clientConfig = createGeminiClient(process.env, { live: true });
-	} catch (error: any) {
-		ws.close(1011, `Failed to initialize Gemini Live client: ${error?.message ?? String(error)}`);
-		return;
-	}
-	const ai = clientConfig.ai;
-	// NON_BLOCKING function behavior is developer-API only (not supported on Vertex
-	// AI per the @google/genai FunctionDeclaration contract). On Vertex we keep the
-	// existing blocking dispatch so tool calls still resolve correctly.
-	const nonBlockingEnabled = clientConfig.backend === "developer-api";
-
-	const activeSession: ActiveSession = {
-		sessionId,
-		ws,
-		session: null,
-		clientSequenceId: 0,
-		serverSequenceId: 0,
-		pendingServerMessages: [],
-		server,
-		commandApprovals: createRealtimeCommandApprovalRegistry(),
-		pendingCommandCalls: new Map(),
-		provider: process.env.AGENT_PROVIDER || "gemini-live",
-		model,
-		backend: clientConfig.backend,
-		nonBlockingEnabled,
-		resumptionHandle,
-		pendingToolResponses: reconnect?.pendingToolResponses ?? [],
-	};
-	activeSessions.set(sessionId, activeSession);
-
-	// Send start message with sessionId. We want this to be serverSequenceId = 1.
-	sendToClient(activeSession, {
-		type: "start",
-		session: sessionId
-	}, false);
-
-	// Tool definitions
-	const tools = [
-=======
 // Extracted (rather than inlined in startNewSession) so the tool surface —
 // what the assistant can read freely vs. what requires operator approval —
 // is unit-testable independently of a live Gemini Live connection.
 export function buildRealtimeTools(nonBlockingEnabled: boolean) {
-	return [
->>>>>>> origin/main
-		{
+	return [		{
 			functionDeclarations: [
 				{
 					name: "execute_terminal_command",
@@ -1375,12 +923,7 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 				},
 				{
 					name: "launch_agent",
-<<<<<<< HEAD
-					description: "Launches a new oh-my-pk background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'. This is a mutating command; the assistant should propose it via propose_command and only call it directly after user approval.",
-=======
-					description: "Launches a new oh-my-pk background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'. Actually launching (as opposed to just opening the hub) mutates state, so it requires operator approval.",
->>>>>>> origin/main
-					parameters: {
+					description: "Launches a new oh-my-pk background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'. Actually launching (as opposed to just opening the hub) mutates state, so it requires operator approval.",					parameters: {
 						type: "OBJECT",
 						properties: {
 							prompt: { type: "STRING", description: "Optional task prompt for the new agent. Omit to open the agent hub." },
@@ -1393,12 +936,7 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 				},
 				{
 					name: "archive_session",
-<<<<<<< HEAD
-					description: "Archives or recovers a session by its path. Archived sessions are hidden from the dashboard but fully recoverable. This is a mutating command; the assistant should propose it via propose_command and only call it directly after user approval.",
-=======
-					description: "Archives or recovers a session by its path. Archived sessions are hidden from the dashboard but fully recoverable. Mutates state, so it requires operator approval.",
->>>>>>> origin/main
-					parameters: {
+					description: "Archives or recovers a session by its path. Archived sessions are hidden from the dashboard but fully recoverable. Mutates state, so it requires operator approval.",					parameters: {
 						type: "OBJECT",
 						properties: {
 							sessionPath: { type: "STRING", description: "The full session path to archive or recover." },
@@ -1408,28 +946,6 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 					}
 				},
 				{
-<<<<<<< HEAD
-					name: "chat_agent",
-					description: "Sends a chat message to an oh-my-pk background lane or subagent. This is a mutating command; the assistant should propose it via propose_command and only call it directly after user approval.",
-					parameters: {
-						type: "OBJECT",
-						properties: {
-							agentId: { type: "STRING", description: "The agent id to chat with." },
-							text: { type: "STRING", description: "The message to send." }
-						},
-						required: ["agentId", "text"]
-					}
-				},
-				{
-					name: "kill_agent",
-					description: "Archives (kills) an oh-my-pk background lane or subagent. This is a mutating command; the assistant should propose it via propose_command and only call it directly after user approval.",
-					parameters: {
-						type: "OBJECT",
-						properties: {
-							agentId: { type: "STRING", description: "The agent id to archive." }
-						},
-						required: ["agentId"]
-=======
 					name: "list_agent_hub_agents",
 					description: "Read-only: lists all oh-my-pk background agents (main lanes and subagents) with their status. Use to answer 'what agents are running' or before proposing to launch/archive anything.",
 					parameters: {
@@ -1467,9 +983,7 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 						properties: {
 							path: { type: "STRING", description: "Absolute path of the file to read." }
 						},
-						required: ["path"]
->>>>>>> origin/main
-					}
+						required: ["path"]					}
 				}
 			]
 		}
@@ -1612,11 +1126,6 @@ async function startNewSession(
 								command: call.args?.command as string || undefined,
 							}, false);
 
-<<<<<<< HEAD
-							const dispatchResult = await dispatchRealtimeToolCall(activeSession, toolCall);
-							const outputText = dispatchResult.outputText;
-							if (dispatchResult.deferToolResponse) continue;
-=======
 							let outputText = "";
 							try {
 								if (call.name === "execute_terminal_command") {
@@ -1934,8 +1443,6 @@ async function startNewSession(
 								outputText = JSON.stringify({ ok: false, error: err.message });
 							}
 							if (deferToolResponse) continue;
->>>>>>> origin/main
-
 							sendRealtimeToolResponse(activeSession, toolCall, outputText);
 						}
 					}

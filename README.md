@@ -1,14 +1,8 @@
 # pk-speak
 
-<<<<<<< HEAD
-A conversational assistant for Pi / `pi-mono` that uses voice, wake-word, and remote-control as input channels.
-
-pi-speak is a conversational assistant, not just a text assistant with TTS bolted on. The assistant can see all subagent state and the workspace, interview you to scope ambiguous requests, and ask for explicit approval before running any command that mutates a subagent, terminal, or file. Voice, the `PK` wake phrase, Telegram, and the mobile web/Android remote are all ways to reach the same assistant. It gives you:
-=======
 A conversational assistant for Pi / `pi-mono`, reachable over voice, phone, and browser remote.
 
 `pk-speak` runs a persistent conversational assistant that can see session and background-agent state and read the workspace on every turn, but never mutates anything — launching an agent, archiving a session, or running a command outside a small read-only allowlist — without your explicit approval. Voice (`/mono`), Telegram (`/phone`), and the browser/Android remote (`/remote`) are channels into that same assistant, not separate products. It gives you:
->>>>>>> origin/main
 
 - a conversational assistant that reads subagent state and proposes commands for approval
 - spoken assistant replies with multiple TTS backends
@@ -318,7 +312,6 @@ Behavior:
 - the spoken version can optionally be rewritten for audio clarity
 - `/speak stop` interrupts playback without disabling speech mode
 
-<<<<<<< HEAD
 #### `/speak agent` — agent-driven speech
 
 `/speak agent` enables a different model: the agent itself decides what to say and emits a `pk-speak "..."` shell command inline at the end of its turn. There is no second LLM summarizer pass and no auto-speak watcher collecting the full reply. The sanitizer still runs. If the agent says nothing worth hearing, no audio fires.
@@ -382,7 +375,6 @@ args = []
 ```
 
 Ready-to-paste config snippets for all three runtimes are in the `integrations/` directory.
-=======
 
 ### `/pk-speak`
 
@@ -395,7 +387,6 @@ Hard-stop for voice chatter. Unlike `/speak stop` (interrupt current playback on
 ```
 
 Aliases for stop: `off`, `quiet`, `silence`, `shush`.
->>>>>>> origin/main
 
 ### `/mono`
 

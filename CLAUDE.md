@@ -25,13 +25,8 @@ When the task involves spoken replies, wake-word listening, voice session routin
 
 ## What This Repo Optimizes For
 
-<<<<<<< HEAD
-- a conversational assistant that reads subagent state and proposes commands for approval
-- natural spoken interaction as one input channel among several
-=======
 - a conversational assistant with broad read-only access to sessions, background agents, and the workspace (workspace reads confined to the workspace root, capped, secret-shaped paths refused), but no mutation without explicit operator approval
-- natural spoken interaction
->>>>>>> origin/main
+- natural spoken interaction as one input channel among several
 - command-backed control surfaces
 - safe multi-session routing
 - one primary session-manager abstraction for normal operators
@@ -53,16 +48,13 @@ When the task involves spoken replies, wake-word listening, voice session routin
 ## Important Source Map
 
 - `index.ts` → command registration and runtime orchestration (also owns the routing-store watcher that reloads after pane writes)
-<<<<<<< HEAD
 - `speech-preamble.ts` → exports `PK_SPEAK_PREAMBLE`; injected by pi in `/speak agent` mode; paste into codex/oh-my-pi/claude-code config for those runtimes; ready-to-paste snippets in `integrations/`
 - `pk-speak.ts` → CLI entry point compiled to `dist/pk-speak.js`; `parseArgs` is pure and tested; `main()` is the bin entrypoint
 - `pk-speak-mcp.ts` → MCP server entry point compiled to `dist/pk-speak-mcp.js` (bin `pk-speak-mcp`); thin stdio adapter that shells out to sibling `pk-speak.js`; never writes to stdout except JSON-RPC
 - `audio-playback.ts` → `getPlayerInvocation` (pure, platform-aware) and `playAudio` (cross-platform); shared between the extension and the CLI
 - `integrations/` → ready-to-paste config snippets for Claude Code (`CLAUDE.md` paste + optional `.mcp.json`), Codex, and oh-my-pi (`AGENTS.md` paste + `~/.codex/config.toml` stanza)
-=======
 - `realtime-gateway.ts` → conversational assistant core: Gemini Live session, read-only subagent/workspace tools, `propose_command` approval flow
 - `realtime-command-approval.ts` → approval registry for terminal/chat/kill/launch proposals
->>>>>>> origin/main
 - `voice-session-command.ts` → natural spoken session phrases
 - `voice-routing.ts` → normalized target matching, compact numeric route families, and conflict checks
 - `session-routing.ts` → naming, aliases, dashboard formatting, removal rules, and `buildSessionDashboard` shared with the pane

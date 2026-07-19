@@ -1041,7 +1041,6 @@ function synthesizeSag(text: string, outputPath: string, signal?: AbortSignal) {
 			finish(error);
 		});
 		child.on("exit", (code) => {
-<<<<<<< HEAD
 			signal?.removeEventListener("abort", abortHandler);
 			if (code === 0) resolve();
 			else {
@@ -1061,10 +1060,6 @@ function synthesizeSag(text: string, outputPath: string, signal?: AbortSignal) {
 				const safeStderr = redactSecrets(stderr).trim();
 				reject(new Error(`sag exited with code ${code}${safeStderr ? `: ${safeStderr}` : ""}`));
 			}
-=======
-			if (code === 0) finish();
-			else finish(new Error(`sag exited with code ${code}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
->>>>>>> origin/main
 		});
 		if (!child.stdin) {
 			finish(new Error("Failed to write sag stdin: stdin is unavailable"));
