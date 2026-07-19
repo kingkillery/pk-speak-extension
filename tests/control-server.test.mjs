@@ -78,7 +78,7 @@ async function withServer(overrides = {}, fn) {
 		}),
 		setRoutingTarget: async (target) => ({ ok: true, message: target ? `target:${target}` : "target:cleared" }),
 		onMonoAction: async () => ({ ok: true, message: "mono" }),
-		onSpeakAction: async () => ({ ok: true, message: "speak" }),
+		onSpeakAction: overrides.onSpeakAction || (async () => ({ ok: true, message: "speak" })),
 		onPhoneAction: async () => ({ ok: true, message: "phone" }),
 		getSlashCommands: overrides.getSlashCommands || (() => []),
 		onTextTurn: overrides.onTextTurn || (async (text, includeAudio, target, cwd, mode, agentProvider) => ({ replyText: `${text}:${includeAudio}:${target || "current"}:${cwd || "default-cwd"}:${mode || "auto"}:${agentProvider || "none"}` })),
@@ -581,6 +581,38 @@ test("mutating mono and speak routes reject GET and require POST", async () => {
 		});
 		assert.equal(providerPost.statusCode, 200);
 	});
+});
+
+test("speak routes reject inherited object property names", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({
+			port,
+			path: "/v1/speak/toString",
+			headers: { Host: "tailnet.example", Authorization: "Bearer secret-token" },
+		});
+		assert.equal(response.statusCode, 404);
+	});
+});
+
+test("remote agent speak action reaches the extension handler", async () => {
+	let action;
+	await withServer(
+		{ onSpeakAction: async (nextAction) => {
+			action = nextAction;
+			return { ok: true, message: "agent speech enabled" };
+		} },
+		async (port) => {
+			const response = await request({
+				port,
+				path: "/v1/speak/agent",
+				method: "POST",
+				headers: { Host: "tailnet.example", Authorization: "Bearer secret-token" },
+			});
+			assert.equal(response.statusCode, 200);
+			assert.equal(response.json().message, "agent speech enabled");
+		},
+	);
+	assert.equal(action, "agent");
 });
 
 test("POST route rejects malformed JSON payload", async () => {

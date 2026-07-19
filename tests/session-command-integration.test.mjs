@@ -487,3 +487,44 @@ test("/pk-speak stop disables speech and reports hard stop", async () => {
 	});
 });
 
+test("agent speech mode uses the bundled dispatcher and hard-stop persists as off", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const speak = pi.commands.get("speak");
+		const pkSpeak = pi.commands.get("pk-speak");
+		assert.ok(speak);
+		assert.ok(pkSpeak);
+
+		const ctx = makeCtx("/sessions/agent.jsonl");
+		await speak.handler("agent", ctx);
+		assert.match(ctx.notifications.at(-1)?.message || "", /Agent speak mode enabled/i);
+		const agentState = pi.appended.filter((entry) => entry.customType === "elevenlabs-speak-state").at(-1)?.data;
+		assert.deepEqual({ mode: agentState.mode, enabled: agentState.enabled }, { mode: "agent", enabled: true });
+
+		const beforeAgentStart = pi.events.get("before_agent_start");
+		const prompt = await beforeAgentStart({ systemPrompt: "base" }, ctx);
+		assert.match(prompt.systemPrompt, /pk-speak\.js["'] speak/);
+
+		await pkSpeak.handler("stop", ctx);
+		const stoppedState = pi.appended.filter((entry) => entry.customType === "elevenlabs-speak-state").at(-1)?.data;
+		assert.deepEqual({ mode: stoppedState.mode, enabled: stoppedState.enabled }, { mode: "off", enabled: false });
+
+		const resumed = makeCtx("/sessions/agent.jsonl");
+		resumed.sessionManager.getBranch = () => [{ type: "custom", customType: "elevenlabs-speak-state", data: stoppedState }];
+		const sessionShutdown = pi.events.get("session_shutdown");
+		assert.ok(sessionShutdown);
+		try {
+			await pi.events.get("session_start")({}, resumed);
+			await speak.handler("status", resumed);
+			assert.match(resumed.notifications.at(-1)?.message || "", /Speech mode is off/i);
+
+			await pkSpeak.handler("on", resumed);
+			const enabledState = pi.appended.filter((entry) => entry.customType === "elevenlabs-speak-state").at(-1)?.data;
+			assert.deepEqual({ mode: enabledState.mode, enabled: enabledState.enabled }, { mode: "on", enabled: true });
+		} finally {
+			await sessionShutdown({}, resumed);
+		}
+	});
+});
+

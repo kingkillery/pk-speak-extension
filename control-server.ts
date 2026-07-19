@@ -233,7 +233,7 @@ export type ControlServerOptions = {
 	setRoutingTarget: (target?: string) => Promise<ControlActionResult> | ControlActionResult;
 	onMonoAction: (action: "on" | "off" | "status") => Promise<ControlActionResult> | ControlActionResult;
 	onSpeakAction: (
-		action: "on" | "off" | "stop" | "status" | "test" | "providers" | "provider" | "rewrite",
+		action: "on" | "off" | "agent" | "stop" | "status" | "test" | "providers" | "provider" | "rewrite",
 		value?: string,
 	) => Promise<ControlActionResult> | ControlActionResult;
 	onPhoneAction: (
@@ -307,7 +307,7 @@ type RateLimitBucket = {
 const MONO_ACTIONS = new Set(["on", "off", "status"]);
 const PHONE_ACTIONS = new Set(["on", "off", "status", "code", "unpair"]);
 const SPEAK_READ_ACTIONS = new Set(["status", "providers"]);
-const SPEAK_WRITE_ACTIONS = new Set(["on", "off", "stop", "test", "provider", "rewrite"]);
+const SPEAK_WRITE_ACTIONS = new Set(["on", "off", "agent", "stop", "test", "provider", "rewrite"]);
 
 const DEFAULT_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
 const DEFAULT_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
@@ -1717,7 +1717,7 @@ export class ControlServer {
 				this.writeMethodNotAllowed(res, ["POST"]);
 				return true;
 			}
-			this.writeJson(res, 200, await this.onSpeakAction(action as "on" | "off" | "stop" | "test"));
+			this.writeJson(res, 200, await this.onSpeakAction(action as "on" | "off" | "agent" | "stop" | "test"));
 			return true;
 		}
 		return false;

@@ -291,3 +291,25 @@ test("pk-speak wrap capture classifies approval prompts", async () => {
 	});
 	assert.match(stdout, /pk-speak capture: approval-needed, needs-input/);
 });
+
+test("pk-speak retains every non-speak dispatcher family", async () => {
+	const commands = [
+		{ args: ["setup", "--help"], expected: /Usage: pk-speak setup/ },
+		{ args: ["doctor", "--dry-run"], expected: /dry-run: pk-speak doctor/ },
+		{ args: ["wrap", "--dry-run", "--", process.execPath, "-e", "console.log('ok')"], expected: [/Command:/, /Cwd:/, /Shell:/, /Capture:/] },
+		{ args: ["brainstorm", "ideas.wav", "--dry-run"], expected: /dry-run: pk-speak brainstorm/ },
+		{ args: ["gateway", "--dry-run"], expected: /dry-run: pk-speak gateway/ },
+		{ args: ["tray", "--dry-run"], expected: /dry-run: pk-speak tray/ },
+		{ args: ["mobile", "--dry-run"], expected: /dry-run: pk-speak mobile/ },
+		{ args: ["admin", "--dry-run"], expected: /dry-run: pk-speak admin/ },
+		{ args: ["config", "--dry-run"], expected: /dry-run: pk-speak config/ },
+	];
+
+	for (const { args, expected } of commands) {
+		const { stdout } = await execFileAsync(process.execPath, ["dist/pk-speak.js", ...args], { cwd: process.cwd() });
+		const expectedPatterns = Array.isArray(expected) ? expected : [expected];
+		for (const expectedPattern of expectedPatterns) {
+			assert.match(stdout, expectedPattern, `expected preserved dispatcher command: ${args[0]}`);
+		}
+	}
+});

@@ -68,9 +68,12 @@ import {
 } from "./tts.js";
 import { readAttentionSnapshots } from "./attention-broker.js";
 import { isGeminiLiveConfigured, runGeminiLiveTurn } from "./gemini-live-turn.js";
+import { buildAgentSpeakCommand, buildAgentSpeechPreamble } from "./agent-speech.js";
+import { isSpeakEnabled, normalizeSpeakMode, type SpeakMode } from "./speak-mode.js";
 
 type SpeakState = SpeakRuntimeState & {
 	enabled: boolean;
+	mode: SpeakMode;
 };
 
 type MonoState = {
@@ -167,8 +170,8 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "speak",
 		description: "Enable spoken assistant replies and choose the TTS provider",
-		usage: "/speak [on|off|stop|status|test|providers|provider <name>|rewrite on|rewrite off]",
-		examples: ["/speak on", "/speak status", "/speak provider edge"],
+		usage: "/speak [on|off|agent|stop|status|test|providers|provider <name>|rewrite on|rewrite off]",
+		examples: ["/speak on", "/speak agent", "/speak status", "/speak provider edge"],
 		source: "extension",
 	},
 	{
@@ -791,6 +794,7 @@ function enableOmpSpeechConfig(): void {
 export default function speakExtension(pi: ExtensionAPI) {
 	let speakState: SpeakState = {
 		enabled: false,
+		mode: "off",
 		provider: "auto",
 	};
 	let lastAssistantText = "";
@@ -891,6 +895,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 		rewriteEnabled: speakState.rewriteEnabled,
 	});
 
+	const getSpeakMode = (): SpeakMode => normalizeSpeakMode(speakState);
+	const setSpeakMode = (mode: SpeakMode) => {
+		speakState.mode = mode;
+		speakState.enabled = isSpeakEnabled(mode);
+	};
+	const getAgentSpeakCommand = () => buildAgentSpeakCommand(getExtensionDir());
+
 	const updateStatus = (ctx?: any) => {
 		const target = ctx || lastCtx;
 		if (!target?.hasUI) return;
@@ -955,6 +966,25 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const persistState = () => {
 		pi.appendEntry<SpeakState>(STATE_TYPE, { ...speakState });
+	};
+
+	const transitionSpeakMode = (
+		mode: SpeakMode,
+		options: { ctx?: any; hardStop?: boolean; stopPlayback?: boolean } = {},
+	): boolean => {
+		if (mode === "agent" && !getAgentSpeakCommand()) return false;
+		if (mode === "off") {
+			setSpeakMode("off");
+			if (options.hardStop) disableOmpSpeechConfig();
+		} else {
+			enableOmpSpeechConfig();
+			setSpeakMode(mode);
+		}
+		if (options.stopPlayback) stopSpeaking(options.ctx);
+		persistState();
+		setPhase("ready", options.ctx);
+		updateStatus(options.ctx);
+		return true;
 	};
 
 	const persistMonoState = () => {
@@ -2175,6 +2205,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const provider = resolveTtsProvider(getSpeakRuntimeState());
 		return {
 			enabled: speakState.enabled,
+			mode: getSpeakMode(),
 			configuredProvider: speakState.provider || "auto",
 			provider,
 			rewriteEnabled: isRewriteEnabled(getSpeakRuntimeState()),
@@ -2347,19 +2378,25 @@ export default function speakExtension(pi: ExtensionAPI) {
 	};
 
 	const handleSpeakAction = async (
-		action: "on" | "off" | "stop" | "status" | "test" | "providers" | "provider" | "rewrite",
+		action: "on" | "off" | "agent" | "stop" | "status" | "test" | "providers" | "provider" | "rewrite",
 		value?: string,
 		ctx?: any,
 	) => {
 		if (action === "on") {
-			clearRootVoiceDisable();
-			enableOmpSpeechConfig();
-			speakState.enabled = true;
-			persistState();
-			setPhase("ready", ctx);
+			transitionSpeakMode("on", { ctx });
 			return {
 				ok: true,
 				message: `Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())}).`,
+				speak: getSpeakStatus(),
+			};
+		}
+		if (action === "agent") {
+			if (!transitionSpeakMode("agent", { ctx })) {
+				return { ok: false, message: "Agent speak mode is unavailable because this extension installation has no bundled pk-speak CLI." };
+			}
+			return {
+				ok: true,
+				message: `Agent speak mode enabled (${describeTtsProvider(getSpeakRuntimeState())}).`,
 				speak: getSpeakStatus(),
 			};
 		}
@@ -2372,19 +2409,14 @@ export default function speakExtension(pi: ExtensionAPI) {
 			};
 		}
 		if (action === "off") {
-			speakState.enabled = false;
-			persistState();
-			stopSpeaking(ctx);
-			updateStatus(ctx);
+			transitionSpeakMode("off", { ctx, stopPlayback: true });
 			return { ok: true, message: "Speech mode disabled.", speak: getSpeakStatus() };
 		}
 		if (action === "status") {
 			const rewriteStatus = isRewriteEnabled(getSpeakRuntimeState()) ? "rewrite on" : "rewrite off";
 			return {
 				ok: true,
-				message: speakState.enabled
-					? `Speech mode is on (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}).`
-					: `Speech mode is off (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}).`,
+				message: `Speech mode is ${getSpeakMode()} (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}).`,
 				speak: getSpeakStatus(),
 			};
 		}
@@ -2420,9 +2452,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 			return { ok: false, message: `Unknown rewrite value "${value}". Use on or off.` };
 		}
-		speakState.enabled = true;
-		persistState();
-		setPhase("ready", ctx);
+		transitionSpeakMode("on", { ctx });
 		void speakText(`Hey, this is Pi speak using ${describeTtsProvider(getSpeakRuntimeState())}.`, ctx);
 		return {
 			ok: true,
@@ -2978,9 +3008,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					const cue = playMonoCue("listening");
 					cue.on("error", () => {});
 					if (!speakState.enabled && !isRootVoiceDisabled()) {
-						speakState.enabled = true;
-						persistState();
-						setPhase("ready", target);
+						transitionSpeakMode("on", { ctx: target });
 					}
 					const targetLabel = voiceTarget ? ` (target: ${voiceTarget})` : "";
 					target?.ui?.notify?.(`Listening now${targetLabel} - speak your request, then say "${MONO_WAKE_PHRASE}" again to keep alive`, "info");
@@ -3813,11 +3841,12 @@ export default function speakExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("speak", {
-		description: "Enable spoken assistant replies with provider selection",
+		description: "Enable spoken assistant replies, agent-driven speech, and provider selection",
 		getArgumentCompletions: (prefix) => {
 			const options = [
 				"on",
 				"off",
+				"agent",
 				"stop",
 				"status",
 				"test",
@@ -3840,49 +3869,37 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const lower = raw.toLowerCase();
 
 			if (!raw || lower === "on" || lower === "enable" || lower === "start") {
-				clearRootVoiceDisable();
-				enableOmpSpeechConfig();
-				speakState.enabled = true;
-				persistState();
-				setPhase("ready", ctx);
+				transitionSpeakMode("on", { ctx });
 				ctx.ui.notify(`Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
 				return;
 			}
-
-			if (lower === "stop" || lower === "interrupt" || lower === "quiet" || lower === "shush") {
-				stopSpeaking(ctx);
-				ctx.ui.notify(
-					speakState.enabled ? "Stopped current speech playback" : "No speech playback is active",
-					"info",
-				);
+			if (lower === "agent") {
+				if (!transitionSpeakMode("agent", { ctx })) {
+					ctx.ui.notify("Agent speak mode is unavailable because this extension installation has no bundled pk-speak CLI.", "error");
+					return;
+				}
+				ctx.ui.notify(`Agent speak mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
 				return;
 			}
-
-			if (lower === "off" || lower === "disable") {
-				speakState.enabled = false;
-				persistState();
+			if (lower === "stop" || lower === "interrupt" || lower === "quiet" || lower === "shush") {
 				stopSpeaking(ctx);
-				updateStatus(ctx);
+				ctx.ui.notify(speakState.enabled ? "Stopped current speech playback" : "No speech playback is active", "info");
+				return;
+			}
+			if (lower === "off" || lower === "disable") {
+				transitionSpeakMode("off", { ctx, stopPlayback: true });
 				ctx.ui.notify("Speech mode disabled", "info");
 				return;
 			}
-
 			if (lower === "status") {
 				const rewriteStatus = isRewriteEnabled(getSpeakRuntimeState()) ? "rewrite on" : "rewrite off";
-				ctx.ui.notify(
-					speakState.enabled
-						? `Speech mode is on (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus})`
-						: `Speech mode is off (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus})`,
-					"info",
-				);
+				ctx.ui.notify(`Speech mode is ${getSpeakMode()} (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus})`, "info");
 				return;
 			}
-
 			if (lower === "providers") {
 				ctx.ui.notify(`Available providers: ${AVAILABLE_TTS_PROVIDERS.join(", ")}`, "info");
 				return;
 			}
-
 			if (lower.startsWith("provider ")) {
 				const requested = lower.slice("provider ".length).trim() as TtsProvider;
 				if (!AVAILABLE_TTS_PROVIDERS.includes(requested)) {
@@ -3896,46 +3913,34 @@ export default function speakExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`Speech provider set to ${describeTtsProvider(getSpeakRuntimeState())}`, "info");
 				return;
 			}
-
 			if (lower === "rewrite on" || lower === "rewrite enable") {
 				speakState.rewriteEnabled = true;
 				persistState();
 				ctx.ui.notify("Speech rewrite enabled", "info");
 				return;
 			}
-
 			if (lower === "rewrite off" || lower === "rewrite disable") {
 				speakState.rewriteEnabled = false;
 				persistState();
 				ctx.ui.notify("Speech rewrite disabled", "info");
 				return;
 			}
-
 			if (lower === "test") {
-				speakState.enabled = true;
-				persistState();
-				setPhase("ready", ctx);
+				transitionSpeakMode("on", { ctx });
 				void speakText(`Hey, this is Pi speak using ${describeTtsProvider(getSpeakRuntimeState())}.`, ctx);
 				ctx.ui.notify(`Played speech test with ${describeTtsProvider(getSpeakRuntimeState())}`, "info");
 				return;
 			}
-
-			speakState.enabled = true;
-			persistState();
-			setPhase("ready", ctx);
+			transitionSpeakMode("on", { ctx });
 			ctx.ui.notify(`Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
 			pi.sendUserMessage(raw);
 		},
 	});
 
 	const hardStopPkSpeak = (ctx: any) => {
-		speakState.enabled = false;
-		persistState();
-		disableOmpSpeechConfig();
-		stopSpeaking(ctx);
+		transitionSpeakMode("off", { ctx, hardStop: true, stopPlayback: true });
 		stopListener(ctx);
 		persistMonoState();
-		updateStatus(ctx);
 		updateMonoStatus(ctx);
 	};
 
@@ -3957,12 +3962,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (lower === "on" || lower === "enable" || lower === "start") {
-				clearRootVoiceDisable();
-				enableOmpSpeechConfig();
-				speakState.enabled = true;
-				persistState();
-				setPhase("ready", ctx);
-				updateStatus(ctx);
+				transitionSpeakMode("on", { ctx });
 				ctx.ui.notify(`pk-speak enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
 				return;
 			}
@@ -3975,7 +3975,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 						: "listener waiting for wake"
 					: "listener off";
 				ctx.ui.notify(
-					`pk-speak: speech ${speakState.enabled ? "on" : "off"} (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}); ${monoStatus}`,
+					`pk-speak: speech ${getSpeakMode()} (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}); ${monoStatus}`,
 					"info",
 				);
 				return;
@@ -3990,6 +3990,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const remoteRuntime = remoteServer?.getRuntimeState();
 		speakState = {
 			enabled: false,
+			mode: "off",
 			provider: "auto",
 		};
 		remoteState = {
@@ -4005,13 +4006,20 @@ export default function speakExtension(pi: ExtensionAPI) {
 		sessionWakeAliases = { ...persistedRouting.aliases };
 		lastRoutingStoreMtime = readRoutingStoreMtime();
 		startRoutingStoreWatcher();
+		let shouldPersistRestoredSpeakState = false;
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type === "custom" && entry.customType === STATE_TYPE && entry.data && typeof entry.data === "object") {
-				const savedSpeakState = entry.data as SpeakState;
+				const savedSpeakState = entry.data as Partial<SpeakState>;
+				const savedMode = normalizeSpeakMode(savedSpeakState);
+				const restoredMode = isRootVoiceDisabled() || (savedMode === "agent" && !getAgentSpeakCommand())
+					? "off"
+					: savedMode;
+				shouldPersistRestoredSpeakState ||= restoredMode !== savedMode || savedSpeakState.enabled !== isSpeakEnabled(restoredMode);
 				speakState = {
 					...speakState,
 					...savedSpeakState,
-					enabled: !!savedSpeakState.enabled,
+					mode: restoredMode,
+					enabled: isSpeakEnabled(restoredMode),
 				};
 			}
 			if (entry.type === "custom" && entry.customType === MONO_STATE_TYPE && entry.data && typeof entry.data === "object") {
@@ -4041,6 +4049,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				}
 			}
 		}
+		if (shouldPersistRestoredSpeakState) persistState();
 		// Register current session in registry if it has a name
 		const currentName = pi.getSessionName();
 		const currentFile = ctx.sessionManager.getSessionFile();
@@ -4111,8 +4120,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const shouldInjectSpeechPrompt = speakState.enabled || forceSpeechPromptNextTurn;
 		forceSpeechPromptNextTurn = false;
 		if (!shouldInjectSpeechPrompt) return;
+		const agentCommand = getSpeakMode() === "agent" ? getAgentSpeakCommand() : undefined;
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n${SPEECH_MODE_PROMPT}`,
+			systemPrompt: `${event.systemPrompt}\n\n${agentCommand ? buildAgentSpeechPreamble(agentCommand) : SPEECH_MODE_PROMPT}`,
 		};
 	});
 
@@ -4140,12 +4150,14 @@ export default function speakExtension(pi: ExtensionAPI) {
 		lastCtx = ctx;
 		piAgentProvider.handleAgentEnd();
 		const replyText = lastAssistantText.trim();
-		if (speakState.enabled && ctx.hasUI) {
+		if (speakState.enabled && getSpeakMode() !== "agent" && ctx.hasUI) {
 			if (replyText) {
 				void speakText(replyText, ctx);
 			} else {
 				setPhase("ready", ctx);
 			}
+		} else if (getSpeakMode() === "agent" && ctx.hasUI) {
+			setPhase("ready", ctx);
 		}
 		if (pendingRemoteTurn) {
 			await resolvePendingPhoneTurn(ctx);
