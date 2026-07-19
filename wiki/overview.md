@@ -65,3 +65,6 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
 - The post-merge verifier run added local follow-up fixes for Android gateway archive/recover wiring, EventSource query-token auth, malformed gateway URL handling, workspace truncation display, and legacy agents-only inventory rendering.
 - Latest validation evidence from the run: `npm test` passed 333 tests; Android `:app:testStandardDebugUnitTest :app:compileBooxDebugKotlin :app:assembleStandardDebug` succeeded; `git diff --check` returned exit 0 with only LF/CRLF warnings.
 - See `wiki/sessions/2026-07-02-pr13-android-gateway-parity.md` for the run summary, skipped findings, and local changed-file list.
+
+## Recent Durable Updates
+- 2026-07-13: Created concept [[herdr-agent-hub- Module]]

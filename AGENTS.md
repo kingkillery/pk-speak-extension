@@ -1,6 +1,12 @@
 # AGENTS.md - pi-speak-pk Extension
 
+<<<<<<< HEAD
 Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent that uses voice, wake-word, and remote-control as input channels. The assistant can read all subagent state and the workspace, interview the user to scope work, and propose commands that only execute after explicit approval. Voice (`/mono`, `PK` wake phrase), Telegram (`/phone`), and the mobile/web remote (`/remote`, `/pk-remote`) are all ways to reach the same assistant.
+=======
+Extension development context for `pi-speak-pk` — a conversational assistant for pi-coding-agent, reachable over voice, wake-word, phone, and browser/Android remote.
+
+The assistant (`realtime-gateway.ts`) has broad read-only access to sessions, background agents, and the workspace on every turn (workspace reads stay confined to `PI_SPEAK_WORKSPACE_ROOT`, are capped in size, and refuse secret-shaped paths), but never mutates anything without explicit operator approval. See "Conversational Assistant Mode" in `README.md` and the approval-flow notes below.
+>>>>>>> origin/main
 
 ## Build
 
@@ -43,6 +49,9 @@ npm test         # Run tests
 | `realtime-terminal-approval.ts` | Original terminal-command approval registry used by the realtime gateway |
 | `realtime-command-approval.ts` | Extended approval registry covering terminal, chat, kill, and launch command proposals. `propose_command` stages a mutation and returns a confirmation token; the assistant only executes after the user approves. |
 | `listener/listener.py` | Always-on wake-word listener (faster-whisper wake detection + transcription) |
+| `realtime-gateway.ts` | Live-voice conversational assistant over Gemini Live: `REALTIME_SYSTEM_PROMPT` persona, `buildRealtimeTools` tool surface (read-only session/agent-hub/workspace tools + approval-gated mutating tools), tool-call dispatch |
+| `realtime-terminal-approval.ts` / `realtime-terminal-command.ts` | Approval registry + safety classifier for `execute_terminal_command` (raw shell command, read-only allowlist vs. confirm) |
+| `realtime-command-approval.ts` | Approval registry for non-terminal mutating tool calls (`launch_agent`, `archive_session`), keyed by kind+description rather than a command string |
 
 ## TTS Provider Logic
 
@@ -68,13 +77,17 @@ Auto-resolution order:
 
 - **Workspace browse + file read**: The PWA Workspace tab uses `GET /v1/workspace?path=...` (lists a directory; `entries` now include files as well as directories with `name`/`path`/`type` and `size` on files) and the read-only `GET /v1/workspace/file?path=...` (returns `name`/`path`/`size`/`truncated`/`binary`/`content`, capped at the first 512 KB, empty content for binary files). Both are confined to `PI_SPEAK_WORKSPACE_ROOT`, which **defaults to the agent working directory** (`getDefaultWorkspacePath`: `AGENT_CWD`/`AGENT_WORKSPACE`/`process.cwd()`) rather than the whole drive, since the file endpoint reads file contents under that root; set it to a directory to widen, or to `fs` for the drive root. Containment uses a lexical `..` guard plus a realpath check (symlinks/junctions resolving outside root are rejected), the listing is streamed and capped at 2000 entries (`truncated` flag), and Windows reserved device names (CON/NUL/COM1…) are rejected. These expose the `workspace-browse` and `workspace-file-read` capabilities; "Use this folder" sets the launch `cwd` for turns. Endpoints/capabilities live in `control-server.ts` (`/v1/workspace`, `/v1/workspace/file`).
 - **Pane write path**: All pane-driven mutations flow through `loadPersistedSessionRouting` → pure helper in `session-routing.ts` → `persistSessionRouting` → `appendSessionEvent(kind, "admin", payload)`. The extension watches the routing store mtime and reloads in-process state on external writes.
+- **Conversational assistant approval boundary**: `execute_terminal_command` outside the read-only allowlist, `launch_agent` when it actually launches (as opposed to `hubOnly`/no-prompt, which just opens the hub — the `hubOnly`/prompt/`targetNode` decision is the pure, unit-tested `isNavigationalLaunch` helper), and `archive_session` all defer their tool response, send `tool_approval_required` over the realtime WS, and only run after the client sends `terminal_approve`/`terminal_reject` (terminal) or `command_approve`/`command_reject` (everything else). Every request/resolve/execution-result step for both flows is appended to the shared `realtime-terminal-audit.ts` JSONL trail (`terminal.*` / `command.*` kinds) via `appendTerminalAudit`. Read-only tools (`list_sessions`, `get_session_info`, `list_agent_hub_agents`, `get_agent_hub_agent`, `browse_workspace`, `read_workspace_file`) never require approval, but `read_workspace_file` refuses (`looksLikeSecretPath` in `realtime-terminal-command.ts`) to return content for paths that look like credentials/keys (`.env*`, `id_rsa`/`id_ed25519`, `*.pem`/`*.key`/etc.) so secrets can't be narrated into a voice conversation. `agentHubGateway` on `ControlServer` is intentionally typed `Pick<AgentHubGateway, "snapshot" | "detail">` for external (realtime-gateway) callers — the full mutating instance stays on the private `_agentHubGateway` field, used only by the HTTP `/v1/herdr/agent*` routes. When adding a new mutating tool, gate it the same way instead of executing inline.
 - **Remote audio**: Browser mic requires HTTPS origin (use Tailscale Serve or tunnel)
 
 ## Testing
 
 ```bash
-npm test   # Non-local auth, rate limiting, body size, audio expiry, etc.
+npm test               # Non-local auth, rate limiting, body size, audio expiry, etc.
+npm run test:realtime-live   # End-to-end: real handleRealtimeGateway dispatch against a fake Gemini Live connection
 ```
+
+`npm test` (`tests/*.test.mjs`) covers plenty of real integration behavior generally (non-local auth, rate limiting, body size, audio expiry, etc.), but for the realtime conversational-assistant gateway specifically it only covers pure helpers in isolation — e.g. `buildRealtimeTools`, `isNavigationalLaunch`, `looksLikeSecretPath`, the approval registries. It does not exercise the actual onmessage tool-call switch in `realtime-gateway.ts`. `npm run test:realtime-live` (`tests/integration/*.test.mjs`, requires Node's `--experimental-test-module-mocks`, kept out of the default `tests/*.test.mjs` glob on purpose) fakes `@google/genai`'s `GoogleGenAI`/`live.connect` and drives the real `handleRealtimeGateway` entrypoint end to end: a read-only tool call answers immediately with no approval step; a mutating call (`launch_agent`/`archive_session`) defers behind `tool_approval_required` and only actually runs after a `command_approve` control message, never after `command_reject`; approvals/executions land in the real on-disk audit trail; `read_workspace_file` refuses a secret-shaped path without touching disk and returns real content for an ordinary one. Extend this file (not just the pure-helper tests) when changing the approval-gating wiring itself, not just the logic it calls.
 
 ## Release
 

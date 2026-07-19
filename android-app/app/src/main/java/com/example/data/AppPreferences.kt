@@ -33,7 +33,6 @@ data class ChatMessage(
 class AppPreferences(context: Context) {
     companion object {
         const val DEFAULT_WORKSPACE_PATH = "C:\\Dev"
-        const val SPWR_DAILY_WORKSPACE_PATH = "C:\\Users\\Prest\\Desktop\\SPWR-DAILY\\Interconnection-Dash-2026"
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences("pi_speak_prefs", Context.MODE_PRIVATE)

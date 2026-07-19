@@ -1,8 +1,14 @@
 # pk-speak
 
+<<<<<<< HEAD
 A conversational assistant for Pi / `pi-mono` that uses voice, wake-word, and remote-control as input channels.
 
 pi-speak is a conversational assistant, not just a text assistant with TTS bolted on. The assistant can see all subagent state and the workspace, interview you to scope ambiguous requests, and ask for explicit approval before running any command that mutates a subagent, terminal, or file. Voice, the `PK` wake phrase, Telegram, and the mobile web/Android remote are all ways to reach the same assistant. It gives you:
+=======
+A conversational assistant for Pi / `pi-mono`, reachable over voice, phone, and browser remote.
+
+`pk-speak` runs a persistent conversational assistant that can see session and background-agent state and read the workspace on every turn, but never mutates anything — launching an agent, archiving a session, or running a command outside a small read-only allowlist — without your explicit approval. Voice (`/mono`), Telegram (`/phone`), and the browser/Android remote (`/remote`) are channels into that same assistant, not separate products. It gives you:
+>>>>>>> origin/main
 
 - a conversational assistant that reads subagent state and proposes commands for approval
 - spoken assistant replies with multiple TTS backends
@@ -20,7 +26,16 @@ These are all input channels to the same conversational assistant. Pick the one 
 2. Hands-free on the same machine: use `/mono on` (say `PK` to start a conversation)
 3. Remote from your phone with the least friction: use `/phone on`
 4. Remote from your phone with QR setup: use `/pk-remote`, then scan the QR from the Android phone
-5. Remote button grid on Android: use the bundled Unified Remote remote
+## Documentation
+
+- [Getting Started](./docs/GETTING_STARTED.md) — install, five voice paths, first session, TTS ladder, phone setup, session routing, Gemini Live
+- [Architecture](./docs/ARCHITECTURE.md) — subsystem map, data flow, provider model, HTTP API surface, Android/PWA clients, environment variables
+- [Troubleshooting](./docs/TROUBLESHOOTING.md) — 12 common problem areas with causes and fixes, plus a 5-command quick diagnostic checklist
+- [Session Operations](./docs/SESSION_OPERATIONS.md) — named sessions, wake routing, compact PK1/PK2 lanes
+- [Remote Operating Guide](./docs/REMOTE_OPERATING_GUIDE.md) — phone setup, Android app, web app, Tailscale/tunnel configuration
+- [Validation Checklist](./docs/REMOTE_VALIDATION_CHECKLIST.md) — full phone-focused pass/fail run sheet
+- [Codebase Map](./docs/CODEBASE_MAP.md) — file-level tour of the TypeScript source
+
 
 ## Install
 
@@ -445,6 +460,18 @@ The conversational assistant is the center; voice, wake-word, Telegram, and the 
 
 7. `control-server.ts`
    Local HTTP API, audio artifact serving, and the built-in mobile app host.
+
+## Conversational Assistant Mode
+
+`realtime-gateway.ts` runs the live-voice conversational assistant. It can call read-only tools on every turn — `list_sessions`, `get_session_info`, `list_agent_hub_agents`, `get_agent_hub_agent`, `browse_workspace`, `read_workspace_file` — to see real session, background-agent, and workspace state before answering.
+
+Anything that mutates state goes through operator approval first:
+
+- `execute_terminal_command` outside the read-only allowlist
+- `launch_agent` when it actually launches an agent (not just opening the hub)
+- `archive_session` (archive or recover)
+
+The assistant calls the tool normally; if the action needs approval, the client shows what is about to happen and waits for an explicit approve/reject before anything runs. Nothing is claimed as done until a real tool result confirms it.
 
 ## Remote Paths
 

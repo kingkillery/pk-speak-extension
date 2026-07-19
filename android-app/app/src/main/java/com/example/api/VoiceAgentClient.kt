@@ -43,17 +43,16 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     @Volatile
     private var activeTurnCall: Call? = null
 
-    /**
-     * Sends a text turn to the current active agent.
-     * Returns a Pair of: (User Transcript, Agent Response Text)
-     */
-    suspend fun sendTextTurn(text: String): Pair<String, String> {
-        val targetAgent = prefs.activeAgent
-        Log.d("VoiceAgent", "Sending text turn using: $targetAgent")
-
-        return withContext(Dispatchers.IO) {
-            callLocalGatewayText(text)
-        }
+    companion object {
+        /**
+         * A voice turn falls back to a plain text turn (re-sending the local transcript) only
+         * on a definitive 429 rejection, where the gateway refused the turn without running it.
+         * A 502 or a connection error is ambiguous — the turn may already have executed before
+         * the reply was lost, and re-sending the prompt could run non-idempotent agent actions
+         * twice — so those are surfaced as errors instead of retried.
+         */
+        fun shouldFallBackToTextTurn(result: GatewayTurnResult): Boolean =
+            result.statusCode == 429
     }
 
     suspend fun sendTextTurnDetailed(text: String): GatewayTurnResult {
@@ -65,32 +64,6 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         }
     }
 
-    /**
-     * Sends an audio file turn to the active agent.
-     * Returns a Pair of: (Recognized Transcription, Agent Response Text)
-     */
-    suspend fun sendVoiceTurn(audioFile: File, fallbackPrompt: String = ""): Pair<String, String> {
-        val targetAgent = prefs.activeAgent
-        Log.d("VoiceAgent", "Sending voice turn using: $targetAgent")
-
-        val result = withContext(Dispatchers.IO) {
-            callLocalGatewayVoice(audioFile)
-        }
-        val reply = result.second.lowercase()
-        if (reply.contains("operational status returned by remote: 502")
-            || reply.contains("operational status returned by remote: 429")
-            || reply.contains("voice transmission offline")
-            || reply.contains("gateway connection error")) {
-            val prompt = fallbackPrompt.trim()
-            if (prompt.isNotEmpty() && !prompt.equals("Listening...", ignoreCase = true)) {
-                return withContext(Dispatchers.IO) {
-                    callLocalGatewayText(prompt)
-                }
-            }
-        }
-        return result
-    }
-
     suspend fun sendVoiceTurnDetailed(audioFile: File, fallbackPrompt: String = ""): GatewayTurnResult {
         val targetAgent = prefs.activeAgent
         Log.d("VoiceAgent", "Sending voice turn using: $targetAgent")
@@ -98,11 +71,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         val result = withContext(Dispatchers.IO) {
             callLocalGatewayVoiceDetailed(audioFile)
         }
-        val reply = result.replyText.lowercase()
-        if (reply.contains("operational status returned by remote: 502")
-            || reply.contains("operational status returned by remote: 429")
-            || reply.contains("voice transmission offline")
-            || reply.contains("gateway connection error")) {
+        if (shouldFallBackToTextTurn(result)) {
             val prompt = fallbackPrompt.trim()
             if (prompt.isNotEmpty() && !prompt.equals("Listening...", ignoreCase = true)) {
                 return withContext(Dispatchers.IO) {
@@ -352,11 +321,6 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     }
 
     // --- PI SPEAK LOCAL REMOTE GATEWAY ---
-    private fun callLocalGatewayText(text: String): Pair<String, String> {
-        val result = callLocalGatewayTextDetailed(text)
-        return Pair(result.transcript, result.replyText)
-    }
-
     private fun callLocalGatewayTextDetailed(text: String): GatewayTurnResult {
         val gatewayUrl = "${gatewayBaseUrl()}/v1/turn/text"
         Log.d("VoiceAgent", "POST text turn to gateway: $gatewayUrl")
@@ -416,11 +380,6 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 activeTurnCall = null
             }
         }
-    }
-
-    private fun callLocalGatewayVoice(audioFile: File): Pair<String, String> {
-        val result = callLocalGatewayVoiceDetailed(audioFile)
-        return Pair(result.transcript, result.replyText)
     }
 
     private fun callLocalGatewayVoiceDetailed(audioFile: File): GatewayTurnResult {
@@ -525,18 +484,6 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
                 Log.e("VoiceAgent", "Gateway audio download failed: ${response.code}")
             }
         }
-    }
-
-    private fun simulateVoiceTranscription(): String {
-        val promptExamples = listOf(
-            "Review handleEvents on line 42 for leaks",
-            "Generate optimized unit test configurations for Gradle build speed",
-            "Recompile the release binary targets on main node",
-            "Connect physical debug shell on Tailscale subnet",
-            "Explain git status discrepancies in remote repository",
-            "Verify dependencies sync in libs.versions.toml"
-        )
-        return promptExamples.random()
     }
 
     suspend fun discoverMachines(): List<DiscoveredMachine> {

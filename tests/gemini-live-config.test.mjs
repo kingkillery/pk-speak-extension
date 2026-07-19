@@ -31,6 +31,7 @@ test("PI_SPEAK_GEMINI_LIVE_MODEL override wins on either backend", () => {
 test("Gemini options expose 3.1 defaults and 2.5 legacy fallbacks", () => {
 	assert.equal(live.GEMINI_LIVE_MODEL_OPTIONS[0], "gemini-3.1-flash-live-preview");
 	assert.equal(live.GEMINI_TEXT_MODEL_OPTIONS[0], "gemini-3.5-flash");
+	assert.ok(live.GEMINI_TEXT_MODEL_OPTIONS.includes("9router/ag/gemini-3-5-flash-high"));
 	assert.ok(live.GEMINI_LIVE_MODEL_OPTIONS.includes("gemini-live-2.5-flash-native-audio"));
 	assert.deepEqual(live.GEMINI_TTS_MODEL_OPTIONS, ["gemini-3.1-flash-tts-preview"]);
 });

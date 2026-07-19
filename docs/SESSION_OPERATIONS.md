@@ -1,6 +1,10 @@
 # Session Operations
 
+<<<<<<< HEAD
 This is the focused operator guide for `/sess` in `pi-speak-pk`. Sessions are assistant-managed: the conversational assistant can switch between them, inspect them, and archive/recover them, always asking for approval before mutating. `/sess` is the operator surface for naming, wake aliases, and routing that the assistant and voice channels share.
+=======
+This is the focused operator guide for `/sess` in `pi-speak-pk`. `/sess` is how you manage the sessions the conversational assistant can see and route into — it does not itself mutate a session's contents; launching, archiving, or otherwise changing agent state through the assistant always goes through its own approval flow (see `README.md#conversational-assistant-mode`).
+>>>>>>> origin/main
 
 ## Main commands
 
