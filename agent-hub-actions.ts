@@ -31,7 +31,7 @@ export function validateOmpSelection(
 		return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + sep);
 	});
 	if (!inRoots) return { ok: false, error: "Session path is outside the configured oh-my-pk roots." };
-	if (!existsSync(path)) return { ok: false, error: "Session file does not exist (it may have been archived or removed)." };
+	if (!existsSync(resolved)) return { ok: false, error: "Session file does not exist (it may have been archived or removed)." };
 	return { ok: true };
 }
 

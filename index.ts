@@ -1888,12 +1888,20 @@ export default function speakExtension(pi: ExtensionAPI) {
 			} catch (error) {
 				const reason = `Failed to run remote turn: ${getErrorMessage(error)}`;
 				diagnostics.lastErrors.remote = reason;
-				// H3 parity: a failed ompk --resume (stale/archived path) clears the
-				// selection so we don't keep running the broken resume every turn.
-				if (executionPlan.backend === "oh-my-pk" && ompSelection.get(undefined)) {
-					ompSelection.select(undefined, null);
-					appendSessionEvent("sess.ompk-select-cleared", "admin", { reason });
-					lastCtx?.ui?.notify?.("Cleared the ompk session selection after a resume failure.", "warning");
+			// H3 parity: only clear the selection when the failure is the resume
+				// target itself being gone (stale/archived/removed) — re-validate with the
+				// same shared validator. A transient failure (timeout, omp busy) leaves a
+				// valid path, so we keep the selection instead of nuking it every blip.
+				if (executionPlan.backend === "oh-my-pk") {
+					const selected = ompSelection.get(undefined);
+					if (selected) {
+						const recheck = validateOmpSelection(selected);
+						if (!recheck.ok) {
+							ompSelection.select(undefined, null);
+							appendSessionEvent("sess.omp-select-cleared", "admin", { reason, error: recheck.error });
+							lastCtx?.ui?.notify?.(`Cleared the omp session selection: ${recheck.error}`, "warning");
+						}
+					}
 				}
 				const failedMs = Date.now() - (startedWithAgent || Date.now());
 				agentRunMs = failedMs;
