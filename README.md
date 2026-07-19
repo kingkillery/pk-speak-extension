@@ -292,6 +292,7 @@ Common examples:
 
 ```text
 /speak on
+/speak agent
 /speak off
 /speak stop
 /speak status
@@ -311,6 +312,69 @@ Behavior:
 - the spoken version can optionally be rewritten for audio clarity
 - `/speak stop` interrupts playback without disabling speech mode
 
+#### `/speak agent` — agent-driven speech
+
+`/speak agent` enables a different model: the agent itself decides what to say and emits a `pk-speak "..."` shell command inline at the end of its turn. There is no second LLM summarizer pass and no auto-speak watcher collecting the full reply. The sanitizer still runs. If the agent says nothing worth hearing, no audio fires.
+
+Use `/speak on` for remote and phone paths (Telegram, browser app, HTTP API) where the reply is captured server-side and there is no shell. Use `/speak agent` for local interactive sessions where the agent has a working shell.
+
+See `docs/AGENT_SPEAK.md` for the full rationale and wiring instructions for codex and Claude Code.
+
+### `pk-speak` CLI
+
+`pk-speak` is a standalone CLI that synthesizes text to audio and plays it. It is what the agent calls when `/speak agent` mode is active, but it can also be run directly from any terminal.
+
+```text
+pk-speak "text to speak"
+pk-speak --voice en-US-GuyNeural "Done. Check the output."
+pk-speak --no-play --output /tmp/reply.mp3 "File saved."
+pk-speak --no-wait "Starting the build now."
+pk-speak --rewrite "$(cat summary.txt)"
+```
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--voice <name>` | provider default | Override TTS voice |
+| `--no-play` | — | Synthesize to file only; do not play |
+| `--no-wait` | — | Start playback and return immediately |
+| `--output <path>` | temp `.mp3` | Write audio to this path |
+| `--rewrite` | off | Enable the LLM rewrite-for-speech pass |
+| `--help`, `-h` | — | Print usage |
+| `--version`, `-v` | — | Print version |
+
+Exit codes: `0` success, `1` error (one clean stderr line), `2` missing text argument.
+
+### `pk-speak-mcp` MCP server (optional)
+
+`pk-speak-mcp` is a thin stdio MCP server that shells out to the `pk-speak` CLI. Use it when you are working in a runtime that prefers MCP tool-call integration over direct shell invocation — for example, Claude Code with the Bash tool restricted, or a remote codex or oh-my-pi session.
+
+```text
+pk-speak-mcp   # starts the stdio server; wire it into your MCP client config
+```
+
+It exposes one tool (`speak`) with input `{ text, voice? }`. On success it returns `"Spoke."` as an MCP text result. All diagnostics go to stderr.
+
+Wire it into Claude Code via `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pk-speak": { "command": "pk-speak-mcp", "args": [] }
+  }
+}
+```
+
+Wire it into Codex and oh-my-pi via `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.pk-speak]
+command = "pk-speak-mcp"
+args = []
+```
+
+Ready-to-paste config snippets for all three runtimes are in the `integrations/` directory.
 
 ### `/pk-speak`
 
@@ -945,11 +1009,17 @@ For a compact operator worksheet, use `docs/REMOTE_VALIDATION_RUN_SHEET.md`.
 - [index.ts](./index.ts)
 - [realtime-gateway.ts](./realtime-gateway.ts)
 - [tts.ts](./tts.ts)
+- [pk-speak.ts](./pk-speak.ts)
+- [pk-speak-mcp.ts](./pk-speak-mcp.ts)
+- [speech-preamble.ts](./speech-preamble.ts)
+- [audio-playback.ts](./audio-playback.ts)
 - [stt.ts](./stt.ts)
 - [phone-bridge.ts](./phone-bridge.ts)
 - [control-server.ts](./control-server.ts)
 - [listener/listener.py](./listener/listener.py)
 - [web/remote/index.html](./web/remote/index.html)
+- [integrations/](./integrations/)
+- [docs/AGENT_SPEAK.md](./docs/AGENT_SPEAK.md)
 - [docs/CODEBASE_MAP.md](./docs/CODEBASE_MAP.md)
 
 ## Release Notes

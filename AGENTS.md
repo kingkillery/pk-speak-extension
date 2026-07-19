@@ -15,8 +15,14 @@ npm test         # Run tests
 
 | File | Purpose |
 |------|---------|
+| `docs/AGENT_SPEAK.md` | Rationale, `PK_SPEAK_PREAMBLE` text, and wiring instructions for pi / codex / oh-my-pi / claude code; also covers the optional `pk-speak-mcp` MCP server |
+| `integrations/` | Ready-to-paste config snippets: `claude-code/` (CLAUDE.md paste + optional .mcp.json/SessionStart hook), `codex/` (AGENTS.md paste + config.toml stanza), `oh-my-pi/` (same AGENTS.md path as codex) |
 | `docs/VOICE_SESSION_BRIDGE.md` | Natural-language bridge for wake phrases and session targeting |
 | `docs/SESSION_OPERATIONS.md` | Focused operator guide for `/sess`, wake aliases, and the `/sess ui` management pane |
+| `speech-preamble.ts` | Exports `PK_SPEAK_PREAMBLE` — the shared instruction string injected by pi in `/speak agent` mode and pasted into codex/claude-code config |
+| `pk-speak.ts` | CLI entry point (`dist/pk-speak.js`); exports `parseArgs` (pure, tested) and `PkSpeakArgs` type |
+| `pk-speak-mcp.ts` | Stdio MCP server (`dist/pk-speak-mcp.js`, bin `pk-speak-mcp`); thin adapter that shells out to the `pk-speak` CLI; exposes one `speak` tool with `{ text, voice? }` input; all diagnostics go to stderr |
+| `audio-playback.ts` | Exports `getPlayerInvocation` (pure, platform-aware) and `playAudio` (cross-platform spawn); shared between the extension and the CLI |
 | `index.ts` | Extension entrypoint, command registration, state management |
 | `server-app.ts` | `pi-speak-server` — one-command desktop app: ensures the gateway, opens the loopback-only `/connect` pairing window (Edge app mode), `--install-shortcut` for Desktop/Start Menu |
 | `pairing.ts` | Shared pairing primitives: persistent install auth token (`%LOCALAPPDATA%/pi-speak/http-token`) + phone-facing base-URL discovery (Tailscale-first); used by the control server, tray, and server app |
@@ -65,6 +71,11 @@ Auto-resolution order:
 - **Local voice (`/mono`)**: Requires Python stack with `faster-whisper`, `sounddevice`, `numpy`
 - **Wake sensitivity**: Use `PI_SPEAK_WAKE_SENSITIVITY=low|medium|high` as the main operator control for how forgiving `PK` activation should be; use the lower-level fuzzy and compact env vars only as overrides
 - **Short numeric routes**: Keep `one/1` and `two/2` as distinct voice families. `PK one` / `PK1` should stay separate from `PK two` / `PK2`, while multi-word names like `PK to Google` must stay literal.
+- **Agent-driven speech**: `/speak agent` injects `PK_SPEAK_PREAMBLE` at `before_agent_start` and suppresses the `agent_end` auto-speak watcher. The agent emits `pk-speak "..."` itself. Classic `/speak on` is unchanged. Do not conflate the two modes.
+- **`pk-speak` CLI**: Wraps `synthesizeToFile` + `playAudio`. Set voice env vars BEFORE dynamic-importing `tts.ts` because `DEFAULT_*` constants are evaluated at module load. Exit 0 on success, exit 1 with a single clean stderr line on failure, exit 2 for missing text.
+- **`audio-playback.ts`**: `getPlayerInvocation` is pure (no side effects). `playAudio` spawns with `{ windowsHide: true, stdio: "ignore", shell: false }`. `wait=false` resolves as soon as the child is spawned. Always import from `"./audio-playback.js"` (`.js` extension, ESM + NodeNext).
+- **`speech-preamble.ts`**: `PK_SPEAK_PREAMBLE` is self-contained so it can be pasted into codex/oh-my-pi/claude-code config verbatim. Do not split or abbreviate it — the full text is what the other runtimes consume.
+- **`pk-speak-mcp.ts`**: a thin stdio MCP adapter. It MUST NOT reimplement TTS in-process. Resolve `pk-speak.js` as a sibling of the compiled `pk-speak-mcp.js` via `fileURLToPath(import.meta.url)` + `dirname`. Spawn `process.execPath + [ pkSpeakPath, ...(voice ? ["--voice", voice] : []), text ]`. Capture exit code; non-zero → MCP error result; zero → `{ content: [{ type: "text", text: "Spoke." }] }`. Never write to stdout except JSON-RPC — all diagnostics go to `console.error`.
 - **Operator UX**: `/sess` should surface the compact-lane summary inline, `/sess slots` should show the explicit PK1/PK2 lane ownership view, and `/sess ui` should launch the Ink management pane in a separate terminal so it does not steal the pi-coding-agent TTY.
 - **Phone setup UX**: `/pk-remote` is the shortest Android setup path. It should start the HTTP gateway if needed, choose public/Tailscale/LAN URLs in that order, and print a QR for the native `pi-speak://setup` deep link.
 - **Android control-surface parity**: the native app mirrors the web remote against the same gateway endpoints — session mutations (`/v1/sessions/rename|alias|archive|remove`), route target (`/v1/route`), compact slots (`/v1/sessions/slots`), agent discovery (`/v1/agents`), the SSE event feed (`/v1/events`), and the workspace file viewer (`/v1/workspace/file`). Client parsing lives in `android-app/.../api/GatewayOps.kt` (pure, unit-tested) and the SSE tail in `api/GatewayEventStream.kt`; when a new gateway endpoint is added for the web remote, extend those instead of burying JSON parsing in `MainActivity.kt`.

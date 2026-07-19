@@ -88,14 +88,20 @@ artifacts/
 .codegraph/
 tmp-phone-turn.*
 
-# Local agent handoffs, planning scratch, and generated memory diagnostics
-.handoff.md
+# Coverage output (rebuilt by npm run test:coverage)
+coverage/
+
+# Audit tool output, llm-wiki failure capture, and stray UI dump
+.audit-results.json
+.llm-wiki/
+window.xml
+
+# Session/handoff/review scratch and goal working notes
 handoff.md
+.handoff.md
 proprompt.md
 .prd/
-coverage/
 goals/
-.llm-wiki/skill-pipeline/failures/
 
 # Scratch files
 test-rl.js

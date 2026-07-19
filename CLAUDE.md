@@ -17,15 +17,16 @@ When the task involves spoken replies, wake-word listening, voice session routin
 
 1. `docs/VOICE_SESSION_BRIDGE.md`
 2. `docs/SESSION_OPERATIONS.md` for `/sess`, wake aliases, and multi-session operator flows
-3. `README.md`
-4. the relevant source file
+3. `docs/AGENT_SPEAK.md` for `/speak agent`, the `pk-speak` CLI, and `PK_SPEAK_PREAMBLE` wiring
+4. `README.md`
+5. the relevant source file
 
 `SKILL.md` is intentionally a pointer file.
 
 ## What This Repo Optimizes For
 
 - a conversational assistant with broad read-only access to sessions, background agents, and the workspace (workspace reads confined to the workspace root, capped, secret-shaped paths refused), but no mutation without explicit operator approval
-- natural spoken interaction
+- natural spoken interaction as one input channel among several
 - command-backed control surfaces
 - safe multi-session routing
 - one primary session-manager abstraction for normal operators
@@ -34,7 +35,9 @@ When the task involves spoken replies, wake-word listening, voice session routin
 
 ## Core Command Families
 
-- `/speak` → spoken replies
+- `/speak` → spoken replies; `/speak agent` for agent-driven speech via `pk-speak` (no auto-watcher, no rewrite pass)
+- `pk-speak` CLI → synthesize and play text from any shell; the mechanism the agent calls in `/speak agent` mode
+- `pk-speak-mcp` → optional stdio MCP server (bin); thin adapter over the CLI for clients where the Bash tool is unavailable; one `speak` tool, input `{ text, voice? }`
 - `/mono` → wake-word listener
 - `/sess` → session manager dashboard, naming, switching, edit wrapper, aliases, removal, export, plus `/sess ui` for the interactive Ink management pane
 - `/attn` → advanced ready-session broker controls
@@ -45,6 +48,11 @@ When the task involves spoken replies, wake-word listening, voice session routin
 ## Important Source Map
 
 - `index.ts` → command registration and runtime orchestration (also owns the routing-store watcher that reloads after pane writes)
+- `speech-preamble.ts` → exports `PK_SPEAK_PREAMBLE`; injected by pi in `/speak agent` mode; paste into codex/oh-my-pi/claude-code config for those runtimes; ready-to-paste snippets in `integrations/`
+- `pk-speak.ts` → CLI entry point compiled to `dist/pk-speak.js`; `parseArgs` is pure and tested; `main()` is the bin entrypoint
+- `pk-speak-mcp.ts` → MCP server entry point compiled to `dist/pk-speak-mcp.js` (bin `pk-speak-mcp`); thin stdio adapter that shells out to sibling `pk-speak.js`; never writes to stdout except JSON-RPC
+- `audio-playback.ts` → `getPlayerInvocation` (pure, platform-aware) and `playAudio` (cross-platform); shared between the extension and the CLI
+- `integrations/` → ready-to-paste config snippets for Claude Code (`CLAUDE.md` paste + optional `.mcp.json`), Codex, and oh-my-pi (`AGENTS.md` paste + `~/.codex/config.toml` stanza)
 - `realtime-gateway.ts` → conversational assistant core: Gemini Live session, read-only subagent/workspace tools, `propose_command` approval flow
 - `realtime-command-approval.ts` → approval registry for terminal/chat/kill/launch proposals
 - `voice-session-command.ts` → natural spoken session phrases
@@ -58,6 +66,7 @@ When the task involves spoken replies, wake-word listening, voice session routin
 - `realtime-gateway.ts` → conversational assistant persona and tool surface (read-only tools vs. approval-gated mutating tools) for the live-voice Gemini Live gateway
 - `realtime-command-approval.ts` → approval registry for non-terminal mutating tool calls (`launch_agent`, `archive_session`)
 - `README.md` → operator commands and examples
+- `docs/AGENT_SPEAK.md` → agent-driven speech rationale, preamble text, and per-runtime wiring guide
 
 ## Rules For Changes In This Area
 
@@ -73,6 +82,7 @@ If you add or change voice/session behavior:
   - `SKILL.md`
   - `docs/VOICE_SESSION_BRIDGE.md`
   - `docs/SESSION_OPERATIONS.md`
+  - `docs/AGENT_SPEAK.md` if agent-driven speech, `pk-speak` CLI, or `pk-speak-mcp` server behavior changed
   - `AGENTS.md`
   - `CLAUDE.md`
   - `README.md` if user-visible behavior changed
@@ -86,6 +96,8 @@ npm test
 ```
 
 Prefer coverage in:
+- `tests/pk-speak-cli.test.mjs`
+- `tests/audio-playback.test.mjs`
 - `tests/voice-session-command.test.mjs`
 - `tests/session-routing.test.mjs`
 - `tests/session-routing-store.test.mjs`

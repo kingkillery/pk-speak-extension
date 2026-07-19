@@ -68,9 +68,17 @@ import {
 } from "./tts.js";
 import { readAttentionSnapshots } from "./attention-broker.js";
 import { isGeminiLiveConfigured, runGeminiLiveTurn } from "./gemini-live-turn.js";
+import { getPlayerInvocation } from "./audio-playback.js";
+import { PK_SPEAK_PREAMBLE } from "./speech-preamble.js";
+import {
+	type SpeakMode,
+	normalizeSpeakMode,
+	isSpeakEnabled,
+} from "./speak-mode.js";
 
 type SpeakState = SpeakRuntimeState & {
 	enabled: boolean;
+	mode?: SpeakMode;
 };
 
 type MonoState = {
@@ -167,8 +175,8 @@ const REMOTE_SLASH_COMMANDS: RemoteSlashCommand[] = [
 	{
 		name: "speak",
 		description: "Enable spoken assistant replies and choose the TTS provider",
-		usage: "/speak [on|off|stop|status|test|providers|provider <name>|rewrite on|rewrite off]",
-		examples: ["/speak on", "/speak status", "/speak provider edge"],
+		usage: "/speak [on|off|agent|stop|status|test|providers|provider <name>|rewrite on|rewrite off]",
+		examples: ["/speak on", "/speak agent", "/speak status", "/speak provider edge"],
 		source: "extension",
 	},
 	{
@@ -411,23 +419,6 @@ function extractText(content: unknown): string {
 
 function getSpeakInvocation(outputPath: string) {
 	return getSpeakInvocationFromEnv(outputPath, DEFAULT_VOICE, process.env);
-}
-
-function getPlayerInvocation(filePath: string) {
-	const escaped = filePath.replace(/\\/g, "\\\\");
-	const ps = `
-Add-Type -AssemblyName presentationCore
-$player = New-Object System.Windows.Media.MediaPlayer
-$player.Open([Uri]::new("${escaped}"))
-Start-Sleep -Milliseconds 250
-$player.Play()
-while ($player.NaturalDuration.HasTimeSpan -eq $false) { Start-Sleep -Milliseconds 100 }
-$duration = [Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds)
-Start-Sleep -Milliseconds ($duration + 1200)
-$player.Stop()
-$player.Close()
-`;
-	return { command: "powershell.exe", args: ["-NoProfile", "-Command", ps] };
 }
 
 function normalizeBaseUrl(value: string) {
@@ -792,6 +783,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let speakState: SpeakState = {
 		enabled: false,
 		provider: "auto",
+		mode: "off",
 	};
 	let lastAssistantText = "";
 	let speakingProcess: ChildProcess | undefined;
@@ -890,6 +882,17 @@ export default function speakExtension(pi: ExtensionAPI) {
 		provider: speakState.provider,
 		rewriteEnabled: speakState.rewriteEnabled,
 	});
+
+	// Single source of truth for the speak mode. `enabled` stays as the legacy
+	// gate (true whenever mode is "on" or "agent") so all existing reads keep
+	// working; persisted state from older builds (mode-less) is normalized via
+	// normalizeSpeakMode in ./speak-mode.js.
+	const getSpeakMode = (): SpeakMode => normalizeSpeakMode(speakState);
+
+	const setSpeakMode = (mode: SpeakMode) => {
+		speakState.mode = mode;
+		speakState.enabled = isSpeakEnabled(mode);
+	};
 
 	const updateStatus = (ctx?: any) => {
 		const target = ctx || lastCtx;
@@ -2175,6 +2178,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const provider = resolveTtsProvider(getSpeakRuntimeState());
 		return {
 			enabled: speakState.enabled,
+			mode: getSpeakMode(),
 			configuredProvider: speakState.provider || "auto",
 			provider,
 			rewriteEnabled: isRewriteEnabled(getSpeakRuntimeState()),
@@ -2347,19 +2351,29 @@ export default function speakExtension(pi: ExtensionAPI) {
 	};
 
 	const handleSpeakAction = async (
-		action: "on" | "off" | "stop" | "status" | "test" | "providers" | "provider" | "rewrite",
+		action: "on" | "off" | "agent" | "stop" | "status" | "test" | "providers" | "provider" | "rewrite",
 		value?: string,
 		ctx?: any,
 	) => {
 		if (action === "on") {
 			clearRootVoiceDisable();
 			enableOmpSpeechConfig();
-			speakState.enabled = true;
+			setSpeakMode("on");
 			persistState();
 			setPhase("ready", ctx);
 			return {
 				ok: true,
 				message: `Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())}).`,
+				speak: getSpeakStatus(),
+			};
+		}
+		if (action === "agent") {
+			setSpeakMode("agent");
+			persistState();
+			setPhase("ready", ctx);
+			return {
+				ok: true,
+				message: `Agent speak mode enabled (${describeTtsProvider(getSpeakRuntimeState())}). The agent will speak via pk-speak.`,
 				speak: getSpeakStatus(),
 			};
 		}
@@ -2372,7 +2386,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			};
 		}
 		if (action === "off") {
-			speakState.enabled = false;
+			setSpeakMode("off");
 			persistState();
 			stopSpeaking(ctx);
 			updateStatus(ctx);
@@ -2380,11 +2394,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 		}
 		if (action === "status") {
 			const rewriteStatus = isRewriteEnabled(getSpeakRuntimeState()) ? "rewrite on" : "rewrite off";
+			const mode = getSpeakMode();
+			const modeLabel = mode === "agent" ? "agent" : mode === "on" ? "on" : "off";
 			return {
 				ok: true,
-				message: speakState.enabled
-					? `Speech mode is on (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}).`
-					: `Speech mode is off (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}).`,
+				message: `Speech mode is ${modeLabel} (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus}).`,
 				speak: getSpeakStatus(),
 			};
 		}
@@ -2420,7 +2434,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 			return { ok: false, message: `Unknown rewrite value "${value}". Use on or off.` };
 		}
-		speakState.enabled = true;
+		setSpeakMode("on");
 		persistState();
 		setPhase("ready", ctx);
 		void speakText(`Hey, this is Pi speak using ${describeTtsProvider(getSpeakRuntimeState())}.`, ctx);
@@ -2977,8 +2991,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 					updateMonoStatus(target);
 					const cue = playMonoCue("listening");
 					cue.on("error", () => {});
-					if (!speakState.enabled && !isRootVoiceDisabled()) {
-						speakState.enabled = true;
+				if (!speakState.enabled && !isRootVoiceDisabled()) {
+						setSpeakMode("on");
 						persistState();
 						setPhase("ready", target);
 					}
@@ -3818,6 +3832,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const options = [
 				"on",
 				"off",
+				"agent",
 				"stop",
 				"status",
 				"test",
@@ -3842,10 +3857,21 @@ export default function speakExtension(pi: ExtensionAPI) {
 			if (!raw || lower === "on" || lower === "enable" || lower === "start") {
 				clearRootVoiceDisable();
 				enableOmpSpeechConfig();
-				speakState.enabled = true;
+				setSpeakMode("on");
 				persistState();
 				setPhase("ready", ctx);
 				ctx.ui.notify(`Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
+				return;
+			}
+
+			if (lower === "agent") {
+				setSpeakMode("agent");
+				persistState();
+				setPhase("ready", ctx);
+				ctx.ui.notify(
+					`Agent speak mode enabled (${describeTtsProvider(getSpeakRuntimeState())}). The agent will speak via pk-speak.`,
+					"info",
+				);
 				return;
 			}
 
@@ -3859,7 +3885,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (lower === "off" || lower === "disable") {
-				speakState.enabled = false;
+				setSpeakMode("off");
 				persistState();
 				stopSpeaking(ctx);
 				updateStatus(ctx);
@@ -3869,10 +3895,10 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 			if (lower === "status") {
 				const rewriteStatus = isRewriteEnabled(getSpeakRuntimeState()) ? "rewrite on" : "rewrite off";
+				const mode = getSpeakMode();
+				const modeLabel = mode === "agent" ? "agent" : mode === "on" ? "on" : "off";
 				ctx.ui.notify(
-					speakState.enabled
-						? `Speech mode is on (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus})`
-						: `Speech mode is off (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus})`,
+					`Speech mode is ${modeLabel} (${describeTtsProvider(getSpeakRuntimeState())}, ${rewriteStatus})`,
 					"info",
 				);
 				return;
@@ -3912,7 +3938,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (lower === "test") {
-				speakState.enabled = true;
+				setSpeakMode("on");
 				persistState();
 				setPhase("ready", ctx);
 				void speakText(`Hey, this is Pi speak using ${describeTtsProvider(getSpeakRuntimeState())}.`, ctx);
@@ -3920,7 +3946,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			speakState.enabled = true;
+			setSpeakMode("on");
 			persistState();
 			setPhase("ready", ctx);
 			ctx.ui.notify(`Speech mode enabled (${describeTtsProvider(getSpeakRuntimeState())})`, "info");
@@ -3991,6 +4017,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		speakState = {
 			enabled: false,
 			provider: "auto",
+			mode: "off",
 		};
 		remoteState = {
 			enabled: !!remoteRuntime?.enabled,
@@ -4008,10 +4035,15 @@ export default function speakExtension(pi: ExtensionAPI) {
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type === "custom" && entry.customType === STATE_TYPE && entry.data && typeof entry.data === "object") {
 				const savedSpeakState = entry.data as SpeakState;
+				// Back-compat: older persisted entries have no `mode` field, only the
+				// legacy `enabled` boolean. Derive mode from enabled in that case, then
+				// re-derive enabled from mode so the two always stay consistent.
+				const restoredMode: SpeakMode = normalizeSpeakMode(savedSpeakState);
 				speakState = {
 					...speakState,
 					...savedSpeakState,
-					enabled: !!savedSpeakState.enabled,
+					mode: restoredMode,
+					enabled: isSpeakEnabled(restoredMode),
 				};
 			}
 			if (entry.type === "custom" && entry.customType === MONO_STATE_TYPE && entry.data && typeof entry.data === "object") {
@@ -4111,8 +4143,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const shouldInjectSpeechPrompt = speakState.enabled || forceSpeechPromptNextTurn;
 		forceSpeechPromptNextTurn = false;
 		if (!shouldInjectSpeechPrompt) return;
+		// Agent mode: the agent speaks itself via the pk-speak CLI, so inject the
+		// pk-speak preamble instead of the classic watcher/summarizer prompt.
+		const preamble = getSpeakMode() === "agent" ? PK_SPEAK_PREAMBLE : SPEECH_MODE_PROMPT;
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n${SPEECH_MODE_PROMPT}`,
+			systemPrompt: `${event.systemPrompt}\n\n${preamble}`,
 		};
 	});
 
@@ -4140,12 +4175,18 @@ export default function speakExtension(pi: ExtensionAPI) {
 		lastCtx = ctx;
 		piAgentProvider.handleAgentEnd();
 		const replyText = lastAssistantText.trim();
-		if (speakState.enabled && ctx.hasUI) {
+		// Agent mode self-speaks via the pk-speak CLI, so suppress the auto-speak
+		// watcher here to avoid double audio. Classic "on" mode keeps auto-speak.
+		if (speakState.enabled && getSpeakMode() !== "agent" && ctx.hasUI) {
 			if (replyText) {
 				void speakText(replyText, ctx);
 			} else {
 				setPhase("ready", ctx);
 			}
+		} else if (getSpeakMode() === "agent" && ctx.hasUI) {
+			// Agent mode never enters the speakText branch above, so the UI phase
+			// would otherwise stay stuck at "llm". Reset it back to "ready" here.
+			setPhase("ready", ctx);
 		}
 		if (pendingRemoteTurn) {
 			await resolvePendingPhoneTurn(ctx);
