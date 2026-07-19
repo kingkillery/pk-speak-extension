@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret } from "./setup-config.js";
-import { resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
+import { getAudioMimeType, resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
+import { transcribeAudioBuffer } from "./stt.js";
+import { runGeminiTextTurn } from "./gemini-live-turn.js";
 import {
 	describeSpeakPlaybackGate,
 	normalizeSpeakPlaybackGate,
@@ -24,44 +26,133 @@ const ROOT = resolve(DIST_DIR, "..");
 async function main() {
 	const argv = process.argv.slice(2);
 	const args = parseArgs(argv);
-	const command = String(args._ || "help").toLowerCase();
-	if (command === "help" || ((args.help || args.h) && !args._)) {
+
+	if (args.version || args.V) {
+		console.log(getPackageVersion());
+		return;
+	}
+
+	if ((args.help || args.h) && !args._) {
+		printHelp();
+		return;
+	}
+
+	if (!args._) {
+		console.error("Unknown pk-speak command");
+		printHelp();
+		process.exitCode = 1;
+		return;
+	}
+
+	const command = String(args._).toLowerCase();
+	const commandArgv = argv.slice(1);
+	const dryRun = hasFlag(commandArgv, "dry-run") || args["dry-run"] === true;
+	const wantsHelp = hasFlag(commandArgv, "help") || hasFlag(commandArgv, "h");
+
+	if (command === "help") {
 		printHelp();
 		return;
 	}
 	if (command === "setup" || command === "init") {
-		await runNodeScript(join(DIST_DIR, "pi-speak-pk.js"), argv.slice(1));
+		if (wantsHelp) {
+			printSetupHelp();
+			return;
+		}
+		await runNodeScript(join(DIST_DIR, "pi-speak-pk.js"), stripMetaFlags(commandArgv));
 		return;
 	}
 	if (command === "doctor") {
+		if (wantsHelp) {
+			printDoctorHelp();
+			return;
+		}
+		if (dryRun) {
+			printDoctorDryRun();
+			return;
+		}
 		printDoctor();
 		return;
 	}
 	if (command === "speak" || command === "say") {
-		await runSpeakCommand(argv.slice(1));
+		await runSpeakCommand(commandArgv);
 		return;
 	}
 	if (command === "wrap") {
-		await runWrapCommand(argv.slice(1));
+		await runWrapCommand(commandArgv);
+		return;
+	}
+	if (command === "brainstorm" || command === "bs") {
+		await runBrainstormCommand(commandArgv);
 		return;
 	}
 	if (command === "gateway" || command === "serve") {
-		await runNodeScript(join(DIST_DIR, "headless-gateway.js"), argv.slice(1));
+		if (wantsHelp) {
+			printGatewayHelp();
+			return;
+		}
+		const gatewayArgs = stripMetaFlags(commandArgv);
+		const liveMode = gatewayArgs.includes("--live");
+		const passthrough = gatewayArgs.filter((arg) => arg !== "--live");
+		const scriptPath = join(DIST_DIR, "headless-gateway.js");
+		const envExtras = liveMode ? { AGENT_PROVIDER: "gemini-live" } : undefined;
+		if (dryRun) {
+			printNodeScriptDryRun("gateway", scriptPath, passthrough, envExtras);
+			return;
+		}
+		await runNodeScript(scriptPath, passthrough, envExtras);
 		return;
 	}
 	if (command === "tray") {
-		await runNodeScript(join(DIST_DIR, "persistent-tray.js"), argv.slice(1));
+		if (wantsHelp) {
+			printTrayHelp();
+			return;
+		}
+		const scriptPath = join(DIST_DIR, "persistent-tray.js");
+		const passthrough = stripMetaFlags(commandArgv);
+		if (dryRun) {
+			printNodeScriptDryRun("tray", scriptPath, passthrough);
+			return;
+		}
+		await runNodeScript(scriptPath, passthrough);
 		return;
 	}
 	if (command === "mobile" || command === "qr" || command === "android") {
-		await runNodeScript(join(ROOT, "scripts", "qr-setup.mjs"), argv.slice(1));
+		if (wantsHelp) {
+			printMobileHelp();
+			return;
+		}
+		const scriptPath = join(ROOT, "scripts", "qr-setup.mjs");
+		const passthrough = stripMetaFlags(commandArgv);
+		if (dryRun) {
+			printNodeScriptDryRun("mobile", scriptPath, passthrough);
+			return;
+		}
+		await runNodeScript(scriptPath, passthrough);
 		return;
 	}
 	if (command === "admin" || command === "sessions") {
-		await runNodeScript(join(DIST_DIR, "ui", "admin.js"), argv.slice(1));
+		if (wantsHelp) {
+			printAdminHelp();
+			return;
+		}
+		const scriptPath = join(DIST_DIR, "ui", "admin.js");
+		const passthrough = stripMetaFlags(commandArgv);
+		if (dryRun) {
+			printNodeScriptDryRun("admin", scriptPath, passthrough);
+			return;
+		}
+		await runNodeScript(scriptPath, passthrough);
 		return;
 	}
 	if (command === "config") {
+		if (wantsHelp) {
+			printConfigHelp();
+			return;
+		}
+		if (dryRun) {
+			printConfigDryRun();
+			return;
+		}
 		printConfig();
 		return;
 	}
@@ -73,17 +164,25 @@ async function main() {
 function printHelp() {
 	console.log([
 		"Usage: pk-speak <command> [options]",
+		"       pk-speak --version",
 		"",
 		"Commands:",
-		"  setup       Run first-time setup",
-		"  doctor      Show configured backend, voice, APK, and gateway status inputs",
-		"  speak       Speak text from args or stdin using configured TTS",
-		"  wrap        Run a CLI command and speak start/finish notices",
-		"  gateway     Start the headless phone/control gateway",
-		"  tray        Start the Windows tray controller and gateway",
-		"  mobile      Print the Android setup/download QR",
-		"  admin       Open the sessions admin pane",
-		"  config      Show the saved setup profile path and masked values",
+		"  setup       Run first-time setup (no --dry-run)",
+		"  doctor      Show configured backend, voice, APK, and gateway status inputs (--dry-run)",
+		"  speak       Speak text from args or stdin using configured TTS (--dry-run)",
+		"  wrap        Run a CLI command and speak start/finish notices (--dry-run)",
+		"  brainstorm  Transcribe brainstorm audio using WhisperX and structure it (--dry-run)",
+		"  gateway     Start the headless phone/control gateway (add --live for Gemini Live barge-in) (--dry-run)",
+		"  tray        Start the Windows tray controller and gateway (--dry-run)",
+		"  mobile      Print the Android setup/download QR (--dry-run)",
+		"  admin       Open the sessions admin pane (--dry-run)",
+		"  config      Show the saved setup profile path and masked values (--dry-run)",
+		"  help        Show this help",
+		"",
+		"--dry-run support:",
+		"  Supported: doctor, speak, wrap, brainstorm, gateway, tray, mobile, admin, config",
+		"  Not supported: setup",
+		"  Dry-run prints the resolved plan and exits 0 without spawning subprocesses, opening ports, writing files, or playing audio.",
 		"",
 		"Typical flow:",
 		"  pi-speak-pk",
@@ -102,6 +201,193 @@ function printHelp() {
 	].join("\n"));
 }
 
+function printSetupHelp() {
+	console.log([
+		"Usage: pk-speak setup [options]",
+		"",
+		"Runs first-time setup via pi-speak-pk.",
+		"",
+		"Options:",
+		"  -h, --help    Show this help",
+		"",
+		"--dry-run is not supported for setup.",
+		"",
+		"Examples:",
+		"  pk-speak setup",
+		"  pk-speak init",
+	].join("\n"));
+}
+
+function printDoctorHelp() {
+	console.log([
+		"Usage: pk-speak doctor [--dry-run]",
+		"",
+		"Shows configured backend, voice, APK, and gateway status inputs.",
+		"",
+		"Options:",
+		"  --dry-run     Print the doctor plan without reading user env via powershell or mutating state",
+		"  -h, --help    Show this help",
+		"",
+		"Examples:",
+		"  pk-speak doctor --help",
+		"  pk-speak doctor --dry-run",
+		"  pk-speak doctor",
+	].join("\n"));
+}
+
+function printConfigHelp() {
+	console.log([
+		"Usage: pk-speak config [--dry-run]",
+		"",
+		"Shows the saved setup profile path and masked values.",
+		"",
+		"Options:",
+		"  --dry-run     Print the config plan without writing files",
+		"  -h, --help    Show this help",
+		"",
+		"Examples:",
+		"  pk-speak config --help",
+		"  pk-speak config --dry-run",
+		"  pk-speak config",
+	].join("\n"));
+}
+
+function printGatewayHelp() {
+	console.log([
+		"Usage: pk-speak gateway [--live] [--dry-run] [args...]",
+		"",
+		"Starts the headless phone/control gateway.",
+		"",
+		"Options:",
+		"  --live        Set AGENT_PROVIDER=gemini-live for barge-in",
+		"  --dry-run     Print the planned node command without spawning it",
+		"  -h, --help    Show this help",
+		"",
+		"Examples:",
+		"  pk-speak gateway --help",
+		"  pk-speak gateway --dry-run",
+		"  pk-speak gateway",
+		"  pk-speak gateway --live",
+	].join("\n"));
+}
+
+function printTrayHelp() {
+	console.log([
+		"Usage: pk-speak tray [--dry-run] [args...]",
+		"",
+		"Starts the Windows tray controller and gateway.",
+		"",
+		"Options:",
+		"  --dry-run     Print the planned node command without spawning it",
+		"  -h, --help    Show this help",
+		"",
+		"Examples:",
+		"  pk-speak tray --help",
+		"  pk-speak tray --dry-run",
+		"  pk-speak tray",
+	].join("\n"));
+}
+
+function printMobileHelp() {
+	console.log([
+		"Usage: pk-speak mobile [--dry-run] [args...]",
+		"",
+		"Prints the Android setup/download QR via scripts/qr-setup.mjs.",
+		"",
+		"Options:",
+		"  --dry-run     Print the planned node command without spawning it",
+		"  -h, --help    Show this help",
+		"",
+		"Examples:",
+		"  pk-speak mobile --help",
+		"  pk-speak mobile --dry-run",
+		"  pk-speak mobile",
+	].join("\n"));
+}
+
+function printAdminHelp() {
+	console.log([
+		"Usage: pk-speak admin [--dry-run] [args...]",
+		"",
+		"Opens the sessions admin pane.",
+		"",
+		"Options:",
+		"  --dry-run     Print the planned node command without spawning it",
+		"  -h, --help    Show this help",
+		"",
+		"Examples:",
+		"  pk-speak admin --help",
+		"  pk-speak admin --dry-run",
+		"  pk-speak admin",
+	].join("\n"));
+}
+
+function printDoctorDryRun() {
+	const configPath = getPiSpeakSetupConfigPath();
+	console.log("dry-run: pk-speak doctor");
+	console.log(`Would load setup config from: ${configPath}`);
+	console.log(`Package root: ${ROOT}`);
+	console.log("Would report: agent provider, voice router, TTS provider, playback gate, ElevenLabs key source, gateway port/token, realtime terminal audit path, Android APK, headless gateway, tray controller");
+	console.log("Would not spawn powershell.exe, open network ports, write files, or play audio");
+}
+
+function printConfigDryRun() {
+	const configPath = getPiSpeakSetupConfigPath();
+	console.log("dry-run: pk-speak config");
+	console.log(`Would read setup config from: ${configPath}`);
+	console.log("Would print masked profile values (agent provider, voice router, TTS provider, playback gate, API keys, gateway token)");
+	console.log("Would not write files, spawn subprocesses, open network ports, or play audio");
+}
+
+function printNodeScriptDryRun(
+	commandName: string,
+	scriptPath: string,
+	args: string[],
+	envExtras?: NodeJS.ProcessEnv,
+) {
+	console.log(`dry-run: pk-speak ${commandName}`);
+	if (!existsSync(scriptPath)) {
+		if (isDistBuildTarget(scriptPath)) {
+			console.log(`${scriptPath}: not built — run npm run build`);
+		} else {
+			console.log(`Command target not found: ${scriptPath}`);
+		}
+	} else {
+		console.log(`Would run: ${process.execPath} ${[scriptPath, ...args].join(" ")}`);
+	}
+	if (envExtras && Object.keys(envExtras).length > 0) {
+		const rendered = Object.entries(envExtras)
+			.map(([key, value]) => `${key}=${value ?? ""}`)
+			.sort()
+			.join(" ");
+		console.log(`Env: ${rendered}`);
+	}
+	console.log("Would not spawn a child process, open network ports, write files, or play audio");
+}
+
+function getPackageVersion(): string {
+	const pkgPath = join(ROOT, "package.json");
+	const raw = readFileSync(pkgPath, "utf8");
+	const pkg = JSON.parse(raw) as { version?: string };
+	return pkg.version ?? "0.0.0";
+}
+
+function hasFlag(argv: string[], name: string): boolean {
+	const long = `--${name}`;
+	const short = `-${name}`;
+	return argv.some((arg) => arg === long || arg === short);
+}
+
+function stripMetaFlags(argv: string[]): string[] {
+	return argv.filter((arg) => arg !== "--dry-run" && arg !== "--help" && arg !== "-h");
+}
+
+function isDistBuildTarget(scriptPath: string): boolean {
+	const normalized = scriptPath.replace(/\\/g, "/");
+	const distNormalized = DIST_DIR.replace(/\\/g, "/");
+	return normalized === distNormalized || normalized.startsWith(`${distNormalized}/`);
+}
+
 function printDoctor() {
 	const config = loadPiSpeakSetupConfig();
 	const configPath = getPiSpeakSetupConfigPath();
@@ -111,7 +397,7 @@ function printDoctor() {
 	console.log(`Package root: ${ROOT}`);
 	console.log(`Agent provider: ${config.agentProvider || process.env.AGENT_PROVIDER || "codex"}`);
 	console.log(`Voice router: ${config.executionRouterMode || process.env.PI_SPEAK_EXECUTION_ROUTER_MODE || "auto"}`);
-	console.log(`TTS provider: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "edge"}`);
+	console.log(`TTS provider: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "auto"}`);
 	console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ env: process.env, config }))}`);
 	console.log(`ElevenLabs key: ${elevenLabsEnv.summary}`);
 	if (elevenLabsEnv.warning) console.log(`Warning: ${elevenLabsEnv.warning}`);
@@ -186,15 +472,50 @@ async function runSpeakCommand(argv: string[]) {
 		return;
 	}
 
-	const text = (options.textParts.join(" ") || await readStdin()).trim();
+	let text = "";
+	if (options.input) {
+		const filePath = resolve(options.input);
+		if (!existsSync(filePath)) {
+			console.error(`Audio input file not found: ${filePath}`);
+			process.exitCode = 1;
+			return;
+		}
+		const fileBuffer = await readFile(filePath);
+		const mimeType = getAudioMimeType(filePath);
+		const result = await transcribeAudioBuffer(fileBuffer, mimeType);
+		text = result.text;
+		if (!options.quiet && options.dryRun) {
+			console.log(`Transcribed with ${result.provider}: ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`);
+		}
+	} else {
+		text = (options.textParts.join(" ") || await readStdin()).trim();
+	}
+
 	if (!text) {
-		console.error("No text provided. Pass text as arguments or pipe it on stdin.");
+		console.error("No text provided. Pass text as arguments, pipe it on stdin, or use --input with an audio file.");
 		printSpeakHelp();
 		process.exitCode = 1;
 		return;
 	}
 
-	await speakText(text, options);
+	let finalText = text;
+	if (options.summarize) {
+		finalText = await summarizeText(text);
+		if (!options.quiet && options.dryRun) {
+			console.log(`Summary: ${finalText.slice(0, 200)}${finalText.length > 200 ? "..." : ""}`);
+		}
+	}
+
+	await speakText(finalText, options);
+}
+
+async function summarizeText(text: string): Promise<string> {
+	const prompt = `Summarize the following text into one or two sentences suitable for spoken playback. Keep it concise and natural.\n\n${text}`;
+	const result = await runGeminiTextTurn(prompt);
+	if (!result.replyText || result.replyText === "Gemini completed the turn without returning text.") {
+		throw new Error("Summarization failed: Gemini returned no text.");
+	}
+	return result.replyText.trim();
 }
 
 async function speakText(text: string, options: SpeakTextOptions) {
@@ -300,7 +621,7 @@ function printWrapHelp() {
 		"",
 		"Options:",
 		"  --label <name>             Friendly name to say",
-		"  --provider <auto|edge|elevenlabs|openai|sag|higgs|stable-audio|legacy>",
+		"  --provider <auto|edge|gemini|elevenlabs|openai|sag|higgs|stable-audio|minimax|legacy>",
 		"  --cwd <path>               Working directory for the command",
 		"  --shell                    Run through the platform shell",
 		"  --capture                  Mirror and classify stdout/stderr",
@@ -312,7 +633,7 @@ function printWrapHelp() {
 		"  --start-text <text>        Override start notice",
 		"  --success-text <text>      Override success notice",
 		"  --failure-text <text>      Override failure prefix",
-		"  --dry-run                  Print the plan without running the command",
+		"  --dry-run                  Print the plan without running the command (supported)",
 		"",
 		"Examples:",
 		"  pk-speak wrap -- codex",
@@ -320,6 +641,7 @@ function printWrapHelp() {
 		"  pk-speak wrap --provider sag -- npm test",
 		"  pk-speak wrap --capture -- npm test",
 		"  pk-speak wrap --no-speak -- node -e \"console.log('ok')\"",
+		"  pk-speak wrap --dry-run -- npm test",
 	].join("\n"));
 }
 
@@ -327,22 +649,28 @@ function printSpeakHelp() {
 	console.log([
 		"Usage: pk-speak speak [options] [text...]",
 		"",
-		"Speaks text from command arguments or stdin using the saved pk-speak TTS setup.",
+		"Speaks text from command arguments, stdin, or an audio file using the saved pk-speak TTS setup.",
 		"",
 		"Options:",
-		"  --provider <auto|edge|elevenlabs|openai|sag|legacy>",
+		"  --provider <auto|edge|gemini|elevenlabs|openai|sag|higgs|stable-audio|minimax|legacy>",
+		"  --input <path>        Transcribe an audio file and speak the transcript",
+		"  --audio-input <path>  Alias for --input",
+		"  --summarize           Summarize the input text before speaking",
 		"  --output <path>       Write audio to a file",
 		"  --no-play             Synthesize only; do not play audio",
 		"  --allow-open-fallback  If hidden playback fails, open the file with the OS default app",
 		"  --gate <immediate|enter>  Require Enter before playing audio",
 		"  --keep                Keep the temp audio file when no --output is supplied",
 		"  --rewrite <true|false>",
-		"  --dry-run             Print provider and spoken text without synthesis",
+		"  --dry-run             Print provider and spoken text without synthesis (supported)",
 		"",
 		"Examples:",
 		"  pk-speak speak \"Tests passed\"",
 		"  codex exec \"run tests\" | pk-speak speak",
-		"  pk-speak speak --provider sag \"I need approval\"",
+		"  pk-speak speak --input recording.wav",
+		"  pk-speak speak --summarize \"Long status message here\"",
+		"  pk-speak speak --provider minimax \"Hello from Minimax\"",
+		"  pk-speak speak --dry-run \"Tests passed\"",
 	].join("\n"));
 }
 
@@ -356,6 +684,9 @@ type SpeakCommandOptions = {
 	gate?: SpeakPlaybackGate;
 	dryRun: boolean;
 	rewrite?: boolean;
+	summarize?: boolean;
+	input?: string;
+	quiet?: boolean;
 	help: boolean;
 };
 
@@ -370,6 +701,7 @@ type SpeakTextOptions = {
 	rewrite?: boolean;
 	quiet?: boolean;
 };
+
 
 type WrapCommandOptions = {
 	command: string[];
@@ -398,6 +730,7 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 		keep: false,
 		dryRun: false,
 		help: false,
+		quiet: false,
 	};
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i];
@@ -428,6 +761,12 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 			options.gate = normalizeSpeakPlaybackGate(argv[++i]);
 		} else if (key === "rewrite") {
 			options.rewrite = boolArg(argv[++i]);
+		} else if (key === "summarize") {
+			options.summarize = true;
+		} else if (key === "input" || key === "audio-input") {
+			options.input = argv[++i];
+		} else if (key === "quiet") {
+			options.quiet = true;
 		}
 	}
 	if (options.output) options.noPlay = options.noPlay || false;
@@ -500,9 +839,11 @@ function normalizeTtsProvider(value: string | undefined): TtsProvider | undefine
 		|| normalized === "edge"
 		|| normalized === "openai"
 		|| normalized === "elevenlabs"
+		|| normalized === "gemini"
 		|| normalized === "sag"
 		|| normalized === "higgs"
 		|| normalized === "stable-audio"
+		|| normalized === "minimax"
 	) {
 		return normalized;
 	}
@@ -534,25 +875,39 @@ async function readStdin() {
 
 async function playAudioFile(filePath: string, options: { allowOpenFallback?: boolean } = {}): Promise<"played" | "opened" | "skipped"> {
 	if (process.platform === "win32") {
+		// Prefer a headless CLI player when available (ffplay/mpg123/mpv). It is far more
+		// reliable than the WPF MediaPlayer fallback, which fails on headless/agent shells.
+		const winPlayer = getWindowsAudioPlayer();
+		if (winPlayer) {
+			try {
+				await runProcess(winPlayer, getAudioPlayerArgs(winPlayer, filePath));
+				return "played";
+			} catch {
+				// Fall through to the PowerShell MediaPlayer method below.
+			}
+		}
 		try {
-			await runProcess("powershell.exe", [
-				"-NoProfile",
-				"-Sta",
-				"-Command",
+			await runProcess(
+				"powershell.exe",
 				[
-					"$ErrorActionPreference = 'Stop'",
-					"$path = (Resolve-Path -LiteralPath $args[0]).Path",
-					"Add-Type -AssemblyName PresentationCore",
-					"$player = New-Object System.Windows.Media.MediaPlayer",
-					"$player.Open([Uri]::new($path))",
-					"$player.Play()",
-					"$limit = (Get-Date).AddSeconds(120)",
-					"while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $limit) { Start-Sleep -Milliseconds 50 }",
-					"if ($player.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 250) } else { Start-Sleep -Seconds 2 }",
-					"$player.Close()",
-				].join("; "),
-				filePath,
-			]);
+					"-NoProfile",
+					"-Sta",
+					"-Command",
+					[
+						"$ErrorActionPreference = 'Stop'",
+						"$path = (Resolve-Path -LiteralPath $env:PK_SPEAK_AUDIO_PATH).Path",
+						"Add-Type -AssemblyName PresentationCore",
+						"$player = New-Object System.Windows.Media.MediaPlayer",
+						"$player.Open([Uri]::new($path))",
+						"$player.Play()",
+						"$limit = (Get-Date).AddSeconds(120)",
+						"while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $limit) { Start-Sleep -Milliseconds 50 }",
+						"if ($player.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 250) } else { Start-Sleep -Seconds 2 }",
+						"$player.Close()",
+					].join("; "),
+				],
+				{ env: { ...process.env, PK_SPEAK_AUDIO_PATH: filePath } },
+			);
 			return "played";
 		} catch (error) {
 			if (options.allowOpenFallback) {
@@ -568,7 +923,7 @@ async function playAudioFile(filePath: string, options: { allowOpenFallback?: bo
 		console.warn("pk-speak playback skipped: no headless audio player found. Use --allow-open-fallback to open the audio file with the OS default app.");
 		return "skipped";
 	}
-	await runProcess(command, getUnixAudioPlayerArgs(command, filePath));
+	await runProcess(command, getAudioPlayerArgs(command, filePath));
 	return command === "xdg-open" ? "opened" : "played";
 }
 
@@ -580,21 +935,34 @@ function getUnixAudioPlayer(allowOpenFallback?: boolean) {
 	return allowOpenFallback ? "xdg-open" : undefined;
 }
 
-function getUnixAudioPlayerArgs(command: string, filePath: string) {
+function getWindowsAudioPlayer() {
+	for (const command of ["ffplay", "mpg123", "mpv"]) {
+		if (existsOnPath(command)) return command;
+	}
+	return undefined;
+}
+
+function getAudioPlayerArgs(command: string, filePath: string) {
 	if (command === "ffplay") return ["-nodisp", "-autoexit", "-loglevel", "quiet", filePath];
+	if (command === "mpv") return ["--no-video", "--really-quiet", filePath];
 	return [filePath];
 }
 
 function existsOnPath(command: string) {
-	const pathDirs = (process.env.PATH || "").split(process.platform === "win32" ? ";" : ":");
-	return pathDirs.some((dir) => dir && existsSync(join(dir, command)));
+	const isWin = process.platform === "win32";
+	const pathDirs = (process.env.PATH || "").split(isWin ? ";" : ":");
+	const exts = isWin
+		? [...(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").map((ext) => ext.trim()).filter(Boolean), ""]
+		: [""];
+	return pathDirs.some((dir) => dir && exts.some((ext) => existsSync(join(dir, command + ext))));
 }
 
-function runProcess(command: string, args: string[]) {
+function runProcess(command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}) {
 	return new Promise<void>((resolve, reject) => {
 		const child = spawn(command, args, {
 			stdio: "ignore",
 			windowsHide: true,
+			env: options.env ?? process.env,
 		});
 		child.on("error", reject);
 		child.on("close", (code) => {
@@ -731,13 +1099,16 @@ function commandLabel(command: string) {
 	return parts[parts.length - 1] || cleaned || "command";
 }
 
-async function runNodeScript(scriptPath: string, args: string[]) {
+async function runNodeScript(scriptPath: string, args: string[], envExtras?: NodeJS.ProcessEnv) {
 	if (!existsSync(scriptPath)) {
+		if (isDistBuildTarget(scriptPath)) {
+			throw new Error(`${scriptPath}: not built — run npm run build`);
+		}
 		throw new Error(`Command target not found: ${scriptPath}`);
 	}
 	const child = spawn(process.execPath, [scriptPath, ...args], {
 		cwd: process.cwd(),
-		env: buildPiSpeakEnv(),
+		env: { ...buildPiSpeakEnv(), ...(envExtras ?? {}) },
 		stdio: "inherit",
 		windowsHide: false,
 	});
@@ -764,6 +1135,95 @@ function parseArgs(argv: string[]): Args {
 		parsed[key] = value;
 	}
 	return parsed;
+}
+
+async function runBrainstormCommand(argv: string[]) {
+	const dryRun = hasFlag(argv, "dry-run");
+	const wantsHelp = hasFlag(argv, "help") || hasFlag(argv, "h");
+	const positional = stripMetaFlags(argv).filter((arg) => !arg.startsWith("-"));
+
+	if (wantsHelp || positional.length < 1) {
+		console.log([
+			"Usage: pk-speak brainstorm <audio-file-path> [--dry-run]",
+			"",
+			"Transcribes a brainstorm/word-vomit session using WhisperX and structures it into a markdown document.",
+			"",
+			"Options:",
+			"  --dry-run     Print the resolved plan without reading the audio file or calling the gateway",
+			"  -h, --help    Show this help",
+			"",
+			"Examples:",
+			"  pk-speak brainstorm --help",
+			"  pk-speak brainstorm recording.wav --dry-run",
+			"  pk-speak brainstorm recording.wav",
+		].join("\n"));
+		if (!wantsHelp && positional.length < 1) {
+			process.exitCode = dryRun ? 0 : 1;
+		}
+		return;
+	}
+
+	const filePath = resolve(positional[0]);
+	const config = loadPiSpeakSetupConfig();
+	const port = config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767";
+	const token = config.httpToken || process.env.PI_SPEAK_HTTP_TOKEN || "";
+	const host = process.env.PI_SPEAK_HTTP_HOST || "127.0.0.1";
+
+	if (dryRun) {
+		console.log("dry-run: pk-speak brainstorm");
+		console.log(`Audio file: ${filePath}`);
+		console.log(`Exists: ${existsSync(filePath) ? "yes" : "no"}`);
+		console.log(`Would POST to: http://${host}:${port}/v1/brainstorm`);
+		console.log(`Authorization: ${token ? "Bearer <configured>" : "none"}`);
+		console.log("Would not read the audio payload, open network ports, write files, or play audio");
+		return;
+	}
+
+	if (!existsSync(filePath)) {
+		console.error(`Audio file not found: ${filePath}`);
+		process.exitCode = 1;
+		return;
+	}
+
+	const fileBuffer = await import("node:fs/promises").then(m => m.readFile(filePath));
+	const mimeType = filePath.endsWith(".wav") ? "audio/wav"
+		: filePath.endsWith(".mp3") ? "audio/mpeg"
+		: filePath.endsWith(".m4a") ? "audio/mp4"
+		: filePath.endsWith(".webm") ? "audio/webm"
+		: "application/octet-stream";
+
+	console.log(`Sending brainstorm recording (${Math.round(fileBuffer.length / 1024)} KB) to gateway at http://${host}:${port}...`);
+	try {
+		const response = await fetch(`http://${host}:${port}/v1/brainstorm`, {
+			method: "POST",
+			headers: {
+				"Content-Type": mimeType,
+				"Authorization": token ? `Bearer ${token}` : "",
+			},
+			body: fileBuffer,
+		});
+
+		if (!response.ok) {
+			const errText = await response.text();
+			throw new Error(`Gateway returned status ${response.status}: ${errText}`);
+		}
+
+		const result = (await response.json()) as { ok: boolean; text?: string; formatted?: string; filePath?: string; error?: string };
+		if (!result.ok) {
+			throw new Error(result.error || "Brainstorming failed at gateway");
+		}
+
+		console.log("\n--- Brainstorm Processed Successfully ---");
+		console.log(`Saved output file to: ${result.filePath}`);
+		console.log("\nRaw Transcript Preview:");
+		console.log(result.text?.slice(0, 300) + (result.text && result.text.length > 300 ? "..." : ""));
+		console.log("\nStructured Markdown Output Preview:");
+		console.log(result.formatted?.slice(0, 500) + (result.formatted && result.formatted.length > 500 ? "..." : ""));
+	} catch (error) {
+		console.error(`Brainstorm command failed: ${error instanceof Error ? error.message : String(error)}`);
+		console.error("Please make sure the pk-speak gateway is running (run 'pk-speak gateway' first).");
+		process.exitCode = 1;
+	}
 }
 
 main().catch((error) => {

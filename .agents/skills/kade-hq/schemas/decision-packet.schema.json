@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pk-skills1.local/schemas/kade-hq/decision-packet.schema.json",
+  "title": "Kade-HQ Decision Packet",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "context": {"type": "string", "minLength": 1},
+    "options": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "label": {"type": "string", "minLength": 1},
+          "tradeoff": {"type": "string", "minLength": 1},
+          "reversible": {"type": "boolean"}
+        },
+        "required": ["id", "label", "tradeoff", "reversible"]
+      }
+    },
+    "recommendation": {"type": "string", "minLength": 1},
+    "decision_required": {"type": "string", "minLength": 1},
+    "deadline": {"type": ["string", "null"], "format": "date-time"},
+    "no_decision_consequence": {"type": ["string", "null"]},
+    "selected_option": {"type": ["string", "null"]},
+    "reason": {"type": ["string", "null"]},
+    "scope": {"type": "string", "minLength": 1},
+    "source": {"type": "string", "minLength": 1},
+    "recorded_at": {"type": "string", "format": "date-time"}
+  },
+  "required": [
+    "id",
+    "context",
+    "options",
+    "recommendation",
+    "decision_required",
+    "scope",
+    "source",
+    "recorded_at"
+  ]
+}

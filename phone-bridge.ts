@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { basename } from "node:path";
 import { RemoteTurnResult } from "./remote-turn-manager.js";
@@ -12,6 +13,9 @@ export type PhoneBridgeState = {
 	lastPollAt?: number;
 	consecutivePollFailures?: number;
 	lastError?: string;
+	linkAttempts?: number;
+	linkLockoutUntil?: number;
+	linkCodeIssuedAt?: number;
 };
 
 export type TelegramPhoneBridgeOptions = {
@@ -48,6 +52,9 @@ export class TelegramPhoneBridge {
 	private lastPollAt?: number;
 	private consecutivePollFailures = 0;
 	private lastError?: string;
+	private linkAttempts = 0;
+	private linkLockoutUntil?: number;
+	private linkCodeIssuedAt: number;
 	private running = false;
 	private loopPromise?: Promise<void>;
 
@@ -63,6 +70,9 @@ export class TelegramPhoneBridge {
 		this.lastPollAt = options.state.lastPollAt;
 		this.consecutivePollFailures = options.state.consecutivePollFailures || 0;
 		this.lastError = options.state.lastError;
+		this.linkAttempts = options.state.linkAttempts || 0;
+		this.linkLockoutUntil = options.state.linkLockoutUntil;
+		this.linkCodeIssuedAt = options.state.linkCodeIssuedAt || Date.now();
 	}
 
 	start() {
@@ -88,14 +98,26 @@ export class TelegramPhoneBridge {
 			lastPollAt: this.lastPollAt,
 			consecutivePollFailures: this.consecutivePollFailures,
 			lastError: this.lastError,
+			linkLockoutUntil: this.linkLockoutUntil,
 		};
 	}
 
 	resetLink() {
-		this.linkCode = generateLinkCode();
 		this.linkedChatId = undefined;
-		this.onStateChange(this.getStatePatch({ linkCode: this.linkCode, linkedChatId: undefined }));
+		this.rotateLinkCode();
 		return this.linkCode;
+	}
+
+	// Issue a fresh link code and reset the brute-force counters. Used on manual
+	// reset/unpair and whenever a code expires or is burned by too many failed
+	// attempts. Clears any active lockout — a freshly-issued code must be usable
+	// immediately, not blocked by a lockout window from the code it replaced.
+	private rotateLinkCode() {
+		this.linkCode = generateLinkCode();
+		this.linkCodeIssuedAt = Date.now();
+		this.linkAttempts = 0;
+		this.linkLockoutUntil = undefined;
+		this.onStateChange(this.getStatePatch());
 	}
 
 	private async pollLoop() {
@@ -130,12 +152,35 @@ export class TelegramPhoneBridge {
 
 		if (!this.linkedChatId) {
 			const text = message.text?.trim() || "";
+			const now = Date.now();
+			if (now < (this.linkLockoutUntil ?? 0)) {
+				if (text.startsWith("/link ")) {
+					await this.sendMessage(chatId, "Too many attempts. Try again later.");
+				}
+				return;
+			}
+			// A stale code silently rotates so it can't be brute-forced forever.
+			if (now - this.linkCodeIssuedAt > LINK_CODE_TTL_MS) {
+				this.rotateLinkCode();
+			}
 			if (text.toLowerCase() === `/link ${this.linkCode.toLowerCase()}`) {
 				this.linkedChatId = chatId;
+				this.linkAttempts = 0;
 				this.onStateChange(this.getStatePatch({ linkedChatId: chatId }));
 				await this.sendMessage(chatId, "Phone bridge linked. Send text or voice messages to Pi.");
 			} else if (text.startsWith("/link ")) {
-				await this.sendMessage(chatId, "Link code rejected.");
+				this.linkAttempts += 1;
+				if (this.linkAttempts >= MAX_LINK_ATTEMPTS) {
+					// rotateLinkCode() clears linkLockoutUntil (it's also used for a plain
+					// manual reset), so the lockout must be set AFTER it runs, not before.
+					this.rotateLinkCode();
+					this.linkLockoutUntil = now + LINK_LOCKOUT_MS;
+					this.onStateChange(this.getStatePatch());
+					await this.sendMessage(chatId, "Too many attempts. Link code has been reset — check /phone code for the new code.");
+				} else {
+					this.onStateChange(this.getStatePatch());
+					await this.sendMessage(chatId, "Link code rejected.");
+				}
 			}
 			return;
 		}
@@ -268,6 +313,9 @@ export class TelegramPhoneBridge {
 			lastPollAt: this.lastPollAt,
 			consecutivePollFailures: this.consecutivePollFailures,
 			lastError: this.lastError,
+			linkAttempts: this.linkAttempts,
+			linkLockoutUntil: this.linkLockoutUntil,
+			linkCodeIssuedAt: this.linkCodeIssuedAt,
 			...patch,
 		};
 	}
@@ -277,6 +325,12 @@ export class TelegramPhoneBridge {
 	}
 }
 
+const MAX_LINK_ATTEMPTS = 5;
+const LINK_LOCKOUT_MS = 5 * 60 * 1000;
+const LINK_CODE_TTL_MS = 10 * 60 * 1000;
+
 function generateLinkCode() {
-	return String(Math.floor(100000 + Math.random() * 900000));
+	// crypto.randomInt is uniform and unpredictable; the old Math.random() code
+	// was guessable and the /link handler had no throttling.
+	return String(randomInt(100000, 1000000));
 }

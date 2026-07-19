@@ -1,6 +1,6 @@
 import type { AgentProviderCapabilities, AgentProviderName } from "./agent-provider.js";
 
-export type RunnableAgentProviderName = Extract<AgentProviderName, "pi" | "codex" | "claude" | "oh-my-pi">;
+export type RunnableAgentProviderName = Extract<AgentProviderName, "pi" | "codex" | "claude" | "oh-my-pk">;
 
 export type AgentProviderSpec = {
 	name: AgentProviderName;
@@ -64,12 +64,12 @@ const AGENT_PROVIDER_SPECS: Record<AgentProviderName, AgentProviderSpec> = {
 		canResumeSession: (sessionId) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId?.trim() || ""),
 		buildResumeArgs: (sessionId) => ["--resume", sessionId],
 	},
-	"oh-my-pi": {
-		name: "oh-my-pi",
-		displayName: "Oh-my-pi",
-		aliases: ["oh-my-pi", "omp", "oh my pi"],
-		defaultExecutable: "omp",
-		executableEnv: "OMP_BIN",
+	"oh-my-pk": {
+		name: "oh-my-pk",
+		displayName: "Oh-my-pk",
+		aliases: ["oh-my-pk", "ompk", "oh my pk", "oh-my-pi", "omp", "oh my pi"],
+		defaultExecutable: "ompk",
+		executableEnv: "OMPK_BIN",
 		capabilities: { ...BASE_CAPABILITIES },
 		canResumeSession: () => false,
 	},
@@ -94,6 +94,13 @@ const AGENT_PROVIDER_SPECS: Record<AgentProviderName, AgentProviderSpec> = {
 		capabilities: { ...BASE_CAPABILITIES },
 		canResumeSession: () => false,
 	},
+	"9router": {
+		name: "9router",
+		displayName: "9Router",
+		aliases: ["9router", "nine-router", "nine router"],
+		capabilities: { ...BASE_CAPABILITIES, routing: false, steering: false, resumableSessions: false },
+		canResumeSession: () => false,
+	},
 };
 
 export function normalizeAgentProviderName(value: string | undefined): AgentProviderName | undefined {
@@ -107,7 +114,7 @@ export function normalizeAgentProviderName(value: string | undefined): AgentProv
 
 export function normalizeRunnableAgentProviderName(value: string | undefined): RunnableAgentProviderName | undefined {
 	const normalized = normalizeAgentProviderName(value);
-	return normalized === "pi" || normalized === "codex" || normalized === "claude" || normalized === "oh-my-pi" ? normalized : undefined;
+	return normalized === "pi" || normalized === "codex" || normalized === "claude" || normalized === "oh-my-pk" ? normalized : undefined;
 }
 
 export function getAgentProviderSpec(name: AgentProviderName): AgentProviderSpec {

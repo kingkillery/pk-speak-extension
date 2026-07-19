@@ -31,13 +31,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -53,6 +56,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,11 +70,15 @@ import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import com.example.RealtimeVoiceSession
+import com.example.RealtimeVoiceSessionListener
 import com.example.api.GatewaySessionDashboard
 import com.example.api.GatewaySessionEntry
 import com.example.api.GatewaySessionException
 import com.example.api.VoiceAgentClient
 import com.example.audio.AudioHelper
+import com.example.audio.StreamingPcmPlayer
+import com.example.audio.StreamingPcmRecorder
 import com.example.audio.TtsHelper
 import com.example.data.AppPreferences
 import com.example.data.ChatMessage
@@ -104,11 +113,12 @@ import java.util.Locale
  *   - ZERO ANIMATIONS. No infinite transitions, no pulse, no canvas draws at frame rate. The
  *     linear progress indicator is determinate (advances on state changes), not indeterminate.
  *   - LARGE TOUCH TARGETS. Palma is 824x1648 at 300 dpi; minimum 56.dp hit target.
- *   - READ-ONLY OH-MY-PI LANE VIEW. The Hub peek surfaces the gateway session dashboard,
- *     which already merges background lanes from `~/.omp/agent/sessions/` followed by `*.jsonl`. We do NOT
- *     expose a "start lane" or "send to lane" button -- the gateway has no endpoint that
- *     routes a turn to a specific background lane today, so those controls would be lies.
- *     If we add that later, we add it where the gateway supports it, not here.
+ *   - ACTIONABLE OH-MY-PI LANE VIEW. The Hub peek surfaces the gateway session dashboard,
+ *     which already merges background lanes from `~/.omp/agent/sessions/` followed by `*.jsonl`,
+ *     plus a task launcher and, per lane, a chat composer and a two-step archive control backed
+ *     by `/v1/herdr/agent/:id/{chat,kill}`. Deliberately no live-streaming transcript here: EPD
+ *     ghosting comes from frequent partial redraws, so lane detail refreshes on the same 10s
+ *     poll as the rest of the Hub peek instead of tailing an SSE feed line-by-line.
  */
 class BooxMainActivity : ComponentActivity() {
 
@@ -172,6 +182,11 @@ private val Ink = Color(0xFF111111)
 private val Paper = Color(0xFFFFFFFF)
 private val Chrome = Color(0xFFB8B8B8)
 private val SoftChrome = Color(0xFFE2E2E2)
+private val EpdInkMuted = Color(0xFF555555)
+private val EpdInkQuiet = Color(0xFF777777)
+private val EpdInkDisabled = Color(0xFFAAAAAA)
+private val EpdChromeDisabled = Color(0xFFCCCCCC)
+private val EpdChromeSelected = Color(0xFFE8E8E8)
 
 // ─── Root ───────────────────────────────────────────────────────────────────
 @Composable
@@ -192,8 +207,8 @@ private fun BooxRoot(
         )
     }
 
-    // Hub visibility is part of cockpit UX (peek the gateway dashboard including oh-my-pi
-    // background lanes). It does NOT add a "send to lane" button -- read-only by design.
+    // Hub visibility is part of cockpit UX: the gateway dashboard including oh-my-pk background
+    // lanes, a task launcher, and per-lane chat/archive controls (see HubPane).
     var showHub by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var forceCheckTrigger by remember { mutableIntStateOf(0) }
@@ -291,7 +306,6 @@ private fun BooxRoot(
             // ─── Header ──────────────────────────────────────────────
             BooxHeader(
                 state = state,
-                prefs = prefs,
                 onToggleHub = { showHub = !showHub; showSettings = false },
                 onToggleSettings = { showSettings = !showSettings; showHub = false },
             )
@@ -352,73 +366,57 @@ private fun BooxRoot(
 @Composable
 private fun BooxHeader(
     state: StudioRuntimeState,
-    prefs: AppPreferences,
     onToggleHub: () -> Unit,
     onToggleSettings: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, Chrome, RoundedCornerShape(4.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .heightIn(min = 56.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "pi-speak · e-ink",
+                text = "Pi Speak",
                 color = Ink,
-                fontSize = 14.sp,
+                fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
             )
-            val host = prefs.targetIpAddress.ifBlank { "(no gateway)" }
-            val session = prefs.codexSessionName.ifBlank { "default" }
-            Text(
-                text = "$host · $session",
-                color = Ink,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            // Status is paired with a [OK]/[WAIT]/[!!] glyph + the headline text. The
-            // text itself reads "Connected"/"Searching for gateway..."/"Gateway unreachable"
-            // so it carries meaning even if every color renders identically on EPD.
+            Spacer(modifier = Modifier.height(2.dp))
             val statusPrefix = when {
-                state.isGatewayConnected -> "[OK] "
-                state.isReconnecting -> "[WAIT] "
-                else -> "[!!] "
+                state.isGatewayConnected -> "OK"
+                state.isReconnecting -> "WAIT"
+                else -> "ERROR"
             }
-            val statusBorderWeight = if (state.isGatewayConnected) 1.dp else 2.dp
             Text(
-                text = statusPrefix + state.connectionStatusText,
+                text = "$statusPrefix ${state.connectionStatusText}",
                 color = Ink,
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.border(statusBorderWeight, Ink, RoundedCornerShape(2.dp))
-                    .padding(horizontal = 4.dp, vertical = 1.dp),
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
         OutlinedButton(
             onClick = onToggleHub,
-            border = BorderStroke(1.dp, Ink),
+            modifier = Modifier.heightIn(min = 56.dp),
+            border = BorderStroke(1.dp, Chrome),
             shape = RoundedCornerShape(4.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            Text("HUB", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Text("Hub", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(6.dp))
         OutlinedButton(
             onClick = onToggleSettings,
-            border = BorderStroke(1.dp, Ink),
+            modifier = Modifier.heightIn(min = 56.dp),
+            border = BorderStroke(1.dp, Chrome),
             shape = RoundedCornerShape(4.dp),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
         ) {
-            Text("CFG", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Text("Settings", color = Ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -493,25 +491,38 @@ private fun SessionSelector(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onToggle),
+                    .heightIn(min = 56.dp)
+                    .clickable(onClick = onToggle)
+                    .semantics {
+                        contentDescription = if (expanded) {
+                            "Collapse session selector. Current selection: $stripLabel"
+                        } else {
+                            "Open session selector. Current selection: $stripLabel"
+                        }
+                    },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = if (expanded) "▲ SESSION" else "▼ SESSION",
+                    text = "Session",
                     color = Ink,
-                    fontSize = 10.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = stripLabel,
-                    color = if (selectedSessionName.isNotBlank()) Ink else Color(0xFF888888),
+                    color = if (selectedSessionName.isNotBlank()) Ink else EpdInkQuiet,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (expanded) "−" else "+",
+                    color = Ink,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
                 )
             }
 
@@ -530,7 +541,7 @@ private fun SessionSelector(
                 if (projects.isEmpty()) {
                     Text(
                         text = "Loading projects...",
-                        color = Color(0xFF888888),
+                        color = EpdInkQuiet,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -539,7 +550,9 @@ private fun SessionSelector(
                         items(projects, key = { it }) { name ->
                             val sel = name == selectedProject
                             Surface(
-                                modifier = Modifier.clickable { onSelectProject(name) },
+                                modifier = Modifier
+                                    .heightIn(min = 56.dp)
+                                    .clickable { onSelectProject(name) },
                                 color = if (sel) Ink else Paper,
                                 shape = RoundedCornerShape(3.dp),
                                 border = BorderStroke(if (sel) 2.dp else 1.dp, if (sel) Ink else SoftChrome),
@@ -572,7 +585,7 @@ private fun SessionSelector(
                     Text(
                         text = if (selectedProject.isBlank()) "Select a project above."
                                else "No sessions used in the last 24h for $selectedProject.",
-                        color = Color(0xFF888888),
+                        color = EpdInkQuiet,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                     )
@@ -584,8 +597,9 @@ private fun SessionSelector(
                             Surface(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .heightIn(min = 56.dp)
                                     .clickable { onSelectSession(entry) },
-                                color = if (sel) Color(0xFFE8E8E8) else Paper,
+                                color = if (sel) EpdChromeSelected else Paper,
                                 shape = RoundedCornerShape(2.dp),
                                 border = BorderStroke(if (sel) 2.dp else 1.dp, if (sel) Ink else SoftChrome),
                             ) {
@@ -612,7 +626,7 @@ private fun SessionSelector(
                                     )
                                     Text(
                                         text = ago,
-                                        color = Color(0xFF666666),
+                                        color = EpdInkMuted,
                                         fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace,
                                     )
@@ -701,6 +715,97 @@ private fun BooxCockpit(
         }.sortedByDescending { it.lastActivity }
     }
 
+    // ─── Live mode state ─────────────────────────────────────────────────────
+    var liveSessionActive by remember { mutableStateOf(false) }
+    val liveSessionRef = remember { mutableStateOf<RealtimeVoiceSession?>(null) }
+    val liveRecorderRef = remember { mutableStateOf<StreamingPcmRecorder?>(null) }
+    val livePlayerRef = remember { mutableStateOf<StreamingPcmPlayer?>(null) }
+    var approvalDialogState by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    val liveTranscriptBufferRef = remember { mutableStateOf<RealtimeTranscriptBuffer?>(null) }
+    val approvalRejectionGuard = remember { TerminalApprovalRejectionGuard() }
+
+    // Ensure resources are released if the cockpit leaves the composition.
+    DisposableEffect(Unit) {
+        onDispose {
+            liveRecorderRef.value?.stop()
+            liveSessionRef.value?.disconnect()
+            livePlayerRef.value?.stop()
+            liveTranscriptBufferRef.value?.close()
+        }
+    }
+    fun rejectApproval(approvalId: String) {
+        if (approvalRejectionGuard.rejectOnce(approvalId) { liveSessionRef.value?.rejectTerminal(it) ?: false }) {
+            appendChat(state, prefs, "system", "[live] Command rejected by user.")
+        }
+        approvalDialogState = null
+    }
+
+    // ─── Realtime terminal-command approval dialog ────────────────────────────
+    approvalDialogState?.let { (approvalId, command, reason) ->
+        AlertDialog(
+            onDismissRequest = { rejectApproval(approvalId) },
+            title = {
+                Text(
+                    text = "APPROVE COMMAND?",
+                    color = Ink,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = command,
+                        color = Ink,
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    if (reason.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = reason,
+                            color = EpdInkMuted,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        approvalRejectionGuard.clear(approvalId)
+                        liveSessionRef.value?.approveTerminal(approvalId)
+                        approvalDialogState = null
+                    },
+                    modifier = Modifier.heightIn(min = 56.dp),
+                ) {
+                    Text(
+                        text = "APPROVE",
+                        color = Ink,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { rejectApproval(approvalId) },
+                    modifier = Modifier.heightIn(min = 56.dp),
+                ) {
+                    Text(
+                        text = "REJECT",
+                        color = Ink,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            },
+            containerColor = Paper,
+            tonalElevation = 0.dp,
+        )
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
 
         // ─── Chat log ─────────────────────────────────────────────
@@ -710,26 +815,40 @@ private fun BooxCockpit(
                 .weight(1f)
                 .fillMaxWidth()
                 .border(1.dp, Chrome, RoundedCornerShape(4.dp))
-                .padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             items(state.chatMessages, key = { it.id }) { msg -> BooxChatBubble(msg) }
             if (state.chatMessages.isEmpty()) {
                 item {
-                    Text(
-                        text = "Ready. Hold TALK to dictate, or type below.",
-                        color = Color(0xFF666666),
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace,
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 32.dp),
+                    ) {
+                        Text(
+                            text = "Ready when you are",
+                            color = Ink,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Choose a session, then type a prompt or hold Talk.",
+                            color = EpdInkMuted,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp,
+                        )
+                    }
                 }
             }
             if (state.isProcessing && state.latestReply.isBlank()) {
                 item {
                     Text(
-                        text = "...",
+                        text = "[WORK] Agent is responding",
                         color = Ink,
-                        fontSize = 14.sp,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
@@ -765,25 +884,6 @@ private fun BooxCockpit(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // ─── Latest reply (visible block so user can re-read without scrolling) ─
-        if (state.latestReply.isNotBlank() && !state.isProcessing) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Paper,
-                shape = RoundedCornerShape(4.dp),
-                border = BorderStroke(1.dp, Ink)
-            ) {
-                Text(
-                    text = state.latestReply,
-                    color = Ink,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(10.dp),
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
 
         // ─── Text input ───────────────────────────────────────────
         BooxTextInput(
@@ -809,27 +909,56 @@ private fun BooxCockpit(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // ─── Action row: TALK (push-to-talk) / STOP / AUTO-SPEAK ──
+        // ─── Voice actions: Talk leads; Live and Stop stay secondary ─────────
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().height(64.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Local recording-start timestamp. Stays in the Boox composable rather than
-            // on StudioRuntimeState so we don't widen the shared runtime state's surface.
+            // Local recording-start timestamp and auto-stop job for the 90s cap.
             var recordingStartedAtMs by remember { mutableLongStateOf(0L) }
+            var maxRecordingJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+            // HOLD TO TALK is disabled when live mode is active.
             TalkButton(
                 isRecording = state.isRecording,
-                isProcessing = state.isProcessing,
+                isProcessing = state.isProcessing || liveSessionActive,
                 onPress = {
-                    // Caller has already armed the mic permission via onRequestMic.
-                    // We start recording immediately; if permission isn't granted yet
-                    // AudioHelper.startRecording returns null and state.isRecording stays false.
-                    if (!state.isProcessing && !state.isRecording) {
-                        recordingStartedAtMs = startVoiceRecording(state, audioHelper, ttsHelper)
+                    if (!state.isProcessing && !state.isRecording && !liveSessionActive) {
+                        val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!micGranted) {
+                            appendChat(state, prefs, "system",
+                                "Microphone permission is required. Tap again to grant it, or enable it in Settings → Apps → Pi Speak → Permissions.")
+                            onRequestMic()
+                        } else {
+                            recordingStartedAtMs = startVoiceRecording(state, audioHelper, ttsHelper)
+                            maxRecordingJob = scope.launch {
+                                delay(90_000L)
+                                if (state.isRecording) {
+                                    appendChat(state, prefs, "system",
+                                        "Recording auto-stopped after 90 seconds.")
+                                    val startedAt = recordingStartedAtMs
+                                    if (startedAt > 0L) {
+                                        stopAndSendVoiceTurn(
+                                            recordingStartedAtMs = startedAt,
+                                            state = state,
+                                            scope = scope,
+                                            client = client,
+                                            audioHelper = audioHelper,
+                                            ttsHelper = ttsHelper,
+                                            prefs = prefs,
+                                        )
+                                        recordingStartedAtMs = 0L
+                                    }
+                                }
+                            }
+                        }
                     }
                 },
                 onRelease = {
+                    maxRecordingJob?.cancel()
+                    maxRecordingJob = null
                     val startedAt = recordingStartedAtMs
                     if (startedAt > 0L && state.isRecording) {
                         stopAndSendVoiceTurn(
@@ -844,19 +973,170 @@ private fun BooxCockpit(
                         recordingStartedAtMs = 0L
                     }
                 },
-                modifier = Modifier.weight(1f).heightIn(min = 64.dp),
+                modifier = Modifier.weight(1.7f),
             )
 
-            StopButton(
-                enabled = state.isProcessing,
+            // LIVE toggle: starts / stops a full-duplex Gemini realtime voice session.
+            LiveButton(
+                isActive = liveSessionActive,
                 onClick = {
-                    stopCurrentTurn(state, scope, client, audioHelper, ttsHelper, prefs)
+                    if (liveSessionActive) {
+                        // Toggle OFF — tear down the live session cleanly.
+                        liveRecorderRef.value?.stop()
+                        liveSessionRef.value?.disconnect()
+                        livePlayerRef.value?.stop()
+                        liveSessionRef.value = null
+                        liveRecorderRef.value = null
+                        livePlayerRef.value = null
+                        liveSessionActive = false
+                        liveTranscriptBufferRef.value?.close()
+                    } else {
+                        // Toggle ON — check mic permission then start.
+                        val micGranted = ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!micGranted) {
+                            appendChat(state, prefs, "system",
+                                "Microphone permission is required for Live mode. Tap LIVE again after granting it.")
+                            onRequestMic()
+                        } else {
+                            val player = StreamingPcmPlayer()
+                            val recorder = StreamingPcmRecorder(context)
+                            val transcriptBuffer = RealtimeTranscriptBuffer()
+                            liveTranscriptBufferRef.value = transcriptBuffer
+                            val session = RealtimeVoiceSession(
+                                prefs = prefs,
+                                listener = object : RealtimeVoiceSessionListener {
+                                    override fun onConnected(sessionId: String) {
+                                        // Prepare playback and start streaming mic audio.
+                                        player.start()
+                                        recorder.start { seqId, pcm ->
+                                            liveSessionRef.value?.sendAudioChunk(seqId, pcm)
+                                        }
+                                        scope.launch {
+                                            appendChat(state, prefs, "system",
+                                                "[live] Connected: $sessionId")
+                                        }
+                                    }
+
+                                    override fun onAudioChunk(seqId: Int, pcm: ByteArray) {
+                                        // Deliver server audio directly to the player (background thread, no lock needed).
+                                        player.write(seqId, pcm)
+                                    }
+
+                                    override fun onTranscript(text: String) {
+                                        transcriptBuffer.append(text)
+                                    }
+
+                                    override fun onTranscriptComplete() {
+                                        val completedText = transcriptBuffer.drain()
+                                        if (completedText.isNotBlank()) {
+                                            scope.launch {
+                                                appendChat(state, prefs, "assistant", completedText)
+                                            }
+                                        }
+                                    }
+
+                                    override fun onInterrupt() {
+                                        // Interrupted output is partial; do not persist it as a complete reply.
+                                        transcriptBuffer.discardCurrentTurn()
+                                        player.stop()
+                                        player.start()
+                                    }
+
+                                    override fun onToolStart(name: String) {
+                                        scope.launch {
+                                            appendChat(state, prefs, "system", "[tool] $name")
+                                        }
+                                    }
+
+                                    override fun onToolComplete(name: String, output: String) {
+                                        scope.launch {
+                                            appendChat(state, prefs, "system",
+                                                "[tool done] $name: ${output.take(200)}")
+                                        }
+                                    }
+
+                                    override fun onApprovalRequired(
+                                        approvalId: String,
+                                        command: String,
+                                        reason: String,
+                                        cwd: String,
+                                        timeoutMs: Int,
+                                    ) {
+                                        scope.launch {
+                                            approvalDialogState = Triple(approvalId, command, reason)
+                                        }
+                                    }
+
+                                    override fun onApprovalResolved(approvalId: String) {
+                                        scope.launch {
+                                            approvalRejectionGuard.clear(approvalId)
+                                            if (approvalDialogState?.first == approvalId) {
+                                                approvalDialogState = null
+                                            }
+                                        }
+                                    }
+
+                                    override fun onError(message: String) {
+                                        scope.launch {
+                                            appendChat(state, prefs, "system",
+                                                "[live error] $message")
+                                            recorder.stop()
+                                            player.stop()
+                                            liveSessionRef.value = null
+                                            liveRecorderRef.value = null
+                                            livePlayerRef.value = null
+                                            liveSessionActive = false
+                                            transcriptBuffer.close()
+                                        }
+                                    }
+
+                                    override fun onDisconnected() {
+                                        scope.launch {
+                                            if (liveSessionActive) {
+                                                appendChat(state, prefs, "system",
+                                                    "[live] Disconnected.")
+                                                recorder.stop()
+                                                player.stop()
+                                            }
+                                            liveSessionRef.value = null
+                                            liveRecorderRef.value = null
+                                            livePlayerRef.value = null
+                                            liveSessionActive = false
+                                            transcriptBuffer.close()
+                                        }
+                                    }
+                                }
+                            )
+                            liveSessionRef.value = session
+                            liveRecorderRef.value = recorder
+                            livePlayerRef.value = player
+                            liveSessionActive = true
+                            session.connect()
+                        }
+                    }
                 },
-                modifier = Modifier.weight(1f).heightIn(min = 64.dp),
+                modifier = Modifier.weight(0.75f),
+            )
+
+            // STOP: cancels an in-flight HTTP turn OR interrupts Gemini mid-speech in live mode.
+            StopButton(
+                enabled = state.isProcessing || liveSessionActive,
+                onClick = {
+                    if (liveSessionActive) {
+                        liveSessionRef.value?.sendInterrupt()
+                        livePlayerRef.value?.stop()
+                        livePlayerRef.value?.start()
+                    } else {
+                        stopCurrentTurn(state, scope, client, audioHelper, ttsHelper, prefs)
+                    }
+                },
+                modifier = Modifier.weight(0.75f),
             )
         }
 
-        // ─── Auto-speak toggle (checkbox-style button) ────────────
+        // ─── Speak-replies toggle: controls audio output for both text and voice turns ─
         Spacer(modifier = Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -864,15 +1144,16 @@ private fun BooxCockpit(
         ) {
             OutlinedButton(
                 onClick = { prefs.autoSpeakEnabled = !prefs.autoSpeakEnabled },
+                modifier = Modifier.heightIn(min = 56.dp),
                 border = BorderStroke(1.dp, if (prefs.autoSpeakEnabled) Ink else Chrome),
                 shape = RoundedCornerShape(4.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 Text(
-                    text = if (prefs.autoSpeakEnabled) "[x] AUTO-SPEAK" else "[ ] AUTO-SPEAK",
+                    text = if (prefs.autoSpeakEnabled) "Speak on" else "Speak off",
                     color = Ink,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.SansSerif,
                     fontWeight = FontWeight.Bold,
                 )
             }
@@ -884,25 +1165,19 @@ private fun BooxCockpit(
                     audioHelper.stopPlayback()
                     state.playingMessageId = null
                 },
+                modifier = Modifier.heightIn(min = 56.dp),
                 border = BorderStroke(1.dp, Chrome),
                 shape = RoundedCornerShape(4.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 Text(
-                    text = "QUIET",
+                    text = "Quiet",
                     color = Ink,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.SansSerif,
                     fontWeight = FontWeight.Bold,
                 )
             }
-            Spacer(modifier = Modifier.weight(1f))
-            Text(
-                text = "v${BuildConfigEink.einkVersion}",
-                color = Color(0xFF888888),
-                fontSize = 10.sp,
-                fontFamily = FontFamily.Monospace,
-            )
         }
     }
 }
@@ -910,44 +1185,43 @@ private fun BooxCockpit(
 // ─── Chat bubble (read-only render of a single ChatMessage) ────────────────
 @Composable
 private fun BooxChatBubble(msg: ChatMessage) {
-    val (label, labelColor) = when (msg.role) {
-        "user" -> "YOU" to Ink
-        "assistant" -> "AGENT" to Ink
-        "system" -> "! SYSTEM" to Ink
-        "progress" -> "PROGRESS" to Color(0xFF555555)
-        else -> msg.role.uppercase(Locale.US) to Ink
+    val label = when (msg.role) {
+        "user" -> "You"
+        "assistant" -> "Agent"
+        "system" -> "System"
+        "progress" -> "Status"
+        else -> msg.role.replaceFirstChar { it.titlecase(Locale.US) }
     }
+    val messageSurface = if (msg.role == "user") SoftChrome else Paper
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Paper,
-        shape = RoundedCornerShape(2.dp),
-        border = BorderStroke(1.dp, SoftChrome)
+        color = messageSurface,
+        shape = RoundedCornerShape(3.dp),
     ) {
-        Column(modifier = Modifier.padding(8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = label,
-                    color = labelColor,
-                    fontSize = 10.sp,
+                    color = if (msg.role == "progress") EpdInkMuted else Ink,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Text(
                     text = formatTime(msg.timestampMs),
-                    color = Color(0xFF888888),
+                    color = EpdInkQuiet,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                 )
             }
             if (msg.text.isNotBlank()) {
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = msg.text,
                     color = Ink,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp,
                 )
             }
         }
@@ -969,7 +1243,7 @@ private fun BooxTextInput(
     onSend: () -> Unit,
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
         color = Paper,
         shape = RoundedCornerShape(4.dp),
         border = BorderStroke(1.dp, if (enabled) Ink else Chrome)
@@ -978,25 +1252,28 @@ private fun BooxTextInput(
             modifier = Modifier.padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+            Box(modifier = Modifier.weight(1f).heightIn(min = 56.dp)) {
                 BasicTextField(
                     value = value,
                     onValueChange = onValueChange,
                     enabled = enabled,
                     textStyle = TextStyle(
-                        color = if (enabled) Ink else Color(0xFF999999),
-                        fontSize = 14.sp,
-                        fontFamily = FontFamily.Monospace,
+                        color = if (enabled) Ink else EpdInkDisabled,
+                        fontSize = 15.sp,
+                        lineHeight = 21.sp,
                     ),
                     cursorBrush = SolidColor(Ink),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 14.dp)
+                        .semantics { contentDescription = "Prompt" },
                 )
                 if (value.isEmpty()) {
                     Text(
-                        text = "type a prompt...",
-                        color = Color(0xFFAAAAAA),
-                        fontSize = 14.sp,
-                        fontFamily = FontFamily.Monospace,
+                        text = "Ask Pi Speak…",
+                        color = EpdInkDisabled,
+                        fontSize = 15.sp,
+                        modifier = Modifier.padding(vertical = 14.dp),
                     )
                 }
             }
@@ -1004,20 +1281,20 @@ private fun BooxTextInput(
             Button(
                 onClick = onSend,
                 enabled = enabled && value.isNotBlank(),
+                modifier = Modifier.heightIn(min = 56.dp),
                 shape = RoundedCornerShape(4.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Ink,
                     contentColor = Paper,
-                    disabledContainerColor = Color(0xFFCCCCCC),
-                    disabledContentColor = Color(0xFF777777),
+                    disabledContainerColor = EpdChromeDisabled,
+                    disabledContentColor = EpdInkQuiet,
                 ),
                 contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
             ) {
                 Text(
-                    text = "SEND",
+                    text = "Send",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
                 )
             }
         }
@@ -1035,12 +1312,18 @@ private fun TalkButton(
 ) {
     val container = when {
         isRecording -> Ink
-        isProcessing -> Color(0xFFCCCCCC)
+        isProcessing -> EpdChromeDisabled
         else -> Paper
     }
     val content = if (isRecording) Paper else Ink
+    val description = when {
+        isRecording -> "Recording. Release to send."
+        isProcessing -> "Talk unavailable while working."
+        else -> "Hold to talk. Release to send."
+    }
     Surface(
         modifier = modifier
+            .semantics { contentDescription = description }
             .then(
                 if (!isProcessing) {
                     Modifier.pointerInput(Unit) {
@@ -1064,21 +1347,20 @@ private fun TalkButton(
                     }
                 } else Modifier
             )
-            .border(1.dp, Ink, RoundedCornerShape(4.dp)),
+            .border(if (isRecording) 2.dp else 1.dp, Ink, RoundedCornerShape(4.dp)),
         color = container,
         shape = RoundedCornerShape(4.dp),
     ) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
                 text = when {
-                    isRecording -> "● RECORDING — RELEASE TO SEND"
-                    isProcessing -> "BUSY"
-                    else -> "HOLD TO TALK"
+                    isRecording -> "[REC] Release to send"
+                    isProcessing -> "Working"
+                    else -> "Hold to talk"
                 },
                 color = content,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
             )
         }
     }
@@ -1094,22 +1376,59 @@ private fun StopButton(
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier,
+        modifier = modifier.heightIn(min = 56.dp),
         border = BorderStroke(if (enabled) 2.dp else 1.dp, if (enabled) Ink else Chrome),
         shape = RoundedCornerShape(4.dp),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = Paper,
+            contentColor = Ink,
+            disabledContainerColor = EpdChromeDisabled,
+            disabledContentColor = EpdInkMuted,
+        ),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
     ) {
         Text(
-            text = if (enabled) "! STOP" else "STOP",
-            color = if (enabled) Ink else Color(0xFFAAAAAA),
-            fontSize = 14.sp,
+            text = if (enabled) "! Stop" else "Stop",
+            color = if (enabled) Ink else EpdInkDisabled,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace,
         )
     }
 }
 
-// ─── Hub pane: read-only gateway session dashboard including oh-my-pi lanes ─
+// ─── Live button: toggles full-duplex Gemini realtime voice session ────────
+@Composable
+private fun LiveButton(
+    isActive: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val container = if (isActive) Ink else Paper
+    val content = if (isActive) Paper else Ink
+    val borderWeight = if (isActive) 2.dp else 1.dp
+    Surface(
+        modifier = modifier
+            .heightIn(min = 56.dp)
+            .border(borderWeight, Ink, RoundedCornerShape(4.dp))
+            .clickable(onClick = onClick)
+            .semantics {
+                contentDescription = if (isActive) "Live voice active. Tap to disconnect." else "Start live voice."
+            },
+        color = container,
+        shape = RoundedCornerShape(4.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                text = if (isActive) "[ON] Live" else "Live",
+                color = content,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+// ─── Hub pane: gateway session dashboard including oh-my-pk lanes, plus task launch, chat, and archive ─
 private sealed class BooxHubUiState {
     data object Idle : BooxHubUiState()
     data object Loading : BooxHubUiState()
@@ -1142,8 +1461,10 @@ private fun HubPane(
 ) {
     var launchStatus by remember { mutableStateOf("") }
     var launching by remember { mutableStateOf(false) }
+    var launchingColab by remember { mutableStateOf(false) }
     var joiningCollab by remember { mutableStateOf(false) }
     var selectedOmpSessionPath by remember { mutableStateOf<String?>(null) }
+    var showTaskLauncher by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -1156,7 +1477,7 @@ private fun HubPane(
             .padding(8.dp)
     ) {
         Text(
-            text = "OMP AGENT HUB (read-only)",
+            text = "OMPK AGENT HUB",
             color = Ink,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
@@ -1164,34 +1485,78 @@ private fun HubPane(
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
-            text = "Persistent oh-my-pi sessions on the host. " +
-                "Tap ROUTE TURNS HERE on a session to direct voice/text turns into it. " +
-                "LAUNCH OMP HUB starts a new background session.",
-            color = Color(0xFF555555),
+            text = "Persistent oh-my-pk sessions on the host. " +
+                "Tap ROUTE TURNS HERE to direct voice/text turns into a lane, or expand a lane " +
+                "for a direct chat composer and an archive control. " +
+                "LAUNCH TASK starts a new background session with a prompt of your choice.",
+            color = EpdInkMuted,
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
         )
         Spacer(modifier = Modifier.height(8.dp))
 
-        // ─── Launch OMP Hub (EPD-friendly: bordered, monospace, no animation) ─
+        // ─── Launch task (EPD-friendly: bordered, monospace, no animation) ─────
+        OutlinedButton(
+            onClick = { showTaskLauncher = true },
+            modifier = Modifier.heightIn(min = 56.dp),
+            border = BorderStroke(2.dp, Ink),
+            shape = RoundedCornerShape(4.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = "+ LAUNCH TASK",
+                color = Ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // ─── Launch OMPK Hub (EPD-friendly: bordered, monospace, no animation) ─
         OutlinedButton(
             onClick = {
                 if (launching) return@OutlinedButton
                 launching = true
-                launchStatus = "Launching OMP hub..."
+                launchStatus = "Launching OMPK hub..."
                 // Launching the hub also routes turns to it.
-                prefs.activeAgent = "Gateway OMP (oh-my-pi)"
+                prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
                 scope.launch {
                     launchStatus = client.launchOmpHub()
                     launching = false
                 }
             },
+            modifier = Modifier.heightIn(min = 56.dp),
             border = BorderStroke(1.dp, Ink),
             shape = RoundedCornerShape(4.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Text(
-                text = if (launching) "LAUNCHING..." else "LAUNCH OMP HUB",
+                text = if (launching) "LAUNCHING..." else "LAUNCH OMPK HUB",
+                color = Ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        OutlinedButton(
+            onClick = {
+                if (launchingColab) return@OutlinedButton
+                launchingColab = true
+                launchStatus = "Launching Colab..."
+                scope.launch {
+                    launchStatus = client.launchColabWorkspace(prefs.workspacePath)
+                    launchingColab = false
+                }
+            },
+            modifier = Modifier.heightIn(min = 56.dp),
+            border = BorderStroke(1.dp, Ink),
+            shape = RoundedCornerShape(4.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = if (launchingColab) "LAUNCHING..." else "LAUNCH COLAB",
                 color = Ink,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
@@ -1224,6 +1589,7 @@ private fun HubPane(
                     joiningCollab = false
                 }
             },
+            modifier = Modifier.heightIn(min = 56.dp),
             border = BorderStroke(1.dp, Ink),
             shape = RoundedCornerShape(4.dp),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -1261,7 +1627,7 @@ private fun HubPane(
             BooxHubUiState.Empty -> {
                 Text(
                     text = "No sessions reported by gateway.",
-                    color = Color(0xFF555555),
+                    color = EpdInkMuted,
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                 )
@@ -1314,6 +1680,8 @@ private fun HubPane(
             is BooxHubUiState.Loaded -> {
                 HubLoadedContent(
                     dashboard = state.dashboard,
+                    client = client,
+                    scope = scope,
                     selectedOmpSessionPath = selectedOmpSessionPath,
                     onSelectSession = { path ->
                         scope.launch {
@@ -1322,24 +1690,133 @@ private fun HubPane(
                             launchStatus = msg
                         }
                     },
+                    onStatus = { launchStatus = it },
                 )
             }
         }
     }
+
+    if (showTaskLauncher) {
+        BooxLaunchTaskDialog(
+            client = client,
+            prefs = prefs,
+            onDismiss = { showTaskLauncher = false },
+            onLaunched = { message ->
+                launchStatus = message
+                showTaskLauncher = false
+            },
+        )
+    }
+}
+
+// ─── Task launcher dialog (EPD-friendly: pure B/W, no transition animation) ─
+@Composable
+private fun BooxLaunchTaskDialog(
+    client: VoiceAgentClient,
+    prefs: AppPreferences,
+    onDismiss: () -> Unit,
+    onLaunched: (String) -> Unit,
+) {
+    var cwd by remember { mutableStateOf(prefs.workspacePath) }
+    var prompt by remember { mutableStateOf("") }
+    var model by remember { mutableStateOf("") }
+    var launching by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    AlertDialog(
+        onDismissRequest = { if (!launching) onDismiss() },
+        title = {
+            Text("LAUNCH TASK", color = Ink, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        },
+        text = {
+            Column {
+                BasicTextField(
+                    value = cwd,
+                    onValueChange = { cwd = it },
+                    enabled = !launching,
+                    textStyle = TextStyle(color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Ink),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
+                )
+                Text("^ working dir", color = EpdInkQuiet, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Spacer(modifier = Modifier.height(8.dp))
+                BasicTextField(
+                    value = prompt,
+                    onValueChange = { prompt = it },
+                    enabled = !launching,
+                    textStyle = TextStyle(color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Ink),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp)
+                        .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
+                )
+                Text("^ prompt", color = EpdInkQuiet, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                Spacer(modifier = Modifier.height(8.dp))
+                BasicTextField(
+                    value = model,
+                    onValueChange = { model = it },
+                    enabled = !launching,
+                    textStyle = TextStyle(color = Ink, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Ink),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(8.dp),
+                )
+                Text("^ model (optional)", color = EpdInkQuiet, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (!launching) {
+                        launching = true
+                        scope.launch {
+                            val message = client.launchSession(
+                                cwd = cwd.trim().ifBlank { null },
+                                prompt = prompt.trim().ifBlank { null },
+                                model = model.trim().ifBlank { null },
+                            )
+                            launching = false
+                            onLaunched(message)
+                        }
+                    }
+                },
+                modifier = Modifier.heightIn(min = 56.dp),
+            ) {
+                Text(
+                    if (launching) "LAUNCHING..." else "LAUNCH",
+                    color = Ink,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = { if (!launching) onDismiss() },
+                modifier = Modifier.heightIn(min = 56.dp),
+            ) {
+                Text("CANCEL", color = EpdInkMuted, fontFamily = FontFamily.Monospace)
+            }
+        },
+        containerColor = Paper,
+    )
 }
 
 @Composable
 private fun HubLoadedContent(
     dashboard: GatewaySessionDashboard,
+    client: VoiceAgentClient,
+    scope: kotlinx.coroutines.CoroutineScope,
     selectedOmpSessionPath: String?,
     onSelectSession: (String) -> Unit,
+    onStatus: (String) -> Unit,
 ) {
     val byKind = remember(dashboard) { groupSessionsByKind(dashboard.sessions) }
-    val isOhMyPiGroupEmpty = byKind["oh-my-pi"].isNullOrEmpty()
+    val isOhMyPkGroupEmpty = byKind["oh-my-pk"].isNullOrEmpty()
     if (dashboard.sessions.isEmpty()) {
         Text(
             text = "No sessions reported by gateway.",
-            color = Color(0xFF555555),
+            color = EpdInkMuted,
             fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
         )
@@ -1349,9 +1826,9 @@ private fun HubLoadedContent(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // This is the OMP Agent Hub: surface ONLY oh-my-pi background agent lanes. codex/remote/
-        // other gateway sessions are intentionally hidden here. Read-only -- no "drive lane" button.
-        val order = listOf("oh-my-pi")
+        // This is the OMPK Agent Hub: surface ONLY oh-my-pk background agent lanes. codex/remote/
+        // other gateway sessions are intentionally hidden here.
+        val order = listOf("oh-my-pk")
         for (kind in order) {
             val entries = byKind[kind].orEmpty()
             if (entries.isEmpty()) continue
@@ -1369,16 +1846,19 @@ private fun HubLoadedContent(
                 HubSessionRow(
                     entry = entry,
                     dashboard = dashboard,
+                    client = client,
+                    scope = scope,
                     isSelected = entryPath != null && entryPath == selectedOmpSessionPath,
                     onSelect = { if (entryPath != null) onSelectSession(entryPath) },
+                    onStatus = onStatus,
                 )
             }
         }
-        if (isOhMyPiGroupEmpty) {
+        if (isOhMyPkGroupEmpty) {
             item(key = "omp-empty") {
                 Text(
-                    text = "No oh-my-pi background lanes running. Start one on the host (oh-my-pi 'agent mode') and it will appear here.",
-                    color = Color(0xFF555555),
+                    text = "No oh-my-pk background lanes running. Start one on the host (oh-my-pk agent mode) and it will appear here.",
+                    color = EpdInkMuted,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                 )
@@ -1391,9 +1871,17 @@ private fun HubLoadedContent(
 private fun HubSessionRow(
     entry: GatewaySessionEntry,
     dashboard: GatewaySessionDashboard,
+    client: VoiceAgentClient,
+    scope: kotlinx.coroutines.CoroutineScope,
     isSelected: Boolean = false,
     onSelect: () -> Unit = {},
+    onStatus: (String) -> Unit = {},
 ) {
+    var expanded by remember(entry.name) { mutableStateOf(false) }
+    var chatText by remember(entry.name) { mutableStateOf("") }
+    var sending by remember(entry.name) { mutableStateOf(false) }
+    var pendingKillToken by remember(entry.name) { mutableStateOf<String?>(null) }
+    var killing by remember(entry.name) { mutableStateOf(false) }
     val (statusGlyph, statusLabel, statusBorderWeight) = when {
         entry.isCurrentIn(dashboard) -> Triple("[+]", "current", 2.dp)
         entry.isReadyIn(dashboard) -> Triple("[+]", "ready", 2.dp)
@@ -1404,7 +1892,7 @@ private fun HubSessionRow(
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = if (isSelected) Color(0xFFE8E8E8) else Paper,
+        color = if (isSelected) EpdChromeSelected else Paper,
         shape = RoundedCornerShape(2.dp),
         border = BorderStroke(if (isSelected) 2.dp else 1.dp, if (isSelected) Ink else SoftChrome)
     ) {
@@ -1439,7 +1927,7 @@ private fun HubSessionRow(
             if (subtitle.isNotBlank()) {
                 Text(
                     text = subtitle,
-                    color = Color(0xFF555555),
+                    color = EpdInkMuted,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 2,
@@ -1450,7 +1938,7 @@ private fun HubSessionRow(
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = "subagents: ${entry.subagents.joinToString(", ") { it.name.ifBlank { it.id } }}",
-                    color = Color(0xFF555555),
+                    color = EpdInkMuted,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 2,
@@ -1463,7 +1951,7 @@ private fun HubSessionRow(
                 border = BorderStroke(if (isSelected) 2.dp else 1.dp, Ink),
                 shape = RoundedCornerShape(3.dp),
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
             ) {
                 Text(
                     text = if (isSelected) "[*] ROUTING TURNS HERE" else "[ ] ROUTE TURNS HERE",
@@ -1473,12 +1961,109 @@ private fun HubSessionRow(
                     fontFamily = FontFamily.Monospace,
                 )
             }
+            Spacer(modifier = Modifier.height(4.dp))
+            OutlinedButton(
+                onClick = { expanded = !expanded },
+                border = BorderStroke(1.dp, Chrome),
+                shape = RoundedCornerShape(3.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            ) {
+                Text(
+                    text = if (expanded) "^ HIDE CHAT / ARCHIVE" else "v CHAT / ARCHIVE",
+                    color = Ink,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+            if (expanded) {
+                Spacer(modifier = Modifier.height(4.dp))
+                BasicTextField(
+                    value = chatText,
+                    onValueChange = { chatText = it },
+                    enabled = !sending,
+                    textStyle = TextStyle(color = Ink, fontSize = 12.sp, fontFamily = FontFamily.Monospace),
+                    cursorBrush = SolidColor(Ink),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .border(1.dp, Chrome, RoundedCornerShape(3.dp)).padding(6.dp),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = {
+                            val text = chatText.trim()
+                            if (text.isNotEmpty() && !sending) {
+                                sending = true
+                                scope.launch {
+                                    val result = client.sendHubAgentChat(entry.name, text)
+                                    sending = false
+                                    if (result.ok) {
+                                        chatText = ""
+                                        onStatus("Sent to ${entry.name}.")
+                                    } else {
+                                        onStatus(result.error ?: "Message failed.")
+                                    }
+                                }
+                            }
+                        },
+                        border = BorderStroke(1.dp, Ink),
+                        shape = RoundedCornerShape(3.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp),
+                    ) {
+                        Text(
+                            text = if (sending) "SENDING..." else "SEND",
+                            color = Ink,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            if (killing) return@OutlinedButton
+                            killing = true
+                            scope.launch {
+                                val outcome = client.killHubAgent(entry.name, pendingKillToken)
+                                killing = false
+                                when {
+                                    outcome.ok -> {
+                                        pendingKillToken = null
+                                        onStatus("Archived ${entry.name}.")
+                                    }
+                                    outcome.code == "confirm_required" -> {
+                                        pendingKillToken = outcome.confirmToken
+                                        onStatus("Tap ARCHIVE again to confirm.")
+                                    }
+                                    else -> {
+                                        pendingKillToken = null
+                                        onStatus(outcome.error ?: "Archive failed.")
+                                    }
+                                }
+                            }
+                        },
+                        border = BorderStroke(if (pendingKillToken != null) 2.dp else 1.dp, Ink),
+                        shape = RoundedCornerShape(3.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp),
+                    ) {
+                        Text(
+                            text = if (pendingKillToken != null) "CONFIRM?" else "ARCHIVE",
+                            color = Ink,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
 private fun kindLabel(kind: String): String = when (kind) {
-    "oh-my-pi" -> "AGENT (oh-my-pi background lanes)"
+    "oh-my-pk" -> "AGENT (oh-my-pk background lanes)"
     "codex" -> "CODEX"
     "remote" -> "REMOTE"
     else -> "OTHER"
@@ -1488,8 +2073,9 @@ private fun groupSessionsByKind(sessions: List<GatewaySessionEntry>): Map<String
     val out = mutableMapOf<String, MutableList<GatewaySessionEntry>>()
     for (entry in sessions) {
         val key = when {
-            entry.source.equals("oh-my-pi", ignoreCase = true) -> "oh-my-pi"
-            entry.kind.equals("background", ignoreCase = true) -> "oh-my-pi"
+            entry.source.equals("oh-my-pk", ignoreCase = true) -> "oh-my-pk"
+            entry.source.equals("oh-my-pi", ignoreCase = true) -> "oh-my-pk"
+            entry.kind.equals("background", ignoreCase = true) -> "oh-my-pk"
             entry.provider.equals("codex", ignoreCase = true) -> "codex"
             entry.provider.equals("remote", ignoreCase = true) -> "remote"
             else -> "other"
@@ -1507,10 +2093,11 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
     var token by remember { mutableStateOf(prefs.remoteToken) }
     var session by remember { mutableStateOf(prefs.codexSessionName) }
     var agent by remember { mutableStateOf(prefs.activeAgent) }
-    val ompAgent = "Gateway OMP (oh-my-pi)"
+    val ompAgent = "Gateway OMPK (oh-my-pk)"
+    val legacyOmpAgent = "Gateway OMP (oh-my-pi)"
     // Remember what to fall back to when OMP routing is switched off.
     var previousAgent by remember {
-        mutableStateOf(if (agent == ompAgent) "Local Codex (Pi)" else agent.ifBlank { "Local Codex (Pi)" })
+        mutableStateOf(if (agent == ompAgent || agent == legacyOmpAgent) "Local Codex (Pi)" else agent.ifBlank { "Local Codex (Pi)" })
     }
     var showProgress by remember { mutableStateOf(prefs.showTurnProgress) }
     var speakProgress by remember { mutableStateOf(prefs.speakTurnProgress) }
@@ -1601,6 +2188,7 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
                         cameraPermission.launchPermissionRequest()
                     }
                 },
+                modifier = Modifier.heightIn(min = 56.dp),
                 border = BorderStroke(1.dp, Ink),
                 shape = RoundedCornerShape(4.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
@@ -1619,14 +2207,14 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
             }
         }
 
-        // Sends agentProvider="oh-my-pi" with each turn so the gateway runs omp -p --auto-approve.
-        // This is stateless (a fresh omp process per turn), not the same as routing into a running Hub session.
+        // Sends agentProvider="oh-my-pk" with each turn so the gateway runs ompk -p --auto-approve.
+        // This is stateless (a fresh ompk process per turn), not the same as routing into a running Hub session.
         ToggleRow(
-            label = "Send turns via oh-my-pi (stateless)",
-            value = agent == ompAgent,
+            label = "Send turns via oh-my-pk (stateless)",
+            value = agent == ompAgent || agent == legacyOmpAgent,
         ) { on ->
             if (on) {
-                if (agent != ompAgent) previousAgent = agent.ifBlank { "Local Codex (Pi)" }
+                if (agent != ompAgent && agent != legacyOmpAgent) previousAgent = agent.ifBlank { "Local Codex (Pi)" }
                 agent = ompAgent
             } else {
                 agent = previousAgent.ifBlank { "Local Codex (Pi)" }
@@ -1639,12 +2227,13 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
                     prefs.targetIpAddress = gateway.trim()
                     prefs.remoteToken = token.trim()
                     prefs.codexSessionName = session.trim()
-                    prefs.activeAgent = agent.trim()
+                    prefs.activeAgent = if (agent.trim() == legacyOmpAgent) ompAgent else agent.trim()
                     prefs.showTurnProgress = showProgress
                     prefs.speakTurnProgress = speakProgress
                     savedHint = true
                     onSave()
                 },
+                modifier = Modifier.heightIn(min = 56.dp),
                 shape = RoundedCornerShape(4.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Ink, contentColor = Paper),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
@@ -1654,6 +2243,7 @@ private fun SettingsPane(prefs: AppPreferences, onSave: () -> Unit, onClose: () 
             Spacer(modifier = Modifier.width(8.dp))
             OutlinedButton(
                 onClick = onClose,
+                modifier = Modifier.heightIn(min = 56.dp),
                 border = BorderStroke(1.dp, Ink),
                 shape = RoundedCornerShape(4.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
@@ -1673,7 +2263,7 @@ private fun SettingsRow(label: String, value: String, onChange: (String) -> Unit
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(
             text = label,
-            color = Color(0xFF555555),
+            color = EpdInkMuted,
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold,
@@ -1685,6 +2275,7 @@ private fun SettingsRow(label: String, value: String, onChange: (String) -> Unit
             cursorBrush = SolidColor(Ink),
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 56.dp)
                 .border(1.dp, Chrome, RoundedCornerShape(2.dp))
                 .padding(6.dp),
         )
@@ -1699,6 +2290,7 @@ private fun ToggleRow(label: String, value: Boolean, onChange: (Boolean) -> Unit
     ) {
         OutlinedButton(
             onClick = { onChange(!value) },
+            modifier = Modifier.heightIn(min = 56.dp),
             border = BorderStroke(1.dp, if (value) Ink else Chrome),
             shape = RoundedCornerShape(2.dp),
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),

@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "dist",
@@ -12,6 +13,8 @@
     "composite": true
   },
   "include": [
-    "*.ts"
+    "*.ts",
+    "scripts/benchmark-tts.ts",
+    "scripts/benchmark-stt.ts"
   ]
 }

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pk-skills1.local/schemas/kade-hq/commitment.schema.json",
+  "title": "Kade-HQ Commitment",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "outcome": {"type": "string", "minLength": 1},
+    "owner": {"type": ["string", "null"]},
+    "deadline": {"type": ["string", "null"], "format": "date-time"},
+    "next_check": {"type": ["string", "null"], "format": "date-time"},
+    "status": {
+      "type": "string",
+      "enum": ["proposed", "active", "waiting", "completed", "deferred", "cancelled"]
+    },
+    "source": {"type": "string", "minLength": 1},
+    "external_dependency": {"type": ["string", "null"]},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": ["string", "null"], "format": "date-time"}
+  },
+  "required": ["id", "outcome", "status", "source", "recorded_at"],
+  "anyOf": [
+    {"required": ["owner"]},
+    {"required": ["deadline"]},
+    {"required": ["external_dependency"]}
+  ]
+}
