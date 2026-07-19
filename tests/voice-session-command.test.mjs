@@ -54,6 +54,14 @@ test("voice parser maps archive/recover/launch/workspace phrases to slash comman
 		kind: "slash-command",
 		command: "/sess launch hub",
 	});
+	assert.deepEqual(parseVoiceSlashCommand("launch colab"), {
+		kind: "slash-command",
+		command: "/sess launch colab",
+	});
+	assert.deepEqual(parseVoiceSlashCommand("deploy to Colab"), {
+		kind: "slash-command",
+		command: "/sess launch colab",
+	});
 	assert.deepEqual(parseVoiceSlashCommand("list workspaces"), {
 		kind: "slash-command",
 		command: "/sess workspaces",

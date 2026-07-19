@@ -8,9 +8,11 @@ This plan covers three linked workstreams the user requested, in priority order:
 
 1. **Speed** — make `/v1/sessions` (the dashboard the Boox/phone Hub polls) at least 10x faster.
 2. **Navigation** — workspace-grouped, well-named sessions with natural 24h+ archiving (recoverable, stored locally) so ongoing work is easy to move between.
-3. **Voice** — control omp agents/sessions by voice at parity with the GUI (navigate, switch, send turns, launch, archive/recover).
+3. **Voice** — control oh-my-pk/ompk agents and sessions by voice at parity with the GUI (navigate, switch, send turns, launch, archive/recover).
 
-Primary constraint from the user: **oh-my-pi (omp) background agents are the primary connection / function of the app.** The dashboard, navigation, and voice surfaces must treat omp lanes as first-class, not an afterthought.
+Naming update, 2026-07-02: **oh-my-pk** / **ompk** is the canonical harness name. Legacy **oh-my-pi** / **omp** names remain accepted aliases for compatibility.
+
+Primary constraint from the user: **oh-my-pk (ompk) background agents are the primary connection / function of the app.** The dashboard, navigation, and voice surfaces must treat ompk lanes as first-class, not an afterthought.
 
 ---
 

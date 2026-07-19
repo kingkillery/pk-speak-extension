@@ -1,6 +1,15 @@
 # CLAUDE.md - pi-speak-pk
 
-Use this file as a quick repo-local operating guide for voice and multi-session control work.
+Use this file as a quick repo-local operating guide for the pi-speak conversational assistant and its voice/multi-session control surfaces. The assistant is the center; voice (`/mono`, `PK` wake phrase), Telegram (`/phone`), and the mobile/web remote (`/remote`, `/pk-remote`) are input/output channels that reach the same assistant.
+
+## Start Here For Conversational Assistant Work
+
+When the task involves the realtime assistant persona, the `propose_command` approval flow, read-only subagent/workspace tools, or how voice/remote turns reach the assistant, read these first:
+
+1. `realtime-gateway.ts` — assistant core, tool definitions, `propose_command` handling
+2. `realtime-command-approval.ts` — approval registry for terminal/chat/kill/launch proposals
+3. `README.md` — the conversational assistant thesis and how the input channels map to it
+4. the relevant source file
 
 ## Start Here For Natural Voice Control Work
 
@@ -15,7 +24,13 @@ When the task involves spoken replies, wake-word listening, voice session routin
 
 ## What This Repo Optimizes For
 
+<<<<<<< HEAD
+- a conversational assistant that reads subagent state and proposes commands for approval
+- natural spoken interaction as one input channel among several
+=======
+- a conversational assistant with broad read-only access to sessions, background agents, and the workspace (workspace reads confined to the workspace root, capped, secret-shaped paths refused), but no mutation without explicit operator approval
 - natural spoken interaction
+>>>>>>> origin/main
 - command-backed control surfaces
 - safe multi-session routing
 - one primary session-manager abstraction for normal operators
@@ -35,6 +50,8 @@ When the task involves spoken replies, wake-word listening, voice session routin
 ## Important Source Map
 
 - `index.ts` → command registration and runtime orchestration (also owns the routing-store watcher that reloads after pane writes)
+- `realtime-gateway.ts` → conversational assistant core: Gemini Live session, read-only subagent/workspace tools, `propose_command` approval flow
+- `realtime-command-approval.ts` → approval registry for terminal/chat/kill/launch proposals
 - `voice-session-command.ts` → natural spoken session phrases
 - `voice-routing.ts` → normalized target matching, compact numeric route families, and conflict checks
 - `session-routing.ts` → naming, aliases, dashboard formatting, removal rules, and `buildSessionDashboard` shared with the pane
@@ -43,6 +60,8 @@ When the task involves spoken replies, wake-word listening, voice session routin
 - `ui-launcher.ts` → spawns `/sess ui` detached in a new terminal
 - `ui/admin.tsx`, `ui/components/*.tsx`, `ui/actions.ts`, `ui/hooks/useSessionStore.ts`, `ui/selectors.ts` → Ink management pane (built via `tsconfig.ui.json` into `dist/ui/`)
 - `listener/listener.py` → hot audio loop, wake phrase, transcription segmentation
+- `realtime-gateway.ts` → conversational assistant persona and tool surface (read-only tools vs. approval-gated mutating tools) for the live-voice Gemini Live gateway
+- `realtime-command-approval.ts` → approval registry for non-terminal mutating tool calls (`launch_agent`, `archive_session`)
 - `README.md` → operator commands and examples
 
 ## Rules For Changes In This Area
@@ -52,6 +71,7 @@ If you add or change voice/session behavior:
 - prefer `/sess` as the main user-facing abstraction for routing and aliases
 - keep `one/1` and `two/2` deterministic and distinct; do not let fuzzy matching collapse multi-word names like `to Google` into numeric routes
 - keep `/sess` as the operator summary and `/sess slots` as the explicit compact-lane inspection surface
+- any new realtime-gateway tool that mutates state (subagent, terminal, or file) must go through the `tool_approval_required` / `command_approve` / `command_reject` flow — never execute a mutation inline
 - prefer extending extracted pure logic instead of burying new behavior inside `index.ts`
 - update tests first or alongside the change when possible
 - update all of:

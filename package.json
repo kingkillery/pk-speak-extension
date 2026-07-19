@@ -23,6 +23,7 @@
     "pk-speak": "dist/pk-speak.js",
     "pi-speak-admin": "dist/ui/admin.js",
     "pi-speak-tray": "dist/persistent-tray.js",
+    "pi-speak-server": "dist/server-app.js",
     "pi-speak-gateway": "dist/headless-gateway.js",
     "pi-speak-gemini-live-smoke": "dist/gemini-live-smoke.js",
     "pi-speak-qr": "scripts/qr-setup.mjs"
@@ -51,25 +52,29 @@
     "test:parallel": "npm run build && npm run build:ui && node --test --test-concurrency=4 tests/*.test.mjs",
     "test:coverage": "npm run build && npm run build:ui && c8 --reporter=text --reporter=lcov --include='dist/**/*.js' node --test tests/*.test.mjs",
     "test:stress": "npm run build && npm run build:ui && node --test tests/stress-adversarial.test.mjs",
+    "test:realtime-live": "npm run build && npm run build:ui && node --experimental-test-module-mocks --test tests/integration/*.test.mjs",
     "prepublishOnly": "npm run build && npm run build:ui",
     "qr": "node scripts/qr-setup.mjs"
   },
   "dependencies": {
+    "@google-cloud/speech": "^7.5.0",
     "@google/genai": "^1.52.0",
     "bonjour-service": "^1.4.0",
+    "cross-spawn": "^7.0.6",
     "ink": "^7.0.0",
     "node-edge-tts": "^1.2.10",
     "qrcode": "^1.5.4",
     "react": "^19.2.5"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "publishConfig": {
     "access": "public"
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "^0.66.1",
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.15.3",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.14",

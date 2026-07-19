@@ -72,8 +72,8 @@ async function runSetup(args: Args) {
 		config.ttsProvider = await choice(rl, {
 			label: "Reply voice provider",
 			current: config.ttsProvider,
-			defaultValue: valueArg(args.tts) || "edge",
-			choices: ["edge", "elevenlabs", "openai", "sag", "auto"],
+			defaultValue: valueArg(args.tts) || "auto",
+			choices: ["edge", "gemini", "elevenlabs", "openai", "sag", "auto"],
 			yes,
 			nonInteractive,
 		});
@@ -185,7 +185,7 @@ function printConfigSummary(config: PiSpeakSetupConfig, heading: string) {
 	console.log(heading);
 	console.log(`Agent: ${config.agentProvider || "codex"}`);
 	console.log(`Voice router: ${config.executionRouterMode || "auto"}`);
-	console.log(`TTS: ${config.ttsProvider || "edge"}`);
+	console.log(`TTS: ${config.ttsProvider || "auto"}`);
 	console.log(`Playback gate: ${describeSpeakPlaybackGate(normalizeSpeakPlaybackGate(config.speakPlaybackGate) || "immediate")}`);
 	if (config.elevenLabsApiKey) console.log(`ElevenLabs key: ${maskSecret(config.elevenLabsApiKey)}`);
 	if (config.openAiKey) console.log(`OpenAI audio key: ${maskSecret(config.openAiKey)}`);
@@ -211,7 +211,7 @@ function printDoctor() {
 	console.log(`Config: ${existsSync(configPath) ? configPath : "not found"}`);
 	console.log(`Package root: ${ROOT}`);
 	console.log(`Agent: ${config.agentProvider || process.env.AGENT_PROVIDER || "codex"}`);
-	console.log(`TTS: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "edge"}`);
+	console.log(`TTS: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "auto"}`);
 	console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ env: process.env, config }))}`);
 	console.log(`Gateway port: ${config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767"}`);
 	console.log(`Android APK: ${existsSync(join(ROOT, "android-app", ".build-outputs", "app-debug.apk")) ? "bundled" : "not bundled"}`);
@@ -228,7 +228,7 @@ function printHelp() {
 		"  --non-interactive         Do not prompt; use args/defaults",
 		"  --provider <codex|claude|pi>",
 		"  --router <auto|codex|claude|pi>",
-		"  --tts <edge|elevenlabs|openai|sag|auto>",
+		"  --tts <edge|gemini|elevenlabs|openai|sag|auto>",
 		"  --speak-gate <immediate|enter>  Require Enter before spoken playback",
 		"  --mobile <true|false>     Include Android setup in next steps",
 		"  --tray <true|false>       Prefer the Windows tray launcher",

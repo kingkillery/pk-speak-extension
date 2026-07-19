@@ -3,10 +3,11 @@ import { closeSync, createReadStream, existsSync, mkdirSync, opendirSync, openSy
 import { readFile, rm } from "node:fs/promises";
 import dgram, { type Socket as UdpSocket } from "node:dgram";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { basename, dirname, join, parse, resolve } from "node:path";
-import { hostname, networkInterfaces, platform } from "node:os";
+import { hostname, platform } from "node:os";
 import QRCode from "qrcode";
+import { getOrCreateInstallAuthToken, getReachableBaseUrls, isTailscaleIpv4, pickPhoneFacingBaseUrl } from "./pairing.js";
 import Bonjour from "bonjour-service";
 import { WebSocketServer, WebSocket } from "ws";
 import "./realtime-types.js";
@@ -17,6 +18,13 @@ import { readExecutionPlans, readExecutionTraces } from "./conversation-executio
 import type { SessionDashboard, CompactRouteSlot } from "./session-routing.js";
 import type { AgentDiscoverySnapshot } from "./agent-discovery.js";
 import { getPiSpeakConfigDir } from "./setup-config.js";
+import { buildHerdrSnapshot, readHerdrPane, sendHerdrAgent, sendHerdrPane, type HerdrAgentSendPayload, type HerdrPaneReadResult, type HerdrPaneSendPayload, type HerdrSnapshot } from "./herdr-client.js";
+import { createDiskFallbackBinding } from "./herdr-agent-hub-disk.js";
+import { AgentHubGateway, type AgentHubBinding } from "./herdr-agent-hub-gateway.js";
+import { parseHubAgentId, parseHubChatRequest, parseHubKillConfirm } from "./herdr-agent-hub-schema.js";
+import { buildOhMyPiAgentHubDashboardCached } from "./agent-hub-dashboard.js";
+
+const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
 export type ControlServerState = {
 
@@ -31,6 +39,13 @@ export type ControlActionResult = {
 	message: string;
 	[key: string]: unknown;
 };
+
+function actionResultStatus(result: ControlActionResult): number {
+	const status = result.status;
+	return typeof status === "number" && Number.isInteger(status) && status >= 200 && status <= 599
+		? status
+		: result.ok ? 200 : 400;
+}
 
 export type SessionRenamePayload = {
 	sessionPath: string;
@@ -60,6 +75,17 @@ export type SessionLaunchPayload = {
 	provider?: string;
 	sessionDir?: string;
 	hubOnly?: boolean;
+	targetNode?: string;
+};
+
+export type HubPublishPayload = {
+	sessionPath: string;
+	cwd?: string;
+};
+
+export type HubResumePayload = {
+	link: string;
+	cwd?: string;
 };
 
 export type SessionArchivePayload = {
@@ -75,8 +101,8 @@ export type RemoteSlashCommand = {
 	source?: "extension" | "prompt" | "skill" | "builtin";
 };
 
-export type GatewayAgentProvider = "pi" | "codex" | "claude" | "oh-my-pi";
-export type ControlAgentProvider = GatewayAgentProvider | "gemini" | "gemini-live" | "elevenlabs";
+export type GatewayAgentProvider = "pi" | "codex" | "claude" | "oh-my-pk";
+export type ControlAgentProvider = GatewayAgentProvider | "gemini" | "gemini-live" | "elevenlabs" | "9router";
 
 export type ControlServerStatus = {
 	agent?: {
@@ -221,6 +247,7 @@ export type ControlServerOptions = {
 		cwd?: string,
 		mode?: "auto" | "live",
 		agentProvider?: GatewayAgentProvider,
+		model?: string,
 		clientKey?: string,
 	) => Promise<RemoteTurnResult>;
 	onVoiceTurn: (
@@ -231,6 +258,7 @@ export type ControlServerOptions = {
 		cwd?: string,
 		mode?: "auto" | "live",
 		agentProvider?: GatewayAgentProvider,
+		model?: string,
 		clientKey?: string,
 	) => Promise<RemoteTurnResult>;
 	onTurnCancel?: () => Promise<ControlActionResult> | ControlActionResult;
@@ -242,12 +270,25 @@ export type ControlServerOptions = {
 	onSessionResume?: (body: SessionResumePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionLaunch?: (body: SessionLaunchPayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionArchive?: (body: SessionArchivePayload) => Promise<ControlActionResult> | ControlActionResult;
-	/** Select (sessionPath) or deselect (null) the omp resume session for a client. */
+	onHubPublish?: (body: HubPublishPayload) => Promise<ControlActionResult> | ControlActionResult;
+	onHubResume?: (body: HubResumePayload) => Promise<ControlActionResult> | ControlActionResult;
+	isHubHandoffReady?: () => boolean;
+	/** Select (sessionPath) or deselect (null) the ompk resume session for a client. */
 	onOmpSelectSession?: (clientKey: string, sessionPath: string | null) => { ok: boolean; error?: string } | void;
 	onOmpGetSelectedSession?: (clientKey: string) => string | null;
 	getDiscoveredAgents?: () => string[] | AgentDiscoverySnapshot;
+	getHerdrSnapshot?: () => Promise<HerdrSnapshot>;
+	readHerdrPane?: (paneId: string | undefined, lines: number | undefined) => Promise<HerdrPaneReadResult>;
+	sendHerdrPane?: (payload: HerdrPaneSendPayload | undefined) => Promise<ControlActionResult>;
+	sendHerdrAgent?: (payload: HerdrAgentSendPayload | undefined) => Promise<ControlActionResult>;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
+	agentHub?: AgentHubBinding;
 	onRealtimeConnection?: (ws: WebSocket) => void;
+	onBrainstorm?: (
+		buffer: Buffer,
+		mimeType: string | undefined,
+		cwd?: string,
+	) => Promise<{ ok: boolean; text: string; formatted: string; filePath: string }>;
 };
 
 type AudioArtifact = {
@@ -358,15 +399,25 @@ export class ControlServer {
 	private readonly onSessionResume?: ControlServerOptions["onSessionResume"];
 	private readonly onSessionLaunch?: ControlServerOptions["onSessionLaunch"];
 	private readonly onSessionArchive?: ControlServerOptions["onSessionArchive"];
+	private readonly onHubPublish?: ControlServerOptions["onHubPublish"];
+	private readonly onHubResume?: ControlServerOptions["onHubResume"];
+	private readonly isHubHandoffReady: NonNullable<ControlServerOptions["isHubHandoffReady"]>;
 	private readonly onOmpSelectSession?: ControlServerOptions["onOmpSelectSession"];
 	private readonly onOmpGetSelectedSession?: ControlServerOptions["onOmpGetSelectedSession"];
 	private readonly getDiscoveredAgents?: ControlServerOptions["getDiscoveredAgents"];
 	private readonly tailSessionEvents?: ControlServerOptions["tailSessionEvents"];
+	private readonly getHerdrSnapshot: NonNullable<ControlServerOptions["getHerdrSnapshot"]>;
+	private readonly readHerdrPane: NonNullable<ControlServerOptions["readHerdrPane"]>;
+	private readonly sendHerdrPane: NonNullable<ControlServerOptions["sendHerdrPane"]>;
+	private readonly sendHerdrAgent: NonNullable<ControlServerOptions["sendHerdrAgent"]>;
 	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
+	private readonly onBrainstorm?: ControlServerOptions["onBrainstorm"];
 	private wss?: WebSocketServer;
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
+	private readonly _agentHubGateway: AgentHubGateway;
+	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
 		udpEnabled: false,
@@ -402,11 +453,33 @@ export class ControlServer {
 		this.onSessionResume = options.onSessionResume;
 		this.onSessionLaunch = options.onSessionLaunch;
 		this.onSessionArchive = options.onSessionArchive;
+		this.onHubPublish = options.onHubPublish;
+		this.onHubResume = options.onHubResume;
+		this.isHubHandoffReady = options.isHubHandoffReady || (() => false);
 		this.onOmpSelectSession = options.onOmpSelectSession;
 		this.onOmpGetSelectedSession = options.onOmpGetSelectedSession;
 		this.getDiscoveredAgents = options.getDiscoveredAgents;
+		this.getHerdrSnapshot = options.getHerdrSnapshot || (() => buildHerdrSnapshot());
+		this.readHerdrPane = options.readHerdrPane || ((paneId, lines) => readHerdrPane(paneId, lines));
+		this.sendHerdrPane = options.sendHerdrPane || ((payload) => sendHerdrPane(payload));
+		this.sendHerdrAgent = options.sendHerdrAgent || ((payload) => sendHerdrAgent(payload));
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
+		this._agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
+		this.onBrainstorm = options.onBrainstorm;
+	}
+
+	// Read-only view for the conversational realtime gateway: a genuinely
+	// narrow runtime object exposing only snapshot/detail, not chat/kill/
+	// revive/stream. The Pick<> return type alone only narrows at compile
+	// time -- the realtime gateway holds this behind an `any`-typed `server`
+	// reference, so returning `this._agentHubGateway` directly would still let
+	// a future (or buggy) realtime tool reach the mutating methods at runtime.
+	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail"> {
+		return {
+			snapshot: () => this._agentHubGateway.snapshot(),
+			detail: (id, tailLines) => this._agentHubGateway.detail(id, tailLines),
+		};
 	}
 
 	getRuntimeState() {
@@ -501,7 +574,10 @@ export class ControlServer {
 			this.state.port = address.port;
 		}
 
-		this.cleanupTimer = setInterval(() => this.cleanupExpiredAudio(), CLEANUP_INTERVAL_MS);
+		this.cleanupTimer = setInterval(() => {
+			this.cleanupExpiredAudio();
+			this.cleanupStaleRateLimitBuckets();
+		}, CLEANUP_INTERVAL_MS);
 		this.cleanupTimer.unref?.();
 		this.onStateChange({ enabled: true, host, port: this.state.port, authToken });
 		await this.startDiscoveryResponder().catch((error) => {
@@ -539,6 +615,9 @@ export class ControlServer {
 		const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
 		url.pathname = url.pathname.replace(/\/{2,}/g, "/");
 		this.applyCors(req, res, url);
+		if (url.pathname === "/v1/hub/publish" || url.pathname === "/v1/hub/resume") {
+			res.setHeader("Cache-Control", "no-store");
+		}
 
 		if (req.method === "OPTIONS") {
 			res.statusCode = 204;
@@ -556,15 +635,18 @@ export class ControlServer {
 				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 				return;
 			}
+			this.recordRemoteClient(req, url);
 			const id = decodeURIComponent(url.pathname.slice("/v1/audio/".length));
 			await this.handleAudioRequest(id, res);
 			return;
 		}
 
-		if (!this.isAuthorized(req, url, false)) {
+		const allowQueryToken = req.method === "GET" && url.pathname === "/v1/events";
+		if (!this.isAuthorized(req, url, allowQueryToken)) {
 			this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 			return;
 		}
+		this.recordRemoteClient(req, url);
 
 		const rateLimitError = this.checkRateLimit(req, url, localRequest);
 		if (rateLimitError) {
@@ -592,6 +674,18 @@ export class ControlServer {
 						allowedOrigins: [...this.allowedOrigins],
 					},
 					discovery: { ...this.discoveryDiagnostics },
+				},
+			});
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/pairing/status") {
+			this.writeJson(res, 200, {
+				ok: true,
+				lastRemoteClient: this.lastRemoteClient ?? null,
+				gateway: {
+					port: this.state.port ?? DEFAULT_PORT,
+					authRequired: !!this.state.authToken,
 				},
 			});
 			return;
@@ -672,6 +766,88 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/herdr") {
+			this.writeJson(res, 200, { ok: true, herdr: await this.getHerdrSnapshot() });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/herdr/pane/read") {
+			const linesParam = url.searchParams.get("lines");
+			const lines = linesParam ? Number.parseInt(linesParam, 10) : undefined;
+			const result = await this.readHerdrPane(url.searchParams.get("paneId") || undefined, lines);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/herdr/pane/send") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = await this.sendHerdrPane(payload as HerdrPaneSendPayload | undefined);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/herdr/agents") {
+			const snapshot = await this._agentHubGateway.snapshot();
+			this.writeJson(res, 200, { ok: true, generatedAtMs: Date.now(), ...snapshot });
+			return;
+		}
+
+		{
+			const agentMatch = /^\/v1\/herdr\/agent\/([^/]+)(?:\/(chat|revive|kill))?$/.exec(url.pathname);
+			if (agentMatch) {
+				const id = parseHubAgentId(decodeURIComponent(agentMatch[1] ?? ""));
+				if (!id) {
+					this.writeJson(res, 400, { ok: false, code: "bad_id", error: "Malformed agent id." });
+					return;
+				}
+				const action = agentMatch[2];
+				if (req.method === "GET" && !action) {
+					const lines = parsePositiveInt(url.searchParams.get("lines"), 80);
+					const agent = await this._agentHubGateway.detail(id, Math.min(lines, 500));
+					if (!agent) { this.writeJson(res, 404, { ok: false, code: "not_found", error: `Unknown agent: ${id}` }); return; }
+					this.writeJson(res, 200, { ok: true, agent });
+					return;
+				}
+				if (req.method === "POST" && action === "chat") {
+					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+					const parsed = parseHubChatRequest(payload, getPrimaryHeaderValue(req.headers["x-pi-speak-idempotency-key"]));
+					if (!parsed) { this.writeJson(res, 400, { ok: false, code: "bad_request", error: "Body must be { text } (non-empty, <=8192 chars)." }); return; }
+					const result = await this._agentHubGateway.chat(id, parsed.text, parsed.idempotencyKey);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+				if (req.method === "POST" && action === "revive") {
+					const result = await this._agentHubGateway.revive(id);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+				if (req.method === "POST" && action === "kill") {
+					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+					const confirm = parseHubKillConfirm(payload ?? undefined);
+					const result = await this._agentHubGateway.kill(id, confirm?.confirmToken);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+			}
+		}
+
+		{
+			const streamMatch = /^\/v1\/herdr\/stream\/([^/]+)$/.exec(url.pathname);
+			if (req.method === "GET" && streamMatch) {
+				const id = parseHubAgentId(decodeURIComponent(streamMatch[1] ?? ""));
+				if (!id) { this.writeJson(res, 400, { ok: false, code: "bad_id", error: "Malformed agent id." }); return; }
+				const fromByte = parseNonNegativeInt(url.searchParams.get("fromByte"), 0);
+				// SSE: long-lived stream — don't apply REQUEST_TIMEOUT_MS here.
+				await this._agentHubGateway.stream(id, res, fromByte);
+				return;
+			}
+		}
+		if (req.method === "POST" && url.pathname === "/v1/herdr/agent/send") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const result = await this.sendHerdrAgent(payload as HerdrAgentSendPayload | undefined);
+			this.writeJson(res, result.ok ? 200 : 400, result);
+			return;
+		}
 		if (req.method === "GET" && url.pathname === "/v1/commands") {
 			this.writeJson(res, 200, {
 				ok: true,
@@ -783,6 +959,42 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "POST" && url.pathname === "/v1/hub/publish") {
+			res.setHeader("Cache-Control", "no-store");
+			if (!this.onHubPublish) {
+				this.writeJson(res, 501, { ok: false, error: "Hub publish is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const sessionPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
+			const cwd = typeof payload?.cwd === "string" ? payload.cwd.trim() || undefined : undefined;
+			if (!sessionPath || (payload?.cwd !== undefined && typeof payload.cwd !== "string")) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: sessionPath is required and cwd must be a string." });
+				return;
+			}
+			const result = await this.onHubPublish({ sessionPath, cwd });
+			this.writeJson(res, actionResultStatus(result), result);
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/hub/resume") {
+			res.setHeader("Cache-Control", "no-store");
+			if (!this.onHubResume) {
+				this.writeJson(res, 501, { ok: false, error: "Hub resume is not available on this gateway." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const link = typeof payload?.link === "string" ? payload.link.trim() : "";
+			const cwd = typeof payload?.cwd === "string" ? payload.cwd.trim() || undefined : undefined;
+			if (!link || (payload?.cwd !== undefined && typeof payload.cwd !== "string")) {
+				this.writeJson(res, 400, { ok: false, error: "Invalid payload: link is required and cwd must be a string." });
+				return;
+			}
+			const result = await this.onHubResume({ link, cwd });
+			this.writeJson(res, actionResultStatus(result), result);
+			return;
+		}
+
 		if (req.method === "POST" && url.pathname === "/v1/sessions/resume") {
 			if (!this.onSessionResume) {
 				this.writeJson(res, 501, { ok: false, error: "Session resume is not available on this gateway." });
@@ -818,6 +1030,7 @@ export class ControlServer {
 				provider: "string",
 				sessionDir: "string",
 				hubOnly: "boolean",
+				targetNode: "string",
 			};
 			for (const [field, expected] of Object.entries(fieldTypes)) {
 				if (payload[field] !== undefined && typeof payload[field] !== expected) {
@@ -831,7 +1044,8 @@ export class ControlServer {
 			const provider = typeof payload.provider === "string" ? payload.provider : undefined;
 			const sessionDir = typeof payload.sessionDir === "string" ? payload.sessionDir : undefined;
 			const hubOnly = typeof payload.hubOnly === "boolean" ? payload.hubOnly : undefined;
-			const result = await this.onSessionLaunch({ cwd, prompt, model, provider, sessionDir, hubOnly });
+			const targetNode = typeof payload.targetNode === "string" ? payload.targetNode : undefined;
+			const result = await this.onSessionLaunch({ cwd, prompt, model, provider, sessionDir, hubOnly, targetNode });
 			this.writeJson(res, result.ok ? 200 : 400, result);
 			return;
 		}
@@ -885,33 +1099,41 @@ export class ControlServer {
 			return;
 		}
 
+<<<<<<< HEAD
 		if (req.method === "POST" && url.pathname === "/v1/omp/select-session") {
 			if (!this.onOmpSelectSession) {
 				this.writeJson(res, 501, { ok: false, error: "Omp session selection is not available on this gateway." });
 				return;
 			}
+=======
+		if (req.method === "POST" && (url.pathname === "/v1/ompk/select-session" || url.pathname === "/v1/omp/select-session")) {
+>>>>>>> origin/main
 			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
 			const rawPath = typeof payload?.sessionPath === "string" ? payload.sessionPath.trim() : "";
 			const explicitClient = typeof payload?.clientId === "string" ? payload.clientId : undefined;
 			const clientKey = this.clientKey(req, explicitClient);
-			// Empty sessionPath (or clear:true) deselects this client's omp session,
+			// Empty sessionPath (or clear:true) deselects this client's ompk session,
 			// returning it to normal backend routing.
 			const clear = payload?.clear === true || rawPath.length === 0;
 			const sessionPath = clear ? null : rawPath;
 			const result = this.onOmpSelectSession?.(clientKey, sessionPath);
 			if (result && result.ok === false) {
-				this.writeJson(res, 400, { ok: false, error: result.error || "Invalid omp session." });
+				this.writeJson(res, 400, { ok: false, error: result.error || "Invalid ompk session." });
 				return;
 			}
 			this.writeJson(res, 200, { ok: true, sessionPath, cleared: clear });
 			return;
 		}
 
+<<<<<<< HEAD
 		if (req.method === "GET" && url.pathname === "/v1/omp/selected-session") {
 			if (!this.onOmpGetSelectedSession) {
 				this.writeJson(res, 501, { ok: false, error: "Omp session selection is not available on this gateway." });
 				return;
 			}
+=======
+		if (req.method === "GET" && (url.pathname === "/v1/ompk/selected-session" || url.pathname === "/v1/omp/selected-session")) {
+>>>>>>> origin/main
 			const clientKey = this.clientKey(req, url.searchParams.get("clientId") || undefined);
 			const sessionPath = this.onOmpGetSelectedSession(clientKey) ?? null;
 			this.writeJson(res, 200, { ok: true, sessionPath });
@@ -972,7 +1194,8 @@ export class ControlServer {
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
 			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
+			const model = parseModelOverride(url.searchParams.get("model"));
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -994,7 +1217,8 @@ export class ControlServer {
 			const target = typeof payload?.target === "string" ? payload.target.trim() || undefined : undefined;
 			const cwd = getLaunchCwdFromPayload(payload);
 			const agentProvider = parseAgentProviderOverride(typeof payload?.agentProvider === "string" ? payload.agentProvider : undefined);
-			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, typeof payload?.clientId === "string" ? payload.clientId : undefined)));
+			const model = parseModelOverride(typeof payload?.model === "string" ? payload.model : undefined);
+			const result = await this.withTimeout(this.onTextTurn(text, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, typeof payload?.clientId === "string" ? payload.clientId : undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
 			return;
 		}
@@ -1011,8 +1235,26 @@ export class ControlServer {
 			const target = url.searchParams.get("target")?.trim() || undefined;
 			const cwd = getLaunchCwdFromUrl(url);
 			const agentProvider = parseAgentProviderOverride(url.searchParams.get("agentProvider"));
-			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
+			const model = parseModelOverride(url.searchParams.get("model"));
+			const result = await this.withTimeout(this.onVoiceTurn(buffer, mimeType, includeAudio, target, cwd, mode, agentProvider, model, this.clientKey(req, url.searchParams.get("clientId") || undefined)));
 			this.writeJson(res, 200, await this.createTurnPayload(result));
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/brainstorm") {
+			if (!this.onBrainstorm) {
+				this.writeJson(res, 501, { ok: false, error: "Brainstorming mode is not available on this gateway." });
+				return;
+			}
+			const mimeType = getPrimaryHeaderValue(req.headers["content-type"]);
+			if (!isSupportedVoiceContentType(mimeType)) {
+				this.writeJson(res, 415, { ok: false, error: `Unsupported voice content type: ${mimeType || "unknown"}` });
+				return;
+			}
+			const buffer = await this.readBinaryBody(req, VOICE_BODY_LIMIT_BYTES);
+			const cwd = getLaunchCwdFromUrl(url);
+			const result = await this.withTimeout(this.onBrainstorm(buffer, mimeType, cwd));
+			this.writeJson(res, 200, result);
 			return;
 		}
 
@@ -1036,6 +1278,18 @@ export class ControlServer {
 
 		if (url.pathname === "/" || url.pathname === "/app") {
 			this.redirect(res, "/app/");
+			return true;
+		}
+
+		if (url.pathname === "/connect" || url.pathname === "/connect/") {
+			// The connect page renders the pairing QR (which embeds the auth token),
+			// so it is strictly loopback-only: the desktop window on this machine.
+			const remote = normalizeRemoteAddress(req.socket.remoteAddress || "");
+			if (!isLoopback(remote) || !isLoopbackHost(url.hostname)) {
+				this.writeJson(res, 403, { ok: false, error: "The connect page is only available on this machine (open http://127.0.0.1 locally)." });
+				return true;
+			}
+			await this.handleConnectPage(req, url, res);
 			return true;
 		}
 
@@ -1224,11 +1478,15 @@ export class ControlServer {
 				textTurn: "/v1/turn/text",
 				voiceTurn: "/v1/turn/voice",
 				cancelTurn: "/v1/turn/cancel",
+				brainstorm: "/v1/brainstorm",
 				route: "/v1/route",
 				workspace: "/v1/workspace",
 				workspaceFile: "/v1/workspace/file",
 				collabLink: "/v1/collab-link",
 				sessions: "/v1/sessions",
+				sessionLaunch: "/v1/sessions/launch",
+				hubPublish: "/v1/hub/publish",
+				hubResume: "/v1/hub/resume",
 				slots: "/v1/sessions/slots",
 				agents: "/v1/agents",
 				events: "/v1/events",
@@ -1236,6 +1494,13 @@ export class ControlServer {
 				warpTab: "/v1/warp/tab",
 				warpTabConfig: "/v1/warp/tab-config",
 				warpPsmuxSession: "/v1/warp/psmux/session",
+				herdr: "/v1/herdr",
+				herdrPaneRead: "/v1/herdr/pane/read",
+				herdrPaneSend: "/v1/herdr/pane/send",
+				herdrAgentSend: "/v1/herdr/agent/send",
+				herdrAgents: "/v1/herdr/agents",
+				herdrAgent: "/v1/herdr/agent/:id",
+				herdrStream: "/v1/herdr/stream/:id",
 				warpPsmuxWindow: "/v1/warp/psmux/window",
 			},
 			capabilities: [
@@ -1247,6 +1512,9 @@ export class ControlServer {
 				"workspace-browse",
 				"workspace-file-read",
 				"collab-link",
+				"session-launch",
+				...(this.onHubPublish && this.onHubResume && this.isHubHandoffReady() ? ["hub-handoff"] : []),
+				"colab-launch",
 				"turn-cancel",
 				"progress-events",
 				"pwa",
@@ -1255,14 +1523,15 @@ export class ControlServer {
 				"route-slots",
 				"session-mutations",
 				"agent-discovery",
-				"event-stream",
-				"warp-control",
 				"psmux-control",
+				"herdr-control",
+				"agent-hub",
 			],
 			agent: status.agent
 				? {
 					provider: status.agent.provider,
 					configuredProvider: status.agent.configuredProvider,
+					model: status.agent.model,
 					capabilities: status.agent.capabilities,
 				}
 				: undefined,
@@ -1297,10 +1566,14 @@ export class ControlServer {
 		if (defaultTarget) {
 			setupParams.set("default_target", defaultTarget);
 		}
+		if (status.agent?.model) {
+			setupParams.set("agent_model", status.agent.model);
+		}
 		const agentProvider = status.agent?.provider;
 		if (agentProvider === "pi"
 			|| agentProvider === "codex"
 			|| agentProvider === "claude"
+			|| agentProvider === "oh-my-pk"
 			|| agentProvider === "elevenlabs"
 			|| agentProvider === "gemini"
 			|| agentProvider === "gemini-live") {
@@ -1327,6 +1600,49 @@ export class ControlServer {
 			apkQrSvg,
 			status,
 			apkAvailable: existsSync(ANDROID_APK_PATH),
+		}));
+	}
+
+	/**
+	 * Desktop pairing page (loopback-only). Shows the pi-speak://setup QR with the
+	 * phone-facing base URL + persistent token, and live "phone connected" status
+	 * polled from /v1/pairing/status. This is the window `pi-speak-server` opens.
+	 */
+	private async handleConnectPage(req: IncomingMessage, url: URL, res: ServerResponse) {
+		const port = this.state.port ?? DEFAULT_PORT;
+		const token = this.state.authToken || "";
+		const status = this.getStatus();
+		const phoneBaseUrl = pickPhoneFacingBaseUrl(port);
+		const profileName = url.searchParams.get("profile_name")
+			|| process.env.PI_SPEAK_PROFILE_NAME?.trim()
+			|| (hostname() || "Pi Speak");
+		const setupParams = new URLSearchParams({
+			base_url: phoneBaseUrl,
+			machine_id: getStableServerId(),
+			profile_name: profileName,
+			connection_mode: isTailscaleHostname(new URL(phoneBaseUrl).hostname) ? "tailscale" : "manual",
+			workspace_root: getWorkspaceRoot(),
+			workspace_path: getDefaultWorkspacePath(),
+		});
+		if (token) setupParams.set("token", token);
+		const defaultTarget = status.remote.defaultTarget || status.remote.currentSession || "";
+		if (defaultTarget) setupParams.set("default_target", defaultTarget);
+		const appSetupUrl = `pi-speak://setup?${setupParams.toString()}`;
+		const setupPageUrl = new URL(`/setup${token ? `?token=${encodeURIComponent(token)}` : ""}`, phoneBaseUrl).toString();
+		const apkUrl = new URL("/download/pi-speak.apk", phoneBaseUrl).toString();
+		const qrSvg = await QRCode.toString(appSetupUrl, { type: "svg", errorCorrectionLevel: "M", margin: 2, width: 300 });
+		res.statusCode = 200;
+		res.setHeader("Content-Type", "text/html; charset=utf-8");
+		res.setHeader("Cache-Control", "no-store");
+		res.end(renderConnectHtml({
+			profileName,
+			phoneBaseUrl,
+			appSetupUrl,
+			setupPageUrl,
+			apkUrl,
+			apkAvailable: existsSync(ANDROID_APK_PATH),
+			reachableUrls: getReachableBaseUrls(port),
+			qrSvg,
 		}));
 	}
 
@@ -1415,6 +1731,19 @@ export class ControlServer {
 		return false;
 	}
 
+	private recordRemoteClient(req: IncomingMessage, url: URL) {
+		// Pairing-status polls are how UIs *observe* connection state; they must
+		// never count as the phone activity they are trying to detect.
+		if (url.pathname === "/v1/pairing/status") return;
+		const remote = normalizeRemoteAddress(req.socket.remoteAddress || "");
+		if (!remote || isLoopback(remote)) return;
+		this.lastRemoteClient = {
+			at: Date.now(),
+			agent: getPrimaryHeaderValue(req.headers["user-agent"]) || undefined,
+			address: remote,
+		};
+	}
+
 	private isAuthorized(req: IncomingMessage, url: URL, allowQueryToken: boolean) {
 		const token = this.state.authToken || "";
 		if (!token) return true;
@@ -1479,7 +1808,7 @@ export class ControlServer {
 			|| getBearerToken(getPrimaryHeaderValue(req.headers.authorization));
 	}
 
-	// Stable per-client key for scoping per-client state (e.g. omp session
+	// Stable per-client key for scoping per-client state (e.g. ompk session
 	// selection). An explicit `clientId` (header or body) wins; otherwise derive
 	// from remote address + presented token so distinct devices/tokens are
 	// distinct clients. Mirrors the rate-limit bucket key.
@@ -1546,6 +1875,20 @@ export class ControlServer {
 			if (artifact.expiresAt <= now) {
 				this.audioArtifacts.delete(id);
 				void rm(artifact.path, { force: true }).catch(() => {});
+			}
+		}
+	}
+
+	// Evict rate-limit buckets whose window has fully elapsed: an expired bucket is
+	// indistinguishable from a fresh one (checkRateLimit resets counters on a stale
+	// window), so dropping it is behavior-preserving and bounds the Map. Without this
+	// the Map grows once per distinct remoteAddress:token forever — a slow memory leak
+	// on a long-lived public/Tailscale gateway facing rotating IPs and probe tokens.
+	private cleanupStaleRateLimitBuckets() {
+		const now = Date.now();
+		for (const [key, bucket] of this.rateLimitBuckets.entries()) {
+			if (now - bucket.windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
+				this.rateLimitBuckets.delete(key);
 			}
 		}
 	}
@@ -1800,7 +2143,7 @@ function createPsmuxWindow(payload: Record<string, unknown> | undefined): Contro
 }
 
 function openWarpTab(payload: Record<string, unknown> | undefined): ControlActionResult {
-	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined) || process.cwd();
+	const cwd = normalizeExistingDirectory(typeof payload?.cwd === "string" ? payload.cwd : undefined) || getDefaultWorkspacePath();
 	const newWindow = payload?.newWindow === true;
 	const scheme = getWarpUriScheme();
 	const action = newWindow ? "new_window" : "new_tab";
@@ -1916,8 +2259,14 @@ function parseRemoteTurnMode(value: string | null | undefined) {
 function parseAgentProviderOverride(value: string | null | undefined): GatewayAgentProvider | undefined {
 	const normalized = (value || "").trim().toLowerCase();
 	if (normalized === "pi" || normalized === "codex" || normalized === "claude") return normalized;
-	if (normalized === "oh-my-pi" || normalized === "omp") return "oh-my-pi";
+	if (normalized === "oh-my-pk" || normalized === "ompk" || normalized === "oh-my-pi" || normalized === "omp") return "oh-my-pk";
 	return undefined;
+}
+
+function parseModelOverride(value: string | null | undefined): string | undefined {
+	const trimmed = (value || "").trim();
+	if (!trimmed || trimmed.length > 160 || /[\s\x00-\x1f\x7f]/.test(trimmed)) return undefined;
+	return trimmed;
 }
 
 function isTruthy(value: string | null) {
@@ -1947,6 +2296,100 @@ function isLocalRequest(req: IncomingMessage, url: URL) {
 function isLoopbackHost(hostname: string) {
 	const normalized = (hostname || "").toLowerCase();
 	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function renderConnectHtml({
+	profileName,
+	phoneBaseUrl,
+	appSetupUrl,
+	setupPageUrl,
+	apkUrl,
+	apkAvailable,
+	reachableUrls,
+	qrSvg,
+}: {
+	profileName: string;
+	phoneBaseUrl: string;
+	appSetupUrl: string;
+	setupPageUrl: string;
+	apkUrl: string;
+	apkAvailable: boolean;
+	reachableUrls: string[];
+	qrSvg: string;
+}): string {
+	const reachableRows = reachableUrls
+		.map((entry) => `<code>${escapeHtml(entry)}</code>`)
+		.join(" ");
+	return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi Speak — Connect your phone</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
+main { max-width: 640px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: #8b949e; font-size: 14px; margin: 0 0 24px; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px; }
+.qr { display: flex; justify-content: center; margin: 20px 0; }
+.qr > div { background: #ffffff; padding: 14px; border-radius: 10px; line-height: 0; }
+.status { display: flex; align-items: center; gap: 10px; font-size: 15px; margin: 4px 0 12px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: #d29922; animation: pulse 1.6s ease-in-out infinite; }
+.dot.ok { background: #3fb950; animation: none; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.meta { font-size: 13px; color: #8b949e; overflow-wrap: anywhere; margin: 6px 0; }
+code { background: #0d1117; border: 1px solid #30363d; padding: 2px 6px; border-radius: 5px; font-size: 12px; }
+button { background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+button:hover { border-color: #8b949e; }
+.steps { font-size: 14px; color: #c9d1d9; padding-left: 18px; margin: 0 0 8px; }
+.steps li { margin: 4px 0; }
+.footer { font-size: 12px; color: #6e7681; margin-top: 20px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Connect your phone</h1>
+<p class="sub">${escapeHtml(profileName)} &middot; ${escapeHtml(phoneBaseUrl)}</p>
+<section class="panel">
+<div class="status"><span class="dot" id="dot"></span><span id="statusText">Waiting for your phone&hellip;</span></div>
+<ol class="steps">
+<li>Install the Pi Speak app on your Android phone${apkAvailable ? ` (<a href="${escapeHtml(apkUrl)}" style="color:#58a6ff">APK</a>)` : ""}.</li>
+<li>Scan this QR code with the phone camera.</li>
+<li>Tap the <code>pi-speak://</code> link — the app configures itself and connects.</li>
+</ol>
+<div class="qr"><div>${qrSvg}</div></div>
+<p class="meta"><strong>No camera?</strong> Open <code id="setupUrl">${escapeHtml(setupPageUrl)}</code> on the phone <button onclick="copySetup()">Copy link</button></p>
+<p class="meta"><strong>Reachable at:</strong> ${reachableRows || "<code>no LAN/Tailscale address found</code>"}</p>
+</section>
+<p class="footer">This page (and the token inside the QR) is only served to this machine. Keep this window open to see when the phone connects.</p>
+</main>
+<script>
+var loadedAt = Date.now();
+function copySetup() {
+	var text = document.getElementById("setupUrl").textContent;
+	if (navigator.clipboard) { navigator.clipboard.writeText(text); }
+}
+function poll() {
+	fetch("/v1/pairing/status", { cache: "no-store" })
+		.then(function (res) { return res.json(); })
+		.then(function (data) {
+			var client = data && data.lastRemoteClient;
+			if (client && client.at >= loadedAt) {
+				document.getElementById("dot").className = "dot ok";
+				document.getElementById("statusText").textContent =
+					"Phone connected (" + (client.address || "remote") + ")";
+			}
+		})
+		.catch(function () {});
+}
+setInterval(poll, 2000);
+poll();
+</script>
+</body>
+</html>`;
 }
 
 function resolveRemoteAppDir() {
@@ -2105,6 +2548,7 @@ function getWorkspaceRoot() {
 function getDefaultWorkspacePath() {
 	return process.env.AGENT_CWD?.trim()
 		|| process.env.AGENT_WORKSPACE?.trim()
+		|| (platform() === "win32" ? DEFAULT_WINDOWS_WORKSPACE : "")
 		|| process.cwd();
 }
 
@@ -2145,7 +2589,7 @@ function isWindowsReservedDeviceName(pathOrName: string) {
 
 const WORKSPACE_LIST_MAX_ENTRIES = 2000;
 
-function listWorkspaceDirectory(requestedPath?: string) {
+export function listWorkspaceDirectory(requestedPath?: string) {
 	const root = resolve(getWorkspaceRoot());
 	const requested = resolve(requestedPath?.trim() || root);
 	// Lexical clamp first (cheap ../ guard), then confirm the real directory stays in
@@ -2217,11 +2661,13 @@ function decodeTextPreview(buffer: Buffer, truncated: boolean): string {
 	return buffer.subarray(0, end).toString("utf8");
 }
 
-type WorkspaceFileResult =
+export type WorkspaceFileResult =
 	| {
 		ok: true;
 		name: string;
 		path: string;
+		/** Symlink/junction-resolved canonical path, for callers that must gate on the real target rather than the (possibly innocuously-named) requested path. */
+		realPath: string;
 		size: number;
 		truncated: boolean;
 		binary: boolean;
@@ -2229,7 +2675,7 @@ type WorkspaceFileResult =
 	}
 	| { ok: false; status: number; error: string };
 
-function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
+export function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 	const trimmed = requestedPath?.trim();
 	if (!trimmed) {
 		return { ok: false, status: 400, error: "A file path is required." };
@@ -2255,7 +2701,8 @@ function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 		return { ok: false, status: 400, error: "Path is not a regular file." };
 	}
 	// Symlink/junction hardening: the real (link-resolved) path must also stay in root.
-	if (!realPathInsideRoot(target, root)) {
+	const realTarget = realPathInsideRoot(target, root);
+	if (!realTarget) {
 		return { ok: false, status: 403, error: "Path is outside the workspace root." };
 	}
 	let buffer: Buffer;
@@ -2278,6 +2725,7 @@ function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 		ok: true,
 		name: basename(target),
 		path: target,
+		realPath: realTarget,
 		size: stats.size,
 		truncated,
 		binary,
@@ -2305,61 +2753,10 @@ function readCollabLink(): CollabLinkSnapshot {
 	}
 }
 
-function getOrCreateInstallAuthToken() {
-	const tokenFile = getInstallAuthTokenPath();
-	try {
-		const existing = readFileSync(tokenFile, "utf8").trim();
-		if (existing.length >= 24) return existing;
-	} catch {
-		// Generate below.
-	}
-	const token = randomBytes(32).toString("base64url");
-	try {
-		mkdirSync(dirname(tokenFile), { recursive: true });
-		writeFileSync(tokenFile, `${token}\n`, { encoding: "utf8", mode: 0o600 });
-	} catch {
-		// Keep the server usable even when the config directory is read-only.
-	}
-	return token;
-}
-
-function getInstallAuthTokenPath() {
-	const base = process.env.PI_SPEAK_CONFIG_DIR
-		|| process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "pi-speak")
-		|| process.env.APPDATA && join(process.env.APPDATA, "pi-speak")
-		|| join(process.cwd(), ".pi-speak");
-	return join(base, "http-token");
-}
-
 function getStableServerId() {
 	const explicit = process.env.PI_SPEAK_SERVER_ID?.trim();
 	if (explicit) return explicit;
 	return hostname() || "pi-speak";
-}
-
-function getReachableBaseUrls(port: number) {
-	const urls: string[] = [];
-	for (const entries of Object.values(networkInterfaces())) {
-		for (const entry of entries || []) {
-			if (entry.family !== "IPv4" || entry.internal) continue;
-			if (!isPrivateLanIpv4(entry.address) && !isTailscaleIpv4(entry.address)) continue;
-			urls.push(`http://${entry.address}:${port}/`);
-		}
-	}
-	return [...new Set(urls)];
-}
-
-function isPrivateLanIpv4(address: string) {
-	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
-	const [a, b] = parts;
-	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
-}
-
-function isTailscaleIpv4(address: string) {
-	const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-	if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
-	return parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
 }
 
 function safeStatDirectory(path: string) {

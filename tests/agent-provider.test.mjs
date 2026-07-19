@@ -20,7 +20,7 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 		codexBin: "codex",
 		claudeBin: "claude",
 		piBin: "pi",
-		ompBin: "omp",
+		ompBin: "ompk",
 		model: undefined,
 		approvalPolicy: "never",
 		sandbox: "danger-full-access",
@@ -30,14 +30,14 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 		CODEX_BIN: "C:/tools/codex.cmd",
 		CLAUDE_BIN: "C:/tools/claude.cmd",
 		PI_BIN: "C:/tools/pi.cmd",
-		OMP_BIN: "C:/tools/omp.cmd",
+		OMPK_BIN: "C:/tools/ompk.cmd",
 		AGENT_MODEL: "gpt-test",
 	}), {
 		provider: "codex",
 		codexBin: "C:/tools/codex.cmd",
 		claudeBin: "C:/tools/claude.cmd",
 		piBin: "C:/tools/pi.cmd",
-		ompBin: "C:/tools/omp.cmd",
+		ompBin: "C:/tools/ompk.cmd",
 		model: "gpt-test",
 		approvalPolicy: "never",
 		sandbox: "danger-full-access",
@@ -46,8 +46,11 @@ test("agent provider config defaults to pi and honors codex overrides", () => {
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "gemini-live" }).provider, "gemini-live");
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "elevenlabs" }).provider, "elevenlabs");
 	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "claude" }).provider, "claude");
-	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "oh-my-pi" }).provider, "oh-my-pi");
-	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "omp" }).provider, "oh-my-pi");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "oh-my-pk" }).provider, "oh-my-pk");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "ompk" }).provider, "oh-my-pk");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "oh-my-pi" }).provider, "oh-my-pk");
+	assert.equal(resolveAgentProviderConfig({ AGENT_PROVIDER: "omp" }).provider, "oh-my-pk");
+	assert.equal(resolveAgentProviderConfig({ PI_SPEAK_OH_MY_PK_BIN: "C:/tools/ompk-pref.cmd" }).ompBin, "C:/tools/ompk-pref.cmd");
 	assert.equal(resolveAgentProviderConfig({ PI_SPEAK_OH_MY_PI_BIN: "C:/tools/omp-pref.cmd" }).ompBin, "C:/tools/omp-pref.cmd");
 });
 
@@ -55,12 +58,15 @@ test("agent provider registry normalizes provider names and aliases", () => {
 	assert.equal(normalizeAgentProviderName("OpenAI Codex"), "codex");
 	assert.equal(normalizeAgentProviderName("claude code"), "claude");
 	assert.equal(normalizeAgentProviderName("Gemini Live"), "gemini-live");
-	assert.equal(normalizeAgentProviderName("OMP"), "oh-my-pi");
-	assert.equal(normalizeAgentProviderName("oh my pi"), "oh-my-pi");
+	assert.equal(normalizeAgentProviderName("OMPK"), "oh-my-pk");
+	assert.equal(normalizeAgentProviderName("oh my pk"), "oh-my-pk");
+	assert.equal(normalizeAgentProviderName("OMP"), "oh-my-pk");
+	assert.equal(normalizeAgentProviderName("oh my pi"), "oh-my-pk");
 	assert.equal(normalizeRunnableAgentProviderName("gemini-live"), undefined);
 	assert.equal(normalizeRunnableAgentProviderName("claude code"), "claude");
-	assert.equal(normalizeRunnableAgentProviderName("omp"), "oh-my-pi");
-	assert.equal(normalizeRunnableAgentProviderName("oh-my-pi"), "oh-my-pi");
+	assert.equal(normalizeRunnableAgentProviderName("ompk"), "oh-my-pk");
+	assert.equal(normalizeRunnableAgentProviderName("omp"), "oh-my-pk");
+	assert.equal(normalizeRunnableAgentProviderName("oh-my-pi"), "oh-my-pk");
 });
 
 test("agent provider registry exposes capabilities for routing status", () => {

@@ -450,3 +450,40 @@ test("phone setup explains in-session Telegram configuration", async () => {
 		assert.match(message, /\/phone code/);
 	});
 });
+
+test("/pk-speak stop disables speech and reports hard stop", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const pkSpeak = pi.commands.get("pk-speak");
+		const speak = pi.commands.get("speak");
+		assert.ok(pkSpeak, "expected /pk-speak command");
+		assert.ok(speak, "expected /speak command");
+
+		const ctx = makeCtx("/sessions/main.jsonl");
+		await speak.handler("on", ctx);
+		assert.match(ctx.notifications.at(-1)?.message || "", /Speech mode enabled/i);
+
+		// /speak stop is playback-only: speech mode stays enabled.
+		await speak.handler("stop", ctx);
+		assert.match(ctx.notifications.at(-1)?.message || "", /Stopped current speech playback/i);
+		await speak.handler("status", ctx);
+		assert.match(ctx.notifications.at(-1)?.message || "", /Speech mode is on/i);
+
+		await pkSpeak.handler("stop", ctx);
+		const message = ctx.notifications.at(-1)?.message || "";
+		assert.match(message, /pk-speak stopped/i);
+		assert.match(message, /speech disabled/i);
+		assert.match(message, /wake listener stopped/i);
+
+		await pkSpeak.handler("status", ctx);
+		assert.match(ctx.notifications.at(-1)?.message || "", /speech off/i);
+
+		// Hard-stop aliases also disable speech mode.
+		await speak.handler("on", ctx);
+		await pkSpeak.handler("quiet", ctx);
+		await pkSpeak.handler("status", ctx);
+		assert.match(ctx.notifications.at(-1)?.message || "", /speech off/i);
+	});
+});
+

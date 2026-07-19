@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildOhMyPiLaunchArgv, validateOmpSelection } from "../dist/agent-hub-actions.js";
+import { buildColabLaunchPlan, buildOhMyPiLaunchArgv, validateOmpSelection } from "../dist/agent-hub-actions.js";
 
 function withTempDir(fn) {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-launch-argv-"));
@@ -70,6 +70,82 @@ test("buildOhMyPiLaunchArgv returns hub mode argv when hubOnly is true and honor
 	});
 });
 
+test("buildOhMyPiLaunchArgv accepts targetNode option and propagates it to result", () => {
+	withTempDir((tmp) => {
+		const cwd = join(tmp, "project");
+		const result = buildOhMyPiLaunchArgv({
+			cwd,
+			prompt: "ping",
+			targetNode: "colab",
+		}, tmp);
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+		assert.equal(result.targetNode, "colab");
+	});
+});
+
+test("buildOhMyPiLaunchArgv rejects unsupported targetNode and hub target conflicts", () => {
+	withTempDir((tmp) => {
+		const unsupported = buildOhMyPiLaunchArgv({ cwd: tmp, targetNode: "gpu" }, tmp);
+		assert.equal(unsupported.ok, false);
+		if (unsupported.ok) return;
+		assert.match(unsupported.message, /unsupported target/);
+
+		const conflict = buildOhMyPiLaunchArgv({ cwd: tmp, hubOnly: true, targetNode: "colab" }, tmp);
+		assert.equal(conflict.ok, false);
+		if (conflict.ok) return;
+		assert.match(conflict.message, /hubOnly cannot be combined/);
+	});
+});
+
+test("buildColabLaunchPlan emits mesh-sync colab-deploy argv with a stable run id", () => {
+	withTempDir((tmp) => {
+		const cwd = join(tmp, "project");
+		const env = { APPDATA: "C:\\Users\\prest\\AppData\\Roaming" };
+		const result = buildColabLaunchPlan({ cwd }, tmp, env, () => 1782208800000);
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+		assert.equal(result.cwd, resolve(cwd));
+		assert.equal(result.runId, "colab-1782208800000");
+		assert.equal(result.session, "mesh-colab");
+		assert.equal(result.target, "/content/workspace");
+		assert.equal(result.command, "C:\\Users\\prest\\AppData\\Roaming\\Antigravity\\bin\\mesh-sync.cmd");
+		assert.deepEqual(result.argv, [
+			"colab-deploy", resolve(cwd),
+			"--run-id", "colab-1782208800000",
+			"--session", "mesh-colab",
+			"--target", "/content/workspace",
+		]);
+		assert.match(result.commandPreview, /colab-deploy/);
+	});
+});
+
+test("buildColabLaunchPlan honors command overrides and rejects invalid target path", () => {
+	withTempDir((tmp) => {
+		const custom = buildColabLaunchPlan({
+			cwd: tmp,
+			command: "mesh-sync-custom",
+			runId: "run-1",
+			session: "session-1",
+			target: "/content/custom",
+		}, "/unused", {}, () => 1);
+		assert.equal(custom.ok, true);
+		if (!custom.ok) return;
+		assert.equal(custom.command, "mesh-sync-custom");
+		assert.deepEqual(custom.argv, [
+			"colab-deploy", resolve(tmp),
+			"--run-id", "run-1",
+			"--session", "session-1",
+			"--target", "/content/custom",
+		]);
+
+		const invalid = buildColabLaunchPlan({ cwd: tmp, target: "/content/workspace\nbad" }, "/unused");
+		assert.equal(invalid.ok, false);
+		if (invalid.ok) return;
+		assert.match(invalid.message, /Invalid target/);
+	});
+});
+
 test("buildOhMyPiLaunchArgv rejects model/provider with embedded whitespace", () => {
 	withTempDir((tmp) => {
 		const embeddedSpace = buildOhMyPiLaunchArgv({ model: "gpt 5", cwd: tmp }, tmp);
@@ -106,7 +182,7 @@ test("validateOmpSelection accepts a real in-roots session, rejects bad ones, al
 		mkdirSync(projectDir, { recursive: true });
 		const realPath = join(projectDir, "2026-06-23T000000_s.jsonl");
 		writeFileSync(realPath, `${JSON.stringify({ type: "session", id: "s" })}\n`);
-		const env = { PI_SPEAK_OH_MY_PI_SESSIONS_ROOT: root };
+		const env = { PI_SPEAK_OH_MY_PK_SESSIONS_ROOT: root };
 
 		// Deselect is always ok.
 		assert.deepEqual(validateOmpSelection(null, env), { ok: true });
@@ -119,11 +195,17 @@ test("validateOmpSelection accepts a real in-roots session, rejects bad ones, al
 		// Outside configured roots → rejected.
 		const outside = validateOmpSelection(join(tmp, "elsewhere", "x.jsonl"), env);
 		assert.equal(outside.ok, false);
-		assert.match(outside.error, /outside the configured oh-my-pi roots/);
+		assert.match(outside.error, /outside the configured oh-my-pk roots/);
 
 		// Under roots but does not exist → rejected.
 		const missing = validateOmpSelection(join(projectDir, "gone.jsonl"), env);
 		assert.equal(missing.ok, false);
 		assert.match(missing.error, /does not exist/);
+
+		// A path with `..` that normalizes to the real in-roots file must be accepted:
+		// containment and existence must both be checked against the SAME resolved path,
+		// not the raw string (regression guard for existsSync(raw) vs resolve(raw) drift).
+		const dotted = join(projectDir, "sub", "..", "2026-06-23T000000_s.jsonl");
+		assert.deepEqual(validateOmpSelection(dotted, env), { ok: true });
 	});
 });

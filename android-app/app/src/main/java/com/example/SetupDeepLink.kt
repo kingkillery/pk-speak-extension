@@ -10,6 +10,7 @@ data class SetupDeepLink(
     val connectionMode: String?,
     val defaultTarget: String?,
     val agentProvider: String?,
+    val agentModel: String?,
     val workspaceRoot: String?,
     val workspacePath: String?
 )
@@ -34,6 +35,7 @@ fun parseSetupDeepLink(uri: Uri?): SetupDeepLink? {
             ?: uri.getQueryParameter("target")
             ?: uri.getQueryParameter("session"),
         agentProvider = uri.getQueryParameter("agent_provider"),
+        agentModel = uri.getQueryParameter("agent_model") ?: uri.getQueryParameter("model"),
         workspaceRoot = uri.getQueryParameter("workspace_root"),
         workspacePath = uri.getQueryParameter("workspace_path")
     )
@@ -46,10 +48,12 @@ fun applySetupDeepLink(prefs: AppPreferences, setup: SetupDeepLink) {
     setup.defaultTarget?.takeIf { it.isNotBlank() }?.let { prefs.codexSessionName = it }
     setup.workspaceRoot?.takeIf { it.isNotBlank() }?.let { prefs.workspaceRoot = it }
     setup.workspacePath?.takeIf { it.isNotBlank() }?.let { prefs.workspacePath = it }
+    setup.agentModel?.takeIf { it.isNotBlank() }?.let { prefs.agentModel = it }
     setup.connectionMode?.let { prefs.connectionMode = normalizeConnectionMode(it) }
     when (setup.agentProvider?.lowercase()) {
         "codex", "pi" -> prefs.activeAgent = "Local Codex (Pi)"
         "claude" -> prefs.activeAgent = "Gateway Claude (Claude Code)"
+        "oh-my-pk", "ompk", "oh-my-pi", "omp" -> prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
         "elevenlabs" -> prefs.activeAgent = "Gateway Voice (ElevenLabs)"
         "gemini", "gemini-live", "vertex" -> prefs.activeAgent = "Gateway Gemini (Vertex AI)"
     }

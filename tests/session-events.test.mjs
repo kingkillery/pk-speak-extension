@@ -100,21 +100,48 @@ test(
 		assert.equal(firstRetained.payload.i, 5, "oldest entries rotated off");
 		assert.equal(lastRetained.payload.i, 204, "newest entry retained");
 
+		// Cursor is now the high-water seq (trim-stable), not the line count: 205
+		// events were appended, so the newest seq is 205 even though only 200 lines
+		// are retained.
 		const tail = tailSessionEvents(0);
 		assert.equal(tail.events.length, 200);
-		assert.equal(tail.nextOffset, 200);
+		assert.equal(tail.nextOffset, 205);
 	}),
 );
 
 test(
-	"tailSessionEvents resets when offset exceeds current line count",
+	"tailSessionEvents treats the cursor as a seen-seq, not a line index",
 	withIsolatedStore(async () => {
 		appendSessionEvent("a", "voice", {});
 		appendSessionEvent("b", "voice", {});
 
+		// A cursor ahead of every existing seq means "I've already seen everything":
+		// return nothing, and report the true high-water seq (not replay history as
+		// the old line-index implementation did).
 		const tail = tailSessionEvents(999);
-		assert.equal(tail.events.length, 2);
-		assert.equal(tail.events[0].kind, "a");
-		assert.equal(tail.nextOffset, 2);
+		assert.equal(tail.events.length, 0);
+		assert.equal(tail.nextOffset, 999);
+	}),
+);
+
+test(
+	"tailSessionEvents keeps delivering new events across the 200-line rollover",
+	withIsolatedStore(async () => {
+		// Fill to the cap, take the cursor, then append past the rollover.
+		for (let i = 0; i < 200; i++) appendSessionEvent("tick", "command", { i });
+		const atCap = tailSessionEvents(0);
+		assert.equal(atCap.events.length, 200);
+		assert.equal(atCap.nextOffset, 200);
+
+		// Idle poll: nothing new.
+		assert.deepEqual(tailSessionEvents(atCap.nextOffset).events, []);
+
+		// Append 5 more — the log trims, line indices shift, but the seq cursor must
+		// still surface exactly these 5 (the original line-index bug returned none).
+		for (let i = 200; i < 205; i++) appendSessionEvent("tick", "command", { i });
+		const afterRollover = tailSessionEvents(atCap.nextOffset);
+		assert.equal(afterRollover.events.length, 5, "must deliver the 5 post-rollover events");
+		assert.deepEqual(afterRollover.events.map((e) => e.payload.i), [200, 201, 202, 203, 204]);
+		assert.equal(afterRollover.nextOffset, 205);
 	}),
 );

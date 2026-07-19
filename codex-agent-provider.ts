@@ -1,8 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import type { AgentProvider, AgentPromptOptions, AgentResponseChunk } from "./agent-provider.js";
 import { getErrorMessage } from "./agent-provider.js";
 import { AsyncQueue } from "./async-queue.js";
+import { safeSpawn } from "./spawn-shim.js";
 
 type SpawnLike = (
 	command: string,
@@ -10,7 +11,6 @@ type SpawnLike = (
 	options: {
 		stdio: ["pipe", "pipe", "pipe"];
 		windowsHide: boolean;
-		shell: boolean;
 		env?: NodeJS.ProcessEnv;
 		cwd?: string;
 	},
@@ -72,10 +72,6 @@ type ActiveTurn = {
 
 const DEFAULT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_CODEX_TIMEOUT_MS || "180000", 10);
 
-function shouldUseShell(command: string) {
-	return process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command);
-}
-
 export class CodexAgentProvider implements AgentProvider {
 	readonly name = "codex" as const;
 	private readonly codexBin: string;
@@ -104,7 +100,7 @@ export class CodexAgentProvider implements AgentProvider {
 		this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
 		this.approvalPolicy = options.approvalPolicy || "never";
 		this.sandbox = options.sandbox || "danger-full-access";
-		this.spawnImpl = options.spawnImpl || (spawn as unknown as SpawnLike);
+		this.spawnImpl = options.spawnImpl || (safeSpawn as unknown as SpawnLike);
 		this.env = options.env;
 		this.onApprovalRequest = options.onApprovalRequest;
 	}
@@ -201,7 +197,6 @@ export class CodexAgentProvider implements AgentProvider {
 		const child = this.spawnImpl(this.codexBin, args, {
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
-			shell: shouldUseShell(this.codexBin),
 			env: this.env,
 			cwd: options.cwd || this.cwd,
 		});
@@ -249,7 +244,6 @@ export class CodexAgentProvider implements AgentProvider {
 		this.child = this.spawnImpl(this.codexBin, ["app-server", "--listen", "stdio://"], {
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
-			shell: shouldUseShell(this.codexBin),
 			env: this.env,
 			cwd: this.cwd,
 		});
