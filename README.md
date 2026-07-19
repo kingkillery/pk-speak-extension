@@ -1,14 +1,8 @@
 # pk-speak
 
-<<<<<<< HEAD
-A conversational assistant for Pi / `pi-mono` that uses voice, wake-word, and remote-control as input channels.
-
-pi-speak is a conversational assistant, not just a text assistant with TTS bolted on. The assistant can see all subagent state and the workspace, interview you to scope ambiguous requests, and ask for explicit approval before running any command that mutates a subagent, terminal, or file. Voice, the `PK` wake phrase, Telegram, and the mobile web/Android remote are all ways to reach the same assistant. It gives you:
-=======
 A conversational assistant for Pi / `pi-mono`, reachable over voice, phone, and browser remote.
 
 `pk-speak` runs a persistent conversational assistant that can see session and background-agent state and read the workspace on every turn, but never mutates anything — launching an agent, archiving a session, or running a command outside a small read-only allowlist — without your explicit approval. Voice (`/mono`), Telegram (`/phone`), and the browser/Android remote (`/remote`) are channels into that same assistant, not separate products. It gives you:
->>>>>>> origin/main
 
 - a conversational assistant that reads subagent state and proposes commands for approval
 - spoken assistant replies with multiple TTS backends
