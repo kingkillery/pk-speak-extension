@@ -53,6 +53,11 @@ scripts/ralph/.last-branch
 # pi-speak local runtime state (http token, routing store, etc.)
 .pi-speak/
 
+# session-routing-store.ts falls back to process.cwd() when LOCALAPPDATA/
+# APPDATA/TEMP are all unset (e.g. a Linux sandbox), landing routing/audit
+# runtime state directly in the repo root instead of a real user-data dir.
+pi-speak-pk/
+
 # Transient screen/testing dumps and CLI runtimes
 screen*.png
 archive/
@@ -91,3 +96,11 @@ proprompt.md
 coverage/
 goals/
 .llm-wiki/skill-pipeline/failures/
+
+# Scratch files
+test-rl.js
+.tmp/
+
+# Generated multi-agent collaboration and planning artifacts
+.llm-router/
+.omo/

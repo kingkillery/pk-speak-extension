@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pk-skills1.local/schemas/kade-hq/memory-candidate.schema.json",
+  "title": "Kade-HQ Memory Candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "statement": {"type": "string", "minLength": 1},
+    "type": {
+      "type": "string",
+      "enum": ["preference", "fact", "decision", "procedure", "project_state"]
+    },
+    "source": {"type": "string", "minLength": 1},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "valid_until": {"type": ["string", "null"], "format": "date-time"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "scope": {"type": "string", "minLength": 1},
+    "supersedes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    },
+    "status": {
+      "type": "string",
+      "enum": ["candidate", "confirmed", "stale", "conflicted", "retired"]
+    },
+    "explicitly_stated": {"type": "boolean"},
+    "sensitive": {"type": "boolean", "default": false},
+    "conflicts_with": {
+      "type": "array",
+      "items": {"type": "string"},
+      "default": []
+    }
+  },
+  "required": [
+    "statement",
+    "type",
+    "source",
+    "recorded_at",
+    "confidence",
+    "scope",
+    "status",
+    "explicitly_stated"
+  ]
+}

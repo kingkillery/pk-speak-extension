@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pk-skills1.local/schemas/g-kade/context-packet.schema.json",
+  "title": "g-kade Context Packet",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "request": {"type": "string", "minLength": 1},
+    "facts": {"type": "array", "items": {"$ref": "#/$defs/contextItem"}, "default": []},
+    "current_decisions": {"type": "array", "items": {"$ref": "#/$defs/contextItem"}, "default": []},
+    "repo_instructions": {"type": "array", "items": {"$ref": "#/$defs/contextItem"}, "default": []},
+    "human_preferences": {"type": "array", "items": {"$ref": "#/$defs/contextItem"}, "default": []},
+    "constraints": {"type": "array", "items": {"$ref": "#/$defs/contextItem"}, "default": []},
+    "assumptions": {"type": "array", "items": {"$ref": "#/$defs/contextItem"}, "default": []},
+    "unresolved_conflicts": {"type": "array", "items": {"$ref": "#/$defs/conflict"}, "default": []},
+    "source_map": {"type": "array", "items": {"$ref": "#/$defs/source"}, "default": []}
+  },
+  "required": [
+    "request",
+    "facts",
+    "current_decisions",
+    "repo_instructions",
+    "human_preferences",
+    "constraints",
+    "assumptions",
+    "unresolved_conflicts",
+    "source_map"
+  ],
+  "$defs": {
+    "contextItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "source_id": {"type": "string", "minLength": 1},
+        "scope": {"type": "string", "minLength": 1}
+      },
+      "required": ["text", "source_id", "scope"]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "recorded_at": {"type": ["string", "null"], "format": "date-time"},
+        "scope": {"type": "string", "minLength": 1},
+        "freshness": {"type": "string", "enum": ["current", "dated", "unknown"]}
+      },
+      "required": ["id", "source", "scope", "freshness"]
+    },
+    "conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {"type": "string", "minLength": 1},
+        "source_ids": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+        "material": {"type": "boolean"}
+      },
+      "required": ["description", "source_ids", "material"]
+    }
+  }
+}

@@ -49,6 +49,7 @@ Examples of natural requests this skill should map cleanly:
 ## Main command families
 
 - `/speak` → spoken replies and TTS settings
+- `/pk-speak` → hard-stop speech + wake listener (`/pk-speak stop`)
 - `/mono` → local wake-word listener
 - `/sess` → session manager dashboard, session naming, switching, edit wrapper, aliases, removal, export, and `/sess ui` to open the interactive Ink pane in a new terminal
 - `/attn` → advanced multi-session ready-state broker controls

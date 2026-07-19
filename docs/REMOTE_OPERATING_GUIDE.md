@@ -99,6 +99,10 @@ Bad for:
 - real voice transport
 - conversational audio
 
+### Native Android app parity
+
+The native Android app now covers the web remote's full control surface. Beyond text/voice/live turns, the Agent Hub tab has an **OPS** pane with the routing target picker (`/v1/route`), the `PK1`/`PK2` compact route slots (`/v1/sessions/slots`), discovered running/recent agents (`/v1/agents`), and a live session-event feed (`/v1/events`). Session lanes can be renamed, wake-aliased, archived, and removed from the phone, and the hub can show all gateway sessions instead of only OMPK lanes. The Configure tab's workspace browser lists files with sizes and opens a read-only viewer backed by `GET /v1/workspace/file`, with the same 512 KB / binary-notice behavior as the web app.
+
 ## Recommended Android Setup
 
 ### Best setup

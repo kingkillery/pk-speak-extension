@@ -31,6 +31,10 @@ data class ChatMessage(
 )
 
 class AppPreferences(context: Context) {
+    companion object {
+        const val DEFAULT_WORKSPACE_PATH = "C:\\Dev"
+    }
+
     private val prefs: SharedPreferences = context.getSharedPreferences("pi_speak_prefs", Context.MODE_PRIVATE)
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
     private val sessionListAdapterType = Types.newParameterizedType(List::class.java, RecordedSession::class.java)
@@ -66,6 +70,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getString("selected_gateway_session_path", "") ?: ""
         set(value) = prefs.edit().putString("selected_gateway_session_path", value).apply()
 
+    var agentModel: String
+        get() = prefs.getString("agent_model", "") ?: ""
+        set(value) = prefs.edit().putString("agent_model", value.trim()).apply()
+
     var machineProfileName: String
         get() = prefs.getString("machine_profile_name", "MSI / appserver") ?: "MSI / appserver"
         set(value) = prefs.edit().putString("machine_profile_name", value).apply()
@@ -79,7 +87,7 @@ class AppPreferences(context: Context) {
         set(value) = prefs.edit().putInt("last_known_app_version_code", value).apply()
 
     var workspaceRoot: String
-        get() = prefs.getString("workspace_root", "C:\\") ?: "C:\\"
+        get() = prefs.getString("workspace_root", DEFAULT_WORKSPACE_PATH) ?: DEFAULT_WORKSPACE_PATH
         set(value) = prefs.edit().putString("workspace_root", value).apply()
 
     var workspacePath: String

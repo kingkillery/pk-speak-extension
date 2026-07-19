@@ -283,8 +283,10 @@ WHISPER_COMPUTE=int8
 TTS:
 
 ```text
-PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|openai|elevenlabs
+PI_SPEAK_TTS_PROVIDER=auto|legacy|edge|gemini|openai|elevenlabs|sag|higgs|stable-audio
 PI_SPEAK_REWRITE_ENABLED=true|false
+PI_SPEAK_GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview
+PI_SPEAK_GEMINI_TTS_VOICE=Kore
 PI_SPEAK_OPENAI_KEY=
 VOICE_TOOLS_OPENAI_KEY=
 PI_SPEAK_OPENAI_TTS_MODEL=gpt-4o-mini-tts

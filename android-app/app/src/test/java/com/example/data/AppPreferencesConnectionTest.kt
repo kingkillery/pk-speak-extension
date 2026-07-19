@@ -57,6 +57,14 @@ class AppPreferencesConnectionTest {
   }
 
   @Test
+  fun defaultWorkspacePath_usesDevWorkspacePreset() {
+    val prefs = AppPreferences(context)
+
+    assertEquals(AppPreferences.DEFAULT_WORKSPACE_PATH, prefs.workspaceRoot)
+    assertEquals(AppPreferences.DEFAULT_WORKSPACE_PATH, prefs.workspacePath)
+  }
+
+  @Test
   fun selectedGatewaySessionPath_persistsSeparatelyFromTargetAndWorkspace() {
     val prefs = AppPreferences(context)
     prefs.codexSessionName = "Main-Project-Alpha"

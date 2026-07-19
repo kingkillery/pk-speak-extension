@@ -4,7 +4,7 @@ Produced 2026-06-27 by the `VoiceControlResearch` agent (deep web research). Thi
 
 ## TL;DR recommendation
 
-**Boox/Android client (primary voice input device):** use **Gemini Live** (already wired in this repo) with `FunctionDeclarations` for the session-management actions. Near-zero dev effort, native Android mic (no HTTPS getUserMedia issue), built-in semantic VAD + barge-in. Model: `gemini-2.5-flash-native-audio-preview-12-2025` (verify GA name before production).
+**Boox/Android client (primary voice input device):** use **Gemini Live** (already wired in this repo) with `FunctionDeclarations` for the session-management actions. Near-zero dev effort, native Android mic (no HTTPS getUserMedia issue), built-in semantic VAD + barge-in. Vertex model: `gemini-live-2.5-flash-native-audio`.
 
 **Windows host (optional fast path):** **Vosk Grammar Mode** (Apache-2.0, 100% local, ~100-200ms) for the 6 discrete commands when a local/headset mic is attached. Always include `"[unk]"` in the grammar to drain noise.
 

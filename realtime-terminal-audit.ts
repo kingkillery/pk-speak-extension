@@ -7,7 +7,13 @@ export type RealtimeTerminalAuditKind =
 	| "terminal.request"
 	| "terminal.approval_requested"
 	| "terminal.approval_resolved"
-	| "terminal.execution_result";
+	| "terminal.execution_result"
+	// Non-terminal mutating tool calls (launch_agent, archive_session) gated by
+	// realtime-command-approval.ts share this JSONL audit trail for parity with
+	// the terminal flow above, rather than a second untracked approval path.
+	| "command.approval_requested"
+	| "command.approval_resolved"
+	| "command.execution_result";
 
 export type RealtimeTerminalAuditText = {
 	text: string;
@@ -43,6 +49,10 @@ export type RealtimeTerminalAuditEvent = {
 	approved?: boolean;
 	decision?: string;
 	result?: RealtimeTerminalAuditResult;
+	/** kind from RealtimeCommandKind, for command.* events (launch_agent, archive_session). */
+	commandKind?: string;
+	/** Human-readable description for command.* events, e.g. "Archive session /path". */
+	description?: string;
 };
 
 const DEFAULT_AUDIT_TEXT_LIMIT = 4_000;
