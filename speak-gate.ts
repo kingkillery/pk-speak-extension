@@ -13,6 +13,7 @@ export type ResolveSpeakPlaybackGateOptions = {
 export type WaitForSpeakPlaybackGateOptions = {
   readonly inputStream?: typeof input;
   readonly outputStream?: typeof output;
+  readonly signal?: AbortSignal;
 };
 
 export function normalizeSpeakPlaybackGate(value: string | undefined): SpeakPlaybackGate | undefined {
@@ -58,6 +59,7 @@ export async function waitForSpeakPlaybackGate(
   gate: SpeakPlaybackGate,
   options: WaitForSpeakPlaybackGateOptions = {},
 ): Promise<"passed" | "skipped"> {
+  options.signal?.throwIfAborted();
   switch (gate) {
     case "immediate":
       return "passed";
@@ -67,7 +69,8 @@ export async function waitForSpeakPlaybackGate(
       if (!inputStream.isTTY) return "skipped";
       const rl = createInterface({ input: inputStream, output: outputStream });
       try {
-        await rl.question("pk-speak: press Enter to play audio...");
+        await rl.question("pk-speak: press Enter to play audio...", { signal: options.signal });
+        options.signal?.throwIfAborted();
         return "passed";
       } finally {
         rl.close();

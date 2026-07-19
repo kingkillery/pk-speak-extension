@@ -32,10 +32,10 @@ const packageJson = {
 		"pi-speak-gateway": "dist/headless-gateway.js",
 		"pi-speak-tray": "dist/persistent-tray.js",
 		"pi-speak-qr": "scripts/qr-setup.mjs",
+		"pi-speak-mcp": "dist/pk-speak-mcp.js",
 	},
 	files: [
 		"dist",
-		"!dist/pk-speak.*",
 		"!dist/pi-speak-pk.*",
 		"web",
 		"assets",

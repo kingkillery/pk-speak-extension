@@ -17,6 +17,7 @@ import {
 	type SpeakPlaybackGate,
 } from "./speak-gate.js";
 import { getRealtimeTerminalAuditPath } from "./realtime-terminal-audit.js";
+import { playAudioFile } from "./audio-playback.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -506,7 +507,16 @@ async function runSpeakCommand(argv: string[]) {
 		}
 	}
 
-	await speakText(finalText, options);
+	const abortController = new AbortController();
+	const abort = () => abortController.abort();
+	process.once("SIGINT", abort);
+	process.once("SIGTERM", abort);
+	try {
+		await speakText(finalText, { ...options, signal: abortController.signal });
+	} finally {
+		process.removeListener("SIGINT", abort);
+		process.removeListener("SIGTERM", abort);
+	}
 }
 
 async function summarizeText(text: string): Promise<string> {
@@ -519,6 +529,7 @@ async function summarizeText(text: string): Promise<string> {
 }
 
 async function speakText(text: string, options: SpeakTextOptions) {
+	options.signal?.throwIfAborted();
 	if (options.provider === "elevenlabs" || options.provider === "sag") {
 		applyUserEnvSecretWhenDifferent("ELEVENLABS_API_KEY");
 	}
@@ -543,20 +554,26 @@ async function speakText(text: string, options: SpeakTextOptions) {
 			text,
 			outputPath,
 			state,
+			signal: options.signal,
 		});
 		if (!options.quiet) {
 			console.log(`Spoke with ${result.provider}${result.rewriteApplied ? " (rewritten)" : ""}: ${outputPath}`);
 		}
 		if (!options.noPlay) {
 			const gate = resolveSpeakPlaybackGate({ cliGate: options.gate, env: process.env, config: loadPiSpeakSetupConfig() });
-			const gateResult = await waitForSpeakPlaybackGate(gate);
+			const gateResult = await waitForSpeakPlaybackGate(gate, { signal: options.signal });
 			if (gateResult === "skipped") {
 				console.warn(`pk-speak playback gated (${describeSpeakPlaybackGate(gate)}) but stdin is not interactive; audio left at ${outputPath}.`);
 				removeTempDir = false;
 				return;
 			}
-			const playback = await playAudioFile(outputPath, { allowOpenFallback: options.allowOpenFallback });
-			if (playback === "opened") removeTempDir = false;
+			const playback = await playAudioFile(outputPath, {
+				allowOpenFallback: options.allowOpenFallback,
+				wait: options.wait,
+				cleanupDir: tempDir,
+				signal: options.signal,
+			});
+			if (playback === "opened" || playback === "started") removeTempDir = false;
 		}
 	} finally {
 		if (tempDir && removeTempDir) {
@@ -658,6 +675,7 @@ function printSpeakHelp() {
 		"  --summarize           Summarize the input text before speaking",
 		"  --output <path>       Write audio to a file",
 		"  --no-play             Synthesize only; do not play audio",
+		"  --no-wait             Return after a detached supervisor starts; it retains temp audio until playback completes",
 		"  --allow-open-fallback  If hidden playback fails, open the file with the OS default app",
 		"  --gate <immediate|enter>  Require Enter before playing audio",
 		"  --keep                Keep the temp audio file when no --output is supplied",
@@ -679,6 +697,7 @@ type SpeakCommandOptions = {
 	provider?: TtsProvider;
 	output?: string;
 	noPlay: boolean;
+	wait: boolean;
 	allowOpenFallback: boolean;
 	keep: boolean;
 	gate?: SpeakPlaybackGate;
@@ -700,6 +719,8 @@ type SpeakTextOptions = {
 	dryRun: boolean;
 	rewrite?: boolean;
 	quiet?: boolean;
+	wait?: boolean;
+	signal?: AbortSignal;
 };
 
 
@@ -727,6 +748,7 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 		textParts: [],
 		noPlay: false,
 		allowOpenFallback: false,
+		wait: true,
 		keep: false,
 		dryRun: false,
 		help: false,
@@ -751,6 +773,8 @@ function parseSpeakArgs(argv: string[]): SpeakCommandOptions {
 			options.output = argv[++i];
 		} else if (key === "no-play") {
 			options.noPlay = true;
+		} else if (key === "no-wait") {
+			options.wait = false;
 		} else if (key === "allow-open-fallback") {
 			options.allowOpenFallback = true;
 		} else if (key === "keep") {
@@ -873,104 +897,6 @@ async function readStdin() {
 	return text;
 }
 
-async function playAudioFile(filePath: string, options: { allowOpenFallback?: boolean } = {}): Promise<"played" | "opened" | "skipped"> {
-	if (process.platform === "win32") {
-		// Prefer a headless CLI player when available (ffplay/mpg123/mpv). It is far more
-		// reliable than the WPF MediaPlayer fallback, which fails on headless/agent shells.
-		const winPlayer = getWindowsAudioPlayer();
-		if (winPlayer) {
-			try {
-				await runProcess(winPlayer, getAudioPlayerArgs(winPlayer, filePath));
-				return "played";
-			} catch {
-				// Fall through to the PowerShell MediaPlayer method below.
-			}
-		}
-		try {
-			await runProcess(
-				"powershell.exe",
-				[
-					"-NoProfile",
-					"-Sta",
-					"-Command",
-					[
-						"$ErrorActionPreference = 'Stop'",
-						"$path = (Resolve-Path -LiteralPath $env:PK_SPEAK_AUDIO_PATH).Path",
-						"Add-Type -AssemblyName PresentationCore",
-						"$player = New-Object System.Windows.Media.MediaPlayer",
-						"$player.Open([Uri]::new($path))",
-						"$player.Play()",
-						"$limit = (Get-Date).AddSeconds(120)",
-						"while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $limit) { Start-Sleep -Milliseconds 50 }",
-						"if ($player.NaturalDuration.HasTimeSpan) { Start-Sleep -Milliseconds ([Math]::Ceiling($player.NaturalDuration.TimeSpan.TotalMilliseconds) + 250) } else { Start-Sleep -Seconds 2 }",
-						"$player.Close()",
-					].join("; "),
-				],
-				{ env: { ...process.env, PK_SPEAK_AUDIO_PATH: filePath } },
-			);
-			return "played";
-		} catch (error) {
-			if (options.allowOpenFallback) {
-				await runProcess("cmd.exe", ["/c", "start", "", filePath]);
-				return "opened";
-			}
-			console.warn(`pk-speak playback skipped: hidden Windows audio failed (${error instanceof Error ? error.message : String(error)}).`);
-			return "skipped";
-		}
-	}
-	const command = getUnixAudioPlayer(options.allowOpenFallback);
-	if (!command) {
-		console.warn("pk-speak playback skipped: no headless audio player found. Use --allow-open-fallback to open the audio file with the OS default app.");
-		return "skipped";
-	}
-	await runProcess(command, getAudioPlayerArgs(command, filePath));
-	return command === "xdg-open" ? "opened" : "played";
-}
-
-function getUnixAudioPlayer(allowOpenFallback?: boolean) {
-	if (process.platform === "darwin") return "afplay";
-	for (const command of ["paplay", "mpg123", "ffplay"]) {
-		if (existsOnPath(command)) return command;
-	}
-	return allowOpenFallback ? "xdg-open" : undefined;
-}
-
-function getWindowsAudioPlayer() {
-	for (const command of ["ffplay", "mpg123", "mpv"]) {
-		if (existsOnPath(command)) return command;
-	}
-	return undefined;
-}
-
-function getAudioPlayerArgs(command: string, filePath: string) {
-	if (command === "ffplay") return ["-nodisp", "-autoexit", "-loglevel", "quiet", filePath];
-	if (command === "mpv") return ["--no-video", "--really-quiet", filePath];
-	return [filePath];
-}
-
-function existsOnPath(command: string) {
-	const isWin = process.platform === "win32";
-	const pathDirs = (process.env.PATH || "").split(isWin ? ";" : ":");
-	const exts = isWin
-		? [...(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").map((ext) => ext.trim()).filter(Boolean), ""]
-		: [""];
-	return pathDirs.some((dir) => dir && exts.some((ext) => existsSync(join(dir, command + ext))));
-}
-
-function runProcess(command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}) {
-	return new Promise<void>((resolve, reject) => {
-		const child = spawn(command, args, {
-			stdio: "ignore",
-			windowsHide: true,
-			env: options.env ?? process.env,
-		});
-		child.on("error", reject);
-		child.on("close", (code) => {
-			if (code === 0) resolve();
-			else reject(new Error(`${command} exited with code ${code}`));
-		});
-	});
-}
 
 async function speakTextSafely(text: string, options: WrapCommandOptions) {
 	await speakText(text, {
@@ -982,6 +908,7 @@ async function speakTextSafely(text: string, options: WrapCommandOptions) {
 		rewrite: false,
 		gate: options.gate,
 		quiet: true,
+		wait: true,
 	}).catch((error) => {
 		console.error(`pk-speak notice failed: ${error instanceof Error ? error.message : String(error)}`);
 	});

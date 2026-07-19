@@ -286,12 +286,13 @@ Voice (`/mono`, `/speak`), Telegram (`/phone`), and the mobile web/Android remot
 
 ### `/speak`
 
-Turns spoken replies on, off, or changes the backend.
+Turns spoken replies on or off, selects the TTS backend, or enables agent-driven speech.
 
 Common examples:
 
 ```text
 /speak on
+/speak agent
 /speak off
 /speak stop
 /speak status
@@ -310,6 +311,10 @@ Behavior:
 - Pi still keeps the full on-screen response
 - the spoken version can optionally be rewritten for audio clarity
 - `/speak stop` interrupts playback without disabling speech mode
+- `/speak agent` lets the coding agent choose concise spoken summaries; the extension injects an explicit `node <installed-extension>/dist/pk-speak.js speak ...` command, never an undeclared global binary. It suppresses the normal end-of-turn watcher to avoid double playback.
+- `/pk-speak stop` hard-stops speech, persists mode `off`, and writes the root voice-disable sentinel; `/pk-speak on` is the authoritative re-enable path.
+
+For MCP clients, use `pk-speak-mcp` (desktop package) or `pi-speak-mcp` (extension package). The server runs the bundled dispatcher with bounded request text and stderr, and cancels child speech on request cancellation, timeout, transport close, or process shutdown.
 
 
 ### `/pk-speak`

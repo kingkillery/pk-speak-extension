@@ -26,7 +26,8 @@
     "pi-speak-server": "dist/server-app.js",
     "pi-speak-gateway": "dist/headless-gateway.js",
     "pi-speak-gemini-live-smoke": "dist/gemini-live-smoke.js",
-    "pi-speak-qr": "scripts/qr-setup.mjs"
+    "pi-speak-qr": "scripts/qr-setup.mjs",
+    "pk-speak-mcp": "dist/pk-speak-mcp.js"
   },
   "files": [
     "dist",
@@ -59,12 +60,14 @@
   "dependencies": {
     "@google-cloud/speech": "^7.5.0",
     "@google/genai": "^1.52.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "bonjour-service": "^1.4.0",
     "cross-spawn": "^7.0.6",
     "ink": "^7.0.0",
     "node-edge-tts": "^1.2.10",
     "qrcode": "^1.5.4",
-    "react": "^19.2.5"
+    "react": "^19.2.5",
+    "zod": "^4.4.3"
   },
   "engines": {
     "node": ">=22"
