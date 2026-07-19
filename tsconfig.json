@@ -15,6 +15,7 @@
   "include": [
     "*.ts",
     "scripts/benchmark-tts.ts",
-    "scripts/benchmark-stt.ts"
+    "scripts/benchmark-stt.ts",
+    "scripts/synthetic-live-smoke.ts"
   ]
 }

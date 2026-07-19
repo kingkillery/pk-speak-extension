@@ -54,6 +54,19 @@ test("isActive reports whether any client holds a path (review M3 sweep exclusio
 	assert.equal(store.isActive("/omp/foo.jsonl"), false);
 });
 
+test("isActive matches across path spelling differences (M3 guard robustness)", () => {
+	const store = new OmpSelectionStore();
+	// Client selected the resolved/absolute form...
+	store.select("a", "/omp/proj/2026.jsonl");
+	// ...the sweep asks with an equivalent but differently-spelled path. The M3
+	// guard must still report it active, or the sweep would archive a live
+	// selection. Comparison is on the resolved form, not raw string equality.
+	assert.equal(store.isActive("/omp/proj/sub/../2026.jsonl"), true);
+	assert.equal(store.isActive("/omp/proj/./2026.jsonl"), true);
+	// A genuinely different file is still not active.
+	assert.equal(store.isActive("/omp/proj/2027.jsonl"), false);
+});
+
 test("undefined clientKey collapses to a single stable default bucket", () => {
 	const store = new OmpSelectionStore();
 	store.select(undefined, "/omp/local.jsonl");
