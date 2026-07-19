@@ -24,13 +24,8 @@ When the task involves spoken replies, wake-word listening, voice session routin
 
 ## What This Repo Optimizes For
 
-<<<<<<< HEAD
-- a conversational assistant that reads subagent state and proposes commands for approval
-- natural spoken interaction as one input channel among several
-=======
 - a conversational assistant with broad read-only access to sessions, background agents, and the workspace (workspace reads confined to the workspace root, capped, secret-shaped paths refused), but no mutation without explicit operator approval
 - natural spoken interaction
->>>>>>> origin/main
 - command-backed control surfaces
 - safe multi-session routing
 - one primary session-manager abstraction for normal operators

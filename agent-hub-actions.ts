@@ -48,7 +48,7 @@ export function archiveOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.
 
 	let raw: string;
 	try {
-		raw = readFileSync(sessionPath, "utf8");
+		raw = readFileSync(resolved, "utf8");
 	} catch (error) {
 		if (error instanceof Error) return { ok: false, message: `Session file is not readable: ${error.message}` };
 		throw error;
@@ -73,7 +73,7 @@ export function archiveOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.
 		type: "background_instance",
 		...archived,
 	};
-	writeFileSync(sessionPath, `${lines.join("\n").replace(/\n*$/, "\n")}${JSON.stringify(archivedEntry)}\n`);
+	writeFileSync(resolved, `${lines.join("\n").replace(/\n*$/, "\n")}${JSON.stringify(archivedEntry)}\n`);
 	return { ok: true, message: `Removed background session "${current.name}".` };
 }
 
@@ -90,7 +90,7 @@ export function recoverOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.
 
 	let raw: string;
 	try {
-		raw = readFileSync(sessionPath, "utf8");
+		raw = readFileSync(resolved, "utf8");
 	} catch (error) {
 		if (error instanceof Error) return { ok: false, message: `Session file is not readable: ${error.message}` };
 		throw error;
@@ -115,7 +115,7 @@ export function recoverOhMyPiBackgroundSession(sessionPath: string, env: NodeJS.
 		type: "background_instance",
 		...active,
 	};
-	writeFileSync(sessionPath, `${lines.join("\n").replace(/\n*$/, "\n")}${JSON.stringify(recoveredEntry)}\n`);
+	writeFileSync(resolved, `${lines.join("\n").replace(/\n*$/, "\n")}${JSON.stringify(recoveredEntry)}\n`);
 	return { ok: true, message: `Recovered background session "${active.name}".` };
 }
 

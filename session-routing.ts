@@ -1,4 +1,14 @@
+import { resolve, sep } from "node:path";
 import { findNormalizedKey, getNumericRouteFamily } from "./voice-routing.js";
+
+// Archived-path membership compares two independently-built paths (the client's
+// archive request vs the dashboard scanner's entry), so normalize both sides to
+// the resolved form (lower-cased on Windows for its case-insensitive FS) — raw
+// string equality silently fails on separator/`..`/casing differences.
+export function normalizeArchivePath(path: string): string {
+	const resolved = resolve(path);
+	return sep === "\\" ? resolved.toLowerCase() : resolved;
+}
 
 export type SessionRoutingState = {
 	sessions: Record<string, string>;
@@ -314,12 +324,12 @@ export function enrichDashboardWithWorkspaces(
 	const archived = new Set<string>();
 	for (const path of options.archivedPaths ?? []) {
 		const key = path?.trim();
-		if (key) archived.add(key);
+		if (key) archived.add(normalizeArchivePath(key));
 	}
 	const visible: SessionDashboardEntry[] = [];
 	for (const entry of dashboard.sessions) {
 		const entryPath = entry.sessionPath ?? entry.path;
-		const isArchived = !!entryPath && archived.has(entryPath);
+		const isArchived = !!entryPath && archived.has(normalizeArchivePath(entryPath));
 		const cwd = entry.cwd ?? entry.workingDirectory;
 		const enriched: SessionDashboardEntry = {
 			...entry,
