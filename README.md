@@ -909,9 +909,11 @@ Then link again with the fresh code.
 
 ## Testing
 
+Synthetic `/v1/live` text smoke: `node ./dist/scripts/synthetic-live-smoke.js --dry-run` (or omit `--dry-run` against a running gateway).
 TTS/STT provider latency (after `npm run build`): `node dist/scripts/benchmark-tts.js --dry-run --text "hello"` and `node dist/scripts/benchmark-stt.js --dry-run --audio-file <wav> --providers google`. Dry-run prints the plan only (no JSON, no provider calls). Default STT providers stay `local openai elevenlabs`.
 
 Run the automated production-readiness checks with:
+
 
 ```text
 npm test

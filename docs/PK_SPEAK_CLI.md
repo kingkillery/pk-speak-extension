@@ -128,6 +128,9 @@ node ./dist/pk-speak.js config
 
 `--dry-run` prints the plan and does not write files.
 
+## Smoke testing
+
+Text-only `/v1/live` smoke (no audio): `node ./dist/scripts/synthetic-live-smoke.js --dry-run` prints the plan; omit `--dry-run` to send `{ type: "text" }` turns against a running `pk-speak gateway` (`--help` lists host/port/token/turns/timeout flags).
 ## Benchmarking
 
 Provider latency harnesses for TTS (`synthesizeToFile`) and STT (`transcribeAudioBuffer`). Live runs print a stdout results table and write JSON to `--output`. `--dry-run` validates inputs and prints the planned providers/iterations/output (and TTS text / STT audio path) without loading models, decoding audio, calling providers (including Google), printing the results table, or writing JSON. STT requires `--audio-file` and exits 1 if the path is missing (including dry-run). Default STT providers are `local openai elevenlabs`; `google` is valid when passed explicitly.
