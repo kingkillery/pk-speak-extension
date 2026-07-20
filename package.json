@@ -47,6 +47,7 @@
     "build": "tsc -p tsconfig.json",
     "build:ui": "tsc -p tsconfig.ui.json && node scripts/sync-ui-package.mjs",
     "build:pi-extension": "npm run build && npm run build:ui && node scripts/sync-pi-extension-package.mjs",
+    "build:omp-bundle": "npm run build && bun build dist/index.js --outfile dist/omp-index.js --target node --format esm",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json --noEmit",
     "verify": "npm run typecheck && npm run test:parallel && npm run test:stress && npm run test:coverage",
     "test": "npm run build && npm run build:ui && node --test tests/*.test.mjs",

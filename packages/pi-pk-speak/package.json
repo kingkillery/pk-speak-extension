@@ -13,6 +13,16 @@
     "pk-speak"
   ],
   "main": "dist/index.js",
+  "pi": {
+    "extensions": [
+      "dist/index.js"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "dist/index.js"
+    ]
+  },
   "bin": {
     "pi-speak-admin": "dist/ui/admin.js",
     "pi-speak-gateway": "dist/headless-gateway.js",

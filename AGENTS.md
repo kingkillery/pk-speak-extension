@@ -50,6 +50,7 @@ npm test         # Run tests
 | `realtime-command-approval.ts` | Approval registry for non-terminal mutating tool calls (`launch_agent`, `archive_session`), keyed by kind+description rather than a command string |
 | `realtime-speech-brief.ts` | Pure speech shaper for the model-facing tool response: clips dumps, adds `summary`/`speechHint`, so Gemini Live *discusses* results instead of reciting them. The client `tool_complete` keeps the full payload. |
 | `voice-mode.ts` | Unified voice-layer toggle (`off`/`tts`/`stt`/`combo`/`realtime`) over the TTS, wake-listener, and Gemini Live switches. Pure helpers: `voiceModeTargets`, `resolveVoiceMode`, `nextVoiceMode` (bare `/voice` cycles). `combo` = turn-based listen+speak, deliberately distinct from `realtime` (full-duplex Gemini Live via `/v1/live`). |
+| `dist/omp-index.js` | Bun-bundled single-file extension entry for loading under the **compiled oh-my-pk binary** (`npm run build:omp-bundle`). The compiled Bun resolver never consults external `node_modules` for extension files (not via walk-up, junctions, or NODE_PATH), so ompk-loaded extensions must have zero bare runtime imports. Point `~/.omp/agent/config.yml` `extensions:` at this file, not `dist/index.js`. Upstream pi loads `dist/index.js` directly and resolves deps normally. |
 
 ## TTS Provider Logic
 

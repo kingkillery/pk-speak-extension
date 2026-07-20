@@ -27,6 +27,11 @@ const packageJson = {
 		"pk-speak",
 	],
 	main: "dist/index.js",
+	// Extension entry declarations: upstream pi reads "pi", the Oh-my-pk fork's
+	// plugin loader reads (pkg.omp ?? pkg.pi).extensions — both must point at
+	// the built extension entry or a linked plugin contributes nothing.
+	pi: { extensions: ["dist/index.js"] },
+	omp: { extensions: ["dist/index.js"] },
 	bin: {
 		"pi-speak-admin": "dist/ui/admin.js",
 		"pi-speak-gateway": "dist/headless-gateway.js",
