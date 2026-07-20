@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RemoteTurnResult } from "./remote-turn-manager.js";
+import { createSimulatedLiveClient, SIMULATED_LIVE_MODEL } from "./gemini-live-simulated.js";
 
 const DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview";
 const DEFAULT_VERTEX_LIVE_MODEL = "gemini-live-2.5-flash";
@@ -31,22 +32,29 @@ export const GEMINI_TTS_MODEL_OPTIONS = [
 	"gemini-3.1-flash-tts-preview",
 ] as const;
 
-type GeminiBackend = "developer-api" | "vertex";
+type GeminiBackend = "developer-api" | "vertex" | "simulated";
 
 export function isGeminiLiveConfigured(env: NodeJS.ProcessEnv = process.env) {
-	return !!(env.PI_SPEAK_VERTEX_API_KEY || env.GOOGLE_API_KEY || env.GEMINI_API_KEY || getVertexConfig(env));
+	return isGeminiLiveSimulated(env) || !!(env.PI_SPEAK_VERTEX_API_KEY || env.GOOGLE_API_KEY || env.GEMINI_API_KEY || getVertexConfig(env));
+}
+
+export function isGeminiLiveSimulated(env: NodeJS.ProcessEnv = process.env) {
+	return getGeminiBackend(env) === "simulated";
 }
 
 export function getGeminiLiveModel(env: NodeJS.ProcessEnv = process.env) {
 	const override = env.PI_SPEAK_GEMINI_LIVE_MODEL?.trim();
 	if (override) return override;
-	return getGeminiBackend(env) === "vertex" ? DEFAULT_VERTEX_LIVE_MODEL : DEFAULT_LIVE_MODEL;
+	const backend = getGeminiBackend(env);
+	if (backend === "simulated") return SIMULATED_LIVE_MODEL;
+	return backend === "vertex" ? DEFAULT_VERTEX_LIVE_MODEL : DEFAULT_LIVE_MODEL;
 }
 
 // Vertex Live requires apiVersion v1beta1; the generic PI_SPEAK_GEMINI_API_VERSION
 // (often v1beta or v1) is correct for the developer API but breaks the Vertex Live
 // websocket handshake. Resolve per-backend, honoring an explicit Vertex-only override.
 export function getGeminiApiVersion(backend: GeminiBackend, env: NodeJS.ProcessEnv = process.env) {
+	if (backend === "simulated") return "v1beta";
 	if (backend === "vertex") {
 		return env.PI_SPEAK_VERTEX_API_VERSION?.trim() || DEFAULT_VERTEX_API_VERSION;
 	}
@@ -55,8 +63,8 @@ export function getGeminiApiVersion(backend: GeminiBackend, env: NodeJS.ProcessE
 
 export function getGeminiBackend(env: NodeJS.ProcessEnv = process.env): GeminiBackend {
 	const configured = (env.PI_SPEAK_GEMINI_BACKEND || env.GOOGLE_GENAI_BACKEND || "").trim().toLowerCase();
+	if (configured === "simulated" || configured === "sim" || configured === "simulator") return "simulated";
 	if (configured === "vertex" || configured === "vertexai" || configured === "gcloud") return "vertex";
-	if (configured === "developer-api" || configured === "developer" || configured === "api") return "developer-api";
 	if (isTruthy(env.GOOGLE_GENAI_USE_VERTEXAI) || isTruthy(env.GOOGLE_GENAI_USE_ENTERPRISE)) return "vertex";
 	if (env.PI_SPEAK_VERTEX_API_KEY) return "vertex";
 	if (!env.GOOGLE_API_KEY && !env.GEMINI_API_KEY && getVertexConfig(env)) return "vertex";
@@ -76,6 +84,15 @@ export function createGeminiClient(
 ) {
 	const backend = getGeminiBackend(env);
 	const apiVersion = getGeminiApiVersion(backend, env);
+	if (backend === "simulated") {
+		if (!options.live) {
+			throw new Error("Gemini backend 'simulated' supports Live sessions only; unset PI_SPEAK_GEMINI_BACKEND for text turns.");
+		}
+		return {
+			ai: createSimulatedLiveClient(env) as unknown as GoogleGenAI,
+			backend: "simulated" as const,
+		};
+	}
 	if (backend === "vertex") {
 		const vertex = getVertexConfig(env);
 		if (vertex) {

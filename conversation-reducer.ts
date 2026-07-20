@@ -1,4 +1,4 @@
-import { isGeminiLiveConfigured, runGeminiTextTurn } from "./gemini-live-turn.js";
+import { isGeminiLiveConfigured, isGeminiLiveSimulated, runGeminiTextTurn } from "./gemini-live-turn.js";
 import type { ConversationReducerSummary } from "./remote-turn-manager.js";
 
 const DEFAULT_MIN_CONFIDENCE = 0.45;
@@ -497,7 +497,7 @@ export async function reduceConversationTurn(
 			targetName,
 		}, base);
 	}
-	if (reducerMode !== "off" && reducerMode !== "heuristic" && shouldTryGemini && isGeminiLiveConfigured() && routerText) {
+	if (reducerMode !== "off" && reducerMode !== "heuristic" && shouldTryGemini && isGeminiLiveConfigured() && !isGeminiLiveSimulated() && routerText) {
 		try {
 			const geminiResult = await reduceWithGemini(routerText, {
 				mode: reducerMode,

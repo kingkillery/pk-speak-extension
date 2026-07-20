@@ -68,7 +68,7 @@ import {
 	type TtsProvider,
 } from "./tts.js";
 import { readAttentionSnapshots } from "./attention-broker.js";
-import { isGeminiLiveConfigured, runGeminiLiveTurn } from "./gemini-live-turn.js";
+import { isGeminiLiveConfigured, isGeminiLiveSimulated, runGeminiLiveTurn } from "./gemini-live-turn.js";
 import { buildAgentSpeakCommand, buildAgentSpeechPreamble } from "./agent-speech.js";
 import { isSpeakEnabled, normalizeSpeakMode, type SpeakMode } from "./speak-mode.js";
 import {
@@ -954,7 +954,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const mode = getVoiceMode();
 		const ready = mode === "realtime" ? isGeminiLiveConfigured() : true;
 		const label = voiceModeStatusLabel(mode, ready);
-		target.ui.setStatus("voice", mode === "realtime" && realtimeDesktopOpened ? `${label} · desktop` : label);
+		const withSim = mode === "realtime" && isGeminiLiveSimulated() ? `${label} · sim` : label;
+		target.ui.setStatus("voice", mode === "realtime" && realtimeDesktopOpened ? `${withSim} · desktop` : withSim);
 	};
 
 	/**
@@ -987,6 +988,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (!targets.realtime) realtimeDesktopOpened = false;
 		if (wasRealtime && !targets.realtime) remoteServer?.disconnectRealtimeClients();
 		if (targets.realtime) {
+			if (isGeminiLiveSimulated()) {
+				notes.push("Simulated Gemini Live backend (PI_SPEAK_GEMINI_BACKEND=simulated): deterministic local replies, no Google API calls.");
+			}
 			if (!isGeminiLiveConfigured()) {
 				notes.push("Gemini Live is not configured: set GOOGLE_API_KEY, or Vertex ADC with GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION.");
 			} else if (!remoteServer) {
@@ -4106,7 +4110,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					`Voice mode: ${mode} — ${describeVoiceMode(mode)}`,
 					`TTS: ${speakState.enabled ? `on (${describeTtsProvider(getSpeakRuntimeState())})` : "off"}`,
 					`STT: ${monoActive ? (voiceInputActive ? "listener active" : "listener waiting for wake") : "off"}`,
-					`Realtime: ${realtimeVoiceActive ? (isGeminiLiveConfigured() ? `armed (Gemini Live configured, /v1/live${realtimeDesktopOpened ? ", desktop client opened" : ""})` : "armed but Gemini Live is NOT configured") : "off"}`,
+					`Realtime: ${realtimeVoiceActive ? (isGeminiLiveConfigured() ? `armed (${isGeminiLiveSimulated() ? "SIMULATED Gemini Live backend" : "Gemini Live configured"}, /v1/live${realtimeDesktopOpened ? ", desktop client opened" : ""})` : "armed but Gemini Live is NOT configured") : "off"}`,
 					"Modes: off | tts | stt | combo (turn-based listen+speak) | realtime | realtime local (desktop Gemini Live client)",
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
