@@ -70,6 +70,15 @@ import { readAttentionSnapshots } from "./attention-broker.js";
 import { isGeminiLiveConfigured, runGeminiLiveTurn } from "./gemini-live-turn.js";
 import { buildAgentSpeakCommand, buildAgentSpeechPreamble } from "./agent-speech.js";
 import { isSpeakEnabled, normalizeSpeakMode, type SpeakMode } from "./speak-mode.js";
+import {
+	describeVoiceMode,
+	nextVoiceMode,
+	normalizeVoiceMode,
+	resolveVoiceMode,
+	voiceModeStatusLabel,
+	voiceModeTargets,
+	type VoiceMode,
+} from "./voice-mode.js";
 
 type SpeakState = SpeakRuntimeState & {
 	enabled: boolean;
@@ -148,6 +157,7 @@ const STATE_TYPE = "elevenlabs-speak-state";
 const MONO_STATE_TYPE = "mono-listener-state";
 const PHONE_STATE_TYPE = "phone-bridge-state";
 const REMOTE_STATE_TYPE = "remote-control-state";
+const VOICE_STATE_TYPE = "voice-mode-state";
 const SESSION_REGISTRY_TYPE = "session-registry";
 const SESSION_WAKE_ALIAS_TYPE = "session-wake-aliases";
 const SESSION_REMOVE_CONFIRM_TTL_MS = Number.parseInt(process.env.PI_SPEAK_SESSION_REMOVE_CONFIRM_TTL_MS || "120000", 10);
@@ -374,30 +384,22 @@ function handleGatewaySlashCommand(
 
 const SPEECH_MODE_PROMPT = `Activate CodeChat mode for this conversation.
 
-Speech pipeline for this session:
-1. The user submits text.
-2. Pi generates the full assistant response for the UI.
-3. The spoken version may be lightly rewritten for audio clarity.
-4. The spoken version is synthesized by the configured TTS provider.
+Speech is a separate realtime layer, not a readout of the terminal response:
+- Keep live conversation concise, natural, and easy to follow by ear.
+- Use short progress acknowledgements only when they prevent dead air or report meaningful new information.
+- Never read the final terminal text aloud or copy it verbatim into speech.
+- Never narrate raw command output, stack traces, JSON, diffs, logs, file contents, or long paths.
+- Translate technical findings into plain English before discussing them.
+- Never claim an action completed until a real tool result confirms it.
 
-Core behavior:
-- Be highly conversational, concise, and easy to follow when heard out loud.
+Written response style:
+- Keep the complete technical answer in the terminal.
 - Prefer short paragraphs over lists unless lists are clearly better.
-- Avoid markdown tables unless I explicitly ask for one.
-- Do not read or emphasize full file paths unless absolutely necessary. Prefer filenames, folder names, or short relative locations.
-- Translate raw command output, stack traces, JSON, diffs, and logs into plain English first.
-- When discussing code, start with the high-level purpose, then the important details, then next actions.
-- Build context progressively: first explain what the repo or feature seems to do, then zoom into the relevant files and functions.
-- Prefer README, docs, AGENTS.md, CLAUDE.md, specs, plans, and nearby source before going broad.
-- If you need to inspect code, use tools and summarize what you found in a speech-friendly way.
-- If you want to make changes, first explain the intent in one or two plain-English sentences.
-- For dangerous or irreversible actions, explicitly ask for approval before proceeding.
-- When the user asks follow-up questions, keep continuity and act like you are talking about the same codebase live.
-
-Response style:
+- Avoid markdown tables unless explicitly requested.
+- Start code explanations with purpose, then important details, then next actions.
+- Build context progressively and preserve continuity across follow-ups.
+- For dangerous or irreversible actions, explicitly ask for approval first.
 - Sound like a smart teammate talking, not a report generator.
-- Keep answers tight by default and expand only when useful.
-- Mention filenames and functions naturally, like â€œin speak11.pyâ€ or â€œthe listen function,â€ instead of long path strings.
 - End with the clearest next useful point or question.`;
 
 function extractText(content: unknown): string {
@@ -807,6 +809,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let listenerProcess: ChildProcess | undefined;
 	let listenerRl: ReturnType<typeof createInterface> | undefined;
 	let monoActive = false;
+	let realtimeVoiceActive = false;
 	let voiceInputActive = false;
 	let voiceTarget: string | undefined;
 	let sessionRegistry: Record<string, string> = {};
@@ -935,6 +938,67 @@ export default function speakExtension(pi: ExtensionAPI) {
 			: "mono:standby";
 		target.ui.setStatus("mono", label);
 	};
+
+	const getVoiceMode = (): VoiceMode =>
+		resolveVoiceMode({ speakEnabled: speakState.enabled, sttEnabled: monoActive, realtime: realtimeVoiceActive });
+
+	const persistVoiceMode = () => {
+		pi.appendEntry<{ mode: VoiceMode }>(VOICE_STATE_TYPE, { mode: getVoiceMode() });
+	};
+
+	const updateVoiceStatus = (ctx?: any) => {
+		const target = ctx || lastCtx;
+		if (!target?.hasUI) return;
+		const mode = getVoiceMode();
+		const ready = mode === "realtime" ? isGeminiLiveConfigured() : true;
+		target.ui.setStatus("voice", voiceModeStatusLabel(mode, ready));
+	};
+
+	/**
+	 * Applies one unified voice mode across the TTS / STT / realtime switches.
+	 * Returns operator-facing notes (readiness warnings, serving hints).
+	 */
+	const applyVoiceMode = async (mode: VoiceMode, ctx?: any): Promise<string[]> => {
+		const targets = voiceModeTargets(mode);
+		const notes: string[] = [];
+
+		// TTS side — preserve "agent" speak mode when speech should stay enabled.
+		if (targets.speakEnabled && !speakState.enabled) {
+			transitionSpeakMode("on", { ctx });
+		} else if (!targets.speakEnabled && speakState.enabled) {
+			transitionSpeakMode("off", { ctx, stopPlayback: true });
+		}
+
+		// STT side — the always-on PK wake listener.
+		if (targets.sttEnabled && !monoActive) {
+			startListener(ctx);
+			persistMonoState();
+		} else if (!targets.sttEnabled && monoActive) {
+			stopListener(ctx);
+			persistMonoState();
+		}
+
+		// Realtime side — Gemini Live served to live clients over /v1/live.
+		realtimeVoiceActive = targets.realtime;
+		if (targets.realtime) {
+			if (!isGeminiLiveConfigured()) {
+				notes.push("Gemini Live is not configured: set GOOGLE_API_KEY, or Vertex ADC with GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION.");
+			} else if (!remoteServer) {
+				await startRemoteServer(ctx, true);
+				notes.push("Realtime gateway is up — connect a live client (phone app or web remote live mode) to /v1/live.");
+			} else {
+				notes.push("Realtime ready — connect a live client (phone app or web remote live mode) to /v1/live.");
+			}
+		}
+
+		persistVoiceMode();
+		updateMonoStatus(ctx);
+		updateVoiceStatus(ctx);
+		return notes;
+	};
+
+	const formatVoiceModeNotice = (mode: VoiceMode, notes: string[]): string =>
+		[`Voice mode: ${mode} — ${describeVoiceMode(mode)}`, ...notes].join("\n");
 
 	const updatePhoneStatus = (ctx?: any) => {
 		const target = ctx || lastCtx;
@@ -3940,8 +4004,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const hardStopPkSpeak = (ctx: any) => {
 		transitionSpeakMode("off", { ctx, hardStop: true, stopPlayback: true });
 		stopListener(ctx);
+		realtimeVoiceActive = false;
 		persistMonoState();
+		persistVoiceMode();
 		updateMonoStatus(ctx);
+		updateVoiceStatus(ctx);
 	};
 
 	pi.registerCommand("pk-speak", {
@@ -3985,6 +4052,48 @@ export default function speakExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("voice", {
+		description: "Toggle the voice layer: off, TTS only, STT only, combo (listen+speak), or realtime Gemini Live",
+		getArgumentCompletions: (prefix) => {
+			const options = ["toggle", "off", "tts", "stt", "combo", "realtime", "status"];
+			const matches = options.filter((opt) => opt.startsWith(prefix));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+		},
+		handler: async (args, ctx) => {
+			const lower = (args || "").trim().toLowerCase();
+
+			// Bare /voice (or /voice toggle) cycles: off → tts → stt → combo → realtime.
+			if (!lower || lower === "toggle" || lower === "cycle" || lower === "next") {
+				const next = nextVoiceMode(getVoiceMode());
+				const notes = await applyVoiceMode(next, ctx);
+				ctx.ui.notify(formatVoiceModeNotice(next, notes), "info");
+				return;
+			}
+
+			if (lower === "status") {
+				const mode = getVoiceMode();
+				const lines = [
+					`Voice mode: ${mode} — ${describeVoiceMode(mode)}`,
+					`TTS: ${speakState.enabled ? `on (${describeTtsProvider(getSpeakRuntimeState())})` : "off"}`,
+					`STT: ${monoActive ? (voiceInputActive ? "listener active" : "listener waiting for wake") : "off"}`,
+					`Realtime: ${realtimeVoiceActive ? (isGeminiLiveConfigured() ? "armed (Gemini Live configured, /v1/live)" : "armed but Gemini Live is NOT configured") : "off"}`,
+					"Modes: off | tts | stt | combo (turn-based listen+speak) | realtime (full-duplex Gemini Live agent)",
+				];
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+			const mode = normalizeVoiceMode(lower);
+			if (mode !== "off" || lower === "off") {
+				const notes = await applyVoiceMode(mode, ctx);
+				ctx.ui.notify(formatVoiceModeNotice(mode, notes), notes.length > 0 && mode === "realtime" && !isGeminiLiveConfigured() ? "warning" : "info");
+				return;
+			}
+
+			ctx.ui.notify("Usage: /voice [toggle|off|tts|stt|combo|realtime|status]", "error");
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		lastCtx = ctx;
 		const remoteRuntime = remoteServer?.getRuntimeState();
@@ -4001,6 +4110,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		};
 		lastAssistantText = "";
 		phase = "ready";
+		realtimeVoiceActive = false;
 		const persistedRouting = loadPersistedSessionRouting();
 		sessionRegistry = { ...persistedRouting.sessions };
 		sessionWakeAliases = { ...persistedRouting.aliases };
@@ -4021,6 +4131,11 @@ export default function speakExtension(pi: ExtensionAPI) {
 					mode: restoredMode,
 					enabled: isSpeakEnabled(restoredMode),
 				};
+			}
+			if (entry.type === "custom" && entry.customType === VOICE_STATE_TYPE && entry.data && typeof entry.data === "object") {
+				// Only the realtime flag needs restoring here — speak/mono restore
+				// from their own entries, and realtime implies both were off.
+				realtimeVoiceActive = normalizeVoiceMode((entry.data as { mode?: unknown }).mode) === "realtime";
 			}
 			if (entry.type === "custom" && entry.customType === MONO_STATE_TYPE && entry.data && typeof entry.data === "object") {
 				const mono = entry.data as MonoState;
@@ -4094,6 +4209,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 		updateStatus(ctx);
 		updateMonoStatus(ctx);
+		updateVoiceStatus(ctx);
 		updatePhoneStatus(ctx);
 		updateRemoteStatus(ctx);
 	});
@@ -4120,7 +4236,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const shouldInjectSpeechPrompt = speakState.enabled || forceSpeechPromptNextTurn;
 		forceSpeechPromptNextTurn = false;
 		if (!shouldInjectSpeechPrompt) return;
-		const agentCommand = getSpeakMode() === "agent" ? getAgentSpeakCommand() : undefined;
+		const agentCommand = speakState.enabled ? getAgentSpeakCommand() : undefined;
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${agentCommand ? buildAgentSpeechPreamble(agentCommand) : SPEECH_MODE_PROMPT}`,
 		};
@@ -4149,16 +4265,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.on("agent_end", async (_event, ctx) => {
 		lastCtx = ctx;
 		piAgentProvider.handleAgentEnd();
-		const replyText = lastAssistantText.trim();
-		if (speakState.enabled && getSpeakMode() !== "agent" && ctx.hasUI) {
-			if (replyText) {
-				void speakText(replyText, ctx);
-			} else {
-				setPhase("ready", ctx);
-			}
-		} else if (getSpeakMode() === "agent" && ctx.hasUI) {
-			setPhase("ready", ctx);
-		}
+		if (speakState.enabled && ctx.hasUI) setPhase("ready", ctx);
 		if (pendingRemoteTurn) {
 			await resolvePendingPhoneTurn(ctx);
 		}

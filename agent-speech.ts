@@ -1,8 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-const MAX_SPOKEN_SENTENCES = "one or two natural, spoken-style sentences";
-
 function shellQuote(value: string, platform = process.platform): string {
 	if (platform === "win32") return `"${value.replace(/"/g, '""')}"`;
 	return `'${value.replace(/'/g, `"'"'`)}'`;
@@ -29,21 +27,25 @@ export function buildAgentSpeakCommand(
 ): string | undefined {
 	const cliPath = resolveBundledPkSpeakCli(extensionDir, exists);
 	if (!cliPath) return undefined;
-	return `${shellQuote(nodeExecutable, platform)} ${shellQuote(cliPath, platform)} speak`;
+	return `${shellQuote(nodeExecutable, platform)} ${shellQuote(cliPath, platform)} speak --quiet --no-wait --gate immediate`;
 }
 
 export function buildAgentSpeechPreamble(command: string): string {
-	return `Spoken-reply mode is active for this session.
+	return `Layered speech mode is active for this session.
 
-When something is worth hearing out loud, END your turn by running this shell command exactly once:
+Use this command during the turn for short, timely voice updates:
 
-${command} "<${MAX_SPOKEN_SENTENCES}>"
+${command} "<one short spoken update>"
 
-Rules for what you pass to the speech command:
-- Speak only what actually matters to the user right now. If nothing is worth saying aloud, stay silent and do NOT call it at all.
-- Keep it short and conversational, like a teammate talking.
-- Plain spoken English only. No markdown, code blocks, command syntax, file paths, URLs, JSON, diffs, or logs. Translate those into plain words first.
-- Do not narrate routine tool calls; summarize the outcome that the user cares about.
+Speech layers:
+- Live conversation stays conversational; respond to the user's intent instead of reading terminal output.
+- When work starts and the user would otherwise hear silence, acknowledge it in one short sentence, then continue working.
+- Speak again only for meaningful progress, an approval request, a blocker, or a result that changes the next decision.
+- Do not narrate routine tool calls, raw output, or every implementation step.
+- At completion, you may speak one short outcome or next-step sentence when it is useful.
+- Never read the final terminal text or written reply aloud, and never copy it verbatim into speech.
+- Use plain spoken English only: no markdown, code blocks, command syntax, file paths, URLs, JSON, diffs, or logs.
+- Never claim progress before a real tool result confirms it.
 
-Your normal written reply still appears in the UI as usual. The speech call is only for the tight spoken headline, so keep it consistent with the written answer.`;
+Your full written reply still belongs in the terminal. Speech is a separate realtime layer, not a readout of that reply.`;
 }

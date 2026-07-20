@@ -528,3 +528,77 @@ test("agent speech mode uses the bundled dispatcher and hard-stop persists as of
 	});
 });
 
+
+test("normal speech mode injects layered speech instead of a final-text reader", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const speak = pi.commands.get("speak");
+		assert.ok(speak);
+
+		const ctx = makeCtx("/sessions/layered.jsonl");
+		await speak.handler("on", ctx);
+		const prompt = await pi.events.get("before_agent_start")({ systemPrompt: "base" }, ctx);
+
+		assert.match(prompt.systemPrompt, /pk-speak\.js["'] speak/);
+		assert.match(prompt.systemPrompt, /during the turn/i);
+	});
+});
+
+test("agent_end never starts post-hoc TTS for final terminal text", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const speak = pi.commands.get("speak");
+		assert.ok(speak);
+		const statuses = [];
+		const ctx = makeCtx("/sessions/layered.jsonl", {
+			ui: {
+				notify() {},
+				setStatus(name, value) {
+					statuses.push({ name, value });
+				},
+			},
+		});
+
+		await speak.handler("on", ctx);
+		await speak.handler("provider edge", ctx);
+		await pi.events.get("agent_start")({}, ctx);
+		await pi.events.get("message_end")({
+			message: { role: "assistant", content: [{ type: "text", text: "A long final terminal report that must stay visual." }] },
+		}, ctx);
+		const statusCountBeforeEnd = statuses.length;
+
+		try {
+			await pi.events.get("agent_end")({}, ctx);
+			await sleep(0);
+			const endStatuses = statuses.slice(statusCountBeforeEnd).map(({ value }) => value);
+			assert.equal(endStatuses.some((value) => /(?:rewrite|voice|playing)$/.test(value)), false);
+		} finally {
+			await speak.handler("off", ctx);
+		}
+	});
+});
+
+test("/voice tts and off coordinate the real speech switch", async () => {
+	await withSessionStore(async () => {
+		const pi = makePi();
+		speakExtension(pi);
+		const voice = pi.commands.get("voice");
+		assert.ok(voice);
+		const ctx = makeCtx("/sessions/voice-mode.jsonl");
+
+		await voice.handler("tts", ctx);
+		const enabled = pi.appended.filter((entry) => entry.customType === "elevenlabs-speak-state").at(-1)?.data;
+		assert.deepEqual({ mode: enabled.mode, enabled: enabled.enabled }, { mode: "on", enabled: true });
+
+		await voice.handler("status", ctx);
+		assert.match(ctx.notifications.at(-1)?.message || "", /Voice mode: tts/i);
+
+		await voice.handler("off", ctx);
+		const disabled = pi.appended.filter((entry) => entry.customType === "elevenlabs-speak-state").at(-1)?.data;
+		const unified = pi.appended.filter((entry) => entry.customType === "voice-mode-state").at(-1)?.data;
+		assert.deepEqual({ mode: disabled.mode, enabled: disabled.enabled }, { mode: "off", enabled: false });
+		assert.deepEqual(unified, { mode: "off" });
+	});
+});

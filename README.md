@@ -284,6 +284,22 @@ Voice (`/mono`, `/speak`), Telegram (`/phone`), and the mobile web/Android remot
 
 ## Main Commands
 
+### `/voice`
+
+One easy toggle for the whole local voice layer, with a persistent status-bar indicator (`voice:tts`, `voice:stt`, `voice:combo`, `voice:realtime`).
+
+```text
+/voice            # cycle: off → tts → stt → combo → realtime → off
+/voice tts        # spoken replies only (listener off)
+/voice stt        # listening only (PK wake on, no spoken replies)
+/voice combo      # turn-based loop: listen + speak (half-duplex, not realtime)
+/voice realtime   # full-duplex Gemini Live agent served to live clients on /v1/live
+/voice off        # everything off (same end state as /pk-speak stop)
+/voice status     # show each switch: TTS, STT, realtime readiness
+```
+
+`combo` is the turn-based speak/transcribe loop — it is **not** a realtime emotive voice agent. `realtime` is the Gemini Live (GPT-realtime-class) full-duplex path; selecting it stands the local TTS/wake loop down so the two audio paths never fight, checks that Gemini Live credentials are configured (`GOOGLE_API_KEY` or Vertex ADC), and makes sure the gateway is serving `/v1/live` for a phone or browser live client. The chosen mode persists across sessions.
+
 ### `/speak`
 
 Turns spoken replies on or off, selects the TTS backend, or enables agent-driven speech.
@@ -308,14 +324,33 @@ Common examples:
 
 Behavior:
 
-- Pi still keeps the full on-screen response
-- the spoken version can optionally be rewritten for audio clarity
-- `/speak stop` interrupts playback without disabling speech mode
-- `/speak agent` lets the coding agent choose concise spoken summaries; the extension injects an explicit `node <installed-extension>/dist/pk-speak.js speak ...` command, never an undeclared global binary. It suppresses the normal end-of-turn watcher to avoid double playback.
+- Pi keeps the complete response on screen; the final terminal text is never automatically sent to TTS.
+- `/speak on` injects the bundled speech command so the coding agent can give short, timely acknowledgements while it works and a concise outcome when useful.
+- Speech commands run quiet, start playback without blocking the agent, and must discuss results rather than recite output.
+- `/speak agent` remains a compatibility alias for explicit agent-driven speech behavior.
+- `/speak stop` interrupts playback without disabling speech mode.
 - `/pk-speak stop` hard-stops speech, persists mode `off`, and writes the root voice-disable sentinel; `/pk-speak on` is the authoritative re-enable path.
 
 For MCP clients, use `pk-speak-mcp` (desktop package) or `pi-speak-mcp` (extension package). The server runs the bundled dispatcher with bounded request text and stderr, and cancels child speech on request cancellation, timeout, transport close, or process shutdown.
 
+
+### `/voice`
+
+Selects the whole voice layer with one command instead of coordinating TTS, wake listening, and realtime audio separately.
+
+```text
+/voice tts
+/voice stt
+/voice combo
+/voice realtime
+/voice off
+/voice status
+```
+
+- `tts` enables layered spoken progress without reading the final terminal reply.
+- `stt` enables wake-word input without spoken replies; `combo` enables both turn-based input and speech.
+- `realtime` disables the local turn-based audio paths, starts the Gemini Live gateway when configured, and waits for a phone or web live client at `/v1/live`.
+- Bare `/voice` cycles through `off → tts → stt → combo → realtime`.
 
 ### `/pk-speak`
 

@@ -49,6 +49,7 @@ npm test         # Run tests
 | `realtime-terminal-approval.ts` / `realtime-terminal-command.ts` | Approval registry + safety classifier for `execute_terminal_command` (raw shell command, read-only allowlist vs. confirm) |
 | `realtime-command-approval.ts` | Approval registry for non-terminal mutating tool calls (`launch_agent`, `archive_session`), keyed by kind+description rather than a command string |
 | `realtime-speech-brief.ts` | Pure speech shaper for the model-facing tool response: clips dumps, adds `summary`/`speechHint`, so Gemini Live *discusses* results instead of reciting them. The client `tool_complete` keeps the full payload. |
+| `voice-mode.ts` | Unified voice-layer toggle (`off`/`tts`/`stt`/`combo`/`realtime`) over the TTS, wake-listener, and Gemini Live switches. Pure helpers: `voiceModeTargets`, `resolveVoiceMode`, `nextVoiceMode` (bare `/voice` cycles). `combo` = turn-based listen+speak, deliberately distinct from `realtime` (full-duplex Gemini Live via `/v1/live`). |
 
 ## TTS Provider Logic
 

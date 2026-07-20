@@ -27,11 +27,11 @@ The setup flow creates the local profile and pairing information. Reload Pi afte
 
 | Path | Start it with | Use it when |
 | --- | --- | --- |
-| Local voice | `/speak on` | You want Pi to read replies aloud on the computer running Pi. |
-| Wake-word voice | `/mono on` | You want hands-free interaction: say `PK` instead of typing a command first. |
+| Local voice | `/voice tts` or `/speak on` | You want short spoken progress and result acknowledgements while the complete reply stays in the terminal. |
+| Wake-word voice | `/voice combo` or `/mono on` | You want hands-free turn-based interaction: say `PK` instead of typing a command first. |
 | Phone via Telegram | `/phone on` | You want the simplest, resilient phone path using text and voice notes. |
 | Phone web/native app | `/pk-remote` | You want a QR-based Android setup with microphone input, audio replies, and a session dashboard. |
-| Gemini Live gateway | `AGENT_PROVIDER=gemini-live` | You want a real-time Gemini Live gateway for a phone or other remote client. |
+| Gemini Live gateway | `/voice realtime` | You want a real-time Gemini Live gateway for a phone or other live client. |
 
 ## 4. Minimal first session
 
