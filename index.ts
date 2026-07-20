@@ -1014,8 +1014,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		realtimeDesktopOpened = true;
 		updateVoiceStatus(ctx);
 		return launched.mode === "edge-app"
-			? "Opened the local Gemini Live client in Edge app mode. Tap Start live once to grant microphone access."
-			: "Opened the local Gemini Live client in your browser. Tap Start live once to grant microphone access.";
+			? "Opened the desktop Live orb (Edge app). Tap the orb once to grant microphone access."
+			: "Opened the desktop Live orb in your browser. Tap the orb once to grant microphone access.";
 	};
 
 	const formatVoiceModeNotice = (mode: VoiceMode, notes: string[]): string =>

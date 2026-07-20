@@ -1087,6 +1087,40 @@ fun StudioTabContent(
                     }
                 }
 
+                override fun onCameraCapture(callId: String, reason: String) {
+                    scope.launch {
+                        if (liveSessionRef.value !== session) return@launch
+                        appendChat("system", "[camera] ${reason.ifBlank { "Capturing frame…" }}")
+                        val owner = context as? androidx.lifecycle.LifecycleOwner
+                        if (owner == null) {
+                            session.sendCameraFrame(callId, "image/jpeg", "", "No lifecycle owner for camera")
+                            return@launch
+                        }
+                        val frame = try {
+                            com.example.audio.CameraSnapshot.captureJpegBase64(context, owner)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        if (frame == null) {
+                            session.sendCameraFrame(callId, "image/jpeg", "", "Camera capture failed or permission denied")
+                            appendChat("system", "[camera] Capture failed")
+                        } else {
+                            session.sendCameraFrame(callId, frame.mimeType, frame.base64, reason)
+                            appendChat("system", "[camera] Frame sent")
+                        }
+                    }
+                }
+
+                override fun onAudioFormat(rate: Int) {
+                    if (liveSessionRef.value !== session) return
+                    player.setSampleRate(rate)
+                    // Recreate track if already started so the new rate applies.
+                    if (player.isPlaying) {
+                        player.stop()
+                        player.start()
+                    }
+                }
+
                 override fun onError(message: String, httpCode: Int?) {
                     scope.launch {
                         if (liveSessionRef.value !== session) return@launch

@@ -63,6 +63,8 @@ test("buildRealtimeTools exposes read-only agent-hub and workspace tools alongsi
 		"get_agent_hub_agent",
 		"browse_workspace",
 		"read_workspace_file",
+		"web_search",
+		"camera_snapshot",
 	]) {
 		assert.ok(names.includes(readOnlyName), `expected read-only tool ${readOnlyName}`);
 	}

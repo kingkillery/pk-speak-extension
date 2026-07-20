@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<meta name="theme-color" content="#0a0b10">
+	<title>Pi Speak Live</title>
+	<link rel="stylesheet" href="/orb/orb.css">
+</head>
+<body class="booting">
+	<div class="stage" id="stage">
+		<header class="top">
+			<div class="identity">
+				<strong>Pi Speak Live</strong>
+				<span class="sub" id="backend-label">Gemini Live</span>
+			</div>
+			<div class="top-actions">
+				<button type="button" class="icon-btn" id="mute-btn" title="Mute mic" aria-label="Mute microphone">Mic</button>
+				<button type="button" class="icon-btn" id="cam-btn" title="Camera tool" aria-label="Toggle camera">Cam</button>
+				<button type="button" class="icon-btn" id="close-btn" title="Close" aria-label="Close orb">×</button>
+			</div>
+		</header>
+
+		<main class="hero">
+			<button type="button" class="orb state-idle" id="orb" aria-label="Start or stop live conversation">
+				<span class="orb-core"></span>
+				<span class="orb-ring"></span>
+			</button>
+			<p class="caption" id="caption">Tap the orb to talk</p>
+			<p class="subcaption" id="subcaption">Desktop companion for terminal voice</p>
+		</main>
+
+		<aside class="chat" id="chat" aria-live="polite"></aside>
+
+		<footer class="dock">
+			<div class="gate">
+				<label for="gate-db">Gate <span id="gate-value">-50 dB</span></label>
+				<input id="gate-db" type="range" min="-66" max="-3" step="1" value="-50">
+			</div>
+			<div class="meter"><div class="meter-fill" id="meter-fill"></div></div>
+			<button type="button" class="btn" id="stop-btn" disabled>End</button>
+		</footer>
+
+		<video id="cam-pip" class="cam-pip hidden" playsinline muted autoplay></video>
+	</div>
+	<script type="module" src="/orb/orb.js"></script>
+</body>
+</html>

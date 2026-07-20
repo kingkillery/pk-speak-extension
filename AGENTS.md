@@ -41,16 +41,20 @@ npm test         # Run tests
 | `agent-hub-actions.ts` | Pure helpers: `archiveOhMyPiBackgroundSession`, `buildOhMyPiLaunchArgv` for `/v1/sessions/launch` and `/v1/sessions/remove` |
 | `herdr-agent-hub-gateway.ts` | `AgentHubGateway` — chat/kill/revive/stream request handling for `/v1/herdr/agent*`, shared by every `AgentHubBinding` (disk-only fallback or live) |
 | `herdr-agent-hub-live.ts` | The real (mutating) `AgentHubBinding`: chat submits a normal turn targeted at the lane's name, kill archives it, revive recovers it — no invented IPC with the external oh-my-pk binary |
-| `realtime-gateway.ts` | The conversational assistant core. Runs a Gemini Live session with read-only subagent/workspace tools (`list_agents`, `get_agent`, `read_transcript`, `list_workspace`, `read_workspace_file`) and a `propose_command` approval flow. Voice, phone, and remote turns all reach this assistant. |
+| `realtime-gateway.ts` | Live conversational assistant on `/v1/live`: `REALTIME_SYSTEM_PROMPT`, `buildRealtimeTools` / `dispatchRealtimeToolCall` (session/hub/workspace reads + `web_search` + `camera_snapshot` + approval-gated mutations). Default upstream Gemini Live; optional OpenAI-Realtime via `live-backend.ts`. |
+| `live-backend.ts` | Live upstream kind selection (`gemini` \| `openai-realtime`) and shared adapter contracts. |
+| `openai-realtime-live.ts` | OpenAI-Realtime / HF S2S adapter (`PI_SPEAK_LIVE_BACKEND=openai-realtime\|hf` + `PI_SPEAK_OPENAI_REALTIME_URL` / `SPEECH_TO_SPEECH_URL`). |
+| `web-search.ts` | Serper-backed `web_search` helper and `/v1/search` proxy (env-only keys). |
+| `desktop-live-client.ts` | Opens the terminal Live companion; defaults to `/orb/` (Edge `--app`), optional full `/app/` surface. |
+| `web/remote/orb.*` | Desktop orb UI + HF-style worklet Live client for terminal operators. |
+| `web/remote/live-*-worklet.js` | Capture (Int16@16kHz + noise gate) and playback (ring buffer + barge-in clear) AudioWorklets. |
 | `realtime-terminal-approval.ts` | Original terminal-command approval registry used by the realtime gateway |
-| `realtime-command-approval.ts` | Extended approval registry covering terminal, chat, kill, and launch command proposals. `propose_command` stages a mutation and returns a confirmation token; the assistant only executes after the user approves. |
+| `realtime-command-approval.ts` | Extended approval registry covering terminal, chat, kill, and launch command proposals. |
 | `listener/listener.py` | Always-on wake-word listener (faster-whisper wake detection + transcription) |
-| `realtime-gateway.ts` | Live-voice conversational assistant over Gemini Live: `REALTIME_SYSTEM_PROMPT` persona, `buildRealtimeTools` tool surface (read-only session/agent-hub/workspace tools + approval-gated mutating tools), tool-call dispatch |
 | `realtime-terminal-approval.ts` / `realtime-terminal-command.ts` | Approval registry + safety classifier for `execute_terminal_command` (raw shell command, read-only allowlist vs. confirm) |
-| `realtime-command-approval.ts` | Approval registry for non-terminal mutating tool calls (`launch_agent`, `archive_session`), keyed by kind+description rather than a command string |
-| `realtime-speech-brief.ts` | Pure speech shaper for the model-facing tool response: clips dumps, adds `summary`/`speechHint`, so Gemini Live *discusses* results instead of reciting them. The client `tool_complete` keeps the full payload. |
-| `voice-mode.ts` | Unified voice-layer toggle (`off`/`tts`/`stt`/`combo`/`realtime`) over the TTS, wake-listener, and Gemini Live switches. Pure helpers: `voiceModeTargets`, `resolveVoiceMode`, `nextVoiceMode` (bare `/voice` cycles). `combo` = turn-based listen+speak, deliberately distinct from `realtime` (full-duplex Gemini Live via `/v1/live`). |
-| `gemini-live-simulated.ts` | In-process simulated Gemini Live backend (`PI_SPEAK_GEMINI_BACKEND=simulated`, aliases `sim`/`simulator`): duck-typed `live.connect` returning a deterministic scripted session — echo replies by default, JSON scenario files via `PI_SPEAK_SIM_SCENARIO`, synthetic 24 kHz PCM, tool-call/approval and barge-in semantics, `PI_SPEAK_SIM_TIMESCALE=0` for instant CI pacing. No Google credentials or network. |
+| `realtime-speech-brief.ts` | Pure speech shaper for the model-facing tool response: clips dumps, adds `summary`/`speechHint`, so Live *discusses* results instead of reciting them. The client `tool_complete` keeps the full payload. |
+| `voice-mode.ts` | Unified voice-layer toggle (`off`/`tts`/`stt`/`combo`/`realtime`) over the TTS, wake-listener, and Live switches. `combo` = turn-based; `realtime` = full-duplex via `/v1/live` (+ desktop orb). |
+| `gemini-live-simulated.ts` | In-process simulated Gemini Live backend (`PI_SPEAK_GEMINI_BACKEND=simulated`): keyless deterministic Live for CI. |
 | `dist/omp-index.js` | Bun-bundled single-file extension entry for loading under the **compiled oh-my-pk binary** (`npm run build:omp-bundle`). The compiled Bun resolver never consults external `node_modules` for extension files (not via walk-up, junctions, or NODE_PATH), so ompk-loaded extensions must have zero bare runtime imports. Point `~/.omp/agent/config.yml` `extensions:` at this file, not `dist/index.js`. Upstream pi loads `dist/index.js` directly and resolves deps normally. |
 
 ## TTS Provider Logic

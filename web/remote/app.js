@@ -4,6 +4,8 @@ export const STORAGE_AUTOPLAY = "piSpeakRemoteAutoplay";
 export const STORAGE_REMEMBER = "piSpeakRemoteRememberToken";
 export const STORAGE_LAUNCH_PATH = "piSpeakRemoteLaunchPath";
 export const STORAGE_LIVE_MODE = "piSpeakRemoteLiveMode";
+export const STORAGE_LIVE_GATE = "piSpeakRemoteLiveNoiseGate";
+export const STORAGE_LIVE_GATE_DB = "piSpeakRemoteLiveNoiseGateDb";
 
 export function buildRealtimeWebSocketUrl(origin, token = "") {
 	const url = new URL("/v1/live", origin);
@@ -53,6 +55,22 @@ export function decodeLivePcmFrame(frame) {
 		samples[index] = sample < 0 ? sample / 0x8000 : sample / 0x7fff;
 	}
 	return { sequenceId: view.getInt32(0, false), samples };
+}
+
+/** Stamp a 4-byte BE sequence header onto Int16 LE PCM already at 16 kHz (HF worklet output). */
+export function encodeLiveInt16PcmFrame(sequenceId, int16Samples) {
+	if (!Number.isInteger(sequenceId) || sequenceId < 1) throw new Error("Live audio sequence ID must be a positive integer.");
+	const samples = int16Samples instanceof Int16Array
+		? int16Samples
+		: int16Samples instanceof ArrayBuffer
+			? new Int16Array(int16Samples)
+			: null;
+	if (!samples || samples.length === 0) throw new Error("Live Int16 PCM samples are required.");
+	const frame = new ArrayBuffer(4 + samples.byteLength);
+	const view = new DataView(frame);
+	view.setInt32(0, sequenceId, false);
+	new Uint8Array(frame, 4).set(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength));
+	return frame;
 }
 
 export function loadPersistedSettings({
@@ -147,10 +165,20 @@ if (typeof document !== "undefined") {
 		liveCaptureEpoch: 0,
 		liveAudioWorkletReady: false,
 		liveCaptureSink: null,
+		livePlaybackNode: null,
+		livePlaybackReady: false,
+		livePlaybackSampleRate: 24_000,
 		livePlaybackCursor: 0,
 		livePlaybackSources: new Set(),
 		livePlaybackGeneration: 0,
 		liveLastInterruptAt: 0,
+		liveMicLevel: 0,
+		liveNoiseGateDb: -50,
+		liveNoiseGateEnabled: true,
+		liveCameraStream: null,
+		liveCameraEnabled: false,
+		liveWebSearchAvailable: false,
+		liveState: "idle",
 		pendingTerminalApprovals: {},
 	};
 
@@ -204,6 +232,8 @@ if (typeof document !== "undefined") {
 		audioToggle: document.getElementById("audio-toggle"),
 		autoplayToggle: document.getElementById("autoplay-toggle"),
 		liveModeToggle: document.getElementById("live-mode-toggle"),
+		liveNoiseGateToggle: document.getElementById("live-noise-gate-toggle"),
+		liveNoiseGateDb: document.getElementById("live-noise-gate-db"),
 
 		setupStatus: document.getElementById("setup-status"),
 		setupLink: document.getElementById("setup-link"),
@@ -920,6 +950,8 @@ if (typeof document !== "undefined") {
 		if (els.audioToggle) els.audioToggle.checked = state.wantAudio;
 		if (els.autoplayToggle) els.autoplayToggle.checked = state.autoplay;
 		if (els.liveModeToggle) els.liveModeToggle.checked = state.liveMode;
+		if (els.liveNoiseGateToggle) els.liveNoiseGateToggle.checked = state.liveNoiseGateEnabled;
+		if (els.liveNoiseGateDb) els.liveNoiseGateDb.value = String(state.liveNoiseGateDb);
 		if (els.rememberToken) els.rememberToken.checked = state.rememberToken;
 		if (els.launchPathInput) els.launchPathInput.value = state.launchPath;
 		if (els.targetInput) els.targetInput.value = activeTarget() || "";
@@ -959,6 +991,9 @@ if (typeof document !== "undefined") {
 		state.autoplay = (getLocalStorage().getItem(STORAGE_AUTOPLAY) || "true") !== "false";
 		const queryMode = query.get("mode");
 		state.liveMode = queryMode ? queryMode.toLowerCase() === "live" : getLocalStorage().getItem(STORAGE_LIVE_MODE) === "true";
+		state.liveNoiseGateEnabled = (getLocalStorage().getItem(STORAGE_LIVE_GATE) || "true") !== "false";
+		const gateDb = Number.parseFloat(getLocalStorage().getItem(STORAGE_LIVE_GATE_DB) || "-50");
+		state.liveNoiseGateDb = Number.isFinite(gateDb) ? Math.min(-3, Math.max(-66, gateDb)) : -50;
 		if (state.liveMode) state.wantAudio = true;
 		if (queryToken) {
 			getSessionStorage().setItem(STORAGE_TOKEN, queryToken);
@@ -1000,6 +1035,8 @@ if (typeof document !== "undefined") {
 		getLocalStorage().setItem(STORAGE_AUDIO, String(state.wantAudio));
 		getLocalStorage().setItem(STORAGE_LIVE_MODE, String(state.liveMode));
 		getLocalStorage().setItem(STORAGE_AUTOPLAY, String(state.autoplay));
+		getLocalStorage().setItem(STORAGE_LIVE_GATE, String(state.liveNoiseGateEnabled));
+		getLocalStorage().setItem(STORAGE_LIVE_GATE_DB, String(state.liveNoiseGateDb));
 		syncSettingsUi();
 	}
 
@@ -1178,17 +1215,58 @@ if (typeof document !== "undefined") {
 		if (!AudioContextClass) throw new Error("This browser does not support realtime audio playback.");
 		state.liveAudioContext = new AudioContextClass({ latencyHint: "interactive" });
 		state.liveAudioWorkletReady = false;
+		state.livePlaybackReady = false;
 		state.livePlaybackCursor = 0;
 		return state.liveAudioContext;
 	}
 
+	async function ensureLiveWorklets(context) {
+		if (!state.liveAudioWorkletReady) {
+			await Promise.all([
+				context.audioWorklet.addModule("/app/live-capture-worklet.js"),
+				context.audioWorklet.addModule("/app/live-playback-worklet.js"),
+			]);
+			state.liveAudioWorkletReady = true;
+		}
+		if (!state.livePlaybackNode) {
+			const playback = new AudioWorkletNode(context, "pi-speak-live-playback", {
+				numberOfInputs: 0,
+				numberOfOutputs: 1,
+				outputChannelCount: [1],
+			});
+			playback.port.postMessage({ kind: "config", inputRate: state.livePlaybackSampleRate || 24_000 });
+			playback.connect(context.destination);
+			state.livePlaybackNode = playback;
+			state.livePlaybackReady = true;
+		}
+	}
+
+	function applyLiveNoiseGate() {
+		if (!state.liveCaptureNode) return;
+		state.liveCaptureNode.port.postMessage({
+			kind: "gate",
+			enabled: !!state.liveNoiseGateEnabled,
+			thresholdDb: Number.isFinite(state.liveNoiseGateDb) ? state.liveNoiseGateDb : -50,
+		});
+	}
+
+	function setLiveMicEnabled(enabled) {
+		if (!state.liveCaptureNode) return;
+		state.liveCaptureNode.port.postMessage({ kind: "enable", value: !!enabled });
+	}
+
 	function stopLivePlayback() {
 		state.livePlaybackGeneration += 1;
+		// HF methodology: wipe the playback worklet queue immediately on barge-in.
+		if (state.livePlaybackNode) {
+			try { state.livePlaybackNode.port.postMessage({ kind: "clear" }); } catch {}
+		}
 		for (const source of state.livePlaybackSources) {
 			try { source.stop(); } catch {}
 		}
 		state.livePlaybackSources.clear();
 		state.livePlaybackCursor = state.liveAudioContext?.currentTime || 0;
+		if (state.liveState === "ai-speaking") state.liveState = "listening";
 	}
 
 	async function playLiveAudioFrame(data) {
@@ -1200,8 +1278,20 @@ if (typeof document !== "undefined") {
 		if (generation !== state.livePlaybackGeneration) return;
 		const context = ensureLiveAudioContext();
 		if (context.state === "suspended") await context.resume().catch(() => {});
+		await ensureLiveWorklets(context);
 		if (generation !== state.livePlaybackGeneration) return;
-		const buffer = context.createBuffer(1, decoded.samples.length, 24_000);
+
+		if (state.livePlaybackNode) {
+			// Prefer the HF ring-buffer worklet (click-free clear + upsample).
+			const copy = new Float32Array(decoded.samples.length);
+			copy.set(decoded.samples);
+			state.livePlaybackNode.port.postMessage({ kind: "audio", samples: copy }, [copy.buffer]);
+			state.liveState = "ai-speaking";
+			return;
+		}
+
+		// Fallback: scheduled BufferSource (pre-worklet browsers).
+		const buffer = context.createBuffer(1, decoded.samples.length, state.livePlaybackSampleRate || 24_000);
 		buffer.copyToChannel(decoded.samples, 0);
 		const source = context.createBufferSource();
 		source.buffer = buffer;
@@ -1211,6 +1301,7 @@ if (typeof document !== "undefined") {
 		state.livePlaybackSources.add(source);
 		source.addEventListener("ended", () => state.livePlaybackSources.delete(source), { once: true });
 		source.start(startAt);
+		state.liveState = "ai-speaking";
 	}
 
 	function stopLiveCapture({ releaseStream = true } = {}) {
@@ -1226,6 +1317,7 @@ if (typeof document !== "undefined") {
 		state.liveCaptureSource = null;
 		state.liveCaptureSink = null;
 		state.recording = false;
+		state.liveMicLevel = 0;
 		window.clearInterval(state.timerId);
 		state.timerId = null;
 		if (releaseStream && state.stream) {
@@ -1240,10 +1332,21 @@ if (typeof document !== "undefined") {
 	function closeLiveSocket() {
 		stopLiveCapture({ releaseStream: true });
 		stopLivePlayback();
+		if (state.livePlaybackNode) {
+			try { state.livePlaybackNode.disconnect(); } catch {}
+			state.livePlaybackNode = null;
+			state.livePlaybackReady = false;
+		}
+		if (state.liveCameraStream) {
+			for (const track of state.liveCameraStream.getTracks()) track.stop();
+			state.liveCameraStream = null;
+			state.liveCameraEnabled = false;
+		}
 		state.liveConnected = false;
 		state.liveSessionId = "";
 		state.liveLastServerSequenceId = 0;
 		state.liveReconnectAttempts = 0;
+		state.liveState = "idle";
 		window.clearTimeout(state.liveReconnectTimer);
 		state.liveReconnectTimer = null;
 		window.clearTimeout(state.liveStableTimer);
@@ -1266,6 +1369,58 @@ if (typeof document !== "undefined") {
 		}
 	}
 
+	async function captureAndSendCameraFrame(callId, reason) {
+		try {
+			if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera is not available in this browser.");
+			if (!state.liveCameraStream) {
+				state.liveCameraStream = await navigator.mediaDevices.getUserMedia({
+					video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+					audio: false,
+				});
+				state.liveCameraEnabled = true;
+			}
+			const track = state.liveCameraStream.getVideoTracks()[0];
+			if (!track) throw new Error("No camera track.");
+			const video = document.createElement("video");
+			video.muted = true;
+			video.playsInline = true;
+			video.srcObject = state.liveCameraStream;
+			await video.play().catch(() => {});
+			await new Promise((resolve) => {
+				if (video.readyState >= 2) resolve();
+				else video.onloadeddata = () => resolve();
+				window.setTimeout(resolve, 800);
+			});
+			const maxEdge = 768;
+			const vw = video.videoWidth || 640;
+			const vh = video.videoHeight || 480;
+			const scale = Math.min(1, maxEdge / Math.max(vw, vh));
+			const canvas = document.createElement("canvas");
+			canvas.width = Math.max(1, Math.round(vw * scale));
+			canvas.height = Math.max(1, Math.round(vh * scale));
+			const ctx = canvas.getContext("2d");
+			ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+			const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+			const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, "");
+			await sendLiveControl({
+				type: "camera_frame",
+				callId,
+				mimeType: "image/jpeg",
+				data: base64,
+				reason,
+			});
+			setStatus(reason || "Camera frame sent.");
+		} catch (error) {
+			await sendLiveControl({
+				type: "camera_frame",
+				callId,
+				data: "",
+				reason: String(error.message || error),
+			}).catch(() => {});
+			setStatus(String(error.message || error), "error");
+		}
+	}
+
 	async function handleLiveSocketMessage(event) {
 		if (typeof event.data !== "string") {
 			await playLiveAudioFrame(event.data).catch((error) => setStatus(String(error.message || error), "error"));
@@ -1280,9 +1435,17 @@ if (typeof document !== "undefined") {
 		if (Number.isInteger(message.serverSequenceId)) {
 			state.liveLastServerSequenceId = Math.max(state.liveLastServerSequenceId, message.serverSequenceId);
 		}
+		if (message.type === "audio_format" && Number.isFinite(message.rate) && message.rate > 0) {
+			state.livePlaybackSampleRate = message.rate;
+			if (state.livePlaybackNode) {
+				state.livePlaybackNode.port.postMessage({ kind: "config", inputRate: message.rate });
+			}
+			return;
+		}
 		if (message.type === "start") {
 			state.liveConnected = true;
 			state.liveSessionId = message.session || state.liveSessionId;
+			state.liveState = "listening";
 			window.clearTimeout(state.liveStableTimer);
 			state.liveStableTimer = window.setTimeout(() => { state.liveReconnectAttempts = 0; }, 30_000);
 			setStatus(state.recording ? "Live conversation connected — mic is on." : "Live session connected. Tap to turn the mic on.");
@@ -1295,10 +1458,18 @@ if (typeof document !== "undefined") {
 		}
 		if (message.type === "interrupt") {
 			stopLivePlayback();
+			state.liveState = "listening";
+			return;
+		}
+		if (message.type === "camera_capture") {
+			setStatus(message.reason || "Capturing camera frame…");
+			void captureAndSendCameraFrame(message.callId, message.reason);
 			return;
 		}
 		if (message.type === "tool_start") {
-			setStatus(message.command ? `Tool requested: ${message.command}` : "Tool requested.");
+			state.liveState = "processing";
+			const label = message.name || message.command || "tool";
+			setStatus(message.command ? `Tool requested: ${message.command}` : `Tool: ${label}`);
 			return;
 		}
 		if (message.type === "tool_approval_required") {
@@ -1312,11 +1483,13 @@ if (typeof document !== "undefined") {
 			return;
 		}
 		if (message.type === "tool_complete") {
-			setStatus("Tool completed.");
+			state.liveState = "listening";
+			setStatus(message.name ? `Tool completed: ${message.name}` : "Tool completed.");
 			scheduleLiveTurnSettled();
 			return;
 		}
 		if (message.type === "error") {
+			state.liveState = "error";
 			setStatus(message.message || "Live session error.", "error");
 			setRecordingStateBusy(false);
 		}
@@ -1469,33 +1642,57 @@ if (typeof document !== "undefined") {
 			state.stream = stream;
 			const context = ensureLiveAudioContext();
 			await context.resume();
-			if (!state.liveAudioWorkletReady) {
-				await context.audioWorklet.addModule("/app/live-capture-worklet.js");
-				state.liveAudioWorkletReady = true;
-			}
+			await ensureLiveWorklets(context);
 			if (epoch !== state.liveCaptureEpoch || !state.liveMode || state.liveSocket !== socket) return;
 			const source = context.createMediaStreamSource(stream);
 			const capture = new AudioWorkletNode(context, "pi-speak-live-capture", {
 				numberOfInputs: 1,
 				numberOfOutputs: 1,
 				outputChannelCount: [1],
+				processorOptions: { chunkMs: 40 },
 			});
 			const sink = context.createGain();
 			sink.gain.value = 0;
 			capture.port.onmessage = (event) => {
+				const payload = event.data;
+				// HF worklet posts {kind:"level", rms} meter events and Int16 ArrayBuffers.
+				if (payload && typeof payload === "object" && !(payload instanceof ArrayBuffer) && payload.kind === "level") {
+					state.liveMicLevel = Number(payload.rms) || 0;
+					return;
+				}
 				if (!state.recording || socket.readyState !== WebSocket.OPEN) return;
-				const samples = event.data;
+				let int16;
+				if (payload instanceof ArrayBuffer) int16 = new Int16Array(payload);
+				else if (payload instanceof Int16Array) int16 = payload;
+				else if (payload instanceof Float32Array) {
+					// Legacy float path (old worklet) — keep wire compatible.
+					state.liveClientSequenceId += 1;
+					socket.send(encodeLivePcmFrame(state.liveClientSequenceId, payload, 16_000));
+					return;
+				} else {
+					return;
+				}
 				state.liveClientSequenceId += 1;
-				socket.send(encodeLivePcmFrame(state.liveClientSequenceId, samples, 16_000));
+				socket.send(encodeLiveInt16PcmFrame(state.liveClientSequenceId, int16));
+				// Client-side barge-in: if we hear speech while AI audio is queued, clear + interrupt.
 				let energy = 0;
-				for (let index = 0; index < samples.length; index += 1) energy += samples[index] * samples[index];
-				const rms = Math.sqrt(energy / samples.length);
+				for (let index = 0; index < int16.length; index += 1) {
+					const s = int16[index] / 0x8000;
+					energy += s * s;
+				}
+				const rms = Math.sqrt(energy / int16.length);
+				state.liveMicLevel = rms;
 				const now = Date.now();
-				if (rms > 0.035 && state.livePlaybackSources.size > 0 && now - state.liveLastInterruptAt > 750) {
+				const aiPlaying = state.liveState === "ai-speaking" || state.livePlaybackSources.size > 0;
+				if (rms > 0.035 && aiPlaying && now - state.liveLastInterruptAt > 750) {
 					state.liveLastInterruptAt = now;
 					stopLivePlayback();
 					state.liveClientSequenceId += 1;
 					socket.send(JSON.stringify({ type: "interrupt", clientSequenceId: state.liveClientSequenceId }));
+				} else if (rms > 0.02) {
+					state.liveState = "user-speaking";
+				} else if (state.liveState === "user-speaking") {
+					state.liveState = "listening";
 				}
 			};
 			source.connect(capture);
@@ -1504,7 +1701,10 @@ if (typeof document !== "undefined") {
 			state.liveCaptureSource = source;
 			state.liveCaptureNode = capture;
 			state.liveCaptureSink = sink;
+			applyLiveNoiseGate();
+			setLiveMicEnabled(true);
 			state.recording = true;
+			state.liveState = "listening";
 			state.recordStartedAt = Date.now();
 			state.timerId = window.setInterval(ensureTimerState, 250);
 			ensureTimerState();
@@ -1836,7 +2036,11 @@ if (typeof document !== "undefined") {
 		state.wantAudio = !!els.audioToggle?.checked;
 		state.autoplay = !!els.autoplayToggle?.checked;
 		state.liveMode = !!els.liveModeToggle?.checked;
+		state.liveNoiseGateEnabled = !!els.liveNoiseGateToggle?.checked;
+		const gateDb = Number.parseFloat(els.liveNoiseGateDb?.value || String(state.liveNoiseGateDb));
+		if (Number.isFinite(gateDb)) state.liveNoiseGateDb = Math.min(-3, Math.max(-66, gateDb));
 		if (state.liveMode) state.wantAudio = true;
+		applyLiveNoiseGate();
 	}
 
 	function setSettingsOpen(isOpen) {
@@ -1954,6 +2158,14 @@ if (typeof document !== "undefined") {
 		else closeLiveSocket();
 		saveSettings();
 		updateRecordingUi();
+	});
+	els.liveNoiseGateToggle?.addEventListener("change", () => {
+		captureSettings();
+		saveSettings();
+	});
+	els.liveNoiseGateDb?.addEventListener("change", () => {
+		captureSettings();
+		saveSettings();
 	});
 
 	/* Tabs */

@@ -1,3 +1,14 @@
+## 2026-07-20 - synthesis: realtime Live HF parity + desktop orb
+
+- Added `syntheses/realtime-live-hf-parity-2026-07-20.md`: HF-style capture/playback worklets, `/orb/` terminal companion (outside full browser remote), OpenAI-Realtime/HF S2S upstream adapter (`PI_SPEAK_LIVE_BACKEND`), `web_search`/`camera_snapshot` tools, Android CameraX + audio_format parity.
+- Updated project docs: `docs/GETTING_STARTED.md` §8, `docs/ARCHITECTURE.md`, `README.md` `/voice realtime`, `AGENTS.md` key files.
+- Linked from `wiki/index.md`; refreshed `wiki/hot.md` and `wiki/overview.md`. Direct-file fallback (no Obsidian MCP write transport).
+
+## 2026-07-20 - synthesis: realtime platform update
+
+- Added `syntheses/realtime-platform-2026-07-20.md`, covering committed work from `62dd2bd` through `8c0c38c`: approval-gated conversational-assistant tools, secret-path protections, speech-result briefing, unified `/voice` modes, desktop Live client, compiled-OMPK bundle, and deterministic Gemini Live simulation.
+- Linked from `wiki/index.md`. Direct-file fallback used because no Obsidian MCP write transport is available. Current uncommitted web-live/OpenAI-realtime work is explicitly excluded.
+
 ## 2026-07-14 - session: wt-001 conversational-assistant-pivot verification assist
 
 - Added `sessions/2026-07-14-wt001-conversational-assistant-assist.md` — verified colleague worktree wt-001 (branch `advisor/001-conversational-assistant-pivot`, commit `e5e5d21`): build clean, 371/372 tests; fixed + committed the unrelated Windows `spawn-shim` EPERM teardown flake as `62dd2bd` (rmSync maxRetries/retryDelay). Recorded branch open items (README pivot WIP, skill-sync churn) and the sibling-worktree `git -C` / `npm --prefix` workaround.
@@ -68,6 +79,7 @@
 
 ## 2026-07-02T(pass1) - maintenance: Android redesign in progress
 
+- 2026-07-20: Added [[Realtime Platform Update — 2026-07-20]], documenting the committed conversational realtime platform and explicitly separating current uncommitted live-web work.
 - Observed via `git status --short` / `git diff --stat`: `DESIGN.md` added (new operator-cockpit design system doc); `android-app/.../StudioComposables.kt` added (new, untracked) extracting Studio-tab composables out of `MainActivity.kt`; `MainActivity.kt` modified (net -1151 lines, -1746/+601 diff stat) as composables move out; `HeaderConnectionStateTest.kt` modified (+3/-3), likely a small follow-up for the `HeaderSection` rework.
 - Added `wiki/concepts/android-design-system.md` capturing the DESIGN.md token/palette/typography/spacing contract and named components (`HeaderSection`, `PiSpeakDrawer`, `StudioTabContent`, `ConnectionErrorBanner`, `GatewaySessionRow`).
 - Added `wiki/concepts/studio-composables-structure.md` mapping the composable tree in the new `StudioComposables.kt` (`StudioCockpitLayout` → status strip / conversation panel / composer), including the new `StudioIdleState` empty-state composable.

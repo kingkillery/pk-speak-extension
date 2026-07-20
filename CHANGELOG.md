@@ -4,9 +4,22 @@
 
 Ongoing listener, remote-UX, and skill-aware speech-mode work.
 
+Added:
+
+- HF realtime voice methodology on the Live client path (smolagents/hf-realtime-voice style), while keeping Gemini Live as the default upstream backend:
+  - `web/remote/live-capture-worklet.js` — 40 ms Int16 @ 16 kHz capture with noise gate (dBFS threshold, attack/hold/release) and mute-without-teardown
+  - `web/remote/live-playback-worklet.js` — ring-buffer playback with `{kind:"clear"}` barge-in wipe and linear upsample
+  - Live web client wires both worklets, client-side barge-in interrupt, camera_frame capture on `camera_capture` requests, and Settings noise-gate controls
+  - Gateway tools `web_search` (Serper proxy; `SERPER_API_KEY` / `PI_SPEAK_SERPER_API_KEY`) and `camera_snapshot` (client frame round-trip)
+  - `GET /v1/live/config`, `POST /v1/search`, and `audio_format` start announcement (24 kHz)
+  - `live-backend.ts` adapter surface so OpenAI-Realtime-compatible S2S (HF speech-to-speech) can plug in beside Gemini without forking the `/v1/live` client wire (`PI_SPEAK_LIVE_BACKEND=gemini|openai-realtime|hf`)
+  - Desktop/terminal **orb companion** at `/orb/` (Edge `--app` by default via `openDesktopLiveClient`) so voice lives outside the full browser remote when you're in the terminal
+  - OpenAI-Realtime / HF S2S upstream adapter (`openai-realtime-live.ts`) selected with `PI_SPEAK_LIVE_BACKEND=openai-realtime|hf` + `PI_SPEAK_OPENAI_REALTIME_URL` / `SPEECH_TO_SPEECH_URL`; shared `dispatchRealtimeToolCall` keeps coding-agent tools on both backends
+  - Android Live parity: `camera_capture` → CameraX one-shot JPEG, `audio_format` sample-rate switching, `sendCameraFrame` on both standard and Boox flavors
+
 Changed:
 
-- Android app (standard flavor) redesigned for content density, modeled on the Claude Code mobile UI. The tall card-style header is now a slim flat app bar (menu icon / left-aligned title with inline connection dot + `status | Codex: session` line + latency / settings icon, hairline divider) — roughly half the height, same status semantics and indicator colors. The Studio conversation lost its card-in-card chrome: messages now render edge-to-edge on the canvas (no bordered panel, no 20dp inner gutter, no status strip), with Claude-style message anatomy — user turns as compact right-aligned soft bubbles, assistant turns as plain full-width text with Copy/Play actions beneath, progress/system lines as quiet muted metadata (no role labels or per-message borders). The centered "turn progress" block became an inline `Working… / Stop` row, the decorative bottom handle bar was removed, the composer tightened its padding, and non-chat tabs keep a smaller 12dp gutter (was 16dp). Boox e-ink flavor untouched; `HeaderSection` API, status-string format, and idle-state copy unchanged so existing Robolectric tests still apply.
+- Android app (standard flavor) redesigned for content density, modeled on the Claude Code mobile UI. The tall card-style header is now a slim flat app bar (menu icon / left-aligned title with inline connection dot + `status | Codex: session` line + latency / settings icon, hairline divider) — roughly half the height, same status semantics and indicator colors. The Studio conversation lost its card-in-card chrome: messages now render edge-to-edge on the canvas (no bordered panel, no 20dp inner gutter, no status strip), with Claude-style message anatomy — user turns as compact right-aligned soft bubbles, assistant turns as plain full-width text with Copy/Play actions beneath, progress/system lines as quiet muted metadata (no role labels or per-message borders…
 
 Fixed:
 

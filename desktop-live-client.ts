@@ -27,11 +27,13 @@ type DesktopLiveClientOptions = {
 	spawnProcess?: SpawnProcess;
 };
 
-export function buildDesktopLiveClientUrl(port: number, cwd?: string): string {
+export function buildDesktopLiveClientUrl(port: number, cwd?: string, surface: "orb" | "app" = "orb"): string {
 	if (!Number.isInteger(port) || port < 1 || port > 65_535) {
 		throw new Error(`Invalid Pi Speak gateway port: ${port}`);
 	}
-	const url = new URL(`http://127.0.0.1:${port}/app/`);
+	// Terminal users get the floating orb companion (/orb/), not the full remote chrome.
+	const path = surface === "app" ? "/app/" : "/orb/";
+	const url = new URL(`http://127.0.0.1:${port}${path}`);
 	url.searchParams.set("mode", "live");
 	url.searchParams.set("autoconnect", "1");
 	const launchCwd = cwd?.trim();

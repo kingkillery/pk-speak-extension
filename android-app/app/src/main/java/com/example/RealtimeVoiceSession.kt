@@ -24,6 +24,9 @@ interface RealtimeVoiceSessionListener {
     fun onToolComplete(name: String, output: String)
     fun onApprovalRequired(approvalId: String, command: String, reason: String, cwd: String, timeoutMs: Int)
     fun onApprovalResolved(approvalId: String)
+    /** Server asked the client to capture one camera frame for camera_snapshot. */
+    fun onCameraCapture(callId: String, reason: String)
+    fun onAudioFormat(rate: Int)
     fun onError(message: String, httpCode: Int? = null)
     fun onDisconnected()
 }
@@ -224,6 +227,16 @@ class RealtimeVoiceSession(
                 "reconnecting" -> {
                     Log.d(TAG, "Server reported reconnecting, serverSequenceId=$seqId")
                 }
+                "camera_capture" -> {
+                    listener.onCameraCapture(
+                        json.optString("callId", ""),
+                        json.optString("reason", "")
+                    )
+                }
+                "audio_format" -> {
+                    val rate = json.optInt("rate", 0)
+                    if (rate > 0) listener.onAudioFormat(rate)
+                }
                 else -> {
                     Log.d(TAG, "Unhandled server message type: ${json.optString("type")}")
                 }
@@ -267,6 +280,19 @@ class RealtimeVoiceSession(
     fun sendInterrupt() {
         val ws = webSocket ?: return
         val msg = JSONObject().put("type", "interrupt")
+        ws.send(msg.toString())
+    }
+
+    fun sendCameraFrame(callId: String, mimeType: String, base64Data: String, reason: String = "") {
+        val ws = webSocket ?: return
+        val seqId = clientSequenceCounter.incrementAndGet()
+        val msg = JSONObject()
+            .put("type", "camera_frame")
+            .put("callId", callId)
+            .put("mimeType", mimeType)
+            .put("data", base64Data)
+            .put("reason", reason)
+            .put("clientSequenceId", seqId)
         ws.send(msg.toString())
     }
 

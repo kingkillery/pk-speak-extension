@@ -23,6 +23,7 @@ import { createDiskFallbackBinding } from "./herdr-agent-hub-disk.js";
 import { AgentHubGateway, type AgentHubBinding } from "./herdr-agent-hub-gateway.js";
 import { parseHubAgentId, parseHubChatRequest, parseHubKillConfirm } from "./herdr-agent-hub-schema.js";
 import { buildOhMyPiAgentHubDashboardCached } from "./agent-hub-dashboard.js";
+import { isWebSearchConfigured, runWebSearch } from "./web-search.js";
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
@@ -673,6 +674,35 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/live/config") {
+			this.writeJson(res, 200, {
+				ok: true,
+				webSearch: isWebSearchConfigured(),
+				camera: true,
+				backends: ["gemini", "openai-realtime"],
+			});
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/search") {
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			const query = typeof payload?.query === "string" ? payload.query : "";
+			if (!query.trim()) {
+				this.writeJson(res, 400, { ok: false, error: "Body must include a non-empty query string." });
+				return;
+			}
+			if (!isWebSearchConfigured()) {
+				this.writeJson(res, 503, {
+					ok: false,
+					error: "Web search is not configured. Set SERPER_API_KEY or PI_SPEAK_SERPER_API_KEY on the gateway.",
+				});
+				return;
+			}
+			const result = await runWebSearch(query);
+			this.writeJson(res, result.ok ? 200 : 502, result);
+			return;
+		}
+
 		if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
 			const routing = this.getRoutingStatus();
 			const diagnostics = this.getDiagnostics();
@@ -1319,6 +1349,27 @@ export class ControlServer {
 			return true;
 		}
 
+		if (url.pathname === "/orb/" || url.pathname === "/orb/index.html" || url.pathname === "/orb") {
+			if (url.pathname === "/orb") {
+				res.statusCode = 302;
+				res.setHeader("Location", "/orb/");
+				res.end();
+				return true;
+			}
+			await this.serveStaticFile(join(REMOTE_APP_DIR, "orb.html"), "text/html; charset=utf-8", res, "no-store");
+			return true;
+		}
+
+		if (url.pathname === "/orb/orb.js") {
+			await this.serveStaticFile(join(REMOTE_APP_DIR, "orb.js"), "application/javascript; charset=utf-8", res, "no-store");
+			return true;
+		}
+
+		if (url.pathname === "/orb/orb.css") {
+			await this.serveStaticFile(join(REMOTE_APP_DIR, "orb.css"), "text/css; charset=utf-8", res, "no-store");
+			return true;
+		}
+
 		if (url.pathname === "/app/app.js") {
 			await this.serveStaticFile(
 				join(REMOTE_APP_DIR, "app.js"),
@@ -1332,6 +1383,16 @@ export class ControlServer {
 		if (url.pathname === "/app/live-capture-worklet.js") {
 			await this.serveStaticFile(
 				join(REMOTE_APP_DIR, "live-capture-worklet.js"),
+				"application/javascript; charset=utf-8",
+				res,
+				"no-store",
+			);
+			return true;
+		}
+
+		if (url.pathname === "/app/live-playback-worklet.js") {
+			await this.serveStaticFile(
+				join(REMOTE_APP_DIR, "live-playback-worklet.js"),
 				"application/javascript; charset=utf-8",
 				res,
 				"no-store",

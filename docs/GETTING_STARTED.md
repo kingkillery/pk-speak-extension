@@ -31,7 +31,7 @@ The setup flow creates the local profile and pairing information. Reload Pi afte
 | Wake-word voice | `/voice combo` or `/mono on` | You want hands-free turn-based interaction: say `PK` instead of typing a command first. |
 | Phone via Telegram | `/phone on` | You want the simplest, resilient phone path using text and voice notes. |
 | Phone web/native app | `/pk-remote` | You want a QR-based Android setup with microphone input, audio replies, and a session dashboard. |
-| Gemini Live gateway | `/voice realtime` | You want a real-time Gemini Live gateway for a phone or other live client. |
+| Live voice (desktop orb / phone / web) | `/voice realtime` | You want full-duplex live conversation. Terminal users get a desktop **orb** companion; phones/web use `/app/?mode=live` or the Android Live button. |
 
 ## 4. Minimal first session
 
@@ -114,33 +114,72 @@ Create and select named sessions, then inspect the compact voice lanes:
 
 `/sess slots` shows ownership of the compact `PK1`/`PK2` lanes. This matters when several Pi sessions are active: after assigning a session to lane 1, saying **PK one** (or **PK1**) routes the next voice turn to that lane without typing. The corresponding lane-2 forms are **PK two** and **PK2**; they remain distinct from lane 1.
 
-## 8. Gemini Live quick-start
+## 8. Live voice quick-start
 
-For the Vertex AI backend, set the required environment and authenticate on the machine running the gateway:
+Live mode is full-duplex conversation over `/v1/live`. The default upstream is **Gemini Live**; an OpenAI-Realtime / HF speech-to-speech backend is optional.
+
+### Terminal (desktop orb)
+
+```text
+/voice realtime
+```
+
+That starts the gateway if needed and opens the **orb companion** at `http://127.0.0.1:<port>/orb/` (Edge `--app` when available). Tap the orb once to grant the mic. The orb is intentionally separate from the full remote chrome so it can sit beside your terminal.
+
+- Full remote (sessions, hub, workspace): `http://127.0.0.1:<port>/app/?mode=live`
+- Orb only: `http://127.0.0.1:<port>/orb/?mode=live&autoconnect=1`
+
+### Gemini credentials (default backend)
+
+Developer API:
+
+```powershell
+$env:GOOGLE_API_KEY = "<key>"   # or GEMINI_API_KEY
+```
+
+Vertex:
 
 ```powershell
 $env:PI_SPEAK_GEMINI_BACKEND = "vertex"
 $env:GOOGLE_CLOUD_PROJECT = "<your-gcloud-project>"
-$env:GOOGLE_CLOUD_LOCATION = "us-central1"
-# Optional: use a Vertex API key instead of ADC.
-$env:PI_SPEAK_VERTEX_API_KEY = "<optional-vertex-api-key>"
+$env:GOOGLE_CLOUD_LOCATION = "global"
 gcloud auth application-default login
+# Optional: $env:PI_SPEAK_VERTEX_API_KEY = "<vertex-api-key>"
 ```
 
-Run the audio smoke test before connecting a client:
+Smoke test:
 
 ```text
 pi-speak-gemini-live-smoke --modality audio
 ```
 
-Launch the gateway with Gemini Live as its agent provider:
+Keyless CI / local simulation:
 
 ```powershell
-$env:AGENT_PROVIDER = "gemini-live"
-pi-speak-gateway
+$env:PI_SPEAK_GEMINI_BACKEND = "simulated"
 ```
 
-Useful optional settings are `PI_SPEAK_GEMINI_LIVE_MODEL`, `PI_SPEAK_GEMINI_LIVE_MODALITY=audio|text`, and `PI_SPEAK_GEMINI_API_VERSION=v1beta|v1alpha`. Keep Google credentials server-side, never in the phone or browser app.
+### Optional OpenAI-Realtime / HF S2S backend
+
+```powershell
+$env:PI_SPEAK_LIVE_BACKEND = "openai-realtime"   # or hf / s2s
+$env:PI_SPEAK_OPENAI_REALTIME_URL = "wss://<host>/v1/realtime?session_token=..."
+# aliases: SPEECH_TO_SPEECH_URL, PI_SPEAK_S2S_URL
+# optional: PI_SPEAK_OPENAI_REALTIME_KEY, PI_SPEAK_OPENAI_REALTIME_VOICE
+```
+
+Clients still connect to **this** gateway's `/v1/live`; the gateway adapts upstream.
+
+### Live tools
+
+| Tool | Notes |
+| --- | --- |
+| Session / hub / workspace reads | Always available (approval not required) |
+| `web_search` | Needs `SERPER_API_KEY` or `PI_SPEAK_SERPER_API_KEY` on the gateway |
+| `camera_snapshot` | Client captures one JPEG frame (web orb/PWA or Android CameraX) |
+| Terminal / launch / archive | Approval-gated as usual |
+
+Useful settings: `PI_SPEAK_GEMINI_LIVE_MODEL`, `PI_SPEAK_GEMINI_LIVE_MODALITY=audio|text`. Keep provider keys server-side.
 
 ## 9. Where to go next
 

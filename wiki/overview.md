@@ -27,6 +27,7 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
 - Wake word + transcription glue from `listener/listener.py` and `stt.ts`.
 - Text-to-speech through provider chain in `tts.ts`.
 - Wake/command interpretation and session command parsing in `voice-session-command.ts`.
+- **Live duplex:** `/v1/live` via `realtime-gateway.ts`; desktop orb at `/orb/` for terminal users; full remote Live at `/app/?mode=live`; optional OpenAI-Realtime upstream (`live-backend.ts` / `openai-realtime-live.ts`).
 
 ### Session management
 - Core routing and alias logic: `session-routing.ts`.
@@ -68,3 +69,5 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
 
 ## Recent Durable Updates
 - 2026-07-13: Created concept [[herdr-agent-hub- Module]]
+- 2026-07-20: Added [[Realtime Platform Update — 2026-07-20]], documenting the committed conversational realtime platform baseline through `8c0c38c`.
+- 2026-07-20: Added [[Realtime Live HF Parity + Desktop Orb — 2026-07-20]] for HF worklets, desktop orb, OpenAI-Realtime adapter, and Android Live camera tools.

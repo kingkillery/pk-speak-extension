@@ -1075,6 +1075,35 @@ private fun BooxCockpit(
                                         }
                                     }
 
+                                    override fun onCameraCapture(callId: String, reason: String) {
+                                        scope.launch {
+                                            appendChat(state, prefs, "system", "[camera] ${reason.ifBlank { "Capturing frame…" }}")
+                                            val owner = context as? androidx.lifecycle.LifecycleOwner
+                                            val frame = if (owner != null) {
+                                                try {
+                                                    com.example.audio.CameraSnapshot.captureJpegBase64(context, owner)
+                                                } catch (_: Exception) {
+                                                    null
+                                                }
+                                            } else null
+                                            if (frame == null) {
+                                                session.sendCameraFrame(callId, "image/jpeg", "", "Camera capture failed or permission denied")
+                                                appendChat(state, prefs, "system", "[camera] Capture failed")
+                                            } else {
+                                                session.sendCameraFrame(callId, frame.mimeType, frame.base64, reason)
+                                                appendChat(state, prefs, "system", "[camera] Frame sent")
+                                            }
+                                        }
+                                    }
+
+                                    override fun onAudioFormat(rate: Int) {
+                                        player.setSampleRate(rate)
+                                        if (player.isPlaying) {
+                                            player.stop()
+                                            player.start()
+                                        }
+                                    }
+
                                     override fun onError(message: String, httpCode: Int?) {
                                         scope.launch {
                                             appendChat(state, prefs, "system",

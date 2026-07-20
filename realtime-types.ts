@@ -1,5 +1,31 @@
+export type RealtimeControlType =
+	| "start"
+	| "configure"
+	| "interrupt"
+	| "text"
+	| "transcript"
+	| "transcript_complete"
+	| "text_reply"
+	| "tool_start"
+	| "tool_complete"
+	| "tool_approval_required"
+	| "tool_approval_resolved"
+	| "terminal_approve"
+	| "terminal_reject"
+	| "command_approve"
+	| "command_reject"
+	| "error"
+	| "reconnect"
+	| "vad_state"
+	| "reconnecting"
+	| "image"
+	| "camera_capture"
+	| "camera_frame"
+	| "live_state"
+	| "audio_format";
+
 export interface RealtimeControlMessage {
-	type: "start" | "configure" | "interrupt" | "text" | "transcript" | "transcript_complete" | "text_reply" | "tool_start" | "tool_complete" | "tool_approval_required" | "tool_approval_resolved" | "terminal_approve" | "terminal_reject" | "command_approve" | "command_reject" | "error" | "reconnect" | "vad_state";
+	type: RealtimeControlType;
 	text?: string;
 	session?: string;
 	approvalId?: string;
@@ -13,6 +39,16 @@ export interface RealtimeControlMessage {
 	clientSequenceId?: number;
 	serverSequenceId?: number;
 	vadThreshold?: number;
+	/** Base64 image payload (no data: prefix) for camera_frame / image. */
+	data?: string;
+	mimeType?: string;
+	/** Correlates camera_capture ↔ camera_frame with a pending tool call. */
+	callId?: string;
+	/** Assistant/live UI state hint (listening | processing | ai-speaking | …). */
+	state?: string;
+	/** Output PCM sample rate announced once per session. */
+	rate?: number;
+	timeLeft?: string;
 }
 
 export type RealtimeMessage = Buffer | string;

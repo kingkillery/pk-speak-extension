@@ -1,0 +1,427 @@
+// @ts-check
+/**
+ * Desktop/terminal Live orb — HF methodology audio path against pi-speak /v1/live.
+ * Meant to run outside the full remote chrome (Edge --app=/orb/).
+ */
+
+const STORAGE = {
+	gateDb: "piSpeakOrbGateDb",
+	gateOn: "piSpeakOrbGateOn",
+	token: "piSpeakRemoteToken",
+};
+
+/** @typedef {"idle"|"connecting"|"ready"|"listening"|"user-speaking"|"processing"|"ai-speaking"|"error"} OrbState */
+
+const $ = (sel) => /** @type {HTMLElement} */ (document.querySelector(sel));
+const orb = /** @type {HTMLButtonElement} */ ($("#orb"));
+const caption = $("#caption");
+const subcaption = $("#subcaption");
+const backendLabel = $("#backend-label");
+const chat = $("#chat");
+const muteBtn = /** @type {HTMLButtonElement} */ ($("#mute-btn"));
+const camBtn = /** @type {HTMLButtonElement} */ ($("#cam-btn"));
+const closeBtn = /** @type {HTMLButtonElement} */ ($("#close-btn"));
+const stopBtn = /** @type {HTMLButtonElement} */ ($("#stop-btn"));
+const gateInput = /** @type {HTMLInputElement} */ ($("#gate-db"));
+const gateValue = $("#gate-value");
+const meterFill = $("#meter-fill");
+const camPip = /** @type {HTMLVideoElement} */ ($("#cam-pip"));
+
+/** @type {OrbState} */
+let state = "idle";
+let ws = /** @type {WebSocket | null} */ (null);
+let sessionId = "";
+let clientSeq = 0;
+let lastServerSeq = 0;
+let audioCtx = /** @type {AudioContext | null} */ (null);
+let captureNode = /** @type {AudioWorkletNode | null} */ (null);
+let playbackNode = /** @type {AudioWorkletNode | null} */ (null);
+let captureSource = /** @type {MediaStreamAudioSourceNode | null} */ (null);
+let micStream = /** @type {MediaStream | null} */ (null);
+let cameraStream = /** @type {MediaStream | null} */ (null);
+let muted = false;
+let cameraOn = false;
+let playbackRate = 24000;
+let workletsReady = false;
+let liveConnected = false;
+
+function token() {
+	const q = new URL(location.href).searchParams.get("token");
+	if (q) {
+		try { sessionStorage.setItem(STORAGE.token, q); } catch {}
+		return q;
+	}
+	try {
+		return sessionStorage.getItem(STORAGE.token) || localStorage.getItem(STORAGE.token) || "";
+	} catch {
+		return "";
+	}
+}
+
+function wsUrl() {
+	const u = new URL("/v1/live", location.origin);
+	u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+	const t = token();
+	if (t) u.searchParams.set("token", t);
+	return u.toString();
+}
+
+/** @param {OrbState} next */
+function setState(next) {
+	state = next;
+	orb.className = `orb state-${next}`;
+	const labels = {
+		idle: "Tap the orb to talk",
+		connecting: "Connecting…",
+		ready: "Ready — listening",
+		listening: "Listening",
+		"user-speaking": "Hearing you",
+		processing: "Working…",
+		"ai-speaking": "Speaking",
+		error: "Something went wrong",
+	};
+	caption.textContent = labels[next] || next;
+	stopBtn.disabled = next === "idle" || next === "error";
+}
+
+/** @param {"user"|"assistant"|"tool"|"system"} role @param {string} text */
+function pushBubble(role, text) {
+	if (!text?.trim()) return;
+	const el = document.createElement("div");
+	el.className = `bubble ${role}`;
+	el.innerHTML = `<div class="role">${role}</div><div class="body"></div>`;
+	el.querySelector(".body").textContent = text.trim();
+	chat.appendChild(el);
+	while (chat.children.length > 40) chat.firstChild?.remove();
+	chat.scrollTop = chat.scrollHeight;
+}
+
+function loadGate() {
+	const on = (localStorage.getItem(STORAGE.gateOn) || "true") !== "false";
+	const db = Number.parseFloat(localStorage.getItem(STORAGE.gateDb) || "-50");
+	gateInput.value = String(Number.isFinite(db) ? db : -50);
+	gateValue.textContent = `${gateInput.value} dB`;
+	return { enabled: on, thresholdDb: Number(gateInput.value) };
+}
+
+function applyGate() {
+	const enabled = (localStorage.getItem(STORAGE.gateOn) || "true") !== "false";
+	const thresholdDb = Number(gateInput.value);
+	localStorage.setItem(STORAGE.gateDb, String(thresholdDb));
+	gateValue.textContent = `${thresholdDb} dB`;
+	captureNode?.port.postMessage({ kind: "gate", enabled, thresholdDb });
+}
+
+async function ensureAudio() {
+	if (audioCtx && audioCtx.state !== "closed") {
+		if (audioCtx.state === "suspended") await audioCtx.resume();
+		return audioCtx;
+	}
+	const AC = window.AudioContext || window.webkitAudioContext;
+	audioCtx = new AC({ latencyHint: "interactive" });
+	await Promise.all([
+		audioCtx.audioWorklet.addModule("/app/live-capture-worklet.js"),
+		audioCtx.audioWorklet.addModule("/app/live-playback-worklet.js"),
+	]);
+	playbackNode = new AudioWorkletNode(audioCtx, "pi-speak-live-playback", {
+		numberOfInputs: 0,
+		numberOfOutputs: 1,
+		outputChannelCount: [1],
+	});
+	playbackNode.port.postMessage({ kind: "config", inputRate: playbackRate });
+	playbackNode.connect(audioCtx.destination);
+	workletsReady = true;
+	return audioCtx;
+}
+
+function encodeFrame(seq, int16) {
+	const samples = int16 instanceof Int16Array ? int16 : new Int16Array(int16);
+	const frame = new ArrayBuffer(4 + samples.byteLength);
+	const view = new DataView(frame);
+	view.setInt32(0, seq, false);
+	new Uint8Array(frame, 4).set(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength));
+	return frame;
+}
+
+function decodeFrame(buf) {
+	const bytes = buf instanceof ArrayBuffer ? buf : buf.buffer;
+	if (!bytes || bytes.byteLength < 6) return null;
+	const view = new DataView(bytes);
+	const samples = new Float32Array((bytes.byteLength - 4) / 2);
+	for (let i = 0; i < samples.length; i++) {
+		const s = view.getInt16(4 + i * 2, true);
+		samples[i] = s < 0 ? s / 0x8000 : s / 0x7fff;
+	}
+	return { seq: view.getInt32(0, false), samples };
+}
+
+function clearPlayback() {
+	playbackNode?.port.postMessage({ kind: "clear" });
+	document.documentElement.style.setProperty("--ai-audio-level", "0");
+}
+
+function sendJson(payload) {
+	if (!ws || ws.readyState !== WebSocket.OPEN) return;
+	clientSeq += 1;
+	ws.send(JSON.stringify({ ...payload, clientSequenceId: clientSeq }));
+}
+
+async function startCapture() {
+	const ctx = await ensureAudio();
+	micStream = await navigator.mediaDevices.getUserMedia({
+		audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+	});
+	captureSource = ctx.createMediaStreamSource(micStream);
+	captureNode = new AudioWorkletNode(ctx, "pi-speak-live-capture", {
+		numberOfInputs: 1,
+		numberOfOutputs: 1,
+		outputChannelCount: [1],
+		processorOptions: { chunkMs: 40 },
+	});
+	const sink = ctx.createGain();
+	sink.gain.value = 0;
+	captureNode.port.onmessage = (ev) => {
+		const data = ev.data;
+		if (data && typeof data === "object" && !(data instanceof ArrayBuffer) && data.kind === "level") {
+			const rms = Number(data.rms) || 0;
+			const level = Math.min(1, rms * 8);
+			document.documentElement.style.setProperty("--audio-level", String(level));
+			meterFill.style.width = `${Math.round(level * 100)}%`;
+			if (!muted && liveConnected) {
+				if (rms > 0.03 && state === "ai-speaking") {
+					clearPlayback();
+					sendJson({ type: "interrupt" });
+					setState("user-speaking");
+				} else if (rms > 0.02 && state !== "processing") {
+					setState("user-speaking");
+				} else if (state === "user-speaking" && rms < 0.01) {
+					setState("listening");
+				}
+			}
+			return;
+		}
+		if (!ws || ws.readyState !== WebSocket.OPEN || muted) return;
+		let int16;
+		if (data instanceof ArrayBuffer) int16 = new Int16Array(data);
+		else if (data instanceof Int16Array) int16 = data;
+		else return;
+		clientSeq += 1;
+		ws.send(encodeFrame(clientSeq, int16));
+	};
+	captureSource.connect(captureNode);
+	captureNode.connect(sink);
+	sink.connect(ctx.destination);
+	applyGate();
+	captureNode.port.postMessage({ kind: "enable", value: !muted });
+}
+
+function stopCapture() {
+	try { captureNode?.disconnect(); } catch {}
+	try { captureSource?.disconnect(); } catch {}
+	captureNode = null;
+	captureSource = null;
+	if (micStream) {
+		for (const t of micStream.getTracks()) t.stop();
+		micStream = null;
+	}
+	document.documentElement.style.setProperty("--audio-level", "0");
+	meterFill.style.width = "0%";
+}
+
+async function connect() {
+	if (ws) return;
+	setState("connecting");
+	await ensureAudio();
+	await startCapture();
+	ws = new WebSocket(wsUrl());
+	ws.binaryType = "arraybuffer";
+	ws.addEventListener("open", () => {
+		const cwd = new URL(location.href).searchParams.get("cwd");
+		if (cwd) sendJson({ type: "configure", cwd });
+	});
+	ws.addEventListener("message", async (event) => {
+		if (typeof event.data !== "string") {
+			const decoded = decodeFrame(event.data);
+			if (!decoded) return;
+			lastServerSeq = Math.max(lastServerSeq, decoded.seq);
+			const copy = new Float32Array(decoded.samples.length);
+			copy.set(decoded.samples);
+			playbackNode?.port.postMessage({ kind: "audio", samples: copy }, [copy.buffer]);
+			setState("ai-speaking");
+			document.documentElement.style.setProperty("--ai-audio-level", "0.7");
+			return;
+		}
+		let msg;
+		try { msg = JSON.parse(event.data); } catch { return; }
+		if (Number.isInteger(msg.serverSequenceId)) lastServerSeq = Math.max(lastServerSeq, msg.serverSequenceId);
+		if (msg.type === "audio_format" && msg.rate > 0) {
+			playbackRate = msg.rate;
+			playbackNode?.port.postMessage({ kind: "config", inputRate: playbackRate });
+			return;
+		}
+		if (msg.type === "start") {
+			liveConnected = true;
+			sessionId = msg.session || sessionId;
+			if (msg.message) backendLabel.textContent = String(msg.message);
+			setState("listening");
+			subcaption.textContent = sessionId ? `Session ${sessionId}` : "Live";
+			return;
+		}
+		if (msg.type === "transcript" && msg.text) {
+			pushBubble("assistant", msg.text);
+			return;
+		}
+		if (msg.type === "interrupt") {
+			clearPlayback();
+			setState("listening");
+			return;
+		}
+		if (msg.type === "tool_start") {
+			setState("processing");
+			pushBubble("tool", msg.name || msg.command || "tool");
+			return;
+		}
+		if (msg.type === "tool_complete") {
+			setState("listening");
+			pushBubble("tool", `${msg.name || "tool"} done`);
+			return;
+		}
+		if (msg.type === "camera_capture") {
+			setState("processing");
+			await sendCameraFrame(msg.callId, msg.reason);
+			return;
+		}
+		if (msg.type === "error") {
+			setState("error");
+			pushBubble("system", msg.message || "error");
+			subcaption.textContent = msg.message || "error";
+		}
+	});
+	ws.addEventListener("close", () => {
+		liveConnected = false;
+		ws = null;
+		stopCapture();
+		clearPlayback();
+		setState("idle");
+		subcaption.textContent = "Disconnected";
+	});
+	ws.addEventListener("error", () => {
+		setState("error");
+		subcaption.textContent = "Socket error";
+	});
+}
+
+function teardown() {
+	try { ws?.close(); } catch {}
+	ws = null;
+	liveConnected = false;
+	stopCapture();
+	clearPlayback();
+	if (cameraStream) {
+		for (const t of cameraStream.getTracks()) t.stop();
+		cameraStream = null;
+		camPip.srcObject = null;
+		camPip.classList.add("hidden");
+		cameraOn = false;
+	}
+	if (audioCtx) {
+		void audioCtx.close().catch(() => {});
+		audioCtx = null;
+		playbackNode = null;
+		workletsReady = false;
+	}
+	setState("idle");
+}
+
+async function sendCameraFrame(callId, reason) {
+	try {
+		if (!cameraStream) {
+			cameraStream = await navigator.mediaDevices.getUserMedia({
+				video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+				audio: false,
+			});
+			camPip.srcObject = cameraStream;
+			camPip.classList.remove("hidden");
+			cameraOn = true;
+		}
+		const video = document.createElement("video");
+		video.muted = true;
+		video.playsInline = true;
+		video.srcObject = cameraStream;
+		await video.play().catch(() => {});
+		await new Promise((r) => {
+			if (video.readyState >= 2) r(undefined);
+			else video.onloadeddata = () => r(undefined);
+			setTimeout(r, 700);
+		});
+		const maxEdge = 768;
+		const vw = video.videoWidth || 640;
+		const vh = video.videoHeight || 480;
+		const scale = Math.min(1, maxEdge / Math.max(vw, vh));
+		const canvas = document.createElement("canvas");
+		canvas.width = Math.max(1, Math.round(vw * scale));
+		canvas.height = Math.max(1, Math.round(vh * scale));
+		canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
+		const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+		const data = dataUrl.replace(/^data:image\/\w+;base64,/, "");
+		sendJson({ type: "camera_frame", callId, mimeType: "image/jpeg", data, reason });
+		pushBubble("system", reason || "Camera frame sent");
+	} catch (err) {
+		sendJson({ type: "camera_frame", callId, data: "", reason: String(err?.message || err) });
+		pushBubble("system", `Camera failed: ${err?.message || err}`);
+	}
+}
+
+orb.addEventListener("click", async () => {
+	try {
+		if (state === "idle" || state === "error") await connect();
+		else teardown();
+	} catch (err) {
+		setState("error");
+		subcaption.textContent = String(err?.message || err);
+	}
+});
+
+stopBtn.addEventListener("click", () => teardown());
+closeBtn.addEventListener("click", () => {
+	teardown();
+	window.close();
+});
+muteBtn.addEventListener("click", () => {
+	muted = !muted;
+	muteBtn.textContent = muted ? "Unmute" : "Mic";
+	captureNode?.port.postMessage({ kind: "enable", value: !muted });
+});
+camBtn.addEventListener("click", async () => {
+	if (cameraOn) {
+		if (cameraStream) for (const t of cameraStream.getTracks()) t.stop();
+		cameraStream = null;
+		camPip.srcObject = null;
+		camPip.classList.add("hidden");
+		cameraOn = false;
+		camBtn.textContent = "Cam";
+		return;
+	}
+	try {
+		cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+		camPip.srcObject = cameraStream;
+		camPip.classList.remove("hidden");
+		cameraOn = true;
+		camBtn.textContent = "Cam on";
+	} catch (err) {
+		pushBubble("system", `Camera: ${err?.message || err}`);
+	}
+});
+gateInput.addEventListener("input", () => {
+	localStorage.setItem(STORAGE.gateOn, "true");
+	applyGate();
+});
+
+loadGate();
+setState("idle");
+requestAnimationFrame(() => document.body.classList.remove("booting"));
+
+const auto = new URL(location.href).searchParams.get("autoconnect");
+if (auto === "1") {
+	orb.click();
+}

@@ -14,11 +14,13 @@ import kotlin.concurrent.withLock
  * The caller is responsible for parsing the frame and passing the extracted seqId and
  * pcm bytes to [write]. Duplicate or out-of-order frames are silently dropped.
  */
-class StreamingPcmPlayer {
+class StreamingPcmPlayer(
+    private var sampleRate: Int = DEFAULT_SAMPLE_RATE,
+) {
 
     companion object {
         private const val TAG = "StreamingPcmPlayer"
-        private const val SAMPLE_RATE = 24_000
+        const val DEFAULT_SAMPLE_RATE = 24_000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_OUT_MONO
         private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
     }
@@ -39,6 +41,13 @@ class StreamingPcmPlayer {
         }
 
     /**
+     * Updates the output sample rate. Takes effect on the next [start] (recreates the track).
+     */
+    fun setSampleRate(rate: Int) {
+        if (rate >= 8_000) sampleRate = rate
+    }
+
+    /**
      * Creates and prepares the AudioTrack for streaming. Safe to call again after [stop].
      */
     fun start() {
@@ -47,14 +56,15 @@ class StreamingPcmPlayer {
                 Log.w(TAG, "start() called while already running; stopping existing track first")
                 releaseTrackLocked()
             }
-            val minBuffer = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, ENCODING)
-            // Use at least 1 second of buffer headroom (24000 samples × 2 bytes = 48 000 bytes).
-            val bufferSize = maxOf(minBuffer, SAMPLE_RATE * 2)
+            val rate = sampleRate.coerceAtLeast(8_000)
+            val minBuffer = AudioTrack.getMinBufferSize(rate, CHANNEL_CONFIG, ENCODING)
+            // Use at least 1 second of buffer headroom (rate samples × 2 bytes).
+            val bufferSize = maxOf(minBuffer, rate * 2)
 
             @Suppress("DEPRECATION")
             val track = AudioTrack(
                 AudioManager.STREAM_MUSIC,
-                SAMPLE_RATE,
+                rate,
                 CHANNEL_CONFIG,
                 ENCODING,
                 bufferSize,
@@ -63,7 +73,7 @@ class StreamingPcmPlayer {
             audioTrack = track
             lastSeqId = Int.MIN_VALUE
             trackStarted = false
-            Log.d(TAG, "AudioTrack initialized: sampleRate=$SAMPLE_RATE, bufferSize=$bufferSize")
+            Log.d(TAG, "AudioTrack initialized: sampleRate=$rate, bufferSize=$bufferSize")
         }
     }
 

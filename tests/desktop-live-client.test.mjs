@@ -7,10 +7,14 @@ import {
 	openDesktopLiveClient,
 } from "../dist/desktop-live-client.js";
 
-test("desktop live URL selects realtime mode and carries the working directory", () => {
+test("desktop live URL selects the terminal orb surface by default", () => {
 	assert.equal(
 		buildDesktopLiveClientUrl(8767, "C:\\dev\\voice project"),
-		"http://127.0.0.1:8767/app/?mode=live&autoconnect=1&cwd=C%3A%5Cdev%5Cvoice+project",
+		"http://127.0.0.1:8767/orb/?mode=live&autoconnect=1&cwd=C%3A%5Cdev%5Cvoice+project",
+	);
+	assert.equal(
+		buildDesktopLiveClientUrl(8767, undefined, "app"),
+		"http://127.0.0.1:8767/app/?mode=live&autoconnect=1",
 	);
 	assert.throws(() => buildDesktopLiveClientUrl(0), /invalid.*port/i);
 });

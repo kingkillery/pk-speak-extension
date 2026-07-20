@@ -40,6 +40,14 @@ import { listWorkspaceDirectory, readWorkspaceFile } from "./control-server.js";
 import { reduceConversationTurn } from "./conversation-reducer.js";
 import { parseHubAgentId } from "./herdr-agent-hub-schema.js";
 import { shapeRealtimeToolOutputForSpeech } from "./realtime-speech-brief.js";
+import { formatWebSearchForSpeech, isWebSearchConfigured, runWebSearch } from "./web-search.js";
+import { resolveLiveBackendKind } from "./live-backend.js";
+import type { LiveBackendSession } from "./live-backend.js";
+import {
+	connectOpenAiRealtimeLive,
+	isOpenAiRealtimeLiveConfigured,
+	resolveOpenAiRealtimeConnectUrl,
+} from "./openai-realtime-live.js";
 
 
 // Resolve the configured live-client workspace first, then fall back to the active attention session.
@@ -129,6 +137,8 @@ interface ActiveSession {
 	pendingTerminalCalls: Map<string, PendingTerminalCall>;
 	commandApprovals: RealtimeCommandApprovalRegistry;
 	pendingCommandCalls: Map<string, PendingCommandCall>;
+	/** camera_snapshot tool calls waiting on a client camera_frame. */
+	pendingCameraCalls: Map<string, { call: { id: string; name: string }; timer?: ReturnType<typeof setTimeout> }>;
 	provider: string;
 	model: string;
 	server: any; // store server reference
@@ -142,6 +152,10 @@ interface ActiveSession {
 	resumptionHandle?: string;
 	/** FunctionResponses queued while the session is mid-reconnect. */
 	pendingToolResponses: Record<string, unknown>[];
+	/** Resolved Live backend kind (gemini | openai-realtime). */
+	liveBackendKind: string;
+	/** OpenAI-Realtime adapter session when liveBackendKind is not gemini. */
+	liveBackendSession?: LiveBackendSession;
 }
 
 type PendingTerminalCall = {
@@ -164,8 +178,10 @@ export const activeSessions = new Map<string, ActiveSession>();
 // only when it receives an update, and never narrate SILENT-scheduled updates.
 export const REALTIME_SYSTEM_PROMPT = [
 	"You are a conversational assistant with full read access to this workspace: sessions, background agents, and the filesystem.",
-	"Use your read-only tools (list_sessions, get_session_info, list_agent_hub_agents, get_agent_hub_agent, browse_workspace, read_workspace_file) freely and proactively to understand the real state before answering — never guess.",
+	"Use your read-only tools (list_sessions, get_session_info, list_agent_hub_agents, get_agent_hub_agent, browse_workspace, read_workspace_file, web_search) freely and proactively to understand the real state before answering — never guess.",
+	"When the user asks about something on camera or shows you something, call camera_snapshot — do not claim you can see without it.",
 	"When a request is ambiguous or could mean more than one thing, ask a short clarifying question before acting instead of assuming.",
+	"When a user request needs web_search or camera_snapshot, say a brief acknowledgement and call the tool in the same response — do not describe the capability and wait.",
 	"Mutating actions — launching a background agent, archiving or recovering a session, or running a terminal command outside the read-only allowlist — always require the operator's explicit approval. Call the tool normally; if the result says it requires confirmation, tell the user what you are about to do and wait for them to approve or reject it before treating it as done.",
 	"Never claim an action completed until you receive a real tool result confirming it.",
 	"When you fire a background tool (launch_agent, execute_terminal_command), acknowledge in one short sentence, then continue the conversation normally.",
@@ -182,7 +198,14 @@ export { classifyRealtimeTerminalCommand, type RealtimeTerminalCommandSafety };
 function sendLiveStartWhenReady(activeSession: ActiveSession) {
 	if (!activeSession.upstreamSetupComplete || !activeSession.clientHandlersReady || activeSession.startSent) return;
 	activeSession.startSent = true;
-	sendToClient(activeSession, { type: "start", session: activeSession.sessionId }, false);
+	// HF methodology: announce output PCM rate once so the playback worklet can
+	// configure itself. Gemini Live native audio is 24 kHz mono PCM16.
+	sendToClient(activeSession, { type: "audio_format", rate: 24_000 }, false);
+	sendToClient(activeSession, {
+		type: "start",
+		session: activeSession.sessionId,
+		message: activeSession.liveBackendKind,
+	}, false);
 }
 
 export function sendToClient(activeSession: ActiveSession, message: any, isBinary: boolean) {
@@ -317,6 +340,18 @@ export function sendRealtimeToolResponse(
 	// (ignored) otherwise per the @google/genai FunctionResponse contract.
 	if (opts.scheduling !== undefined) functionResponse.scheduling = opts.scheduling;
 	if (opts.willContinue !== undefined) functionResponse.willContinue = opts.willContinue;
+
+	if (activeSession.liveBackendSession?.sendToolResult) {
+		const shaped = typeof modelResponse.output === "string"
+			? modelResponse.output
+			: JSON.stringify(modelResponse);
+		try {
+			activeSession.liveBackendSession.sendToolResult(call.id, call.name, shaped);
+		} catch {
+			activeSession.pendingToolResponses.push(functionResponse);
+		}
+		return;
+	}
 
 	if (activeSession.session) {
 		try {
@@ -649,6 +684,119 @@ function resultLooksOk(outputText: string | undefined): boolean {
 	}
 }
 
+
+const CAMERA_CAPTURE_TIMEOUT_MS = 15_000;
+
+function normalizeImageMimeType(raw: string | undefined): string {
+	const value = (raw || "image/jpeg").trim().toLowerCase();
+	if (value === "image/jpg" || value === "image/jpeg") return "image/jpeg";
+	if (value === "image/png" || value === "image/webp" || value === "image/gif") return value;
+	return "image/jpeg";
+}
+
+function stripDataUrl(data: string): { mimeType?: string; base64: string } {
+	const match = /^data:([^;]+);base64,(.+)$/i.exec(data.trim());
+	if (match) return { mimeType: match[1], base64: match[2] };
+	return { base64: data.trim() };
+}
+
+function sendImageToLiveSession(activeSession: ActiveSession, data: string, mimeType?: string): boolean {
+	if (!data.trim()) return false;
+	const parsed = stripDataUrl(data);
+	const mime = normalizeImageMimeType(mimeType || parsed.mimeType);
+	if (activeSession.liveBackendSession?.sendImage) {
+		try {
+			activeSession.liveBackendSession.sendImage({ data: parsed.base64, mimeType: mime });
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	if (!activeSession.session) return false;
+	try {
+		activeSession.session.sendRealtimeInput({
+			media: {
+				mimeType: mime,
+				data: parsed.base64,
+			},
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function clearPendingCameraCall(activeSession: ActiveSession, callId: string | undefined): void {
+	if (!callId) return;
+	const pending = activeSession.pendingCameraCalls.get(callId);
+	if (!pending) return;
+	if (pending.timer) clearTimeout(pending.timer);
+	activeSession.pendingCameraCalls.delete(callId);
+}
+
+function handleClientImage(activeSession: ActiveSession, ctrl: RealtimeControlMessage): void {
+	const data = typeof ctrl.data === "string" ? ctrl.data : "";
+	if (!data.trim()) {
+		if (ctrl.callId) {
+			clearPendingCameraCall(activeSession, ctrl.callId);
+			sendRealtimeToolResponse(activeSession, { id: ctrl.callId, name: "camera_snapshot" }, JSON.stringify({
+				ok: false,
+				error: "Camera frame was empty.",
+			}));
+		}
+		return;
+	}
+	const delivered = sendImageToLiveSession(activeSession, data, ctrl.mimeType);
+	if (ctrl.callId && activeSession.pendingCameraCalls.has(ctrl.callId)) {
+		const pending = activeSession.pendingCameraCalls.get(ctrl.callId);
+		clearPendingCameraCall(activeSession, ctrl.callId);
+		if (pending) {
+			sendRealtimeToolResponse(activeSession, pending.call, JSON.stringify({
+				ok: delivered,
+				message: delivered
+					? "Camera frame captured and attached. Describe what you see."
+					: "Camera frame arrived but could not be delivered to the live model.",
+			}));
+			sendToClient(activeSession, {
+				type: "tool_complete",
+				name: "camera_snapshot",
+				output: delivered ? "frame attached" : "frame delivery failed",
+			}, false);
+		}
+		return;
+	}
+	if (!delivered) {
+		sendToClient(activeSession, { type: "error", message: "Failed to send image to the live model." }, false);
+	}
+}
+
+function requestCameraSnapshot(
+	activeSession: ActiveSession,
+	toolCall: { id: string; name: string },
+	reason?: string,
+): void {
+	const timer = setTimeout(() => {
+		if (!activeSession.pendingCameraCalls.has(toolCall.id)) return;
+		activeSession.pendingCameraCalls.delete(toolCall.id);
+		sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({
+			ok: false,
+			error: "Timed out waiting for a camera frame from the client.",
+		}));
+		sendToClient(activeSession, {
+			type: "tool_complete",
+			name: "camera_snapshot",
+			output: "timeout",
+		}, false);
+	}, CAMERA_CAPTURE_TIMEOUT_MS);
+	timer.unref?.();
+	activeSession.pendingCameraCalls.set(toolCall.id, { call: toolCall, timer });
+	sendToClient(activeSession, {
+		type: "camera_capture",
+		callId: toolCall.id,
+		reason: reason || "The assistant wants to look through your camera.",
+	}, false);
+}
+
 function setupSocketHandlers(activeSession: ActiveSession) {
 	const ws = activeSession.ws;
 	
@@ -664,7 +812,9 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 					}
 					activeSession.clientSequenceId = seqId;
 					const audioBuf = rawMsg.subarray(4);
-					if (activeSession.session) {
+					if (activeSession.liveBackendSession) {
+						activeSession.liveBackendSession.sendAudio({ pcm: audioBuf, sampleRate: 16000 });
+					} else if (activeSession.session) {
 						activeSession.session.sendRealtimeInput({
 							media: {
 								mimeType: "audio/pcm;rate=16000",
@@ -712,19 +862,25 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 					});
 				} else if (ctrl.type === "interrupt") {
 					// Barge-in / Interrupt from client
-					if (activeSession.session) {
+					if (activeSession.liveBackendSession) {
+						activeSession.liveBackendSession.interrupt();
+					} else if (activeSession.session) {
 						activeSession.session.sendRealtimeInput({ activityStart: {} });
 					}
 					// Echo interrupt back to client to clear buffers immediately
 					sendToClient(activeSession, { type: "interrupt" }, false);
 				} else if (ctrl.type === "text" && ctrl.text) {
 					// Text turn from client
-					if (activeSession.session) {
+					if (activeSession.liveBackendSession) {
+						activeSession.liveBackendSession.sendText(ctrl.text);
+					} else if (activeSession.session) {
 						activeSession.session.sendClientContent({
 							turns: [{ role: "user", parts: [{ text: ctrl.text }] }],
 							turnComplete: true,
 						});
 					}
+				} else if (ctrl.type === "camera_frame" || ctrl.type === "image") {
+					handleClientImage(activeSession, ctrl);
 				}
 			}
 		} catch (err: any) {
@@ -761,6 +917,387 @@ type ReconnectContext = {
 // Extracted (rather than inlined in startNewSession) so the tool surface —
 // what the assistant can read freely vs. what requires operator approval —
 // is unit-testable independently of a live Gemini Live connection.
+async function dispatchRealtimeToolCall(
+	activeSession: ActiveSession,
+	toolCall: { id: string; name: string },
+	callArgs: Record<string, unknown> | undefined,
+): Promise<{ deferToolResponse: boolean; outputText: string }> {
+	let deferToolResponse = false;
+	let outputText = "";
+	const call = { id: toolCall.id, name: toolCall.name, args: callArgs ?? {} };
+	try {
+				if (call.name === "execute_terminal_command") {
+					const command = call.args?.command as string;
+					if (!command) {
+						outputText = JSON.stringify({ ok: false, error: "Missing 'command' argument" });
+						appendTerminalAudit(activeSession, {
+							kind: "terminal.request",
+							toolCallId: toolCall.id,
+							command: "",
+							action: "requires_confirmation",
+							reason: "missing-command",
+							cwd: getCurrentCwd(activeSession),
+						});
+						appendTerminalAudit(activeSession, {
+							kind: "terminal.execution_result",
+							toolCallId: toolCall.id,
+							command: "",
+							action: "requires_confirmation",
+							reason: "missing-command",
+							cwd: getCurrentCwd(activeSession),
+							result: buildRealtimeTerminalAuditResult({
+								ok: false,
+								code: null,
+								skipped: "missing-command",
+								stderr: "Missing 'command' argument",
+							}),
+						});
+					} else {
+						const plan = buildRealtimeTerminalCommandPlan(command);
+						appendTerminalAudit(activeSession, {
+							kind: "terminal.request",
+							toolCallId: toolCall.id,
+							...buildRealtimeTerminalPlanAuditFields(plan),
+							cwd: getCurrentCwd(activeSession),
+						});
+						if (plan.action !== "allow") {
+							outputText = JSON.stringify({
+								ok: false,
+								requiresConfirmation: true,
+								reason: plan.reason,
+								command,
+								cwd: getCurrentCwd(activeSession),
+								timeoutMs: plan.timeoutMs,
+								commandFamily: plan.family || "unregistered",
+								executableKnown: plan.executableKnown,
+								secretInspection: plan.secretInspection,
+								message: "Realtime terminal execution is limited to read-only allowlisted commands. Ask the user for explicit confirmation before running this command outside the realtime tool.",
+							});
+							const approval = activeSession.terminalApprovals.request(command, plan.reason);
+							const timeoutMs = Math.max(0, approval.expiresAt - Date.now());
+							const timer = setTimeout(() => {
+								resolveTerminalApproval(activeSession, approval.id, false, "expired").catch((err) => {
+									sendToClient(activeSession, { type: "error", message: `Terminal approval expiry failed: ${err instanceof Error ? err.message : String(err)}` }, false);
+								});
+							}, timeoutMs);
+							timer.unref?.();
+							activeSession.pendingTerminalCalls.set(approval.id, {
+								call: { ...toolCall, args: call.args },
+								plan,
+								timer,
+							});
+							appendTerminalAudit(activeSession, {
+								kind: "terminal.approval_requested",
+								toolCallId: toolCall.id,
+								approvalId: approval.id,
+								...buildRealtimeTerminalPlanAuditFields(plan),
+								cwd: getCurrentCwd(activeSession),
+							});
+							sendToClient(activeSession, {
+								type: "tool_approval_required",
+								approvalId: approval.id,
+								name: call.name,
+								command,
+								cwd: getCurrentCwd(activeSession),
+								timeoutMs: plan.timeoutMs,
+								reason: plan.reason,
+								message: "Confirm to run this terminal command.",
+								output: outputText,
+							}, false);
+							deferToolResponse = true;
+						} else if (activeSession.nonBlockingEnabled) {
+							// NON_BLOCKING: run the allowlisted command without blocking the
+							// receive loop; deliver the result at the next natural pause.
+							deferToolResponse = true;
+							executeRealtimeTerminalCommand(activeSession, plan, toolCall.id)
+								.then((result) => {
+									sendRealtimeToolResponse(activeSession, toolCall, result, {
+										scheduling: FunctionResponseScheduling.WHEN_IDLE,
+									});
+								})
+								.catch((err) => {
+									sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
+										scheduling: FunctionResponseScheduling.INTERRUPT,
+									});
+								});
+						} else {
+							outputText = await executeRealtimeTerminalCommand(activeSession, plan, toolCall.id);
+						}
+					}
+				} else if (call.name === "switch_session") {
+					const name = call.args?.name as string;
+					if (!name) {
+						outputText = JSON.stringify({ ok: false, error: "Missing 'name' argument" });
+					} else {
+						const persisted = loadPersistedSessionRouting();
+
+						// Find matching sessionPath
+						let matchedPath: string | undefined;
+						let matchedName: string | undefined;
+
+						// 1. Match directly by name in registry
+						for (const [sName, sPath] of Object.entries(persisted.sessions)) {
+							if (sName.toLowerCase() === name.toLowerCase()) {
+								matchedPath = sPath;
+								matchedName = sName;
+								break;
+							}
+						}
+						// 2. Match by alias
+						if (!matchedPath) {
+							for (const [alias, sPath] of Object.entries(persisted.aliases)) {
+								if (alias.toLowerCase() === name.toLowerCase()) {
+									matchedPath = sPath;
+									matchedName = findSessionNameByPath(sPath, persisted.sessions) || alias;
+									break;
+								}
+							}
+						}
+						// 3. Match by path substring or exact path
+						if (!matchedPath) {
+							for (const sPath of Object.values(persisted.sessions)) {
+								if (sPath.toLowerCase() === name.toLowerCase() || sPath.toLowerCase().includes(name.toLowerCase())) {
+									matchedPath = sPath;
+									matchedName = findSessionNameByPath(sPath, persisted.sessions) || "path-match";
+									break;
+								}
+							}
+						}
+
+						if (!matchedPath) {
+							outputText = JSON.stringify({ ok: false, error: `Session not found: ${name}` });
+						} else {
+							// Check if running
+							const snapshots = readAttentionSnapshots();
+							const runningSession = snapshots.find(s => s.sessionPath === matchedPath);
+
+							if (runningSession) {
+								// Already running, claim leader lease
+								claimAttentionLeader(runningSession.sessionId);
+								// Update routing target
+								if (activeSession.server && typeof activeSession.server.setRoutingTarget === "function") {
+									await activeSession.server.setRoutingTarget(matchedName || matchedPath);
+								}
+								outputText = JSON.stringify({
+									ok: true,
+									message: `Switched routing target to active session: ${matchedName || matchedPath}`,
+									sessionPath: matchedPath,
+									sessionId: runningSession.sessionId,
+									active: true,
+								});
+							} else {
+								// Not running, resume it
+								if (activeSession.server && typeof activeSession.server.onSessionResume === "function") {
+									const resumeRes = await activeSession.server.onSessionResume({ sessionPath: matchedPath });
+									outputText = JSON.stringify({
+										ok: resumeRes.ok,
+										message: resumeRes.message,
+										sessionPath: matchedPath,
+										active: false,
+									});
+								} else {
+									// Fallback to manual launch
+									const inventory = discoverAgentInventoryCached();
+									const session = inventory.recent.find(s => s.path === matchedPath);
+									if (session) {
+										const executable = resolveResumeExecutable(session.provider);
+										const args = buildAgentResumeArgs(session.provider, session.sessionId || "", session.cwd);
+										if (executable && args) {
+											launchDetachedCli(executable, args, session.cwd || process.cwd(), `${session.provider} resume`);
+											outputText = JSON.stringify({
+												ok: true,
+												message: `Launching detached resume for ${session.provider} session.`,
+												sessionPath: matchedPath,
+												active: false,
+											});
+										} else {
+											outputText = JSON.stringify({
+												ok: false,
+												error: `Unable to resume session: unsupported provider ${session.provider}`,
+											});
+										}
+									} else {
+										outputText = JSON.stringify({
+											ok: false,
+											error: "Session found in routing store but not in recent resume inventory.",
+										});
+									}
+								}
+							}
+						}
+					}
+				} else if (call.name === "get_session_info") {
+					const persisted = loadPersistedSessionRouting();
+					const snapshots = readAttentionSnapshots();
+					const lease = readAttentionLeaderLease();
+					const cwd = getCurrentCwd(activeSession);
+
+					outputText = JSON.stringify({
+						currentSession: lease?.ownerSessionId || "unknown",
+						currentCwd: cwd,
+						persistedSessions: persisted.sessions,
+						persistedAliases: persisted.aliases,
+						runningSnapshots: snapshots.map(s => ({
+							sessionId: s.sessionId,
+							sessionName: s.sessionName,
+							sessionPath: s.sessionPath,
+							pid: s.pid,
+							phase: s.phase,
+							waitingForAttention: s.waitingForAttention,
+						})),
+					});
+				} else if (call.name === "list_sessions") {
+					if (activeSession.server && typeof activeSession.server.getSessionDashboard === "function") {
+						const dashboard = activeSession.server.getSessionDashboard();
+						outputText = JSON.stringify({
+							ok: true,
+							current: dashboard.current,
+							workspaces: (dashboard.workspaces || []).map((w: any) => ({
+								workspace: w.workspace,
+								sessions: w.sessions.map((s: any) => ({
+									name: s.name,
+									provider: s.provider,
+									stale: !!s.stale,
+									sessionPath: s.sessionPath,
+								})),
+							})),
+						});
+					} else {
+						outputText = JSON.stringify({ ok: false, error: "Session dashboard is not available." });
+					}
+		} else if (call.name === "launch_agent") {
+			const prompt = call.args?.prompt as string | undefined;
+			const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd(activeSession);
+			const hubOnly = call.args?.hubOnly as boolean | undefined;
+			const targetNode = call.args?.targetNode as string | undefined;
+			if (isNavigationalLaunch({ prompt, hubOnly, targetNode })) {
+		// Navigational only (opens the hub/dashboard); nothing mutates, so no approval needed.
+		if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
+			const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly: true, targetNode });
+			outputText = JSON.stringify(result);
+		} else {
+			outputText = JSON.stringify({ ok: false, error: "Session launch is not available." });
+		}
+			} else {
+		// Distill the model's free-form prompt through the conversation
+		// reducer before anything launches: the coding agent receives a
+		// structured task packet (Goal / action items / constraints), and
+		// vague or low-confidence intent becomes a spoken clarification
+		// instead of an approval request. Mirrors the turn-based path
+		// (reduceConversationTurn in index.ts). The distilled packet is
+		// frozen into the approval args, so the approved continuation
+		// executes exactly what the operator saw.
+		let distilledPrompt = prompt;
+		let goalLine: string | undefined;
+		if (prompt && !targetNode) {
+			const reduction = await reduceConversationTurn(prompt, { source: "realtime" });
+			if (!reduction.dispatch) {
+				outputText = JSON.stringify({
+					ok: false,
+					needsClarification: true,
+					confidence: reduction.summary.confidence,
+					message: reduction.replyText,
+				});
+			} else {
+				distilledPrompt = reduction.promptForAgent;
+				goalLine = reduction.summary.goal;
+			}
+		}
+		if (!outputText) {
+			const description = targetNode
+				? `Deploy this workspace to ${targetNode}.`
+				: `Launch a new background agent in ${cwd}${goalLine ? ` with goal: "${goalLine}"` : prompt ? ` with prompt: "${prompt}"` : ""}.`;
+			deferToolResponse = true;
+			requestCommandApproval(activeSession, toolCall, { prompt: distilledPrompt, cwd, hubOnly, targetNode }, "launch_agent", description);
+		}
+			}
+				} else if (call.name === "archive_session") {
+					const sessionPath = call.args?.sessionPath as string;
+					const action = (call.args?.action as string) === "recover" ? "recover" : "archive";
+					if (!sessionPath) {
+						outputText = JSON.stringify({ ok: false, error: "Missing 'sessionPath' argument" });
+					} else {
+						const description = `${action === "recover" ? "Recover" : "Archive"} session ${sessionPath}.`;
+						deferToolResponse = true;
+						requestCommandApproval(activeSession, toolCall, { sessionPath, action }, "archive_session", description);
+					}
+				} else if (call.name === "list_agent_hub_agents") {
+					if (activeSession.server?.agentHubGateway) {
+						const snapshot = await activeSession.server.agentHubGateway.snapshot();
+						outputText = JSON.stringify({ ok: true, folders: snapshot.folders, agents: snapshot.agents });
+					} else {
+						outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
+					}
+				} else if (call.name === "get_agent_hub_agent") {
+					const rawId = call.args?.id as string | undefined;
+					const id = parseHubAgentId(rawId);
+					const tailLines = typeof call.args?.tailLines === "number" ? call.args.tailLines : 40;
+					if (!id) {
+						outputText = JSON.stringify({ ok: false, error: `Missing or invalid 'id' argument: ${rawId ?? ""}` });
+					} else if (activeSession.server?.agentHubGateway) {
+						const detail = await activeSession.server.agentHubGateway.detail(id, Math.min(Math.max(tailLines, 1), 500));
+						outputText = detail ? JSON.stringify({ ok: true, agent: detail }) : JSON.stringify({ ok: false, error: `Unknown agent: ${id}` });
+					} else {
+						outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
+					}
+				} else if (call.name === "browse_workspace") {
+					outputText = JSON.stringify({ ok: true, workspace: listWorkspaceDirectory(call.args?.path as string | undefined) });
+				} else if (call.name === "read_workspace_file") {
+					const requestedPath = call.args?.path as string | undefined;
+					if (requestedPath && looksLikeSecretPath(requestedPath)) {
+						outputText = JSON.stringify({ ok: false, error: "Refusing to read a file that looks like it may hold secrets or credentials." });
+					} else {
+						const result = readWorkspaceFile(requestedPath);
+						// The requested path alone isn't enough: it could be an
+						// innocuously-named symlink pointing at a secret file, so
+						// also gate on the symlink-resolved real path before the
+						// content (already read into memory) is ever returned.
+						if (result.ok && looksLikeSecretPath(result.realPath)) {
+							outputText = JSON.stringify({ ok: false, error: "Refusing to read a file that looks like it may hold secrets or credentials." });
+						} else {
+							outputText = result.ok
+								? JSON.stringify({ ok: true, file: { name: result.name, path: result.path, size: result.size, truncated: result.truncated, binary: result.binary, content: result.content } })
+								: JSON.stringify({ ok: false, error: result.error });
+						}
+					}
+				} else if (call.name === "web_search") {
+					const query = typeof call.args?.query === "string" ? call.args.query : "";
+					if (!query.trim()) {
+						outputText = JSON.stringify({ ok: false, error: "Missing 'query' argument" });
+					} else if (!isWebSearchConfigured()) {
+						outputText = JSON.stringify({
+							ok: false,
+							error: "Web search is not configured. Set SERPER_API_KEY or PI_SPEAK_SERPER_API_KEY on the gateway.",
+						});
+					} else {
+						const result = await runWebSearch(query);
+						if (!result.ok) {
+							outputText = JSON.stringify({ ok: false, error: result.error });
+						} else {
+							outputText = JSON.stringify({
+								ok: true,
+								query: result.query,
+								answer: result.answer,
+								results: result.results,
+								summary: formatWebSearchForSpeech(result),
+								speechHint: "Summarize the top findings in one or two short spoken sentences. Do not read every link.",
+							});
+						}
+					}
+				} else if (call.name === "camera_snapshot") {
+					const reason = typeof call.args?.reason === "string" ? call.args.reason : undefined;
+					deferToolResponse = true;
+					requestCameraSnapshot(activeSession, toolCall, reason);
+				} else {
+					outputText = JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
+				}
+	} catch (err: unknown) {
+		const message = err instanceof Error ? err.message : String(err);
+		outputText = JSON.stringify({ ok: false, error: message });
+	}
+	return { deferToolResponse, outputText };
+}
+
 export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 	return [
 		{
@@ -876,6 +1413,27 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 						},
 						required: ["path"]
 					}
+				},
+				{
+					name: "web_search",
+					description: "Read-only: search the public web for up-to-date facts. Returns a short answer box when available plus top result titles, snippets, and links. Use for current events, docs, or anything outside the local workspace.",
+					parameters: {
+						type: "OBJECT",
+						properties: {
+							query: { type: "STRING", description: "The search query." }
+						},
+						required: ["query"]
+					}
+				},
+				{
+					name: "camera_snapshot",
+					description: "Look through the operator's webcam. Requests one JPEG frame from the connected client so you can describe or answer questions about what they are showing. Only works while a live client with camera access is connected.",
+					parameters: {
+						type: "OBJECT",
+						properties: {
+							reason: { type: "STRING", description: "Optional short reason shown to the operator while the frame is captured." }
+						}
+					}
 				}
 			]
 		}
@@ -925,6 +1483,7 @@ async function startNewSession(
 		pendingTerminalCalls: new Map(),
 		commandApprovals: createRealtimeCommandApprovalRegistry(),
 		pendingCommandCalls: new Map(),
+		pendingCameraCalls: new Map(),
 		provider: process.env.AGENT_PROVIDER || "gemini-live",
 		model,
 		backend: clientConfig.backend,
@@ -932,13 +1491,109 @@ async function startNewSession(
 		resumptionHandle,
 		cwd: reconnect?.cwd,
 		pendingToolResponses: reconnect?.pendingToolResponses ?? [],
+		liveBackendKind: resolveLiveBackendKind(),
 	};
 	activeSessions.set(sessionId, activeSession);
 
 
 	const tools = buildRealtimeTools(nonBlockingEnabled);
+	const liveBackendKind = activeSession.liveBackendKind;
 
 	try {
+		if (liveBackendKind === "openai-realtime") {
+			if (!isOpenAiRealtimeLiveConfigured()) {
+				throw new Error(
+					"OpenAI Realtime / HF S2S backend selected but PI_SPEAK_OPENAI_REALTIME_URL (or SPEECH_TO_SPEECH_URL) is not set.",
+				);
+			}
+			const connectUrl = resolveOpenAiRealtimeConnectUrl();
+			const backendSession = await connectOpenAiRealtimeLive(
+				{
+					connectUrl,
+					apiKey: process.env.PI_SPEAK_OPENAI_REALTIME_KEY || process.env.OPENAI_API_KEY || undefined,
+					voice: process.env.PI_SPEAK_OPENAI_REALTIME_VOICE || undefined,
+					instructions: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || REALTIME_SYSTEM_PROMPT,
+				},
+				{
+					systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || REALTIME_SYSTEM_PROMPT,
+					tools,
+				},
+				{
+					onOutbound: (event) => {
+						if (event.kind === "audio") {
+							sendToClient(activeSession, event.pcm, true);
+						} else if (event.kind === "transcript") {
+							sendToClient(activeSession, { type: "transcript", text: event.text }, false);
+							if (event.final) sendToClient(activeSession, { type: "transcript_complete" }, false);
+						} else if (event.kind === "interrupt") {
+							sendToClient(activeSession, { type: "interrupt" }, false);
+						} else if (event.kind === "error") {
+							sendToClient(activeSession, { type: "error", message: event.message }, false);
+						} else if (event.kind === "tool_call") {
+							void (async () => {
+								const toolCall = { id: event.id, name: event.name };
+								const commandArg = typeof event.args.command === "string" ? event.args.command : undefined;
+								sendToClient(activeSession, {
+									type: "tool_start",
+									name: event.name,
+									command: commandArg,
+								}, false);
+								const { deferToolResponse, outputText } = await dispatchRealtimeToolCall(
+									activeSession,
+									toolCall,
+									event.args,
+								);
+								if (!deferToolResponse) {
+									sendRealtimeToolResponse(activeSession, toolCall, outputText);
+								}
+							})();
+						} else if (event.kind === "status" && event.status === "ready") {
+							activeSession.upstreamSetupComplete = true;
+							sendLiveStartWhenReady(activeSession);
+						}
+					},
+				},
+			);
+			activeSession.liveBackendSession = backendSession;
+			// Duck-type enough of the Gemini session surface used by setupSocketHandlers / close.
+			activeSession.session = {
+				sendRealtimeInput: (payload: { media?: { data?: string }; activityStart?: object }) => {
+					if (payload?.media?.data) {
+						backendSession.sendAudio({ pcm: Buffer.from(payload.media.data, "base64"), sampleRate: 16000 });
+					}
+					if (payload && "activityStart" in payload) backendSession.interrupt();
+				},
+				sendClientContent: (payload: { turns?: Array<{ parts?: Array<{ text?: string }> }> }) => {
+					const text = payload?.turns?.[0]?.parts?.find((p) => p.text)?.text;
+					if (text) backendSession.sendText(text);
+				},
+				sendToolResponse: (payload: { functionResponses?: Array<{ id?: string; name?: string; response?: unknown }> }) => {
+					for (const fr of payload.functionResponses || []) {
+						if (!fr.id || !fr.name) continue;
+						const output = typeof fr.response === "object" && fr.response && "output" in (fr.response as object)
+							? String((fr.response as { output?: unknown }).output ?? "")
+							: JSON.stringify(fr.response ?? {});
+						backendSession.sendToolResult?.(fr.id, fr.name, output);
+					}
+				},
+				close: () => backendSession.close(),
+			};
+			activeSession.upstreamSetupComplete = true;
+			setupSocketHandlers(activeSession);
+			// Wire OpenAI tool calls into the same dispatch as Gemini by handling on the client socket message path is awkward;
+			// process tool calls inline here via a dedicated listener.
+			if (firstMsg !== undefined) ws.emit("message", firstMsg, firstMsgIsBinary);
+			if (activeSession.configurationError) {
+				activeSessions.delete(sessionId);
+				try { backendSession.close(); } catch {}
+				ws.close(1008, activeSession.configurationError);
+				return;
+			}
+			activeSession.clientHandlersReady = true;
+			sendLiveStartWhenReady(activeSession);
+			return;
+		}
+
 		const geminiSession = await ai.live.connect({
 			model,
 			config: {
@@ -1014,359 +1669,17 @@ async function startNewSession(
 						for (const call of message.toolCall.functionCalls) {
 							if (!call.name || !call.id) continue;
 							const toolCall = { id: call.id, name: call.name };
-							let deferToolResponse = false;
-							
-							// Send tool_start event
+							const args = (call.args && typeof call.args === "object")
+								? call.args as Record<string, unknown>
+								: {};
+							const commandArg = typeof args.command === "string" ? args.command : undefined;
 							sendToClient(activeSession, {
 								type: "tool_start",
 								name: call.name,
-								command: call.args?.command as string || undefined,
+								command: commandArg,
 							}, false);
-
-							let outputText = "";
-							try {
-								if (call.name === "execute_terminal_command") {
-									const command = call.args?.command as string;
-									if (!command) {
-										outputText = JSON.stringify({ ok: false, error: "Missing 'command' argument" });
-										appendTerminalAudit(activeSession, {
-											kind: "terminal.request",
-											toolCallId: toolCall.id,
-											command: "",
-											action: "requires_confirmation",
-											reason: "missing-command",
-											cwd: getCurrentCwd(activeSession),
-										});
-										appendTerminalAudit(activeSession, {
-											kind: "terminal.execution_result",
-											toolCallId: toolCall.id,
-											command: "",
-											action: "requires_confirmation",
-											reason: "missing-command",
-											cwd: getCurrentCwd(activeSession),
-											result: buildRealtimeTerminalAuditResult({
-												ok: false,
-												code: null,
-												skipped: "missing-command",
-												stderr: "Missing 'command' argument",
-											}),
-										});
-									} else {
-										const plan = buildRealtimeTerminalCommandPlan(command);
-										appendTerminalAudit(activeSession, {
-											kind: "terminal.request",
-											toolCallId: toolCall.id,
-											...buildRealtimeTerminalPlanAuditFields(plan),
-											cwd: getCurrentCwd(activeSession),
-										});
-										if (plan.action !== "allow") {
-											outputText = JSON.stringify({
-												ok: false,
-												requiresConfirmation: true,
-												reason: plan.reason,
-												command,
-												cwd: getCurrentCwd(activeSession),
-												timeoutMs: plan.timeoutMs,
-												commandFamily: plan.family || "unregistered",
-												executableKnown: plan.executableKnown,
-												secretInspection: plan.secretInspection,
-												message: "Realtime terminal execution is limited to read-only allowlisted commands. Ask the user for explicit confirmation before running this command outside the realtime tool.",
-											});
-											const approval = activeSession.terminalApprovals.request(command, plan.reason);
-											const timeoutMs = Math.max(0, approval.expiresAt - Date.now());
-											const timer = setTimeout(() => {
-												resolveTerminalApproval(activeSession, approval.id, false, "expired").catch((err) => {
-													sendToClient(activeSession, { type: "error", message: `Terminal approval expiry failed: ${err instanceof Error ? err.message : String(err)}` }, false);
-												});
-											}, timeoutMs);
-											timer.unref?.();
-											activeSession.pendingTerminalCalls.set(approval.id, {
-												call: { ...toolCall, args: call.args },
-												plan,
-												timer,
-											});
-											appendTerminalAudit(activeSession, {
-												kind: "terminal.approval_requested",
-												toolCallId: toolCall.id,
-												approvalId: approval.id,
-												...buildRealtimeTerminalPlanAuditFields(plan),
-												cwd: getCurrentCwd(activeSession),
-											});
-											sendToClient(activeSession, {
-												type: "tool_approval_required",
-												approvalId: approval.id,
-												name: call.name,
-												command,
-												cwd: getCurrentCwd(activeSession),
-												timeoutMs: plan.timeoutMs,
-												reason: plan.reason,
-												message: "Confirm to run this terminal command.",
-												output: outputText,
-											}, false);
-											deferToolResponse = true;
-										} else if (activeSession.nonBlockingEnabled) {
-											// NON_BLOCKING: run the allowlisted command without blocking the
-											// receive loop; deliver the result at the next natural pause.
-											deferToolResponse = true;
-											executeRealtimeTerminalCommand(activeSession, plan, toolCall.id)
-												.then((result) => {
-													sendRealtimeToolResponse(activeSession, toolCall, result, {
-														scheduling: FunctionResponseScheduling.WHEN_IDLE,
-													});
-												})
-												.catch((err) => {
-													sendRealtimeToolResponse(activeSession, toolCall, JSON.stringify({ ok: false, error: err?.message || String(err) }), {
-														scheduling: FunctionResponseScheduling.INTERRUPT,
-													});
-												});
-										} else {
-											outputText = await executeRealtimeTerminalCommand(activeSession, plan, toolCall.id);
-										}
-									}
-								} else if (call.name === "switch_session") {
-									const name = call.args?.name as string;
-									if (!name) {
-										outputText = JSON.stringify({ ok: false, error: "Missing 'name' argument" });
-									} else {
-										const persisted = loadPersistedSessionRouting();
-										
-										// Find matching sessionPath
-										let matchedPath: string | undefined;
-										let matchedName: string | undefined;
-										
-										// 1. Match directly by name in registry
-										for (const [sName, sPath] of Object.entries(persisted.sessions)) {
-											if (sName.toLowerCase() === name.toLowerCase()) {
-												matchedPath = sPath;
-												matchedName = sName;
-												break;
-											}
-										}
-										// 2. Match by alias
-										if (!matchedPath) {
-											for (const [alias, sPath] of Object.entries(persisted.aliases)) {
-												if (alias.toLowerCase() === name.toLowerCase()) {
-													matchedPath = sPath;
-													matchedName = findSessionNameByPath(sPath, persisted.sessions) || alias;
-													break;
-												}
-											}
-										}
-										// 3. Match by path substring or exact path
-										if (!matchedPath) {
-											for (const sPath of Object.values(persisted.sessions)) {
-												if (sPath.toLowerCase() === name.toLowerCase() || sPath.toLowerCase().includes(name.toLowerCase())) {
-													matchedPath = sPath;
-													matchedName = findSessionNameByPath(sPath, persisted.sessions) || "path-match";
-													break;
-												}
-											}
-										}
-
-										if (!matchedPath) {
-											outputText = JSON.stringify({ ok: false, error: `Session not found: ${name}` });
-										} else {
-											// Check if running
-											const snapshots = readAttentionSnapshots();
-											const runningSession = snapshots.find(s => s.sessionPath === matchedPath);
-											
-											if (runningSession) {
-												// Already running, claim leader lease
-												claimAttentionLeader(runningSession.sessionId);
-												// Update routing target
-												if (activeSession.server && typeof activeSession.server.setRoutingTarget === "function") {
-													await activeSession.server.setRoutingTarget(matchedName || matchedPath);
-												}
-												outputText = JSON.stringify({
-													ok: true,
-													message: `Switched routing target to active session: ${matchedName || matchedPath}`,
-													sessionPath: matchedPath,
-													sessionId: runningSession.sessionId,
-													active: true,
-												});
-											} else {
-												// Not running, resume it
-												if (activeSession.server && typeof activeSession.server.onSessionResume === "function") {
-													const resumeRes = await activeSession.server.onSessionResume({ sessionPath: matchedPath });
-													outputText = JSON.stringify({
-														ok: resumeRes.ok,
-														message: resumeRes.message,
-														sessionPath: matchedPath,
-														active: false,
-													});
-												} else {
-													// Fallback to manual launch
-													const inventory = discoverAgentInventoryCached();
-													const session = inventory.recent.find(s => s.path === matchedPath);
-													if (session) {
-														const executable = resolveResumeExecutable(session.provider);
-														const args = buildAgentResumeArgs(session.provider, session.sessionId || "", session.cwd);
-														if (executable && args) {
-															launchDetachedCli(executable, args, session.cwd || process.cwd(), `${session.provider} resume`);
-															outputText = JSON.stringify({
-																ok: true,
-																message: `Launching detached resume for ${session.provider} session.`,
-																sessionPath: matchedPath,
-																active: false,
-															});
-														} else {
-															outputText = JSON.stringify({
-																ok: false,
-																error: `Unable to resume session: unsupported provider ${session.provider}`,
-															});
-														}
-													} else {
-														outputText = JSON.stringify({
-															ok: false,
-															error: "Session found in routing store but not in recent resume inventory.",
-														});
-													}
-												}
-											}
-										}
-									}
-								} else if (call.name === "get_session_info") {
-									const persisted = loadPersistedSessionRouting();
-									const snapshots = readAttentionSnapshots();
-									const lease = readAttentionLeaderLease();
-									const cwd = getCurrentCwd(activeSession);
-									
-									outputText = JSON.stringify({
-										currentSession: lease?.ownerSessionId || "unknown",
-										currentCwd: cwd,
-										persistedSessions: persisted.sessions,
-										persistedAliases: persisted.aliases,
-										runningSnapshots: snapshots.map(s => ({
-											sessionId: s.sessionId,
-											sessionName: s.sessionName,
-											sessionPath: s.sessionPath,
-											pid: s.pid,
-											phase: s.phase,
-											waitingForAttention: s.waitingForAttention,
-										})),
-									});
-								} else if (call.name === "list_sessions") {
-									if (activeSession.server && typeof activeSession.server.getSessionDashboard === "function") {
-										const dashboard = activeSession.server.getSessionDashboard();
-										outputText = JSON.stringify({
-											ok: true,
-											current: dashboard.current,
-											workspaces: (dashboard.workspaces || []).map((w: any) => ({
-												workspace: w.workspace,
-												sessions: w.sessions.map((s: any) => ({
-													name: s.name,
-													provider: s.provider,
-													stale: !!s.stale,
-													sessionPath: s.sessionPath,
-												})),
-											})),
-										});
-									} else {
-										outputText = JSON.stringify({ ok: false, error: "Session dashboard is not available." });
-									}
-				} else if (call.name === "launch_agent") {
-					const prompt = call.args?.prompt as string | undefined;
-					const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd(activeSession);
-					const hubOnly = call.args?.hubOnly as boolean | undefined;
-					const targetNode = call.args?.targetNode as string | undefined;
-					if (isNavigationalLaunch({ prompt, hubOnly, targetNode })) {
-						// Navigational only (opens the hub/dashboard); nothing mutates, so no approval needed.
-						if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
-							const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly: true, targetNode });
-							outputText = JSON.stringify(result);
-						} else {
-							outputText = JSON.stringify({ ok: false, error: "Session launch is not available." });
-						}
-					} else {
-						// Distill the model's free-form prompt through the conversation
-						// reducer before anything launches: the coding agent receives a
-						// structured task packet (Goal / action items / constraints), and
-						// vague or low-confidence intent becomes a spoken clarification
-						// instead of an approval request. Mirrors the turn-based path
-						// (reduceConversationTurn in index.ts). The distilled packet is
-						// frozen into the approval args, so the approved continuation
-						// executes exactly what the operator saw.
-						let distilledPrompt = prompt;
-						let goalLine: string | undefined;
-						if (prompt && !targetNode) {
-							const reduction = await reduceConversationTurn(prompt, { source: "realtime" });
-							if (!reduction.dispatch) {
-								outputText = JSON.stringify({
-									ok: false,
-									needsClarification: true,
-									confidence: reduction.summary.confidence,
-									message: reduction.replyText,
-								});
-							} else {
-								distilledPrompt = reduction.promptForAgent;
-								goalLine = reduction.summary.goal;
-							}
-						}
-						if (!outputText) {
-							const description = targetNode
-								? `Deploy this workspace to ${targetNode}.`
-								: `Launch a new background agent in ${cwd}${goalLine ? ` with goal: "${goalLine}"` : prompt ? ` with prompt: "${prompt}"` : ""}.`;
-							deferToolResponse = true;
-							requestCommandApproval(activeSession, toolCall, { prompt: distilledPrompt, cwd, hubOnly, targetNode }, "launch_agent", description);
-						}
-					}
-								} else if (call.name === "archive_session") {
-									const sessionPath = call.args?.sessionPath as string;
-									const action = (call.args?.action as string) === "recover" ? "recover" : "archive";
-									if (!sessionPath) {
-										outputText = JSON.stringify({ ok: false, error: "Missing 'sessionPath' argument" });
-									} else {
-										const description = `${action === "recover" ? "Recover" : "Archive"} session ${sessionPath}.`;
-										deferToolResponse = true;
-										requestCommandApproval(activeSession, toolCall, { sessionPath, action }, "archive_session", description);
-									}
-								} else if (call.name === "list_agent_hub_agents") {
-									if (activeSession.server?.agentHubGateway) {
-										const snapshot = await activeSession.server.agentHubGateway.snapshot();
-										outputText = JSON.stringify({ ok: true, folders: snapshot.folders, agents: snapshot.agents });
-									} else {
-										outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
-									}
-								} else if (call.name === "get_agent_hub_agent") {
-									const rawId = call.args?.id as string | undefined;
-									const id = parseHubAgentId(rawId);
-									const tailLines = typeof call.args?.tailLines === "number" ? call.args.tailLines : 40;
-									if (!id) {
-										outputText = JSON.stringify({ ok: false, error: `Missing or invalid 'id' argument: ${rawId ?? ""}` });
-									} else if (activeSession.server?.agentHubGateway) {
-										const detail = await activeSession.server.agentHubGateway.detail(id, Math.min(Math.max(tailLines, 1), 500));
-										outputText = detail ? JSON.stringify({ ok: true, agent: detail }) : JSON.stringify({ ok: false, error: `Unknown agent: ${id}` });
-									} else {
-										outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
-									}
-								} else if (call.name === "browse_workspace") {
-									outputText = JSON.stringify({ ok: true, workspace: listWorkspaceDirectory(call.args?.path as string | undefined) });
-								} else if (call.name === "read_workspace_file") {
-									const requestedPath = call.args?.path as string | undefined;
-									if (requestedPath && looksLikeSecretPath(requestedPath)) {
-										outputText = JSON.stringify({ ok: false, error: "Refusing to read a file that looks like it may hold secrets or credentials." });
-									} else {
-										const result = readWorkspaceFile(requestedPath);
-										// The requested path alone isn't enough: it could be an
-										// innocuously-named symlink pointing at a secret file, so
-										// also gate on the symlink-resolved real path before the
-										// content (already read into memory) is ever returned.
-										if (result.ok && looksLikeSecretPath(result.realPath)) {
-											outputText = JSON.stringify({ ok: false, error: "Refusing to read a file that looks like it may hold secrets or credentials." });
-										} else {
-											outputText = result.ok
-												? JSON.stringify({ ok: true, file: { name: result.name, path: result.path, size: result.size, truncated: result.truncated, binary: result.binary, content: result.content } })
-												: JSON.stringify({ ok: false, error: result.error });
-										}
-									}
-								} else {
-									outputText = JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
-								}
-							} catch (err: any) {
-								outputText = JSON.stringify({ ok: false, error: err.message });
-							}
+							const { deferToolResponse, outputText } = await dispatchRealtimeToolCall(activeSession, toolCall, args);
 							if (deferToolResponse) continue;
-
 							sendRealtimeToolResponse(activeSession, toolCall, outputText);
 						}
 					}
