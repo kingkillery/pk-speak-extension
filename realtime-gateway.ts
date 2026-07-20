@@ -12,6 +12,7 @@ import { resolveWindowsNpmShim } from "./agent-discovery.js";
 import { normalizeOptionalString } from "./agent-hub-actions.js";
 import { safeSpawn } from "./spawn-shim.js";
 import { spawn } from "node:child_process";
+import { resolve } from "node:path";
 import type { RealtimeControlMessage } from "./realtime-types.js";
 import {
 	createRealtimeTerminalApprovalRegistry,
@@ -36,12 +37,14 @@ import {
 	type RealtimeCommandKind,
 } from "./realtime-command-approval.js";
 import { listWorkspaceDirectory, readWorkspaceFile } from "./control-server.js";
+import { reduceConversationTurn } from "./conversation-reducer.js";
 import { parseHubAgentId } from "./herdr-agent-hub-schema.js";
 import { shapeRealtimeToolOutputForSpeech } from "./realtime-speech-brief.js";
 
 
-// Helper to resolve current cwd of the active session
-function getCurrentCwd(): string {
+// Resolve the configured live-client workspace first, then fall back to the active attention session.
+function getCurrentCwd(activeSession?: { cwd?: string }): string {
+	if (activeSession?.cwd) return activeSession.cwd;
 	const lease = readAttentionLeaderLease();
 	if (lease?.ownerSessionId) {
 		const snapshots = readAttentionSnapshots();
@@ -117,6 +120,9 @@ interface ActiveSession {
 	session: any; // Gemini Live session
 	clientSequenceId: number; // last processed client sequence ID
 	serverSequenceId: number; // last assigned server sequence ID
+	upstreamSetupComplete: boolean;
+	clientHandlersReady: boolean;
+	startSent: boolean;
 	disconnectTimeout?: NodeJS.Timeout;
 	pendingServerMessages: { seqId: number; isBinary: boolean; data: any }[];
 	terminalApprovals: RealtimeTerminalApprovalRegistry;
@@ -126,6 +132,8 @@ interface ActiveSession {
 	provider: string;
 	model: string;
 	server: any; // store server reference
+	cwd?: string;
+	configurationError?: string;
 	/** Backend of the Live connection ("developer-api" | "vertex"). */
 	backend: string;
 	/** True when NON_BLOCKING async function calling is available (developer-api only). */
@@ -170,6 +178,12 @@ export const REALTIME_SYSTEM_PROMPT = [
 ].join(" ");
 
 export { classifyRealtimeTerminalCommand, type RealtimeTerminalCommandSafety };
+
+function sendLiveStartWhenReady(activeSession: ActiveSession) {
+	if (!activeSession.upstreamSetupComplete || !activeSession.clientHandlersReady || activeSession.startSent) return;
+	activeSession.startSent = true;
+	sendToClient(activeSession, { type: "start", session: activeSession.sessionId }, false);
+}
 
 export function sendToClient(activeSession: ActiveSession, message: any, isBinary: boolean) {
 	const seqId = ++activeSession.serverSequenceId;
@@ -241,7 +255,7 @@ async function executeRealtimeTerminalCommand(
 	toolCallId?: string,
 	approvalId?: string,
 ) {
-	const cwd = getCurrentCwd();
+	const cwd = getCurrentCwd(activeSession);
 	const result = await executeRealtimeTerminalCommandPlan(plan, cwd);
 	appendTerminalAudit(activeSession, {
 		kind: "terminal.execution_result",
@@ -404,7 +418,7 @@ async function resolveTerminalApproval(
 		toolCallId: pending.call.id,
 		approvalId: approval.id,
 		...buildRealtimeTerminalPlanAuditFields(pending.plan),
-		cwd: getCurrentCwd(),
+		cwd: getCurrentCwd(activeSession),
 		approved,
 		decision: reason,
 	});
@@ -413,7 +427,7 @@ async function resolveTerminalApproval(
 		approvalId: approval.id,
 		name: pending.call.name,
 		command: pending.plan.command,
-		cwd: getCurrentCwd(),
+		cwd: getCurrentCwd(activeSession),
 		timeoutMs: pending.plan.timeoutMs,
 		reason: pending.plan.reason,
 		message: approved ? "Terminal command approved." : "Terminal command rejected.",
@@ -427,7 +441,7 @@ async function resolveTerminalApproval(
 				toolCallId: pending.call.id,
 				approvalId: approval.id,
 				...buildRealtimeTerminalPlanAuditFields(pending.plan),
-				cwd: getCurrentCwd(),
+				cwd: getCurrentCwd(activeSession),
 				result: buildRealtimeTerminalAuditResult({
 					ok: false,
 					code: null,
@@ -440,7 +454,7 @@ async function resolveTerminalApproval(
 			requiresConfirmation: true,
 			reason,
 			command: pending.plan.command,
-			cwd: getCurrentCwd(),
+			cwd: getCurrentCwd(activeSession),
 			timeoutMs: pending.plan.timeoutMs,
 			riskReason: pending.plan.reason,
 			commandFamily: pending.plan.family || "unregistered",
@@ -510,7 +524,7 @@ async function executeLaunchAgentMutation(
 	args: Record<string, unknown>,
 ): Promise<string | undefined> {
 	const prompt = args.prompt as string | undefined;
-	const cwd = (args.cwd as string | undefined) || getCurrentCwd();
+	const cwd = (args.cwd as string | undefined) || getCurrentCwd(activeSession);
 	const hubOnly = args.hubOnly as boolean | undefined;
 	const targetNode = args.targetNode as string | undefined;
 	if (activeSession.nonBlockingEnabled && prompt && !hubOnly && !targetNode) {
@@ -668,6 +682,26 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 					activeSession.clientSequenceId = Math.max(activeSession.clientSequenceId, ctrl.clientSequenceId);
 				}
 
+				if (ctrl.type === "configure") {
+					const requested = ctrl.cwd?.trim();
+					if (!requested) {
+						activeSession.configurationError = "A live workspace path is required.";
+						sendToClient(activeSession, { type: "error", message: activeSession.configurationError }, false);
+						return;
+					}
+					const workspace = listWorkspaceDirectory(requested);
+					const current = resolve(workspace.current);
+					const expected = resolve(requested);
+					const matches = process.platform === "win32" ? current.toLowerCase() === expected.toLowerCase() : current === expected;
+					if (!matches) {
+						activeSession.configurationError = `Live workspace is outside the gateway root: ${workspace.root}`;
+						sendToClient(activeSession, { type: "error", message: activeSession.configurationError }, false);
+						return;
+					}
+					activeSession.cwd = workspace.current;
+					return;
+				}
+
 				if (ctrl.type === "terminal_approve" || ctrl.type === "terminal_reject") {
 					resolveTerminalApproval(activeSession, ctrl.approvalId, ctrl.type === "terminal_approve").catch((err) => {
 						sendToClient(activeSession, { type: "error", message: `Terminal approval failed: ${err instanceof Error ? err.message : String(err)}` }, false);
@@ -721,6 +755,7 @@ type ReconnectContext = {
 	resumptionHandle?: string;
 	pendingToolResponses: Record<string, unknown>[];
 	priorSessionId: string;
+	cwd?: string;
 };
 
 // Extracted (rather than inlined in startNewSession) so the tool surface —
@@ -777,7 +812,7 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 				},
 				{
 					name: "launch_agent",
-					description: "Launches a new oh-my-pk background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'. Actually launching (as opposed to just opening the hub) mutates state, so it requires operator approval.",
+					description: "Launches a new oh-my-pk background agent, opens the agent hub, or starts the Colab deployment flow when targetNode is 'colab'. Your prompt is distilled into a structured task packet before the agent sees it; a vague or low-confidence prompt comes back as a clarification instead of launching. Actually launching (as opposed to just opening the hub) mutates state, so it requires operator approval.",
 					parameters: {
 						type: "OBJECT",
 						properties: {
@@ -882,6 +917,9 @@ async function startNewSession(
 		clientSequenceId: 0,
 		serverSequenceId: 0,
 		pendingServerMessages: [],
+		upstreamSetupComplete: false,
+		clientHandlersReady: false,
+		startSent: false,
 		server,
 		terminalApprovals: createRealtimeTerminalApprovalRegistry(),
 		pendingTerminalCalls: new Map(),
@@ -892,15 +930,11 @@ async function startNewSession(
 		backend: clientConfig.backend,
 		nonBlockingEnabled,
 		resumptionHandle,
+		cwd: reconnect?.cwd,
 		pendingToolResponses: reconnect?.pendingToolResponses ?? [],
 	};
 	activeSessions.set(sessionId, activeSession);
 
-	// Send start message with sessionId. We want this to be serverSequenceId = 1.
-	sendToClient(activeSession, {
-		type: "start",
-		session: sessionId
-	}, false);
 
 	const tools = buildRealtimeTools(nonBlockingEnabled);
 
@@ -926,6 +960,11 @@ async function startNewSession(
 					// Connection opened
 				},
 				onmessage: async (message: LiveServerMessage) => {
+					if (message.setupComplete) {
+						activeSession.upstreamSetupComplete = true;
+						sendLiveStartWhenReady(activeSession);
+					}
+
 					// 1. Forward raw audio chunk
 					for (const part of message.serverContent?.modelTurn?.parts || []) {
 						if (part.inlineData?.data) {
@@ -996,7 +1035,7 @@ async function startNewSession(
 											command: "",
 											action: "requires_confirmation",
 											reason: "missing-command",
-											cwd: getCurrentCwd(),
+											cwd: getCurrentCwd(activeSession),
 										});
 										appendTerminalAudit(activeSession, {
 											kind: "terminal.execution_result",
@@ -1004,7 +1043,7 @@ async function startNewSession(
 											command: "",
 											action: "requires_confirmation",
 											reason: "missing-command",
-											cwd: getCurrentCwd(),
+											cwd: getCurrentCwd(activeSession),
 											result: buildRealtimeTerminalAuditResult({
 												ok: false,
 												code: null,
@@ -1018,7 +1057,7 @@ async function startNewSession(
 											kind: "terminal.request",
 											toolCallId: toolCall.id,
 											...buildRealtimeTerminalPlanAuditFields(plan),
-											cwd: getCurrentCwd(),
+											cwd: getCurrentCwd(activeSession),
 										});
 										if (plan.action !== "allow") {
 											outputText = JSON.stringify({
@@ -1026,7 +1065,7 @@ async function startNewSession(
 												requiresConfirmation: true,
 												reason: plan.reason,
 												command,
-												cwd: getCurrentCwd(),
+												cwd: getCurrentCwd(activeSession),
 												timeoutMs: plan.timeoutMs,
 												commandFamily: plan.family || "unregistered",
 												executableKnown: plan.executableKnown,
@@ -1051,14 +1090,14 @@ async function startNewSession(
 												toolCallId: toolCall.id,
 												approvalId: approval.id,
 												...buildRealtimeTerminalPlanAuditFields(plan),
-												cwd: getCurrentCwd(),
+												cwd: getCurrentCwd(activeSession),
 											});
 											sendToClient(activeSession, {
 												type: "tool_approval_required",
 												approvalId: approval.id,
 												name: call.name,
 												command,
-												cwd: getCurrentCwd(),
+												cwd: getCurrentCwd(activeSession),
 												timeoutMs: plan.timeoutMs,
 												reason: plan.reason,
 												message: "Confirm to run this terminal command.",
@@ -1190,7 +1229,7 @@ async function startNewSession(
 									const persisted = loadPersistedSessionRouting();
 									const snapshots = readAttentionSnapshots();
 									const lease = readAttentionLeaderLease();
-									const cwd = getCurrentCwd();
+									const cwd = getCurrentCwd(activeSession);
 									
 									outputText = JSON.stringify({
 										currentSession: lease?.ownerSessionId || "unknown",
@@ -1227,7 +1266,7 @@ async function startNewSession(
 									}
 				} else if (call.name === "launch_agent") {
 					const prompt = call.args?.prompt as string | undefined;
-					const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd();
+					const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd(activeSession);
 					const hubOnly = call.args?.hubOnly as boolean | undefined;
 					const targetNode = call.args?.targetNode as string | undefined;
 					if (isNavigationalLaunch({ prompt, hubOnly, targetNode })) {
@@ -1239,11 +1278,37 @@ async function startNewSession(
 							outputText = JSON.stringify({ ok: false, error: "Session launch is not available." });
 						}
 					} else {
-						const description = targetNode
-							? `Deploy this workspace to ${targetNode}.`
-							: `Launch a new background agent in ${cwd}${prompt ? ` with prompt: "${prompt}"` : ""}.`;
-						deferToolResponse = true;
-						requestCommandApproval(activeSession, toolCall, { prompt, cwd, hubOnly, targetNode }, "launch_agent", description);
+						// Distill the model's free-form prompt through the conversation
+						// reducer before anything launches: the coding agent receives a
+						// structured task packet (Goal / action items / constraints), and
+						// vague or low-confidence intent becomes a spoken clarification
+						// instead of an approval request. Mirrors the turn-based path
+						// (reduceConversationTurn in index.ts). The distilled packet is
+						// frozen into the approval args, so the approved continuation
+						// executes exactly what the operator saw.
+						let distilledPrompt = prompt;
+						let goalLine: string | undefined;
+						if (prompt && !targetNode) {
+							const reduction = await reduceConversationTurn(prompt, { source: "realtime" });
+							if (!reduction.dispatch) {
+								outputText = JSON.stringify({
+									ok: false,
+									needsClarification: true,
+									confidence: reduction.summary.confidence,
+									message: reduction.replyText,
+								});
+							} else {
+								distilledPrompt = reduction.promptForAgent;
+								goalLine = reduction.summary.goal;
+							}
+						}
+						if (!outputText) {
+							const description = targetNode
+								? `Deploy this workspace to ${targetNode}.`
+								: `Launch a new background agent in ${cwd}${goalLine ? ` with goal: "${goalLine}"` : prompt ? ` with prompt: "${prompt}"` : ""}.`;
+							deferToolResponse = true;
+							requestCommandApproval(activeSession, toolCall, { prompt: distilledPrompt, cwd, hubOnly, targetNode }, "launch_agent", description);
+						}
 					}
 								} else if (call.name === "archive_session") {
 									const sessionPath = call.args?.sessionPath as string;
@@ -1339,6 +1404,15 @@ async function startNewSession(
 		if (firstMsg !== undefined) {
 			ws.emit("message", firstMsg, firstMsgIsBinary);
 		}
+		if (activeSession.configurationError) {
+			activeSessions.delete(sessionId);
+			try { geminiSession.close(); } catch {}
+			ws.close(1008, activeSession.configurationError);
+			return;
+		}
+
+		activeSession.clientHandlersReady = true;
+		sendLiveStartWhenReady(activeSession);
 	} catch (error: any) {
 		activeSessions.delete(sessionId);
 		ws.close(1011, `Failed to connect to Gemini Live: ${error.message}`);
@@ -1355,6 +1429,7 @@ async function reconnectLiveSession(activeSession: ActiveSession) {
 		resumptionHandle: activeSession.resumptionHandle,
 		pendingToolResponses: activeSession.pendingToolResponses,
 		priorSessionId: activeSession.sessionId,
+		cwd: activeSession.cwd,
 	};
 	try {
 		activeSession.session?.close();
@@ -1378,6 +1453,7 @@ function resumeSession(ws: WebSocket, reconnectMsg: RealtimeControlMessage) {
 	// Flush pending/buffered server messages that client has not yet received
 	const lastClientReceived = reconnectMsg.serverSequenceId || 0;
 	flushPendingServerMessages(activeSession, lastClientReceived);
+	sendToClient(activeSession, { type: "start", session: sessionId }, false);
 }
 
 export async function handleRealtimeGateway(this: any, ws: WebSocket) {

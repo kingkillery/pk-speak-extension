@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
 	<meta charset="utf-8">
@@ -6,6 +6,7 @@
 	<meta name="theme-color" content="#1f3c33">
 	<title>Pi Speak Chat</title>
 	<link rel="manifest" href="/app/app.webmanifest">
+	<link rel="icon" href="/app/icon.svg" type="image/svg+xml">
 	<style>
 		:root {
 			--canvas: #f7f9f4;
@@ -395,7 +396,7 @@
 			right: 0;
 			bottom: 0;
 			z-index: 20;
-			background: rgba(247, 249, 244, 0.92);
+			background: color-mix(in srgb, var(--canvas) 92%, transparent);
 			backdrop-filter: blur(10px);
 			border-top: 1px solid var(--line);
 			padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
@@ -470,7 +471,7 @@
 			padding: 6px 8px;
 			border: 1px solid var(--line);
 			border-radius: 8px;
-			background: rgba(255, 255, 255, 0.9);
+			background: var(--surface-glass);
 			box-shadow: var(--shadow);
 			min-width: 0;
 		}
@@ -507,7 +508,7 @@
 			font-size: 12px;
 			font-weight: 800;
 			border: 1px solid var(--line);
-			background: rgba(255, 255, 255, 0.9);
+			background: var(--surface-glass);
 			border-radius: 8px;
 			padding: 10px 12px;
 			min-width: 86px;

@@ -413,6 +413,7 @@ export class ControlServer {
 	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
 	private readonly onBrainstorm?: ControlServerOptions["onBrainstorm"];
 	private wss?: WebSocketServer;
+	private readonly realtimeClients = new Set<WebSocket>();
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
@@ -518,6 +519,8 @@ export class ControlServer {
 
 		this.wss = new WebSocketServer({ noServer: true });
 		this.wss.on("connection", (ws) => {
+			this.realtimeClients.add(ws);
+			ws.once("close", () => this.realtimeClients.delete(ws));
 			ws.on("message", async (data, isBinary) => {
 				if (!isBinary) {
 					try {
@@ -586,6 +589,17 @@ export class ControlServer {
 		});
 		this.startMdnsAdvertisement();
 		return this.getRuntimeState();
+	}
+
+	disconnectRealtimeClients(reason = "Realtime voice stopped by the CLI.") {
+		if (this.realtimeClients.size === 0) return 0;
+		let disconnected = 0;
+		for (const client of this.realtimeClients) {
+			if (client.readyState !== WebSocket.OPEN) continue;
+			client.close(1000, reason);
+			disconnected += 1;
+		}
+		return disconnected;
 	}
 
 	async stop() {
@@ -1308,6 +1322,16 @@ export class ControlServer {
 		if (url.pathname === "/app/app.js") {
 			await this.serveStaticFile(
 				join(REMOTE_APP_DIR, "app.js"),
+				"application/javascript; charset=utf-8",
+				res,
+				"no-store",
+			);
+			return true;
+		}
+
+		if (url.pathname === "/app/live-capture-worklet.js") {
+			await this.serveStaticFile(
+				join(REMOTE_APP_DIR, "live-capture-worklet.js"),
 				"application/javascript; charset=utf-8",
 				res,
 				"no-store",
@@ -2295,7 +2319,7 @@ function isLocalRequest(req: IncomingMessage, url: URL) {
 }
 
 function isLoopbackHost(hostname: string) {
-	const normalized = (hostname || "").toLowerCase();
+	const normalized = (hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
 	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 

@@ -145,6 +145,32 @@ test("pk-speak help includes speak command", async () => {
 	assert.match(stdout, /Speak examples:/);
 });
 
+test("pk-speak live dry-run reports gateway and desktop plans", async () => {
+	const { stdout } = await execFileAsync(process.execPath, [
+		"dist/pk-speak.js",
+		"live",
+		"--dry-run",
+		"--port",
+		"8877",
+		"--cwd",
+		process.cwd(),
+	], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /live gateway/i);
+	assert.match(stdout, /AGENT_PROVIDER=gemini-live/);
+	assert.match(stdout, /--gateway .*headless-gateway\.js/i);
+	assert.match(stdout, /127\.0\.0\.1:8877\/app\/\?mode=live&autoconnect=1/);
+});
+
+test("pk-speak live help describes the local realtime audio bridge", async () => {
+	const { stdout } = await execFileAsync(process.execPath, ["dist/pk-speak.js", "live", "--help"], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /desktop app window/i);
+	assert.match(stdout, /16 kHz microphone PCM/i);
+});
+
 test("pk-speak speak dry-run reads text args and sanitizes spoken output", async () => {
 	const { stdout } = await execFileAsync(process.execPath, [
 		"dist/pk-speak.js",

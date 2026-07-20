@@ -12,6 +12,49 @@ export function buildRealtimeWebSocketUrl(origin, token = "") {
 	return url.toString();
 }
 
+export function isLoopbackHostname(hostname) {
+	const normalized = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+export function encodeLivePcmFrame(sequenceId, samples, inputSampleRate, outputSampleRate = 16_000) {
+	if (!Number.isInteger(sequenceId) || sequenceId < 1) throw new Error("Live audio sequence ID must be a positive integer.");
+	if (!samples || typeof samples.length !== "number") throw new Error("Live audio samples are required.");
+	if (!Number.isFinite(inputSampleRate) || inputSampleRate < 1 || outputSampleRate < 1) {
+		throw new Error("Live audio sample rates are invalid.");
+	}
+	const ratio = inputSampleRate / outputSampleRate;
+	const outputLength = Math.max(1, Math.floor(samples.length / ratio));
+	const frame = new ArrayBuffer(4 + outputLength * 2);
+	const view = new DataView(frame);
+	view.setInt32(0, sequenceId, false);
+	for (let index = 0; index < outputLength; index += 1) {
+		const start = Math.floor(index * ratio);
+		const end = Math.max(start + 1, Math.min(samples.length, Math.floor((index + 1) * ratio)));
+		let sum = 0;
+		for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1) sum += samples[sourceIndex];
+		const sample = Math.max(-1, Math.min(1, sum / (end - start)));
+		view.setInt16(4 + index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+	}
+	return frame;
+}
+
+export function decodeLivePcmFrame(frame) {
+	const bytes = frame instanceof ArrayBuffer
+		? frame
+		: ArrayBuffer.isView(frame)
+			? frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength)
+			: null;
+	if (!bytes || bytes.byteLength < 6 || (bytes.byteLength - 4) % 2 !== 0) return null;
+	const view = new DataView(bytes);
+	const samples = new Float32Array((bytes.byteLength - 4) / 2);
+	for (let index = 0; index < samples.length; index += 1) {
+		const sample = view.getInt16(4 + index * 2, true);
+		samples[index] = sample < 0 ? sample / 0x8000 : sample / 0x7fff;
+	}
+	return { sequenceId: view.getInt32(0, false), samples };
+}
+
 export function loadPersistedSettings({
 	queryToken = "",
 	queryLaunchPath = "",
@@ -86,10 +129,28 @@ if (typeof document !== "undefined") {
 		workspaceInitialized: false,
 		fileViewerReturnFocus: null,
 		liveSocket: null,
+		liveConnected: false,
+		liveSessionId: "",
+		liveLastServerSequenceId: 0,
+		liveReconnectAttempts: 0,
+		liveReconnectTimer: null,
+		liveStableTimer: null,
 		liveClientSequenceId: 0,
 		liveReplyBuffer: "",
 		liveAgentMessage: null,
 		liveSettleTimer: null,
+		liveTurnInProgress: false,
+		liveAudioContext: null,
+		liveCaptureSource: null,
+		liveCaptureNode: null,
+		liveCaptureStarting: false,
+		liveCaptureEpoch: 0,
+		liveAudioWorkletReady: false,
+		liveCaptureSink: null,
+		livePlaybackCursor: 0,
+		livePlaybackSources: new Set(),
+		livePlaybackGeneration: 0,
+		liveLastInterruptAt: 0,
 		pendingTerminalApprovals: {},
 	};
 
@@ -186,11 +247,11 @@ if (typeof document !== "undefined") {
 	}
 
 	function syncLockedUi() {
-		const locked = !hasToken();
+		const localAccess = isLoopbackHostname(window.location.hostname);
+		const locked = !hasToken() && !localAccess;
 		if (els.appRoot) els.appRoot.classList.toggle("locked", locked);
-		// Onboarding banner is only useful until the token exists.
 		if (els.setupBanner) els.setupBanner.classList.toggle("hidden", !locked);
-		if (els.auth) els.auth.textContent = locked ? "Token needed" : "Token loaded";
+		if (els.auth) els.auth.textContent = hasToken() ? "Token loaded" : localAccess ? "Local access" : "Token needed";
 	}
 
 	function syncDockInset() {
@@ -202,13 +263,14 @@ if (typeof document !== "undefined") {
 	function setStatus(text, tone) {
 		if (els.statusNote) {
 			els.statusNote.textContent = text;
-			els.statusNote.style.color = tone === "error" ? "#9b3517" : "var(--ink)";
+			els.statusNote.style.color = tone === "error" ? "var(--danger)" : "var(--ink)";
 		}
 		if (els.statusDot) {
 			els.statusDot.className = `status-dot${tone === "error" ? " error" : state.lastStatus ? " ready" : ""}`;
 		}
 		if (els.auth) {
-			els.auth.textContent = tone === "error" ? "Token issue" : "Token loaded";
+			const localAccess = isLoopbackHostname(window.location.hostname);
+			els.auth.textContent = tone === "error" ? "Connection issue" : hasToken() ? "Token loaded" : localAccess ? "Local access" : "Token needed";
 		}
 	}
 
@@ -471,6 +533,7 @@ if (typeof document !== "undefined") {
 		if (state.liveSettleTimer) window.clearTimeout(state.liveSettleTimer);
 		state.liveSettleTimer = window.setTimeout(() => {
 			state.liveSettleTimer = null;
+			state.liveTurnInProgress = false;
 			setRecordingStateBusy(false);
 			setStatus("Live turn complete.");
 		}, 1500);
@@ -980,7 +1043,9 @@ if (typeof document !== "undefined") {
 			syncRouteUi(state.lastStatus);
 			syncSettingsUi();
 			getSetupHint(state.lastStatus);
-			setStatus(summarizeStatus(state.lastStatus));
+			setStatus(state.liveMode && state.liveConnected
+				? state.recording ? "Live conversation connected — mic is on." : "Live session connected. Tap to turn the mic on."
+				: summarizeStatus(state.lastStatus));
 			syncLockedUi();
 		} catch (error) {
 			setStatus(String(error.message || error), "error");
@@ -1107,27 +1172,129 @@ if (typeof document !== "undefined") {
 		});
 	}
 
-	function closeLiveSocket() {
-		if (!state.liveSocket) return;
-		try { state.liveSocket.close(); } catch {}
-		state.liveSocket = null;
+	function ensureLiveAudioContext() {
+		if (state.liveAudioContext && state.liveAudioContext.state !== "closed") return state.liveAudioContext;
+		const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+		if (!AudioContextClass) throw new Error("This browser does not support realtime audio playback.");
+		state.liveAudioContext = new AudioContextClass({ latencyHint: "interactive" });
+		state.liveAudioWorkletReady = false;
+		state.livePlaybackCursor = 0;
+		return state.liveAudioContext;
 	}
 
-	function handleLiveSocketMessage(event) {
-		if (typeof event.data !== "string") return;
+	function stopLivePlayback() {
+		state.livePlaybackGeneration += 1;
+		for (const source of state.livePlaybackSources) {
+			try { source.stop(); } catch {}
+		}
+		state.livePlaybackSources.clear();
+		state.livePlaybackCursor = state.liveAudioContext?.currentTime || 0;
+	}
+
+	async function playLiveAudioFrame(data) {
+		const generation = state.livePlaybackGeneration;
+		const bytes = data instanceof Blob ? await data.arrayBuffer() : data;
+		const decoded = decodeLivePcmFrame(bytes);
+		if (!decoded || decoded.samples.length === 0) return;
+		state.liveLastServerSequenceId = Math.max(state.liveLastServerSequenceId, decoded.sequenceId);
+		if (generation !== state.livePlaybackGeneration) return;
+		const context = ensureLiveAudioContext();
+		if (context.state === "suspended") await context.resume().catch(() => {});
+		if (generation !== state.livePlaybackGeneration) return;
+		const buffer = context.createBuffer(1, decoded.samples.length, 24_000);
+		buffer.copyToChannel(decoded.samples, 0);
+		const source = context.createBufferSource();
+		source.buffer = buffer;
+		source.connect(context.destination);
+		const startAt = Math.max(context.currentTime + 0.025, state.livePlaybackCursor);
+		state.livePlaybackCursor = startAt + buffer.duration;
+		state.livePlaybackSources.add(source);
+		source.addEventListener("ended", () => state.livePlaybackSources.delete(source), { once: true });
+		source.start(startAt);
+	}
+
+	function stopLiveCapture({ releaseStream = true } = {}) {
+		state.liveCaptureEpoch += 1;
+		state.liveCaptureStarting = false;
+		if (state.liveCaptureNode) {
+			state.liveCaptureNode.port.onmessage = null;
+			try { state.liveCaptureNode.disconnect(); } catch {}
+		}
+		try { state.liveCaptureSource?.disconnect(); } catch {}
+		try { state.liveCaptureSink?.disconnect(); } catch {}
+		state.liveCaptureNode = null;
+		state.liveCaptureSource = null;
+		state.liveCaptureSink = null;
+		state.recording = false;
+		window.clearInterval(state.timerId);
+		state.timerId = null;
+		if (releaseStream && state.stream) {
+			for (const track of state.stream.getTracks()) track.stop();
+			state.stream = null;
+			state.mediaRecorder = null;
+		}
+		if (els.record) els.record.disabled = !!state.turnInProgress;
+		ensureTimerState();
+	}
+
+	function closeLiveSocket() {
+		stopLiveCapture({ releaseStream: true });
+		stopLivePlayback();
+		state.liveConnected = false;
+		state.liveSessionId = "";
+		state.liveLastServerSequenceId = 0;
+		state.liveReconnectAttempts = 0;
+		window.clearTimeout(state.liveReconnectTimer);
+		state.liveReconnectTimer = null;
+		window.clearTimeout(state.liveStableTimer);
+		state.liveStableTimer = null;
+		if (state.liveTurnInProgress) {
+			window.clearTimeout(state.liveSettleTimer);
+			state.liveSettleTimer = null;
+			state.liveTurnInProgress = false;
+			setRecordingStateBusy(false);
+		}
+		const socket = state.liveSocket;
+		state.liveSocket = null;
+		if (socket) {
+			try { socket.close(); } catch {}
+		}
+		if (state.liveAudioContext) {
+			void state.liveAudioContext.close().catch(() => {});
+			state.liveAudioContext = null;
+			state.liveAudioWorkletReady = false;
+		}
+	}
+
+	async function handleLiveSocketMessage(event) {
+		if (typeof event.data !== "string") {
+			await playLiveAudioFrame(event.data).catch((error) => setStatus(String(error.message || error), "error"));
+			return;
+		}
 		let message;
 		try {
 			message = JSON.parse(event.data);
 		} catch {
 			return;
 		}
+		if (Number.isInteger(message.serverSequenceId)) {
+			state.liveLastServerSequenceId = Math.max(state.liveLastServerSequenceId, message.serverSequenceId);
+		}
 		if (message.type === "start") {
-			setStatus("Live session connected.");
+			state.liveConnected = true;
+			state.liveSessionId = message.session || state.liveSessionId;
+			window.clearTimeout(state.liveStableTimer);
+			state.liveStableTimer = window.setTimeout(() => { state.liveReconnectAttempts = 0; }, 30_000);
+			setStatus(state.recording ? "Live conversation connected — mic is on." : "Live session connected. Tap to turn the mic on.");
 			return;
 		}
 		if (message.type === "transcript" && message.text) {
 			appendOrUpdateLiveReply(message.text);
 			scheduleLiveTurnSettled();
+			return;
+		}
+		if (message.type === "interrupt") {
+			stopLivePlayback();
 			return;
 		}
 		if (message.type === "tool_start") {
@@ -1155,49 +1322,210 @@ if (typeof document !== "undefined") {
 		}
 	}
 
+	function scheduleLiveReconnect(reason = "") {
+		if (!state.liveMode || state.liveReconnectTimer) return;
+		if (state.liveReconnectAttempts >= 5) {
+			setStatus("Live session unavailable after 5 reconnect attempts. Tap Start live to try again.", "error");
+			return;
+		}
+		const delay = Math.min(10_000, 1000 * (2 ** state.liveReconnectAttempts));
+		state.liveReconnectAttempts += 1;
+		const detail = String(reason || "").trim().slice(0, 160);
+		setStatus(`${detail ? `${detail} ` : "Live session disconnected. "}Reconnecting in ${Math.round(delay / 1000)}s…`, "error");
+		state.liveReconnectTimer = window.setTimeout(() => {
+			state.liveReconnectTimer = null;
+			ensureLiveSocket();
+		}, delay);
+	}
+
 	function ensureLiveSocket() {
 		if (state.liveSocket && (state.liveSocket.readyState === WebSocket.OPEN || state.liveSocket.readyState === WebSocket.CONNECTING)) {
 			return state.liveSocket;
 		}
+		state.liveConnected = false;
 		const socket = new WebSocket(buildRealtimeWebSocketUrl(window.location.origin, state.token));
+		socket.binaryType = "arraybuffer";
 		state.liveSocket = socket;
+		socket.addEventListener("open", () => {
+			if (state.liveSocket !== socket) return;
+			state.liveClientSequenceId += 1;
+			if (state.liveSessionId) {
+				socket.send(JSON.stringify({
+					type: "reconnect",
+					session: state.liveSessionId,
+					serverSequenceId: state.liveLastServerSequenceId,
+					clientSequenceId: state.liveClientSequenceId,
+				}));
+				return;
+			}
+			const cwd = state.launchPath.trim();
+			if (cwd) socket.send(JSON.stringify({ type: "configure", cwd, clientSequenceId: state.liveClientSequenceId }));
+		});
 		socket.addEventListener("message", handleLiveSocketMessage);
-		socket.addEventListener("close", () => {
-			if (state.liveSocket === socket) state.liveSocket = null;
+		socket.addEventListener("close", (event) => {
+			if (state.liveSocket !== socket) return;
+			state.liveSocket = null;
+			state.liveConnected = false;
+			window.clearTimeout(state.liveStableTimer);
+			state.liveStableTimer = null;
+			stopLiveCapture({ releaseStream: true });
+			stopLivePlayback();
+			if (event.code === 1000 && event.reason === "Realtime voice stopped by the CLI.") {
+				state.liveMode = false;
+				if (els.liveModeToggle) els.liveModeToggle.checked = false;
+				saveSettings();
+				updateRecordingUi();
+				setStatus(event.reason);
+				return;
+			}
+			scheduleLiveReconnect(event.reason);
 		});
 		socket.addEventListener("error", () => {
+			if (state.liveSocket !== socket) return;
+			state.liveConnected = false;
 			setStatus("Live socket connection failed.", "error");
 		});
 		return socket;
 	}
 
-	function sendLiveControl(payload) {
-		const socket = ensureLiveSocket();
-		const send = () => {
-			state.liveClientSequenceId += 1;
-			socket.send(JSON.stringify({ ...payload, clientSequenceId: state.liveClientSequenceId }));
-		};
-		if (socket.readyState === WebSocket.OPEN) {
-			send();
-			return Promise.resolve();
+	function waitForLiveSocket(socket) {
+		if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
+		if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+			return Promise.reject(new Error("Live socket is closed."));
 		}
 		return new Promise((resolve, reject) => {
-			const onOpen = () => {
-				cleanup();
-				send();
-				resolve();
-			};
-			const onError = () => {
-				cleanup();
-				reject(new Error("Live socket connection failed."));
-			};
-			const cleanup = () => {
+			let settled = false;
+			const finish = (error) => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timeout);
 				socket.removeEventListener("open", onOpen);
 				socket.removeEventListener("error", onError);
+				socket.removeEventListener("close", onClose);
+				if (error) reject(error); else resolve();
 			};
+			const onOpen = () => finish();
+			const onError = () => finish(new Error("Live socket connection failed."));
+			const onClose = () => finish(new Error("Live socket closed before connecting."));
+			const timeout = window.setTimeout(() => finish(new Error("Live socket connection timed out.")), 15_000);
 			socket.addEventListener("open", onOpen);
 			socket.addEventListener("error", onError);
+			socket.addEventListener("close", onClose);
 		});
+	}
+
+	function waitForLiveReady(socket) {
+		if (state.liveConnected) return Promise.resolve();
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const finish = (error) => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timeout);
+				socket.removeEventListener("message", onMessage);
+				socket.removeEventListener("error", onError);
+				socket.removeEventListener("close", onClose);
+				if (error) reject(error); else resolve();
+			};
+			const onMessage = (event) => {
+				if (typeof event.data !== "string") return;
+				try {
+					const message = JSON.parse(event.data);
+					if (message.type === "start") finish();
+					else if (message.type === "error") finish(new Error(message.message || "Live session failed to start."));
+				} catch {}
+			};
+			const onError = () => finish(new Error("Live session failed to start."));
+			const onClose = () => finish(new Error("Live socket closed before the session was ready."));
+			const timeout = window.setTimeout(() => finish(new Error("Live session startup timed out.")), 30_000);
+			socket.addEventListener("message", onMessage);
+			socket.addEventListener("error", onError);
+			socket.addEventListener("close", onClose);
+		});
+	}
+
+	async function startLiveCapture() {
+		if (state.recording || state.liveCaptureStarting) return;
+		if (!navigator.mediaDevices?.getUserMedia) throw new Error("This browser does not support microphone streaming.");
+		if (!window.isSecureContext) throw new Error("Microphone access requires localhost or HTTPS.");
+		const epoch = ++state.liveCaptureEpoch;
+		state.liveCaptureStarting = true;
+		if (els.record) els.record.disabled = true;
+		state.liveReconnectAttempts = 0;
+		window.clearTimeout(state.liveReconnectTimer);
+		state.liveReconnectTimer = null;
+		try {
+			const socket = ensureLiveSocket();
+			await waitForLiveSocket(socket);
+			await waitForLiveReady(socket);
+			const currentStream = state.stream?.getAudioTracks?.().some((track) => track.readyState === "live") ? state.stream : null;
+			const stream = currentStream || await navigator.mediaDevices.getUserMedia({
+				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+			});
+			if (epoch !== state.liveCaptureEpoch || !state.liveMode || state.liveSocket !== socket) {
+				if (!currentStream) for (const track of stream.getTracks()) track.stop();
+				return;
+			}
+			state.stream = stream;
+			const context = ensureLiveAudioContext();
+			await context.resume();
+			if (!state.liveAudioWorkletReady) {
+				await context.audioWorklet.addModule("/app/live-capture-worklet.js");
+				state.liveAudioWorkletReady = true;
+			}
+			if (epoch !== state.liveCaptureEpoch || !state.liveMode || state.liveSocket !== socket) return;
+			const source = context.createMediaStreamSource(stream);
+			const capture = new AudioWorkletNode(context, "pi-speak-live-capture", {
+				numberOfInputs: 1,
+				numberOfOutputs: 1,
+				outputChannelCount: [1],
+			});
+			const sink = context.createGain();
+			sink.gain.value = 0;
+			capture.port.onmessage = (event) => {
+				if (!state.recording || socket.readyState !== WebSocket.OPEN) return;
+				const samples = event.data;
+				state.liveClientSequenceId += 1;
+				socket.send(encodeLivePcmFrame(state.liveClientSequenceId, samples, 16_000));
+				let energy = 0;
+				for (let index = 0; index < samples.length; index += 1) energy += samples[index] * samples[index];
+				const rms = Math.sqrt(energy / samples.length);
+				const now = Date.now();
+				if (rms > 0.035 && state.livePlaybackSources.size > 0 && now - state.liveLastInterruptAt > 750) {
+					state.liveLastInterruptAt = now;
+					stopLivePlayback();
+					state.liveClientSequenceId += 1;
+					socket.send(JSON.stringify({ type: "interrupt", clientSequenceId: state.liveClientSequenceId }));
+				}
+			};
+			source.connect(capture);
+			capture.connect(sink);
+			sink.connect(context.destination);
+			state.liveCaptureSource = source;
+			state.liveCaptureNode = capture;
+			state.liveCaptureSink = sink;
+			state.recording = true;
+			state.recordStartedAt = Date.now();
+			state.timerId = window.setInterval(ensureTimerState, 250);
+			ensureTimerState();
+			setStatus("Live conversation connected — mic is on.");
+		} catch (error) {
+			if (epoch === state.liveCaptureEpoch) stopLiveCapture({ releaseStream: true });
+			throw error;
+		} finally {
+			if (epoch === state.liveCaptureEpoch) {
+				state.liveCaptureStarting = false;
+				if (els.record) els.record.disabled = !!state.turnInProgress;
+			}
+		}
+	}
+
+	async function sendLiveControl(payload) {
+		const socket = ensureLiveSocket();
+		await waitForLiveSocket(socket);
+		await waitForLiveReady(socket);
+		state.liveClientSequenceId += 1;
+		socket.send(JSON.stringify({ ...payload, clientSequenceId: state.liveClientSequenceId }));
 	}
 
 	function sendTerminalApproval(approvalId, approved) {
@@ -1212,6 +1540,7 @@ if (typeof document !== "undefined") {
 
 	async function submitLiveText(text) {
 		setStatus("Sending live text turn...");
+		state.liveTurnInProgress = true;
 		setRecordingStateBusy(true);
 		appendMessage("user", text);
 		state.liveReplyBuffer = "";
@@ -1222,13 +1551,15 @@ if (typeof document !== "undefined") {
 			setStatus("Live turn sent.");
 		} catch (error) {
 			setStatus(String(error.message || error), "error");
+			state.liveTurnInProgress = false;
 			setRecordingStateBusy(false);
 		}
 	}
 
 	function ensureTimerState() {
 		const active = state.recording;
-		if (state.turnInProgress) {
+		if (els.audioToggle) els.audioToggle.classList.toggle("hidden", state.liveMode);
+		if (state.turnInProgress && !state.liveMode) {
 			if (els.record) els.record.classList.remove("recording");
 			if (els.recordLabel) els.recordLabel.textContent = "Working";
 			if (els.recordLabelMain) els.recordLabelMain.textContent = "Processing your turn";
@@ -1236,22 +1567,18 @@ if (typeof document !== "undefined") {
 			if (els.timer) els.timer.textContent = "Please wait";
 			return;
 		}
-		if (!state.recording) {
+		if (!active) {
 			if (els.record) els.record.classList.remove("recording");
-			if (els.recordLabel) els.recordLabel.textContent = "Tap to talk";
-			if (els.recordLabelMain) els.recordLabelMain.textContent = "Speak to local agent";
-			if (els.recordSubtitle) {
-				els.recordSubtitle.textContent = state.liveMode
-					? "Live mode active"
-					: state.wantAudio ? "Text replies are enabled" : "Text replies are enabled";
-			}
+			if (els.recordLabel) els.recordLabel.textContent = state.liveMode ? "Start live" : "Tap to talk";
+			if (els.recordLabelMain) els.recordLabelMain.textContent = state.liveMode ? "Gemini Live" : "Speak to local agent";
+			if (els.recordSubtitle) els.recordSubtitle.textContent = state.liveMode ? "Mic is off" : "Text replies are enabled";
 			if (els.timer) els.timer.textContent = "Ready";
 			return;
 		}
 		if (els.record) els.record.classList.add("recording");
-		if (els.recordLabel) els.recordLabel.textContent = "Tap to send";
-		if (els.recordLabelMain) els.recordLabelMain.textContent = "Release after speaking";
-		if (els.recordSubtitle) els.recordSubtitle.textContent = "Recording";
+		if (els.recordLabel) els.recordLabel.textContent = state.liveMode ? "Mute" : "Tap to send";
+		if (els.recordLabelMain) els.recordLabelMain.textContent = state.liveMode ? "Gemini Live" : "Release after speaking";
+		if (els.recordSubtitle) els.recordSubtitle.textContent = state.liveMode ? "Mic is on" : "Recording";
 		if (els.timer) els.timer.textContent = formatElapsed(Date.now() - state.recordStartedAt);
 	}
 
@@ -1418,6 +1745,19 @@ if (typeof document !== "undefined") {
 	}
 
 	async function toggleRecording() {
+		if (state.liveMode) {
+			if (state.recording) {
+				stopLiveCapture();
+				setStatus("Live mic muted. Tap Start live to resume.");
+				return;
+			}
+			try {
+				await startLiveCapture();
+			} catch (error) {
+				setStatus(String(error.message || error), "error");
+			}
+			return;
+		}
 		if (state.turnInProgress) return;
 		if (state.recording) {
 			await stopRecordingAndSend();
@@ -1603,8 +1943,15 @@ if (typeof document !== "undefined") {
 		saveSettings();
 	});
 	els.liveModeToggle?.addEventListener("change", () => {
+		const recorderActive = state.mediaRecorder && state.mediaRecorder.state !== "inactive";
+		if (els.liveModeToggle.checked && recorderActive) {
+			els.liveModeToggle.checked = false;
+			setStatus("Finish or cancel the current recording before entering live mode.", "error");
+			return;
+		}
 		captureSettings();
-		if (!state.liveMode) closeLiveSocket();
+		if (state.liveMode) ensureLiveSocket();
+		else closeLiveSocket();
 		saveSettings();
 		updateRecordingUi();
 	});
@@ -1682,6 +2029,7 @@ if (typeof document !== "undefined") {
 	});
 
 	loadSettings();
+	syncLockedUi();
 	updateRecordingUi();
 	syncDockInset();
 	if (typeof ResizeObserver !== "undefined" && els.dock) {
@@ -1691,4 +2039,6 @@ if (typeof document !== "undefined") {
 	registerServiceWorker();
 	bindInstallPrompt();
 	void refreshStatus();
+	if (state.liveMode && new URL(window.location.href).searchParams.get("autoconnect") === "1") ensureLiveSocket();
+	window.addEventListener("beforeunload", closeLiveSocket, { once: true });
 }

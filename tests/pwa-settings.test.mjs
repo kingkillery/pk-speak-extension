@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	buildRealtimeWebSocketUrl,
+	decodeLivePcmFrame,
+	encodeLivePcmFrame,
+	isLoopbackHostname,
 	loadPersistedSettings,
 	persistSettingsSnapshot,
 	STORAGE_AUDIO,
@@ -19,6 +22,38 @@ test("buildRealtimeWebSocketUrl maps http origins to websocket live route", () =
 		buildRealtimeWebSocketUrl("https://example.tailnet.ts.net", ""),
 		"wss://example.tailnet.ts.net/v1/live",
 	);
+});
+
+test("desktop loopback hosts bypass remote-token onboarding", () => {
+	for (const host of ["localhost", "127.0.0.1", "::1", "[::1]"]) {
+		assert.equal(isLoopbackHostname(host), true, host);
+	}
+	assert.equal(isLoopbackHostname("100.64.0.1"), false);
+	assert.equal(isLoopbackHostname("127.0.0.42"), false);
+	assert.equal(isLoopbackHostname("desktop.example.com"), false);
+});
+
+test("realtime PCM framing downsamples mic audio and preserves the sequence header", () => {
+	const input = new Float32Array(48).fill(0.5);
+	const frame = encodeLivePcmFrame(7, input, 48_000);
+	assert.equal(frame.byteLength, 4 + 16 * 2);
+	const decoded = decodeLivePcmFrame(frame);
+	assert.ok(decoded);
+	assert.equal(decoded.sequenceId, 7);
+	assert.equal(decoded.samples.length, 16);
+	assert.ok(Math.abs(decoded.samples[0] - 0.5) < 0.001);
+});
+
+test("realtime PCM framing safely upsamples low-rate input", () => {
+	const frame = encodeLivePcmFrame(8, new Float32Array([0.25, -0.25]), 8_000);
+	const decoded = decodeLivePcmFrame(frame);
+	assert.ok(decoded);
+	assert.equal(decoded.samples.length, 4);
+});
+
+test("realtime PCM decoder rejects malformed frames", () => {
+	assert.equal(decodeLivePcmFrame(new ArrayBuffer(5)), null);
+	assert.throws(() => encodeLivePcmFrame(0, new Float32Array([0]), 48_000), /sequence ID/i);
 });
 
 test("query token boots into session-first auth state", () => {

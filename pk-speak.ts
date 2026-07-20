@@ -18,6 +18,7 @@ import {
 } from "./speak-gate.js";
 import { getRealtimeTerminalAuditPath } from "./realtime-terminal-audit.js";
 import { playAudioFile } from "./audio-playback.js";
+import { buildDesktopLiveClientUrl, openDesktopLiveClient } from "./desktop-live-client.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -103,6 +104,33 @@ async function main() {
 		await runNodeScript(scriptPath, passthrough, envExtras);
 		return;
 	}
+	if (command === "live" || command === "desktop") {
+		if (wantsHelp) {
+			printLiveHelp();
+			return;
+		}
+		const passthrough = stripMetaFlags(commandArgv).filter((arg) => arg !== "--no-window");
+		const runtimeEnv = buildPiSpeakEnv();
+		const portValue = typeof args.port === "string" ? args.port : runtimeEnv.PI_SPEAK_HTTP_PORT || "";
+		const port = Number.parseInt(portValue, 10) || 8767;
+		const cwd = typeof args.cwd === "string" ? resolve(args.cwd) : process.cwd();
+		const serverScript = join(DIST_DIR, "server-app.js");
+		const gatewayEntry = join(DIST_DIR, "headless-gateway.js");
+		const serverArgs = ["--no-window", "--gateway", gatewayEntry, ...passthrough];
+		if (dryRun) {
+			printNodeScriptDryRun("live gateway", serverScript, serverArgs, { AGENT_PROVIDER: "gemini-live" });
+			console.log(`Would open desktop live client: ${buildDesktopLiveClientUrl(port, cwd)}`);
+			return;
+		}
+		await runNodeScript(serverScript, serverArgs, { AGENT_PROVIDER: "gemini-live" });
+		if (process.exitCode && process.exitCode !== 0) return;
+		await assertDesktopLiveWorkspace(port, cwd);
+		const launched = openDesktopLiveClient({ port, cwd });
+		console.log(launched.mode === "edge-app"
+			? "Opened the Gemini Live desktop client in Edge app mode. Tap Start live once to grant microphone access."
+			: "Opened the Gemini Live desktop client in your browser. Tap Start live once to grant microphone access.");
+		return;
+	}
 	if (command === "tray") {
 		if (wantsHelp) {
 			printTrayHelp();
@@ -174,6 +202,7 @@ function printHelp() {
 		"  wrap        Run a CLI command and speak start/finish notices (--dry-run)",
 		"  brainstorm  Transcribe brainstorm audio using WhisperX and structure it (--dry-run)",
 		"  gateway     Start the headless phone/control gateway (add --live for Gemini Live barge-in) (--dry-run)",
+		"  live        Start/reuse the gateway and open the local Gemini Live desktop client (--dry-run)",
 		"  tray        Start the Windows tray controller and gateway (--dry-run)",
 		"  mobile      Print the Android setup/download QR (--dry-run)",
 		"  admin       Open the sessions admin pane (--dry-run)",
@@ -181,13 +210,14 @@ function printHelp() {
 		"  help        Show this help",
 		"",
 		"--dry-run support:",
-		"  Supported: doctor, speak, wrap, brainstorm, gateway, tray, mobile, admin, config",
+		"  Supported: doctor, speak, wrap, brainstorm, gateway, live, tray, mobile, admin, config",
 		"  Not supported: setup",
 		"  Dry-run prints the resolved plan and exits 0 without spawning subprocesses, opening ports, writing files, or playing audio.",
 		"",
 		"Typical flow:",
 		"  pi-speak-pk",
 		"  pk-speak tray",
+		"  pk-speak live",
 		"  pk-speak mobile",
 		"",
 		"Speak examples:",
@@ -269,6 +299,24 @@ function printGatewayHelp() {
 		"  pk-speak gateway --dry-run",
 		"  pk-speak gateway",
 		"  pk-speak gateway --live",
+	].join("\n"));
+}
+
+function printLiveHelp() {
+	console.log([
+		"Usage: pk-speak live [--port <port>] [--cwd <path>] [--dry-run]",
+		"",
+		"Starts or reuses the local gateway and opens Gemini Live in a desktop app window.",
+		"The loopback client streams 16 kHz microphone PCM to /v1/live and plays 24 kHz replies.",
+		"",
+		"Options:",
+		"  --port <port>  Gateway port. Defaults to PI_SPEAK_HTTP_PORT or 8767",
+		"  --cwd <path>   Working directory exposed to the live assistant",
+		"  --dry-run      Print the gateway and desktop launch plan",
+		"  -h, --help     Show this help",
+		"",
+		"Example:",
+		"  pk-speak live",
 	].join("\n"));
 }
 
@@ -1024,6 +1072,22 @@ function commandLabel(command: string) {
 	const cleaned = command.replace(/^["']|["']$/g, "");
 	const parts = cleaned.split(/[\\/]/);
 	return parts[parts.length - 1] || cleaned || "command";
+}
+
+async function assertDesktopLiveWorkspace(port: number, requestedCwd: string) {
+	const url = new URL(`http://127.0.0.1:${port}/v1/workspace`);
+	url.searchParams.set("path", requestedCwd);
+	const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+	if (!response.ok) throw new Error(`Unable to verify the live workspace (${response.status}).`);
+	const payload = await response.json() as { workspace?: { current?: string; root?: string } };
+	const actual = payload.workspace?.current ? resolve(payload.workspace.current) : "";
+	const requested = resolve(requestedCwd);
+	const samePath = process.platform === "win32"
+		? actual.toLowerCase() === requested.toLowerCase()
+		: actual === requested;
+	if (!samePath) {
+		throw new Error(`The running gateway is confined to ${payload.workspace?.root || actual || "another workspace"}; restart it for ${requested}.`);
+	}
 }
 
 async function runNodeScript(scriptPath: string, args: string[], envExtras?: NodeJS.ProcessEnv) {

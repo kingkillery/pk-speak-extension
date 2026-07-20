@@ -40,6 +40,7 @@ import { launchSessionManagerPane } from "./ui-launcher.js";
 import { parseVoiceSlashCommand } from "./voice-session-command.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached, resolveWindowsNpmShim } from "./agent-discovery.js";
 import { handleRealtimeGateway } from "./realtime-gateway.js";
+import { openDesktopLiveClient } from "./desktop-live-client.js";
 import { buildSessionWorkingDirectoryMap } from "./session-working-directory.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
@@ -810,6 +811,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let listenerRl: ReturnType<typeof createInterface> | undefined;
 	let monoActive = false;
 	let realtimeVoiceActive = false;
+	let realtimeDesktopOpened = false;
 	let voiceInputActive = false;
 	let voiceTarget: string | undefined;
 	let sessionRegistry: Record<string, string> = {};
@@ -951,7 +953,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (!target?.hasUI) return;
 		const mode = getVoiceMode();
 		const ready = mode === "realtime" ? isGeminiLiveConfigured() : true;
-		target.ui.setStatus("voice", voiceModeStatusLabel(mode, ready));
+		const label = voiceModeStatusLabel(mode, ready);
+		target.ui.setStatus("voice", mode === "realtime" && realtimeDesktopOpened ? `${label} · desktop` : label);
 	};
 
 	/**
@@ -959,6 +962,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	 * Returns operator-facing notes (readiness warnings, serving hints).
 	 */
 	const applyVoiceMode = async (mode: VoiceMode, ctx?: any): Promise<string[]> => {
+		const wasRealtime = realtimeVoiceActive;
 		const targets = voiceModeTargets(mode);
 		const notes: string[] = [];
 
@@ -980,6 +984,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 		// Realtime side — Gemini Live served to live clients over /v1/live.
 		realtimeVoiceActive = targets.realtime;
+		if (!targets.realtime) realtimeDesktopOpened = false;
+		if (wasRealtime && !targets.realtime) remoteServer?.disconnectRealtimeClients();
 		if (targets.realtime) {
 			if (!isGeminiLiveConfigured()) {
 				notes.push("Gemini Live is not configured: set GOOGLE_API_KEY, or Vertex ADC with GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION.");
@@ -995,6 +1001,17 @@ export default function speakExtension(pi: ExtensionAPI) {
 		updateMonoStatus(ctx);
 		updateVoiceStatus(ctx);
 		return notes;
+	};
+
+	const launchLocalRealtimeClient = (ctx?: any) => {
+		const runtime = remoteServer?.getRuntimeState();
+		const port = runtime?.port || remoteState.port || DEFAULT_REMOTE_PORT;
+		const launched = openDesktopLiveClient({ port, cwd: DEFAULT_AGENT_CWD });
+		realtimeDesktopOpened = true;
+		updateVoiceStatus(ctx);
+		return launched.mode === "edge-app"
+			? "Opened the local Gemini Live client in Edge app mode. Tap Start live once to grant microphone access."
+			: "Opened the local Gemini Live client in your browser. Tap Start live once to grant microphone access.";
 	};
 
 	const formatVoiceModeNotice = (mode: VoiceMode, notes: string[]): string =>
@@ -4055,7 +4072,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.registerCommand("voice", {
 		description: "Toggle the voice layer: off, TTS only, STT only, combo (listen+speak), or realtime Gemini Live",
 		getArgumentCompletions: (prefix) => {
-			const options = ["toggle", "off", "tts", "stt", "combo", "realtime", "status"];
+			const options = ["toggle", "off", "tts", "stt", "combo", "realtime", "realtime local", "local", "status"];
 			const matches = options.filter((opt) => opt.startsWith(prefix));
 			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
 		},
@@ -4070,14 +4087,27 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (lower === "realtime local" || lower === "local" || lower === "desktop") {
+				const notes = await applyVoiceMode("realtime", ctx);
+				if (isGeminiLiveConfigured() && remoteServer) {
+					try {
+						notes.push(launchLocalRealtimeClient(ctx));
+					} catch (error) {
+						notes.push(`Could not open the local live client: ${getErrorMessage(error)}`);
+					}
+				}
+				ctx.ui.notify(formatVoiceModeNotice("realtime", notes), isGeminiLiveConfigured() ? "info" : "warning");
+				return;
+			}
+
 			if (lower === "status") {
 				const mode = getVoiceMode();
 				const lines = [
 					`Voice mode: ${mode} — ${describeVoiceMode(mode)}`,
 					`TTS: ${speakState.enabled ? `on (${describeTtsProvider(getSpeakRuntimeState())})` : "off"}`,
 					`STT: ${monoActive ? (voiceInputActive ? "listener active" : "listener waiting for wake") : "off"}`,
-					`Realtime: ${realtimeVoiceActive ? (isGeminiLiveConfigured() ? "armed (Gemini Live configured, /v1/live)" : "armed but Gemini Live is NOT configured") : "off"}`,
-					"Modes: off | tts | stt | combo (turn-based listen+speak) | realtime (full-duplex Gemini Live agent)",
+					`Realtime: ${realtimeVoiceActive ? (isGeminiLiveConfigured() ? `armed (Gemini Live configured, /v1/live${realtimeDesktopOpened ? ", desktop client opened" : ""})` : "armed but Gemini Live is NOT configured") : "off"}`,
+					"Modes: off | tts | stt | combo (turn-based listen+speak) | realtime | realtime local (desktop Gemini Live client)",
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;
@@ -4090,7 +4120,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /voice [toggle|off|tts|stt|combo|realtime|status]", "error");
+			ctx.ui.notify("Usage: /voice [toggle|off|tts|stt|combo|realtime|realtime local|status]", "error");
 		},
 	});
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { RemoteTurnResult } from "./remote-turn-manager.js";
 
 const DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview";
-const DEFAULT_VERTEX_LIVE_MODEL = "gemini-3.1-flash-live-preview";
+const DEFAULT_VERTEX_LIVE_MODEL = "gemini-live-2.5-flash";
 const DEFAULT_TEXT_MODEL = "gemini-3.5-flash";
 const DEFAULT_TIMEOUT_MS = 45000;
 // Vertex Live (BidiGenerateContent) wants v1beta1; the developer API wants v1beta.
@@ -14,6 +14,7 @@ const DEFAULT_VERTEX_API_VERSION = "v1beta1";
 const DEFAULT_VERTEX_LIVE_LOCATION = "global";
 
 export const GEMINI_LIVE_MODEL_OPTIONS = [
+	"gemini-live-2.5-flash",
 	"gemini-3.1-flash-live-preview",
 	"gemini-live-2.5-flash-native-audio",
 	"gemini-2.5-flash-native-audio-preview-12-2025",

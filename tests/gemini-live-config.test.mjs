@@ -18,8 +18,8 @@ test("explicit PI_SPEAK_GEMINI_BACKEND=vertex wins even with an API key present"
 	assert.equal(live.getGeminiBackend({ ...DEV_ENV, PI_SPEAK_GEMINI_BACKEND: "vertex" }), "vertex");
 });
 
-test("live model default favors Gemini 3.1 on both backends", () => {
-	assert.equal(live.getGeminiLiveModel(VERTEX_ENV), "gemini-3.1-flash-live-preview");
+test("live model defaults to the verified Vertex Live audio model", () => {
+	assert.equal(live.getGeminiLiveModel(VERTEX_ENV), "gemini-live-2.5-flash");
 	assert.equal(live.getGeminiLiveModel(DEV_ENV), "gemini-3.1-flash-live-preview");
 });
 
@@ -28,10 +28,11 @@ test("PI_SPEAK_GEMINI_LIVE_MODEL override wins on either backend", () => {
 	assert.equal(live.getGeminiLiveModel({ ...DEV_ENV, PI_SPEAK_GEMINI_LIVE_MODEL: "custom-y" }), "custom-y");
 });
 
-test("Gemini options expose 3.1 defaults and 2.5 legacy fallbacks", () => {
-	assert.equal(live.GEMINI_LIVE_MODEL_OPTIONS[0], "gemini-3.1-flash-live-preview");
+test("Gemini options put the verified Vertex Live model first", () => {
+	assert.equal(live.GEMINI_LIVE_MODEL_OPTIONS[0], "gemini-live-2.5-flash");
 	assert.equal(live.GEMINI_TEXT_MODEL_OPTIONS[0], "gemini-3.5-flash");
 	assert.ok(live.GEMINI_TEXT_MODEL_OPTIONS.includes("9router/ag/gemini-3-5-flash-high"));
+	assert.ok(live.GEMINI_LIVE_MODEL_OPTIONS.includes("gemini-3.1-flash-live-preview"));
 	assert.ok(live.GEMINI_LIVE_MODEL_OPTIONS.includes("gemini-live-2.5-flash-native-audio"));
 	assert.deepEqual(live.GEMINI_TTS_MODEL_OPTIONS, ["gemini-3.1-flash-tts-preview"]);
 });

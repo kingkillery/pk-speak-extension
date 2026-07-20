@@ -2,7 +2,6 @@
 import { GoogleGenAI, Modality, type LiveServerMessage } from "@google/genai";
 import { createGeminiClient, getGeminiApiVersion, getGeminiLiveModel, isGeminiLiveConfigured } from "./gemini-live-turn.js";
 
-const DEFAULT_MODEL = "gemini-3.1-flash-live-preview";
 const DEFAULT_TIMEOUT_MS = 30000;
 
 type SmokeResult = {

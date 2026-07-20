@@ -17,7 +17,7 @@ import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { WebSocket as RealWebSocket } from "ws";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -104,6 +104,18 @@ function setVertexEnv() {
 	process.env.GOOGLE_CLOUD_LOCATION = "us-central1";
 }
 
+test("does not mark the browser live session ready before Gemini setup completes", async () => {
+	setVertexEnv();
+	const ws = new FakeWebSocket();
+	const before = connections.length;
+	handleRealtimeGateway.call({}, ws);
+	ws.emit("message", Buffer.from(JSON.stringify({ type: "noop" })), false);
+	await waitFor(() => connections.length > before, "expected fake Gemini Live connection");
+	assert.equal(ws.jsonMessages().some((message) => message.type === "start"), false);
+	connections.at(-1).callbacks.onmessage({ setupComplete: true });
+	await waitFor(() => ws.jsonMessages().some((message) => message.type === "start"), "expected start after Gemini setup");
+});
+
 async function startFakeSession(server) {
 	const ws = new FakeWebSocket();
 	const connectionCountBefore = connections.length;
@@ -114,7 +126,20 @@ async function startFakeSession(server) {
 	ws.emit("message", Buffer.from(JSON.stringify({ type: "noop" })), false);
 	await waitFor(() => connections.length > connectionCountBefore, "expected a fake Gemini Live connection to have been created");
 	const connection = connections.at(-1);
+	connection.callbacks.onmessage({ setupComplete: true });
+	await waitFor(() => ws.jsonMessages().some((message) => message.type === "start"), "expected fake Gemini Live session setup");
 	return { ws, connection };
+}
+
+async function startFakeConfiguredSession(server, cwd) {
+	const ws = new FakeWebSocket();
+	const connectionCountBefore = connections.length;
+	handleRealtimeGateway.call(server, ws);
+	ws.emit("message", Buffer.from(JSON.stringify({ type: "configure", cwd, clientSequenceId: 1 })), false);
+	await waitFor(() => connections.length > connectionCountBefore, "expected a configured fake Gemini Live connection");
+	connections.at(-1).callbacks.onmessage({ setupComplete: true });
+	await waitFor(() => ws.jsonMessages().some((message) => message.type === "start"), "expected the configured live session to become ready");
+	return { ws, connection: connections.at(-1) };
 }
 
 function lastToolResponse(connection) {
@@ -147,6 +172,50 @@ function readNewAuditEvents(offsetBefore) {
 		.filter((line) => line.length > 0)
 		.map((line) => JSON.parse(line));
 }
+
+test("configure binds the validated desktop workspace before tools run", async () => {
+	setVertexEnv();
+	const previousRoot = process.env.PI_SPEAK_WORKSPACE_ROOT;
+	const root = mkdtempSync(join(tmpdir(), "pi-speak-live-workspace-"));
+	const workspace = join(root, "project");
+	mkdirSync(workspace);
+	process.env.PI_SPEAK_WORKSPACE_ROOT = root;
+	try {
+		const { connection } = await startFakeConfiguredSession({}, workspace);
+		await connection.callbacks.onmessage({
+			toolCall: { functionCalls: [{ id: "call-workspace", name: "get_session_info", args: {} }] },
+		});
+		const output = readOutput(lastToolResponse(connection));
+		assert.equal(output.currentCwd, workspace);
+		const connectionCountBeforeReconnect = connections.length;
+		await connection.callbacks.onmessage({ goAway: { timeLeft: "1s" } });
+		await waitFor(() => connections.length > connectionCountBeforeReconnect, "expected upstream live reconnection");
+		const reconnected = connections.at(-1);
+		await reconnected.callbacks.onmessage({
+			toolCall: { functionCalls: [{ id: "call-workspace-reconnected", name: "get_session_info", args: {} }] },
+		});
+		assert.equal(readOutput(lastToolResponse(reconnected)).currentCwd, workspace);
+	} finally {
+		if (previousRoot === undefined) delete process.env.PI_SPEAK_WORKSPACE_ROOT;
+		else process.env.PI_SPEAK_WORKSPACE_ROOT = previousRoot;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("client websocket reconnect resumes the existing live session", async () => {
+	setVertexEnv();
+	const connectionCountBefore = connections.length;
+	const { ws } = await startFakeSession({});
+	await waitFor(() => ws.jsonMessages().some((message) => message.type === "start"), "expected initial live start message");
+	const session = ws.jsonMessages().find((message) => message.type === "start").session;
+	ws.emit("close", 1006, "network changed");
+
+	const resumedWs = new FakeWebSocket();
+	handleRealtimeGateway.call({}, resumedWs);
+	resumedWs.emit("message", Buffer.from(JSON.stringify({ type: "reconnect", session, serverSequenceId: 0 })), false);
+	await waitFor(() => resumedWs.jsonMessages().some((message) => message.type === "start"), "expected resumed live start message");
+	assert.equal(connections.length, connectionCountBefore + 1, "websocket resume must not create another Gemini connection");
+});
 
 test("read-only tool: list_agent_hub_agents answers immediately with no approval step", async (t) => {
 	setVertexEnv();
@@ -209,7 +278,14 @@ test("mutating tool: launch_agent defers behind approval, then actually launches
 	await waitFor(() => connection.session.toolResponses.length > responseCountBefore, "expected a tool response after command_approve");
 
 	assert.equal(launchCalls.length, 1, "must launch exactly once after approval");
-	assert.deepEqual(launchCalls[0], { prompt: "fix the failing test", cwd: "/tmp/repo", hubOnly: undefined, targetNode: undefined });
+	// The coding agent receives the distilled task packet from the conversation
+	// reducer, not the model's raw free-form prompt.
+	assert.deepEqual(launchCalls[0], {
+		prompt: "Goal: fix the failing test\n\nAction items:\n- fix the failing test\n\nOriginal transcript:\nfix the failing test",
+		cwd: "/tmp/repo",
+		hubOnly: undefined,
+		targetNode: undefined,
+	});
 
 	const fr = lastToolResponse(connection);
 	assert.equal(fr.id, "call-launch");
@@ -225,6 +301,39 @@ test("mutating tool: launch_agent defers behind approval, then actually launches
 	assert.deepEqual(kinds, ["command.approval_requested", "command.approval_resolved", "command.execution_result"]);
 	assert.equal(auditEvents[0].commandKind, "launch_agent");
 	assert.equal(auditEvents[2].result.ok, true);
+});
+
+test("mutating tool: launch_agent with a vague prompt answers with a clarification, never an approval or a launch", async (t) => {
+	setVertexEnv();
+	const launchCalls = [];
+	const server = {
+		agentHubGateway: { snapshot: async () => ({ folders: [], agents: [] }) },
+		onSessionLaunch: async (payload) => {
+			launchCalls.push(payload);
+			return { ok: true, message: "launched" };
+		},
+	};
+	const { ws, connection } = await startFakeSession(server);
+	// Not calling ws.close() here -- see the comment on the first test above.
+
+	await connection.callbacks.onmessage({
+		toolCall: {
+			functionCalls: [{ id: "call-vague", name: "launch_agent", args: { prompt: "hmm", cwd: "/tmp/repo" } }],
+		},
+	});
+
+	// The conversation reducer refuses to distill "hmm" into a task
+	// (confidence below the dispatch floor, no action items), so the model
+	// gets an immediate clarification result to speak -- nothing defers,
+	// nothing mutates.
+	assert.equal(launchCalls.length, 0, "must never launch a vague prompt");
+	assert.equal(ws.jsonMessages().filter((m) => m.type === "tool_approval_required").length, 0, "a vague prompt must not open an approval");
+	const fr = lastToolResponse(connection);
+	assert.equal(fr.id, "call-vague");
+	const output = readOutput(fr);
+	assert.equal(output.ok, false);
+	assert.equal(output.needsClarification, true);
+	assert.match(output.message, /concrete action/i);
 });
 
 test("mutating tool: archive_session never runs when the operator rejects it", async (t) => {
