@@ -37,6 +37,8 @@ import {
 } from "./realtime-command-approval.js";
 import { listWorkspaceDirectory, readWorkspaceFile } from "./control-server.js";
 import { parseHubAgentId } from "./herdr-agent-hub-schema.js";
+import { shapeRealtimeToolOutputForSpeech } from "./realtime-speech-brief.js";
+
 
 // Helper to resolve current cwd of the active session
 function getCurrentCwd(): string {
@@ -160,7 +162,9 @@ export const REALTIME_SYSTEM_PROMPT = [
 	"Never claim an action completed until you receive a real tool result confirming it.",
 	"When you fire a background tool (launch_agent, execute_terminal_command), acknowledge in one short sentence, then continue the conversation normally.",
 	"Do not narrate a tool's progress unless you receive an explicit progress update.",
-	"When a tool result arrives, announce it conversationally at the next natural pause.",
+	"When a tool result arrives, discuss it — do not read JSON, dumps, file contents, logs, or long excerpts aloud.",
+	"Prefer the result's summary field when present. Mention only the facts that matter for the next decision, quote at most one short phrase when useful, and offer more detail if the user wants it.",
+	"Honor speechHint guidance on tool results. Content may already be truncated for speech; say so briefly instead of inventing missing text.",
 	"Do not narrate background state refreshes delivered silently.",
 	"Keep replies short and conversational.",
 ].join(" ");
@@ -274,6 +278,7 @@ export function sendRealtimeToolResponse(
 	outputText: string,
 	opts: ToolResponseOptions = {},
 ) {
+	// Client UI keeps the full/raw payload for inspection.
 	sendToClient(activeSession, {
 		type: "tool_complete",
 		name: call.name,
@@ -282,10 +287,17 @@ export function sendRealtimeToolResponse(
 		willContinue: opts.willContinue,
 	}, false);
 
+	// The Live model gets a speech-shaped brief so it discusses findings
+	// instead of reciting dumps. Explicit response overrides (progress,
+	// done markers) skip shaping — those are already voice-sized.
+	const modelResponse = opts.response ?? {
+		output: shapeRealtimeToolOutputForSpeech(call.name, outputText),
+	};
+
 	const functionResponse: Record<string, unknown> = {
 		id: call.id,
 		name: call.name,
-		response: opts.response ?? { output: outputText },
+		response: modelResponse,
 	};
 	// scheduling/willContinue are only meaningful for NON_BLOCKING calls; harmless
 	// (ignored) otherwise per the @google/genai FunctionResponse contract.

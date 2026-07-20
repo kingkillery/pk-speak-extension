@@ -345,3 +345,41 @@ test("read_workspace_file: returns real file content for an ordinary file under 
 	assert.equal(output.file.content, "hello from disk");
 	assert.equal(output.file.binary, false);
 });
+
+test("read_workspace_file: model output is speech-shaped while the client keeps the full file", async (t) => {
+	setVertexEnv();
+	const workspaceDir = mkdtempSync(join(tmpdir(), "pi-speak-dispatch-shape-test-"));
+	const previousRoot = process.env.PI_SPEAK_WORKSPACE_ROOT;
+	process.env.PI_SPEAK_WORKSPACE_ROOT = workspaceDir;
+	const filePath = join(workspaceDir, "big.txt");
+	const fullContent = Array.from({ length: 200 }, (_, i) => `line ${i} of the big file`).join("\n");
+	writeFileSync(filePath, fullContent, "utf8");
+	t.after(() => {
+		if (previousRoot === undefined) delete process.env.PI_SPEAK_WORKSPACE_ROOT;
+		else process.env.PI_SPEAK_WORKSPACE_ROOT = previousRoot;
+		rmSync(workspaceDir, { recursive: true, force: true });
+	});
+
+	const server = { agentHubGateway: { snapshot: async () => ({ folders: [], agents: [] }) } };
+	const { ws, connection } = await startFakeSession(server);
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-big", name: "read_workspace_file", args: { path: filePath } }] },
+	});
+
+	// Model-facing FunctionResponse: clipped, summarized, discussable.
+	const fr = lastToolResponse(connection);
+	const output = readOutput(fr);
+	assert.equal(output.ok, true);
+	assert.equal(output.file.contentTruncatedForSpeech, true);
+	assert.ok(output.file.content.length < fullContent.length, "model must not receive the full dump");
+	assert.ok(!output.file.content.includes("line 199"), "tail must be clipped from the model view");
+	assert.match(output.summary, /big\.txt/);
+	assert.match(output.speechHint, /Never read JSON/i);
+
+	// Client-facing tool_complete: full raw payload retained for the UI.
+	const toolComplete = ws.jsonMessages().find((m) => m.type === "tool_complete" && m.name === "read_workspace_file");
+	assert.ok(toolComplete, "expected a tool_complete message to the client");
+	const clientOutput = JSON.parse(toolComplete.output);
+	assert.equal(clientOutput.file.content, fullContent, "client must keep the full untruncated content");
+});

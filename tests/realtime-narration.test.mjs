@@ -122,8 +122,11 @@ test("sendRealtimeToolResponse queues for delivery when the session is mid-recon
 	assert.equal(activeSession.pendingToolResponses[0].scheduling, "WHEN_IDLE");
 });
 
-test("REALTIME_SYSTEM_PROMPT guides acknowledge-then-continue and no SILENT narration", () => {
+test("REALTIME_SYSTEM_PROMPT guides discuss-not-recite behavior", () => {
 	assert.match(REALTIME_SYSTEM_PROMPT, /acknowledge/i);
 	assert.match(REALTIME_SYSTEM_PROMPT, /continue the conversation/i);
 	assert.match(REALTIME_SYSTEM_PROMPT, /do not narrate/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /discuss it/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /do not read JSON/i);
+	assert.match(REALTIME_SYSTEM_PROMPT, /speechHint/i);
 });
