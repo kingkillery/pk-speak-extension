@@ -1,0 +1,3 @@
+# Optional local STT backend. Kept separate so the existing faster-whisper path remains the default.
+-r requirements.txt
+moonshine-voice==0.0.69

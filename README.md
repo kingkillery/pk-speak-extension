@@ -434,7 +434,7 @@ Behavior:
 
 ### `/sess`
 
-Named sessions, wake aliases, and routing summaries for the assistant. Sessions are assistant-managed: the conversational assistant can switch between them (`switch_session`), inspect them (`get_session_info`), and archive/recover them (`archive_session`) — always asking for approval before mutating.
+Named sessions, wake aliases, and routing summaries for the assistant. In realtime voice, `get_session_info`/`list_sessions` report observed state, and `switch_session` selects one exact or unambiguous target **for that live connection only**. The assistant can then call `send_session_message`, `resume_session`, `launch_agent`, `kill_agent`, `revive_agent`, or `archive_session`; every mutation opens an operator approval card before execution. `get_realtime_capabilities` reports the features actually available on the selected Gemini or OpenAI-Realtime/HF backend.
 
 ```text
 /sess
@@ -481,8 +481,8 @@ The conversational assistant is the center; voice, wake-word, Telegram, and the 
 3. `tts.ts`
    Multi-provider speech synthesis (the assistant's voice). Supports `legacy`, `edge`, `gemini`, `openai`, `elevenlabs`, `sag`, `higgs`, `stable-audio`, and `auto`.
 
-4. `stt.ts` and `listener/stt_worker.py`
-   Remote voice transcription for uploaded audio. `PI_SPEAK_REMOTE_STT_PROVIDER` accepts `auto|local|openai|elevenlabs|google`. `auto` prefers ElevenLabs/OpenAI when keys are present, otherwise a warm local `faster-whisper` worker.
+4. `stt.ts`, `moonshine-stt.ts`, and the listener workers
+   Uploaded-audio transcription keeps the existing provider chain as the default. `PI_SPEAK_REMOTE_STT_BACKEND=existing|moonshine|auto` selects the completed-utterance backend policy; `auto` tries the existing chain first and activates the persistent Moonshine worker only after a classified transient/unavailable failure. `PI_SPEAK_REMOTE_STT_PROVIDER=auto|local|openai|elevenlabs|google` remains unchanged and applies only inside the `existing` leg.
 
 5. `listener/listener.py`
    The always-on two-tier listener (wake-phrase detection is how you start a conversation with the assistant):
@@ -839,6 +839,38 @@ PI_SPEAK_REMOTE_STT_PROVIDER=google
 ```
 
 `PI_SPEAK_STT_LANGUAGE` feeds both Google and ElevenLabs STT. Defaults differ: Google uses `en-US`; ElevenLabs uses `en`.
+
+### Moonshine local STT fallback
+
+[Moonshine Voice](https://github.com/moonshine-ai/moonshine) is an optional on-device backend for uploaded voice turns. It does not replace Gemini/OpenAI full-duplex `/v1/live`; it shares the existing completed-utterance STT boundary used by `/v1/turn/voice`, Telegram voice notes, and CLI audio transcription.
+
+Install the pinned optional Python binding:
+
+```text
+python -m pip install -r listener/requirements-moonshine.txt
+python -m moonshine_voice.download --stt --language en --model-arch 1
+```
+
+Select a policy:
+
+```text
+PI_SPEAK_REMOTE_STT_BACKEND=existing   # default; current provider behavior is unchanged
+PI_SPEAK_REMOTE_STT_BACKEND=moonshine  # always use Moonshine
+PI_SPEAK_REMOTE_STT_BACKEND=auto       # existing first; Moonshine only on a safe backend failure
+```
+
+`auto` never switches because a transcript is empty, uncertain, or merely slow. It performs at most one fallback attempt for the completed utterance, never mid-utterance, and preserves both failures if Moonshine also fails. Set `PI_SPEAK_STT_TELEMETRY=off` to suppress the structured selection/fallback log lines.
+
+Moonshine settings:
+
+```text
+MOONSHINE_VOICE_CACHE=<optional-cache-directory>
+PI_SPEAK_MOONSHINE_MODEL_PATH=<optional-pre-provisioned-base-en-directory>
+```
+
+Without an explicit model path, Moonshine downloads the English `base-en` model into its cache on first use. For deterministic offline startup, pre-provision that directory and set `PI_SPEAK_MOONSHINE_MODEL_PATH`. Audio decoding reuses the installed `faster-whisper`/PyAV path, so WAV, WebM/Ogg, MP3, and MP4 uploads share the same 16 kHz mono decode behavior. Moonshine model downloads are not content-pinned by the upstream helper; pre-provision and checksum model files when reproducible packaging is required.
+
+Moonshine's code and English models are MIT licensed. Non-English models use the Moonshine Community License and require a separate commercial/distribution review. The public Windows wheel is x86-64; Windows ARM64 is not currently distributed on PyPI.
 
 ### Edge TTS
 

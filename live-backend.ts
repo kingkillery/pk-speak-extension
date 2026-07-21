@@ -22,6 +22,8 @@ export type LiveImageInput = {
 	/** Base64-encoded image bytes (no data: prefix). */
 	data: string;
 	mimeType: string;
+	/** Attach image without starting a response; used while completing a camera tool call. */
+	deferResponse?: boolean;
 };
 
 export type LiveBackendOutbound =
@@ -52,10 +54,10 @@ export type LiveBackendSession = {
 	readonly kind: LiveBackendKind;
 	sendAudio(input: LiveAudioInput): void;
 	sendText(text: string): void;
-	sendImage?(input: LiveImageInput): void;
+	sendImage?(input: LiveImageInput): boolean;
 	interrupt(): void;
-	/** Deliver a tool / function result back into the live turn. */
-	sendToolResult?(callId: string, name: string, output: string): void;
+	/** Deliver a tool result; false means the caller must queue it for reconnect. */
+	sendToolResult?(callId: string, name: string, output: string): boolean;
 	close(): void;
 };
 
@@ -92,9 +94,22 @@ export const OPENAI_REALTIME_SERVER_EVENTS = [
 	"session.updated",
 	"input_audio_buffer.speech_started",
 	"input_audio_buffer.speech_stopped",
+	"conversation.item.input_audio_transcription.completed",
+	"response.created",
 	"response.output_audio.delta",
+	"response.audio.delta",
 	"response.output_audio_transcript.delta",
+	"response.audio_transcript.delta",
+	"response.output_audio_transcript.done",
+	"response.audio_transcript.done",
 	"response.function_call_arguments.done",
 	"response.done",
+	"response.cancelled",
 	"error",
 ] as const;
+
+
+/** Gemini Live supports session resumption handles; OpenAI-Realtime/HF does not. */
+export function liveBackendSupportsResumption(kind: LiveBackendKind): boolean {
+	return kind === "gemini";
+}

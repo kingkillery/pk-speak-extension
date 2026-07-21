@@ -41,7 +41,8 @@ function Write-Log([string]$msg) {
 function Test-GatewayHealthy {
   try {
     $r = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/health" -f $Port) -TimeoutSec 3
-    return ($r.app -eq 'pi-speak')
+    # Require the gateway role: in-agent session servers also answer app=pi-speak.
+    return ($r.app -eq 'pi-speak' -and $r.role -eq 'gateway')
   } catch { return $false }
 }
 

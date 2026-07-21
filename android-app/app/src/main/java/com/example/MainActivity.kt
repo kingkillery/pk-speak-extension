@@ -987,6 +987,7 @@ fun StudioTabContent(
         val player = StreamingPcmPlayer()
         val recorder = StreamingPcmRecorder(context)
         lateinit var session: RealtimeVoiceSession
+        val assistantTranscript = StringBuilder()
         session = RealtimeVoiceSession(
             prefs = prefs,
             listener = object : RealtimeVoiceSessionListener {
@@ -1029,12 +1030,17 @@ fun StudioTabContent(
                     if (liveSessionRef.value === session) player.write(seqId, pcm)
                 }
 
-                override fun onTranscript(text: String) {
+                override fun onTranscript(text: String, role: String) {
+                    if (role == "user") return
+                    assistantTranscript.append(text)
+                    val transcript = assistantTranscript.toString()
                     scope.launch {
-                        if (liveSessionRef.value === session) state.transcription = text
+                        if (liveSessionRef.value === session) state.transcription = transcript
                     }
                 }
-                override fun onTranscriptComplete() = Unit
+                override fun onTranscriptComplete(role: String) {
+                    if (role != "user") assistantTranscript.clear()
+                }
 
                 override fun onInterrupt() {
                     if (liveSessionRef.value !== session) return
@@ -1091,6 +1097,18 @@ fun StudioTabContent(
                     scope.launch {
                         if (liveSessionRef.value !== session) return@launch
                         appendChat("system", "[camera] ${reason.ifBlank { "Capturing frame…" }}")
+                        if (!com.example.audio.CameraSnapshot.hasPermission(context)) {
+                            // Request via system UI if possible; Live path previously only used camera for QR.
+                            try {
+                                (context as? android.app.Activity)?.requestPermissions(
+                                    arrayOf(android.Manifest.permission.CAMERA),
+                                    0xCA,
+                                )
+                            } catch (_: Exception) { }
+                            session.sendCameraFrame(callId, "image/jpeg", "", "Camera permission required for Live snapshot")
+                            appendChat("system", "[camera] Grant CAMERA permission and ask again")
+                            return@launch
+                        }
                         val owner = context as? androidx.lifecycle.LifecycleOwner
                         if (owner == null) {
                             session.sendCameraFrame(callId, "image/jpeg", "", "No lifecycle owner for camera")

@@ -31,6 +31,10 @@ test("pi-speak-pk non-interactive setup writes local config", async () => {
 			"edge",
 			"--speak-gate",
 			"enter",
+			"--stt-backend",
+			"auto",
+			"--stt",
+			"google",
 			"--mobile",
 			"false",
 			"--token",
@@ -45,6 +49,8 @@ test("pi-speak-pk non-interactive setup writes local config", async () => {
 		assert.equal(config.executionRouterMode, "auto");
 		assert.equal(config.ttsProvider, "edge");
 		assert.equal(config.speakPlaybackGate, "enter");
+		assert.equal(config.remoteSttBackend, "auto");
+		assert.equal(config.remoteSttProvider, "google");
 		assert.equal(config.installMobileApp, false);
 		assert.equal(config.httpToken, "test-token-1234567890");
 	} finally {
@@ -76,8 +82,35 @@ test("pk-speak doctor reads saved setup config", async () => {
 		assert.match(stdout, /pk-speak doctor/);
 		assert.match(stdout, /Agent provider: codex/);
 		assert.match(stdout, /Gateway token: doct\.\.\.7890/);
-		assert.match(stdout, /Playback gate: immediate/);
+		// A fresh setup with no --speak-gate now defaults to the interactive
+		// orb (no terminal autoplay).
+		assert.match(stdout, /Playback gate: open interactive orb \(no autoplay\)/);
 		assert.match(stdout, /Realtime terminal audit:/);
+
+		// A deliberate re-opt-in to immediate via the current setup UI is
+		// preserved: the saved config carries the current schema version, so
+		// the legacy migration must not rewrite it.
+		await execFileAsync(process.execPath, [
+			"dist/pi-speak-pk.js",
+			"setup",
+			"--non-interactive",
+			"--provider",
+			"codex",
+			"--tts",
+			"edge",
+			"--speak-gate",
+			"immediate",
+			"--token",
+			"doctor-token-1234567890",
+		], {
+			cwd: process.cwd(),
+			env: { ...process.env, PI_SPEAK_CONFIG_DIR: configDir },
+		});
+		const rerun = await execFileAsync(process.execPath, ["dist/pk-speak.js", "doctor"], {
+			cwd: process.cwd(),
+			env: { ...process.env, PI_SPEAK_CONFIG_DIR: configDir },
+		});
+		assert.match(rerun.stdout, /Playback gate: immediate/);
 	} finally {
 		await rm(configDir, { recursive: true, force: true });
 	}
@@ -160,7 +193,7 @@ test("pk-speak live dry-run reports gateway and desktop plans", async () => {
 	assert.match(stdout, /live gateway/i);
 	assert.match(stdout, /AGENT_PROVIDER=gemini-live/);
 	assert.match(stdout, /--gateway .*headless-gateway\.js/i);
-	assert.match(stdout, /127\.0\.0\.1:8877\/app\/\?mode=live&autoconnect=1/);
+	assert.match(stdout, /127\.0\.0\.1:8877\/orb\/\?mode=live&autoconnect=1/);
 });
 
 test("pk-speak live help describes the local realtime audio bridge", async () => {
@@ -204,7 +237,7 @@ test("pk-speak speak help makes OS media-player fallback explicit", async () => 
 		cwd: process.cwd(),
 	});
 	assert.match(stdout, /--allow-open-fallback/);
-	assert.match(stdout, /--gate <immediate\\|enter>/);
+	assert.match(stdout, /--gate <orb\|immediate\|enter>/);
 	assert.match(stdout, /OS default app/);
 });
 
@@ -225,7 +258,7 @@ test("pk-speak wrap help makes OS media-player fallback explicit", async () => {
 		cwd: process.cwd(),
 	});
 	assert.match(stdout, /--allow-open-fallback/);
-	assert.match(stdout, /--gate <immediate\\|enter>/);
+	assert.match(stdout, /--gate <orb\|immediate\|enter>/);
 	assert.match(stdout, /OS default app/);
 });
 

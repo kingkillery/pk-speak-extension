@@ -185,6 +185,62 @@ body.booting * { transition: none !important; }
 	letter-spacing: 0.08em;
 	text-transform: uppercase;
 }
+
+.approvals {
+	position: fixed;
+	left: 50%;
+	bottom: 96px;
+	transform: translateX(-50%);
+	width: min(420px, calc(100vw - 32px));
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	z-index: 5;
+}
+.approval-card {
+	background: var(--bg-elev);
+	border: 1px solid var(--border-strong, var(--border));
+	border-radius: 14px;
+	padding: 12px 14px;
+	box-shadow: 0 8px 28px rgba(0,0,0,0.4);
+}
+.approval-card strong {
+	display: block;
+	font-size: 12px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	font-family: var(--font-mono);
+	color: var(--text-dim);
+	margin-bottom: 6px;
+}
+.approval-card code {
+	display: block;
+	font-family: var(--font-mono);
+	font-size: 12px;
+	color: var(--text);
+	white-space: pre-wrap;
+	word-break: break-word;
+	margin-bottom: 6px;
+}
+.approval-card .muted {
+	display: block;
+	font-size: 12px;
+	color: var(--text-faint);
+	margin-bottom: 4px;
+}
+.approval-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 10px;
+}
+.approval-actions .btn {
+	flex: 1;
+}
+.approval-actions .btn.primary {
+	background: var(--text);
+	color: var(--bg);
+	border-color: transparent;
+}
 .gate input[type="range"] { width: 100%; }
 .meter {
 	width: 120px;
@@ -222,4 +278,75 @@ body.booting * { transition: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
 	.orb, .orb-ring, .bubble { animation: none; transition: none; }
+}
+
+/* Speech-mode panel: one-shot TTS playback (not realtime Live). */
+.speech-panel {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 20px 22px 18px;
+	margin: 24px auto;
+	max-width: 560px;
+	width: calc(100% - 32px);
+	background: var(--bg-elev);
+	border: 1px solid var(--border);
+	border-radius: 14px;
+}
+.speech-title {
+	margin: 0;
+	font-size: 16px;
+	font-weight: 600;
+	color: var(--text);
+	letter-spacing: 0.01em;
+}
+.speech-text {
+	margin: 0;
+	padding: 12px 14px;
+	background: var(--bg-elev-2);
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	font-family: var(--font);
+	font-size: 14px;
+	line-height: 1.45;
+	color: var(--text);
+	white-space: pre-wrap;
+	word-wrap: break-word;
+	max-height: 40vh;
+	overflow-y: auto;
+}
+.speech-panel audio {
+	width: 100%;
+}
+.speech-actions {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+.speech-actions .btn {
+	flex: 1 1 auto;
+	min-width: 120px;
+}
+.speech-status {
+	margin: 0;
+	font-size: 12px;
+	color: var(--text-dim);
+}
+/* When the body carries mode=speech, suppress the live-only chrome entirely. */
+body.speech-mode .hero,
+body.speech-mode .dock,
+body.speech-mode .chat,
+body.speech-mode .approvals,
+body.speech-mode #mute-btn,
+body.speech-mode #cam-btn,
+body.speech-mode #cam-pip {
+	display: none !important;
+}
+body.speech-mode .identity strong::after {
+	content: " · Reply";
+	color: var(--text-dim);
+	font-weight: 400;
+}
+body.speech-mode .identity .sub {
+	display: none;
 }

@@ -31,9 +31,15 @@ Object.defineProperty(GoogleGenAI.prototype, "live", {
 						mockSessionInstance.closed = true;
 					}
 				};
-				// Trigger onopen in a deferred tick
+				// Mirror the real Gemini Live handshake: onopen, then a
+				// setupComplete server message. The gateway deliberately does
+				// not send its "start" frame until setupComplete arrives
+				// (see "does not mark the browser live session ready before
+				// Gemini setup completes" in the dispatch integration test),
+				// so a mock that only fires onopen never yields a session.
 				setTimeout(() => {
 					options.callbacks?.onopen?.();
+					options.callbacks?.onmessage?.({ setupComplete: true });
 				}, 5);
 				return mockSessionInstance;
 			}
@@ -98,8 +104,8 @@ test("Production Readiness E2E Integration Suite", async (t) => {
 			// Wait for 500ms startup threshold to fire, plus safety padding
 			await new Promise((resolve) => setTimeout(resolve, 650));
 			assert.ok(messages.length > 0, "Should have received initial start message after 650ms");
-			const startMsg = messages[0];
-			assert.equal(startMsg.type, "start");
+			const startMsg = messages.find((message) => message.type === "start");
+			assert.ok(startMsg, "Expected a start message after setup");
 			const sessionId = startMsg.session;
 			assert.ok(sessionId, "Session ID should be generated");
 
@@ -138,6 +144,7 @@ test("Production Readiness E2E Integration Suite", async (t) => {
 			reconnectWs.send(JSON.stringify({
 				type: "reconnect",
 				session: sessionId,
+				reconnectToken: startMsg.reconnectToken,
 				serverSequenceId: startMsg.serverSequenceId || 1
 			}));
 

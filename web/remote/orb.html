@@ -31,6 +31,22 @@
 		</main>
 
 		<aside class="chat" id="chat" aria-live="polite"></aside>
+		<div id="approvals" class="approvals" aria-live="polite"></div>
+
+		<!-- Speech-mode panel: shown only when ?mode=speech. Distinct from the
+		     realtime Live flow — no /v1/live connect, no mic/cam, audio is the
+		     staged artifact controlled by the operator. -->
+		<section class="speech-panel hidden" id="speech-panel" aria-live="polite">
+			<h2 class="speech-title">Pi Speak Reply</h2>
+			<pre class="speech-text" id="speech-text">Loading…</pre>
+			<audio id="speech-audio" controls preload="metadata" aria-label="Reply audio"></audio>
+			<div class="speech-actions">
+				<button type="button" class="btn" id="speech-stop-btn">Stop</button>
+				<button type="button" class="btn" id="speech-disable-btn">Disable speech</button>
+				<button type="button" class="btn" id="speech-enable-btn" hidden>Re-enable speech</button>
+			</div>
+			<p class="speech-status" id="speech-status">Audio is staged. Press play when ready.</p>
+		</section>
 
 		<footer class="dock">
 			<div class="gate">

@@ -20,7 +20,7 @@ import {
 } from "./headless-gateway-routing.js";
 import { runGeminiLiveTurn, runGeminiTextTurn } from "./gemini-live-turn.js";
 import { RemoteTurnManager, type RemoteTurnResult, type TurnProgressEvent } from "./remote-turn-manager.js";
-import { shutdownLocalSttWorker, transcribeAudioBuffer, transcribeWithWhisperX } from "./stt.js";
+import { getSttDiagnostics, shutdownLocalSttWorker, transcribeAudioBuffer, transcribeWithWhisperX } from "./stt.js";
 import { getAudioMimeType, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargets, resolveWindowsNpmShim } from "./agent-discovery.js";
 import { archiveOhMyPiBackgroundSession, buildColabLaunchPlan, buildOhMyPiLaunchArgv, recoverOhMyPiBackgroundSession, validateOmpSelection } from "./agent-hub-actions.js";
@@ -43,6 +43,7 @@ const state = {
 	host: process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0",
 	port: Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10),
 	authToken: process.env.PI_SPEAK_HTTP_TOKEN || "",
+	role: "gateway" as const,
 };
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
@@ -488,7 +489,7 @@ async function runVoiceTurn(
 		const result: RemoteTurnResult = {
 			replyText,
 			transcript: "Voice message received.",
-			providers: { stt: "local" },
+			providers: { stt: "unavailable" },
 			warnings: ["stt-unavailable"],
 			progress: [
 				...progress,
@@ -507,13 +508,14 @@ async function runVoiceTurn(
 		};
 	}
 	const transcript = stt.text.trim();
+	const sttWarnings = stt.fallback ? [`STT fallback: existing → Moonshine (${stt.fallback.code}).`] : [];
 	addProgress(progress, "stt", stt.provider ? `Transcription finished with ${stt.provider}.` : "Transcription finished.", startedAt);
 	if (!transcript) {
 		return {
 			replyText: "I did not hear enough speech to send a turn.",
 			transcript: "",
 			providers: { stt: stt.provider },
-			warnings: ["empty-transcript"],
+			warnings: ["empty-transcript", ...sttWarnings],
 			progress: [
 				...progress,
 				makeProgress("complete", "No speech text was detected.", startedAt),
@@ -537,6 +539,7 @@ async function runVoiceTurn(
 			...result.providers,
 			stt: stt.provider,
 		},
+		warnings: [...(result.warnings || []), ...sttWarnings],
 		progress: result.progress || progress,
 	};
 }
@@ -781,9 +784,9 @@ function findDiscoveredResumeSession(payload: SessionResumePayload) {
 		const sessionId = session.sessionId;
 		if (!isResumableAgentSession(session.provider, sessionId) || !sessionId) return false;
 		if (requestedProvider && session.provider.toLowerCase() !== requestedProvider) return false;
-		if (requestedPath && session.path.toLowerCase() === requestedPath) return true;
-		if (requestedId && sessionId.toLowerCase() === requestedId) return true;
-		return false;
+		if (requestedPath && session.path.toLowerCase() !== requestedPath) return false;
+		if (requestedId && sessionId.toLowerCase() !== requestedId) return false;
+		return !!(requestedPath || requestedId);
 	});
 }
 
@@ -925,6 +928,7 @@ server = new ControlServer({
 		lastErrors: {},
 		recentTimings: {},
 		queue: remoteTurnManager.getSnapshot(),
+		providers: { stt: getSttDiagnostics() },
 	}),
 	getRoutingStatus: () => {
 		refreshRoutingTargets();

@@ -164,6 +164,11 @@ $env:PI_SPEAK_GEMINI_BACKEND = "simulated"
 ```powershell
 $env:PI_SPEAK_LIVE_BACKEND = "openai-realtime"   # or hf / s2s
 $env:PI_SPEAK_OPENAI_REALTIME_URL = "wss://<host>/v1/realtime?session_token=..."
+$env:PI_SPEAK_OPENAI_REALTIME_MODEL = "gpt-realtime" # required by official api.openai.com URLs; appended as ?model=
+# Client PCM is resampled from 16 kHz to the official 24 kHz input rate by default.
+# Set PI_SPEAK_OPENAI_REALTIME_INPUT_RATE only for a compatible custom/HF endpoint.
+# PI_SPEAK_OPENAI_REALTIME_TRANSCRIPTION_MODEL defaults to gpt-4o-mini-transcribe on api.openai.com;
+# set it explicitly for a compatible custom endpoint, or to off to disable.
 # aliases: SPEECH_TO_SPEECH_URL, PI_SPEAK_S2S_URL
 # optional: PI_SPEAK_OPENAI_REALTIME_KEY, PI_SPEAK_OPENAI_REALTIME_VOICE
 ```
@@ -177,7 +182,23 @@ Clients still connect to **this** gateway's `/v1/live`; the gateway adapts upstr
 | Session / hub / workspace reads | Always available (approval not required) |
 | `web_search` | Needs `SERPER_API_KEY` or `PI_SPEAK_SERPER_API_KEY` on the gateway |
 | `camera_snapshot` | Client captures one JPEG frame (web orb/PWA or Android CameraX) |
-| Terminal / launch / archive | Approval-gated as usual |
+| Session selection and inspection | `list_sessions`, `get_session_info`, and connection-local `switch_session` are read-only |
+| OMPK control | `send_session_message`, `resume_session`, `launch_agent`, `kill_agent`, `revive_agent`, and `archive_session` require approval |
+| Terminal commands | Read-only allowlist runs directly; everything else requires approval |
+
+### Backend capability matrix
+
+| Capability | Gemini Live | OpenAI-Realtime / HF |
+| --- | --- | --- |
+| Full-duplex PCM on `/v1/live` | yes | yes |
+| Coding-agent tools (`dispatchRealtimeToolCall`) | yes | yes |
+| NON_BLOCKING slow tools | developer-API only (Vertex stays blocking) | n/a (adapter-defined) |
+| Mid-call resumption (`goAway` handle) | yes | **no** — clean upstream reconnect only |
+| Approvals on desktop orb | yes (`tool_approval_*`) | yes |
+| `web_search` | Serper key on gateway | Serper key on gateway |
+| `camera_snapshot` | client JPEG frame | client JPEG frame |
+| Input transcript role | user + assistant | endpoint-dependent; assistant final events normalized |
+| Tool schema | Gemini function declarations | recursively normalized to OpenAI JSON Schema |
 
 Useful settings: `PI_SPEAK_GEMINI_LIVE_MODEL`, `PI_SPEAK_GEMINI_LIVE_MODALITY=audio|text`. Keep provider keys server-side.
 

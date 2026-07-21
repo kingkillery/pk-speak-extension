@@ -12,7 +12,7 @@ import { publishOwnerHubSession, resumeOwnerHubSession } from "./hub-handoff.js"
 import { sendHerdrPane } from "./herdr-client.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { BusyError, RemoteTurnManager, type ConversationExecutionPlan, type ConversationReducerSummary, type RemoteTurnResult, type TurnProgressEvent, type TurnTimingSummary } from "./remote-turn-manager.js";
-import { shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
+import { getSttDiagnostics, shutdownLocalSttWorker, transcribeAudioBuffer } from "./stt.js";
 import { requestGracefulChildShutdown } from "./listener-control.js";
 import { findSessionRouteConflict, isSpeechInterruptCommand, listKnownTargets, resolveSessionRoute, resolveSessionTarget } from "./voice-routing.js";
 import { isAffirmative, isNegative } from "./voice-confirmation.js";
@@ -41,6 +41,7 @@ import { parseVoiceSlashCommand } from "./voice-session-command.js";
 import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached, resolveWindowsNpmShim } from "./agent-discovery.js";
 import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { openDesktopLiveClient } from "./desktop-live-client.js";
+import { canonicalRealtimeSessionPath } from "./realtime-session-target.js";
 import { buildSessionWorkingDirectoryMap } from "./session-working-directory.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
@@ -67,7 +68,15 @@ import {
 	type SpeakRuntimeState,
 	type TtsProvider,
 } from "./tts.js";
-import { readAttentionSnapshots } from "./attention-broker.js";
+import {
+	buildAttentionSessionId,
+	focusAttentionLeader,
+	readAttentionSnapshots,
+	releaseAttentionLeader,
+	removeAttentionSnapshot,
+	renewAttentionLeader,
+	writeAttentionSnapshot,
+} from "./attention-broker.js";
 import { isGeminiLiveConfigured, isGeminiLiveSimulated, runGeminiLiveTurn } from "./gemini-live-turn.js";
 import { buildAgentSpeakCommand, buildAgentSpeechPreamble } from "./agent-speech.js";
 import { isSpeakEnabled, normalizeSpeakMode, type SpeakMode } from "./speak-mode.js";
@@ -169,7 +178,7 @@ const MONO_KEEP_ALIVE_SECONDS = Number.parseFloat(
 const MONO_WAKE_PHRASE = process.env.PI_SPEAK_WAKE_PHRASE || process.env.PI_SPEAK_MONO_WAKE_PHRASE || "PK";
 const PHONE_TURN_WAIT_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_PHONE_WAIT_TIMEOUT_MS || "180000", 10);
 const DEFAULT_REMOTE_HOST = process.env.PI_SPEAK_HTTP_HOST || "0.0.0.0";
-const DEFAULT_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "8767", 10);
+const DEFAULT_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_REMOTE_PORT || "8770", 10);
 const DEFAULT_ADB_REMOTE_HOST = process.env.PI_SPEAK_ADB_HTTP_HOST || "127.0.0.1";
 const DEFAULT_ADB_REMOTE_PORT = Number.parseInt(process.env.PI_SPEAK_ADB_HTTP_PORT || "8787", 10);
 const PUBLIC_REMOTE_BASE_URL = process.env.PI_SPEAK_PUBLIC_BASE_URL?.trim() || "";
@@ -816,6 +825,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 	let voiceTarget: string | undefined;
 	let sessionRegistry: Record<string, string> = {};
 	let sessionWakeAliases: Record<string, string> = {};
+	let attentionSessionId: string | undefined;
+	let attentionHeartbeat: NodeJS.Timeout | undefined;
+	let attentionWaiting = true;
 	let pendingSessionRemoval:
 		| { sessionPath: string; sessionName: string; requestedAt: number }
 		| undefined;
@@ -832,6 +844,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		host: DEFAULT_REMOTE_HOST,
 		port: DEFAULT_REMOTE_PORT,
 		authToken: process.env.PI_SPEAK_HTTP_TOKEN || DEFAULT_REMOTE_AUTH_TOKEN,
+		role: "session",
 	};
 	let remoteDefaultTarget = remoteState.defaultTarget;
 	let pendingRemoteTurn: PendingRemoteTurn | undefined;
@@ -1044,9 +1057,56 @@ export default function speakExtension(pi: ExtensionAPI) {
 		target.ui.setStatus("remote", `remote:${remoteState.port || DEFAULT_REMOTE_PORT}${suffix}`);
 	};
 
+	const publishAttentionState = (ctx = lastCtx) => {
+		const sessionPath = ctx?.sessionManager?.getSessionFile?.();
+		if (!sessionPath) return;
+		const nextId = buildAttentionSessionId(sessionPath);
+		if (attentionSessionId && attentionSessionId !== nextId) {
+			releaseAttentionLeader(attentionSessionId);
+			removeAttentionSnapshot(attentionSessionId);
+		}
+		attentionSessionId = nextId;
+		writeAttentionSnapshot({
+			sessionId: nextId,
+			sessionName: pi.getSessionName?.() || undefined,
+			sessionPath,
+			pid: process.pid,
+			phase,
+			waitingForAttention: attentionWaiting,
+			readyAt: attentionWaiting ? Date.now() : undefined,
+			lastAssistantText: lastAssistantText || undefined,
+			voiceTarget,
+			aliases: Object.entries(sessionWakeAliases)
+				.filter(([, path]) => path === sessionPath)
+				.map(([alias]) => alias),
+			updatedAt: Date.now(),
+		});
+		renewAttentionLeader(nextId);
+		return nextId;
+	};
+
+	const startAttentionHeartbeat = (ctx = lastCtx) => {
+		if (attentionHeartbeat) clearInterval(attentionHeartbeat);
+		const sessionId = publishAttentionState(ctx);
+		if (sessionId) focusAttentionLeader(sessionId);
+		attentionHeartbeat = setInterval(() => publishAttentionState(), 2_000);
+		attentionHeartbeat.unref?.();
+	};
+
+	const stopAttentionHeartbeat = () => {
+		if (attentionHeartbeat) clearInterval(attentionHeartbeat);
+		attentionHeartbeat = undefined;
+		if (attentionSessionId) {
+			releaseAttentionLeader(attentionSessionId);
+			removeAttentionSnapshot(attentionSessionId);
+		}
+		attentionSessionId = undefined;
+	};
+
 	const setPhase = (next: typeof phase, ctx?: any) => {
 		phase = next;
 		updateStatus(ctx);
+		publishAttentionState(ctx);
 	};
 
 	const persistState = () => {
@@ -2228,9 +2288,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 					try {
 						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
+						diagnostics.lastErrors.stt = undefined;
 						if (!transcription.text) {
 							return { replyText: "I could not understand that voice message." };
 						}
+						const sttWarnings = transcription.fallback
+							? [`STT fallback: existing → Moonshine (${transcription.fallback.code}).`]
+							: undefined;
 						return await enqueuePhoneTurn(
 							"telegram-voice",
 							transcription.text,
@@ -2238,6 +2302,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							true,
 							{ sttMs: transcription.durationMs, totalMs: Date.now() - sttStartedAt },
 							{ stt: transcription.provider },
+							sttWarnings,
 						);
 					} catch (error) {
 						diagnostics.lastErrors.stt = getErrorMessage(error);
@@ -2723,6 +2788,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 		if (!remoteServer) {
 			remoteServer = new ControlServer({
 				state: remoteState,
+				portRetries: 10,
 				onStateChange: (patch) => {
 					syncRemoteState(patch, true);
 				},
@@ -2744,7 +2810,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					lastErrors: diagnostics.lastErrors,
 					recentTimings: diagnostics.recentTimings,
 					queue: remoteTurnManager.getSnapshot(),
-					providers: getTtsDiagnostics(getSpeakRuntimeState()),
+					providers: { ...getTtsDiagnostics(getSpeakRuntimeState()), stt: getSttDiagnostics() },
 					routing: getRoutingStatus(),
 				}),
 				getRoutingStatus,
@@ -2783,9 +2849,13 @@ export default function speakExtension(pi: ExtensionAPI) {
 					try {
 						const sttStartedAt = Date.now();
 						const transcription = await transcribeAudioBuffer(buffer, mimeType);
+						diagnostics.lastErrors.stt = undefined;
 						if (!transcription.text) {
 							return { replyText: "I could not understand that voice message." };
 						}
+						const sttWarnings = transcription.fallback
+							? [`STT fallback: existing → Moonshine (${transcription.fallback.code}).`]
+							: undefined;
 						return await enqueuePhoneTurn(
 							"http-voice",
 							transcription.text,
@@ -2793,7 +2863,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 							includeAudio,
 							{ sttMs: transcription.durationMs, totalMs: Date.now() - sttStartedAt },
 							{ stt: transcription.provider },
-							undefined,
+							sttWarnings,
 							target,
 							cwd,
 							mode,
@@ -2850,13 +2920,33 @@ export default function speakExtension(pi: ExtensionAPI) {
 					if (rawProvider && provider !== "oh-my-pk") {
 						return { ok: false, message: `Resume is not available for provider "${rawProvider}".` };
 					}
-					const rawSessionArg = payload.sessionId?.trim() || payload.sessionPath?.trim();
-					if (!rawSessionArg) return { ok: false, message: "Session id or path is required." };
-					const sessionArg = normalizeOptionalString(rawSessionArg, 1024, "session");
-					if (typeof sessionArg === "object") return { ok: false, message: sessionArg.error };
-					if (!sessionArg) return { ok: false, message: "Session id or path is required." };
-					const cwd = payload.cwd?.trim() || DEFAULT_AGENT_CWD || process.cwd();
-					try {
+				const requestedId = payload.sessionId?.trim();
+				const requestedPath = canonicalRealtimeSessionPath(payload.sessionPath);
+				if (!requestedId && !requestedPath) return { ok: false, message: "Session id or path is required." };
+				const session = buildOhMyPiAgentHubDashboardCached(0).sessions.find((entry) =>
+					(!requestedId || entry.sessionId === requestedId)
+					&& (!requestedPath || canonicalRealtimeSessionPath(entry.sessionPath) === requestedPath));
+				if (!session) return { ok: false, message: "The approved Oh-my-pk session identity is no longer available." };
+				// TOCTOU guard: re-check live attention snapshots immediately before launch.
+				// OMPK snapshot sessionIds are SHA-1(path), so match by canonical path.
+				const canonicalSessionPath = canonicalRealtimeSessionPath(session.sessionPath);
+				const liveSnapshot = readAttentionSnapshots().find((snapshot) =>
+					snapshot.sessionPath && canonicalRealtimeSessionPath(snapshot.sessionPath) === canonicalSessionPath);
+				if (liveSnapshot) {
+					appendSessionEvent("sess.resume.blocked", "admin", {
+						provider: "oh-my-pk",
+						session: session.sessionId || session.sessionPath,
+						reason: "session-already-active",
+						pid: liveSnapshot.pid,
+					});
+					return {
+						ok: false,
+						message: `That session is already running (pid ${liveSnapshot.pid}). Use send_session_message to reach it instead of resuming.`,
+					};
+				}
+				const sessionArg = session.sessionId || session.sessionPath;
+				const cwd = session.cwd?.trim() || payload.cwd?.trim() || DEFAULT_AGENT_CWD || process.cwd();
+				try {
 						const command = launchOhMyPiResume(sessionArg, cwd);
 						appendSessionEvent("sess.resume", "admin", { provider: "oh-my-pk", session: sessionArg, cwd, command });
 						return { ok: true, message: `Launching Oh-my-pk resume for ${sessionArg}.` };
@@ -4241,6 +4331,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 			await startRemoteServer(ctx, true);
 		}
 
+		attentionWaiting = true;
+		startAttentionHeartbeat(ctx);
 		updateStatus(ctx);
 		updateMonoStatus(ctx);
 		updateVoiceStatus(ctx);
@@ -4250,6 +4342,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		lastCtx = ctx;
+		stopAttentionHeartbeat();
 		if (Object.keys(sessionRegistry).length > 0) {
 			persistSessionRegistry();
 		}
@@ -4279,6 +4372,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 	pi.on("agent_start", async (_event, ctx) => {
 		lastCtx = ctx;
 		lastAssistantText = "";
+		attentionWaiting = false;
+		const sessionId = publishAttentionState(ctx);
+		if (sessionId) focusAttentionLeader(sessionId);
 		if (speakState.enabled) setPhase("llm", ctx);
 	});
 
@@ -4294,11 +4390,14 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const text = extractText(event.message.content);
 		if (text) lastAssistantText = text;
 		piAgentProvider.handleMessageEnd(text);
+		publishAttentionState(ctx);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		lastCtx = ctx;
 		piAgentProvider.handleAgentEnd();
+		attentionWaiting = true;
+		publishAttentionState(ctx);
 		if (speakState.enabled && ctx.hasUI) setPhase("ready", ctx);
 		if (pendingRemoteTurn) {
 			await resolvePendingPhoneTurn(ctx);

@@ -27,11 +27,12 @@ class FakeLiveSession {
 	constructor() {
 		this.toolResponses = [];
 		this.closed = false;
+		this.clientContents = [];
 	}
 	sendToolResponse(payload) {
 		this.toolResponses.push(payload);
 	}
-	sendClientContent() {}
+	sendClientContent(payload) { this.clientContents.push(payload); }
 	sendRealtimeInput() {}
 	close() {
 		this.closed = true;
@@ -68,12 +69,14 @@ class FakeWebSocket extends EventEmitter {
 	constructor() {
 		super();
 		this.readyState = RealWebSocket.OPEN;
+		this.closeCode = undefined;
 		this.sent = [];
 	}
 	send(data) {
 		this.sent.push(data);
 	}
 	close(code, reason) {
+		this.closeCode = code;
 		this.readyState = RealWebSocket.CLOSED;
 		this.emit("close", code, reason);
 	}
@@ -207,14 +210,29 @@ test("client websocket reconnect resumes the existing live session", async () =>
 	const connectionCountBefore = connections.length;
 	const { ws } = await startFakeSession({});
 	await waitFor(() => ws.jsonMessages().some((message) => message.type === "start"), "expected initial live start message");
-	const session = ws.jsonMessages().find((message) => message.type === "start").session;
+	const start = ws.jsonMessages().find((message) => message.type === "start");
+	const session = start.session;
 	ws.emit("close", 1006, "network changed");
 
 	const resumedWs = new FakeWebSocket();
 	handleRealtimeGateway.call({}, resumedWs);
-	resumedWs.emit("message", Buffer.from(JSON.stringify({ type: "reconnect", session, serverSequenceId: 0 })), false);
+	resumedWs.emit("message", Buffer.from(JSON.stringify({ type: "reconnect", session, reconnectToken: start.reconnectToken, serverSequenceId: 0 })), false);
 	await waitFor(() => resumedWs.jsonMessages().some((message) => message.type === "start"), "expected resumed live start message");
 	assert.equal(connections.length, connectionCountBefore + 1, "websocket resume must not create another Gemini connection");
+	resumedWs.emit("message", Buffer.from(JSON.stringify({ type: "text", text: "after reconnect", clientSequenceId: 99 })), false);
+	await waitFor(() => connections.at(-1).session.clientContents.some((entry) => entry.turns?.[0]?.parts?.[0]?.text === "after reconnect"), "expected resumed socket controls to reach the live session");
+});
+
+test("client websocket reconnect rejects a missing capability token", async () => {
+	setVertexEnv();
+	const { ws } = await startFakeSession({});
+	const start = ws.jsonMessages().find((message) => message.type === "start");
+	const attacker = new FakeWebSocket();
+	handleRealtimeGateway.call({}, attacker);
+	attacker.emit("message", Buffer.from(JSON.stringify({ type: "reconnect", session: start.session, serverSequenceId: 0 })), false);
+	await waitFor(() => attacker.readyState === RealWebSocket.CLOSED, "expected invalid reconnect to close");
+	assert.equal(attacker.closeCode, 1008);
+	assert.equal(ws.readyState, RealWebSocket.OPEN, "original client must keep session ownership");
 });
 
 test("read-only tool: list_agent_hub_agents answers immediately with no approval step", async (t) => {
@@ -491,4 +509,132 @@ test("read_workspace_file: model output is speech-shaped while the client keeps 
 	assert.ok(toolComplete, "expected a tool_complete message to the client");
 	const clientOutput = JSON.parse(toolComplete.output);
 	assert.equal(clientOutput.file.content, fullContent, "client must keep the full untruncated content");
+});
+
+test("session bridge selects locally and sends an approved OMPK message", async () => {
+	setVertexEnv();
+	const sentTurns = [];
+	const dashboard = {
+		current: "pk",
+		ready: ["pk"],
+		sessions: [{
+			name: "pk",
+			path: "C:/sessions/pk.jsonl",
+			sessionPath: "C:/sessions/pk.jsonl",
+			sessionId: "pk-session-id",
+			provider: "oh-my-pk",
+			cwd: "C:/work/pk",
+			workingDirectory: "C:/work/pk",
+			current: true,
+			isCurrent: true,
+			ready: true,
+			isReady: true,
+			activity: "idle",
+			aliases: ["primary"],
+		}],
+	};
+	const server = {
+		realtimeBridge: {
+			getSessionDashboard: () => dashboard,
+			sendSessionTurn: async (text, target) => {
+				sentTurns.push({ text, target });
+				return { replyText: "OMPK accepted the task." };
+			},
+			agentHub: { snapshot: async () => ({ folders: [], agents: [] }) },
+		},
+	};
+	const { ws, connection } = await startFakeSession(server);
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-switch-pk", name: "switch_session", args: { name: "primary" } }] },
+	});
+	const switchComplete = ws.jsonMessages().find((message) => message.type === "tool_complete" && message.name === "switch_session");
+	assert.ok(switchComplete);
+	assert.equal(JSON.parse(switchComplete.output).target.sessionId, "pk-session-id");
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-message-pk", name: "send_session_message", args: { text: "Review the failing test." } }] },
+	});
+	const approval = ws.jsonMessages().find((message) => message.type === "tool_approval_required" && message.name === "send_session_message");
+	assert.ok(approval, "session message must wait for command approval");
+	assert.equal(sentTurns.length, 0);
+
+	ws.emit("message", Buffer.from(JSON.stringify({ type: "command_approve", approvalId: approval.approvalId })), false);
+	await waitFor(() => sentTurns.length === 1, "expected approved message to reach OMPK bridge");
+	assert.deepEqual(sentTurns[0], {
+		text: "Review the failing test.",
+		target: { name: "pk", agentId: undefined, sessionId: "pk-session-id", sessionPath: "C:/sessions/pk.jsonl", provider: "oh-my-pk", cwd: "C:/work/pk", aliases: ["primary"], sources: ["dashboard"] },
+	});
+	await waitFor(() => connection.session.toolResponses.some((entry) => entry.functionResponses?.[0]?.id === "call-message-pk"), "expected approved tool result");
+});
+
+test("resume_session precheck rejects a live (attention-backed) session and never requests approval", async (t) => {
+	setVertexEnv();
+	// Isolate the broker root so we can plant a live snapshot.
+	const brokerRoot = mkdtempSync(join(tmpdir(), "pi-speak-resume-guard-"));
+	const previousLocalAppData = process.env.LOCALAPPDATA;
+	process.env.LOCALAPPDATA = brokerRoot;
+	const sessionPath = "C:/sessions/active.jsonl";
+	const { writeAttentionSnapshot } = await import("../../dist/attention-broker.js");
+	writeAttentionSnapshot({
+		sessionId: "snap-active",
+		sessionName: "active",
+		sessionPath,
+		pid: 4242,
+		phase: "ready",
+		waitingForAttention: false,
+		aliases: [],
+		updatedAt: Date.now(),
+	});
+	t.after(() => {
+		if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = previousLocalAppData;
+		rmSync(brokerRoot, { recursive: true, force: true });
+	});
+
+	const dashboard = {
+		current: "active",
+		ready: ["active"],
+		sessions: [{
+			name: "active",
+			path: sessionPath,
+			sessionPath,
+			sessionId: "active-header-id",
+			provider: "oh-my-pk",
+			cwd: "C:/work/active",
+			workingDirectory: "C:/work/active",
+			current: false,
+			isCurrent: false,
+			ready: false,
+			isReady: false,
+			activity: "background session",
+			aliases: [],
+		}],
+	};
+	const resumeCalls = [];
+	const server = {
+		realtimeBridge: {
+			getSessionDashboard: () => dashboard,
+			onSessionResume: async (payload) => {
+				resumeCalls.push(payload);
+				return { ok: true, message: "resumed" };
+			},
+			agentHub: { snapshot: async () => ({ folders: [], agents: [] }) },
+		},
+	};
+	const { ws, connection } = await startFakeSession(server);
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-resume-active", name: "resume_session", args: { target: "active" } }] },
+	});
+
+	// No approval must open; the precheck must answer immediately with session-already-active.
+	assert.equal(resumeCalls.length, 0, "must never call onSessionResume for a live session");
+	assert.equal(ws.jsonMessages().filter((m) => m.type === "tool_approval_required").length, 0, "live session must not open an approval");
+	const fr = lastToolResponse(connection);
+	assert.equal(fr.id, "call-resume-active");
+	const output = readOutput(fr);
+	assert.equal(output.ok, false);
+	assert.equal(output.code, "session-already-active");
+	assert.match(output.error, /currently running/i);
 });

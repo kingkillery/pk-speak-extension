@@ -59,6 +59,7 @@ test("buildRealtimeTools exposes read-only agent-hub and workspace tools alongsi
 	for (const readOnlyName of [
 		"get_session_info",
 		"list_sessions",
+		"get_realtime_capabilities",
 		"list_agent_hub_agents",
 		"get_agent_hub_agent",
 		"browse_workspace",
@@ -69,7 +70,7 @@ test("buildRealtimeTools exposes read-only agent-hub and workspace tools alongsi
 		assert.ok(names.includes(readOnlyName), `expected read-only tool ${readOnlyName}`);
 	}
 
-	for (const mutatingName of ["launch_agent", "archive_session"]) {
+	for (const mutatingName of ["launch_agent", "archive_session", "resume_session", "send_session_message", "kill_agent", "revive_agent"]) {
 		const tool = functionDeclarations.find((t) => t.name === mutatingName);
 		assert.ok(tool, `expected mutating tool ${mutatingName}`);
 		assert.match(tool.description, /requires operator approval/i);
@@ -119,6 +120,14 @@ test("ControlServer.agentHubGateway is a genuinely narrow runtime facade, not ju
 	for (const mutatingMethod of ["chat", "kill", "revive", "stream"]) {
 		assert.equal(facade[mutatingMethod], undefined, `${mutatingMethod} must not be reachable through the realtime-facing facade`);
 	}
+});
+
+test("ControlServer realtime bridge reports callback-backed capabilities", () => {
+	const capabilities = newTestControlServer().realtimeBridge.capabilities;
+	assert.equal(capabilities.sessionRead, false);
+	assert.equal(capabilities.sessionMessage, true);
+	assert.equal(capabilities.sessionResume, false);
+	assert.equal(capabilities.agentHubMutations, false);
 });
 
 test("realtime terminal safety allows only read-only commands", () => {

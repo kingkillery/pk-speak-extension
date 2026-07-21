@@ -17,7 +17,7 @@ import type {
 // cast only the constructor, keep the instance typed loosely via the package export.
 type NodeWsConstructor = new (
 	address: string,
-	options?: { headers?: Record<string, string> },
+	options?: { headers?: Record<string, string>; handshakeTimeout?: number },
 ) => InstanceType<typeof WsSocket>;
 const NodeWebSocket = WsSocket as unknown as NodeWsConstructor;
 
@@ -29,6 +29,10 @@ export type OpenAiRealtimeLiveConfig = {
 	voice?: string;
 	instructions?: string;
 	outputSampleRate?: number;
+	inputSampleRate?: number;
+	/** null disables transcription; undefined enables the official default only on api.openai.com. */
+	inputTranscriptionModel?: string | null;
+	connectTimeoutMs?: number;
 };
 
 function trimSlash(url: string): string {
@@ -42,13 +46,22 @@ export function resolveOpenAiRealtimeConnectUrl(env: NodeJS.ProcessEnv = process
 		env.SPEECH_TO_SPEECH_URL?.trim() ||
 		"";
 	if (!direct) return "";
-	if (/\/v1\/realtime(\?|$)/i.test(direct)) return direct;
-	// Bare host or LB-less server root → append path.
-	if (direct.startsWith("ws://") || direct.startsWith("wss://") || direct.startsWith("http://") || direct.startsWith("https://")) {
-		const asWs = direct.replace(/^http/i, "ws");
-		return `${trimSlash(asWs)}/v1/realtime`;
+	let resolved: string;
+	if (/\/v1\/realtime(\?|$)/i.test(direct)) {
+		resolved = direct;
+	} else if (direct.startsWith("ws://") || direct.startsWith("wss://") || direct.startsWith("http://") || direct.startsWith("https://")) {
+		resolved = `${trimSlash(direct.replace(/^http/i, "ws"))}/v1/realtime`;
+	} else {
+		resolved = `wss://${trimSlash(direct)}/v1/realtime`;
 	}
-	return `wss://${trimSlash(direct)}/v1/realtime`;
+	try {
+		const url = new URL(resolved);
+		if (url.hostname.toLowerCase() === "api.openai.com" && !url.searchParams.has("model")) {
+			url.searchParams.set("model", env.PI_SPEAK_OPENAI_REALTIME_MODEL?.trim() || "gpt-realtime");
+			return url.toString();
+		}
+	} catch {}
+	return resolved;
 }
 
 export function isOpenAiRealtimeLiveConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -73,6 +86,40 @@ function bufferToBase64(buf: Buffer): string {
 	return buf.toString("base64");
 }
 
+export function resamplePcm16Mono(pcm: Buffer, inputRate: number, outputRate: number): Buffer {
+	if (inputRate === outputRate || pcm.length < 4) return pcm;
+	const inputSamples = Math.floor(pcm.length / 2);
+	const outputSamples = Math.max(1, Math.round(inputSamples * outputRate / inputRate));
+	const output = Buffer.allocUnsafe(outputSamples * 2);
+	for (let index = 0; index < outputSamples; index += 1) {
+		const source = index * (inputSamples - 1) / Math.max(1, outputSamples - 1);
+		const leftIndex = Math.floor(source);
+		const rightIndex = Math.min(inputSamples - 1, leftIndex + 1);
+		const fraction = source - leftIndex;
+		const left = pcm.readInt16LE(leftIndex * 2);
+		const right = pcm.readInt16LE(rightIndex * 2);
+		output.writeInt16LE(Math.round(left + (right - left) * fraction), index * 2);
+	}
+	return output;
+}
+
+function normalizeJsonSchema(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(normalizeJsonSchema);
+	const record = asRecord(value);
+	if (!record) return value;
+	const normalized: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(record)) {
+		if (key === "type" && typeof child === "string") {
+			normalized[key] = child.toLowerCase();
+		} else if (key === "type" && Array.isArray(child)) {
+			normalized[key] = child.map((entry) => typeof entry === "string" ? entry.toLowerCase() : entry);
+		} else {
+			normalized[key] = normalizeJsonSchema(child);
+		}
+	}
+	return normalized;
+}
+
 /**
  * Convert Gemini-style functionDeclarations into OpenAI Realtime session.tools.
  * Accepts the array shape produced by buildRealtimeTools().
@@ -90,7 +137,7 @@ export function mapRealtimeToolsToOpenAi(tools: unknown): unknown[] {
 				type: "function",
 				name: d.name,
 				description: typeof d.description === "string" ? d.description : "",
-				parameters: d.parameters ?? { type: "object", properties: {} },
+				parameters: normalizeJsonSchema(d.parameters ?? { type: "object", properties: {} }),
 			});
 		}
 	}
@@ -103,22 +150,34 @@ export async function connectOpenAiRealtimeLive(
 	handlers: LiveBackendHandlers,
 ): Promise<LiveBackendSession> {
 	const outputRate = config.outputSampleRate ?? 24_000;
+	const configuredInputRate = config.inputSampleRate ?? 24_000;
+	const inputRate = Number.isFinite(configuredInputRate) && configuredInputRate > 0 ? configuredInputRate : 24_000;
+	let inputTranscriptionModel = config.inputTranscriptionModel ?? undefined;
+	if (config.inputTranscriptionModel === undefined) {
+		try {
+			if (new URL(config.connectUrl).hostname.toLowerCase() === "api.openai.com") {
+				inputTranscriptionModel = "gpt-4o-mini-transcribe";
+			}
+		} catch {}
+	}
 	const headers: Record<string, string> = {};
 	if (config.apiKey) {
 		headers.Authorization = `Bearer ${config.apiKey}`;
 		headers["OpenAI-Beta"] = "realtime=v1";
 	}
 
-	const ws = new NodeWebSocket(config.connectUrl, { headers });
+	const connectTimeoutMs = config.connectTimeoutMs ?? 20_000;
+	const ws = new NodeWebSocket(config.connectUrl, { headers, handshakeTimeout: connectTimeoutMs });
 	let closed = false;
-	let configured = false;
-	/** response_id currently speaking (for barge-in cancel). */
+	let sessionUpdateSent = false;
+	let readySent = false;
+	let assistantTranscriptOpen = false;
 	let activeResponseId = "";
-
 	const send = (payload: Record<string, unknown>) => {
 		// readyState 1 === OPEN for both DOM and ws package enums.
-		if (closed || ws.readyState !== 1) return;
+		if (closed || ws.readyState !== 1) return false;
 		ws.send(JSON.stringify(payload));
+		return true;
 	};
 	const sessionUpdate = () => {
 		const tools = mapRealtimeToolsToOpenAi(options.tools);
@@ -130,7 +189,8 @@ export async function connectOpenAiRealtimeLive(
 				output_modalities: ["audio"],
 				audio: {
 					input: {
-						format: { type: "audio/pcm", rate: 16_000 },
+						format: { type: "audio/pcm", rate: inputRate },
+						...(inputTranscriptionModel ? { transcription: { model: inputTranscriptionModel } } : {}),
 						turn_detection: { type: "server_vad" },
 					},
 					output: {
@@ -144,18 +204,6 @@ export async function connectOpenAiRealtimeLive(
 		});
 	};
 
-	await new Promise<void>((resolve, reject) => {
-		const timer = setTimeout(() => reject(new Error("OpenAI Realtime connect timed out")), 20_000);
-		ws.once("open", () => {
-			clearTimeout(timer);
-			resolve();
-		});
-		ws.once("error", (err) => {
-			clearTimeout(timer);
-			reject(err instanceof Error ? err : new Error(String(err)));
-		});
-	});
-
 	ws.on("message", (raw) => {
 		let msg: Record<string, unknown>;
 		try {
@@ -165,12 +213,18 @@ export async function connectOpenAiRealtimeLive(
 		}
 		const type = asString(msg.type);
 
-		if (type === "session.created" || type === "session.updated") {
-			if (!configured) {
-				configured = true;
+		if (type === "session.created") {
+			if (!sessionUpdateSent) {
+				sessionUpdateSent = true;
 				sessionUpdate();
 			}
-			handlers.onOutbound({ kind: "status", status: "ready", detail: type });
+			return;
+		}
+		if (type === "session.updated") {
+			if (!readySent) {
+				readySent = true;
+				handlers.onOutbound({ kind: "status", status: "ready", detail: type });
+			}
 			return;
 		}
 
@@ -187,8 +241,17 @@ export async function connectOpenAiRealtimeLive(
 			return;
 		}
 
-		if (type === "response.done" || type === "response.cancelled") {
+		if (type === "response.done") {
 			activeResponseId = "";
+			if (assistantTranscriptOpen) {
+				assistantTranscriptOpen = false;
+				handlers.onOutbound({ kind: "transcript", text: "", role: "assistant", final: true });
+			}
+			return;
+		}
+		if (type === "response.cancelled") {
+			activeResponseId = "";
+			assistantTranscriptOpen = false;
 			return;
 		}
 
@@ -208,7 +271,19 @@ export async function connectOpenAiRealtimeLive(
 			type === "response.audio_transcript.delta"
 		) {
 			const delta = asString(msg.delta);
-			if (delta) handlers.onOutbound({ kind: "transcript", text: delta, role: "assistant" });
+			if (delta) {
+				assistantTranscriptOpen = true;
+				handlers.onOutbound({ kind: "transcript", text: delta, role: "assistant" });
+			}
+			return;
+		}
+		if (type === "response.output_audio_transcript.done" || type === "response.audio_transcript.done") {
+			const transcript = asString(msg.transcript);
+			if (transcript && !assistantTranscriptOpen) {
+				handlers.onOutbound({ kind: "transcript", text: transcript, role: "assistant" });
+			}
+			assistantTranscriptOpen = false;
+			handlers.onOutbound({ kind: "transcript", text: "", role: "assistant", final: true });
 			return;
 		}
 
@@ -249,40 +324,60 @@ export async function connectOpenAiRealtimeLive(
 		handlers.onOutbound({ kind: "status", status: "closed" });
 	});
 
+
+	await new Promise<void>((resolve, reject) => {
+		const onConnectError = (err: unknown) => {
+			clearTimeout(timer);
+			reject(err instanceof Error ? err : new Error(String(err)));
+		};
+		const timer = setTimeout(() => {
+			ws.off("error", onConnectError);
+			ws.once("error", () => {});
+			try {
+				const pending = ws as unknown as { _req?: { destroy(): void }; close(): void };
+				pending._req?.destroy();
+				pending.close();
+			} catch {}
+			reject(new Error("OpenAI Realtime connect timed out"));
+		}, connectTimeoutMs + 100);
+		ws.once("open", () => {
+			clearTimeout(timer);
+			ws.off("error", onConnectError);
+			resolve();
+		});
+		ws.once("error", onConnectError);
+	});
+	ws.on("error", (err) => {
+		handlers.onOutbound({
+			kind: "error",
+			message: err instanceof Error ? err.message : String(err),
+		});
+	});
+
 	const session: LiveBackendSession = {
 		kind: "openai-realtime",
 		sendAudio(input: LiveAudioInput) {
-			// Expect 16 kHz PCM16 from the gateway client path.
-			void input.sampleRate;
-			send({
-				type: "input_audio_buffer.append",
-				audio: bufferToBase64(input.pcm),
-			});
+			const pcm = resamplePcm16Mono(input.pcm, input.sampleRate, inputRate);
+			send({ type: "input_audio_buffer.append", audio: bufferToBase64(pcm) });
 		},
 		sendText(text: string) {
 			send({
 				type: "conversation.item.create",
-				item: {
-					type: "message",
-					role: "user",
-					content: [{ type: "input_text", text }],
-				},
+				item: { type: "message", role: "user", content: [{ type: "input_text", text }] },
 			});
 			send({ type: "response.create" });
 		},
 		sendImage(input: LiveImageInput) {
-			send({
+			const delivered = send({
 				type: "conversation.item.create",
 				item: {
 					type: "message",
 					role: "user",
-					content: [{
-						type: "input_image",
-						image_url: `data:${input.mimeType};base64,${input.data}`,
-					}],
+					content: [{ type: "input_image", image_url: `data:${input.mimeType};base64,${input.data}` }],
 				},
 			});
-			send({ type: "response.create" });
+			if (delivered && !input.deferResponse) send({ type: "response.create" });
+			return delivered;
 		},
 		interrupt() {
 			send({ type: "response.cancel" });
@@ -290,21 +385,17 @@ export async function connectOpenAiRealtimeLive(
 			handlers.onOutbound({ kind: "interrupt" });
 		},
 		sendToolResult(callId: string, name: string, output: string) {
-			send({
+			const delivered = send({
 				type: "conversation.item.create",
-				item: {
-					type: "function_call_output",
-					call_id: callId,
-					output,
-				},
+				item: { type: "function_call_output", call_id: callId, output },
 			});
-			// Keep name available for logs; OpenAI wire keys on call_id.
 			void name;
-			send({ type: "response.create" });
+			if (delivered) send({ type: "response.create" });
+			return delivered;
 		},
 		close() {
 			closed = true;
-			try { ws.close(); } catch { /* ignore */ }
+			try { ws.close(); } catch {}
 		},
 	};
 

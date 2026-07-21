@@ -55,4 +55,13 @@ class RealtimeTranscriptTest {
         assertTrue(guard.rejectOnce("approval-1") { rejectedIds.add(it); true })
         assertEquals(listOf("approval-1", "approval-1"), rejectedIds)
     }
+
+    @Test
+    fun liveApprovalControlsSeparateTerminalAndCommandRegistries() {
+        assertEquals("terminal_approve", realtimeApprovalControlType("execute_terminal_command", "mutating-command", true))
+        assertEquals("terminal_reject", realtimeApprovalControlType("execute_terminal_command", "mutating-command", false))
+        assertEquals("command_approve", realtimeApprovalControlType("launch_agent", "launch_agent", true))
+        assertEquals("command_reject", realtimeApprovalControlType("archive_session", "archive_session", false))
+        assertEquals("command_approve", realtimeApprovalControlType("chat_agent", "", true))
+    }
 }

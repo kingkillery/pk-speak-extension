@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { closeSync, createReadStream, existsSync, mkdirSync, opendirSync, openSync, readFileSync, realpathSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import dgram, { type Socket as UdpSocket } from "node:dgram";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, parse, resolve } from "node:path";
-import { hostname, platform } from "node:os";
+import { hostname, platform, tmpdir } from "node:os";
 import QRCode from "qrcode";
-import { getOrCreateInstallAuthToken, getReachableBaseUrls, isTailscaleIpv4, pickPhoneFacingBaseUrl } from "./pairing.js";
+import { clearRootVoiceDisable, enableRootVoiceDisable, getOrCreateInstallAuthToken, getReachableBaseUrls, isRootVoiceDisabled, isTailscaleIpv4, pickPhoneFacingBaseUrl } from "./pairing.js";
 import Bonjour from "bonjour-service";
 import { WebSocketServer, WebSocket } from "ws";
 import "./realtime-types.js";
@@ -24,6 +24,7 @@ import { AgentHubGateway, type AgentHubBinding } from "./herdr-agent-hub-gateway
 import { parseHubAgentId, parseHubChatRequest, parseHubKillConfirm } from "./herdr-agent-hub-schema.js";
 import { buildOhMyPiAgentHubDashboardCached } from "./agent-hub-dashboard.js";
 import { isWebSearchConfigured, runWebSearch } from "./web-search.js";
+import { canonicalRealtimeSessionPath } from "./realtime-session-target.js";
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
@@ -33,6 +34,9 @@ export type ControlServerState = {
 	host?: string;
 	port?: number;
 	authToken?: string;
+	/** Identifies which role this server plays so health probes can tell the
+	 * always-on gateway apart from a per-session in-agent control server. */
+	role?: "gateway" | "session";
 };
 
 export type ControlActionResult = {
@@ -223,6 +227,9 @@ export type CollabLinkSnapshot = {
 
 export type ControlServerOptions = {
 	state: ControlServerState;
+	/** Extra ports to try (base+1…base+N) when the requested port is already
+	 * bound. Keeps parallel agent sessions from failing on EADDRINUSE. */
+	portRetries?: number;
 	onStateChange: (patch: Partial<ControlServerState>) => void;
 	getStatus: () => ControlServerStatus;
 	getDiagnostics: () => ControlServerDiagnostics;
@@ -299,6 +306,19 @@ type AudioArtifact = {
 	expiresAt: number;
 };
 
+/**
+ * A staged one-shot TTS artifact for the speech-mode orb. Reuses the
+ * AudioArtifact audio-serve pipeline, layered with the reply text the orb
+ * renders alongside the player. Server-owned path under the audio temp dir;
+ * never accepts a caller-supplied path.
+ */
+type SpeechArtifact = AudioArtifact & {
+	text: string;
+	createdAt: number;
+	/** Server-owned parent directory (mkdtemp result); removed recursively. */
+	cleanupDir: string;
+};
+
 type RateLimitBucket = {
 	windowStartedAt: number;
 	control: number;
@@ -317,6 +337,10 @@ const CLEANUP_INTERVAL_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_AUDIO_CLEA
 const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_TIMEOUT_MS || "180000", 10);
 const TEXT_BODY_LIMIT_BYTES = Number.parseInt(process.env.PI_SPEAK_HTTP_TEXT_BODY_LIMIT_BYTES || "65536", 10);
 const VOICE_BODY_LIMIT_BYTES = Number.parseInt(process.env.PI_SPEAK_HTTP_VOICE_BODY_LIMIT_BYTES || "26214400", 10);
+const SPEECH_ARTIFACT_BODY_LIMIT_BYTES = Number.parseInt(process.env.PI_SPEAK_HTTP_SPEECH_BODY_LIMIT_BYTES || "10485760", 10);
+const SPEECH_ARTIFACT_TTL_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_SPEECH_TTL_MS || "600000", 10);
+const SPEECH_TEXT_LIMIT_BYTES = Number.parseInt(process.env.PI_SPEAK_HTTP_SPEECH_TEXT_LIMIT_BYTES || "8192", 10);
+const SPEECH_ALLOWED_MIME_TYPES = ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm"];
 const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_WINDOW_MS || "60000", 10);
 const RATE_LIMIT_CONTROL = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_CONTROL || "20", 10);
 const RATE_LIMIT_VOICE = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_VOICE || "6", 10);
@@ -417,8 +441,11 @@ export class ControlServer {
 	private readonly realtimeClients = new Set<WebSocket>();
 	private readonly state: ControlServerState;
 	private readonly audioArtifacts = new Map<string, AudioArtifact>();
+	private readonly speechArtifacts = new Map<string, SpeechArtifact>();
 	private readonly rateLimitBuckets = new Map<string, RateLimitBucket>();
+	private readonly portRetries: number;
 	private readonly _agentHubGateway: AgentHubGateway;
+	private readonly agentHubCanMutate: boolean;
 	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
@@ -434,7 +461,9 @@ export class ControlServer {
 			host: options.state.host ?? DEFAULT_HOST,
 			port: options.state.port ?? DEFAULT_PORT,
 			authToken: options.state.authToken || process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken(),
+			role: options.state.role ?? "gateway",
 		};
+		this.portRetries = Math.max(0, options.portRetries ?? 0);
 		this.onStateChange = options.onStateChange;
 		this.getStatus = options.getStatus;
 		this.getDiagnostics = options.getDiagnostics;
@@ -468,6 +497,7 @@ export class ControlServer {
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
 		this._agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
+		this.agentHubCanMutate = options.agentHub?.canMutate === true;
 		this.onBrainstorm = options.onBrainstorm;
 	}
 
@@ -481,6 +511,67 @@ export class ControlServer {
 		return {
 			snapshot: () => this._agentHubGateway.snapshot(),
 			detail: (id, tailLines) => this._agentHubGateway.detail(id, tailLines),
+		};
+	}
+
+	/**
+	 * Trusted in-process bridge for the realtime assistant. Read operations are
+	 * exposed directly; callers must complete the realtime approval flow before
+	 * invoking any mutation on this facade.
+	 */
+	get realtimeBridge() {
+		return {
+			capabilities: {
+				sessionRead: !!this.getSessionDashboard,
+				sessionMessage: true,
+				sessionResume: !!this.onSessionResume,
+				sessionLaunch: !!this.onSessionLaunch,
+				sessionArchive: !!this.onSessionArchive,
+				agentHubMutations: this.agentHubCanMutate,
+			},
+			getSessionDashboard: () => this.getSessionDashboard?.(),
+			sendSessionTurn: async (
+				text: string,
+				target?: { name?: string; sessionId?: string; sessionPath?: string; cwd?: string },
+			) => {
+				let routeTarget = target?.name;
+				if (target?.sessionId || target?.sessionPath) {
+					const dashboard = this.getSessionDashboard?.();
+					const expectedPath = canonicalRealtimeSessionPath(target.sessionPath);
+					const entry = dashboard?.sessions.find((session) =>
+						(!target.sessionId || session.sessionId === target.sessionId)
+						&& (!expectedPath || !!session.sessionPath && canonicalRealtimeSessionPath(session.sessionPath) === expectedPath));
+					if (!entry) {
+						return {
+							replyText: "The approved session target is no longer available.",
+							warnings: ["Session identity changed before the approved message was dispatched."],
+						};
+					}
+					routeTarget = entry.name;
+				}
+				return await this.onTextTurn(text, false, routeTarget, target?.cwd, "live");
+			},
+			resumeSession: (payload: SessionResumePayload) =>
+				this.onSessionResume
+					? Promise.resolve(this.onSessionResume(payload))
+					: Promise.resolve({ ok: false, message: "Session resume is not available." }),
+			launchSession: (payload: SessionLaunchPayload) =>
+				this.onSessionLaunch
+					? Promise.resolve(this.onSessionLaunch(payload))
+					: Promise.resolve({ ok: false, message: "Session launch is not available." }),
+			archiveSession: (payload: SessionArchivePayload) =>
+				this.onSessionArchive
+					? Promise.resolve(this.onSessionArchive(payload))
+					: Promise.resolve({ ok: false, message: "Session archive is not available." }),
+			agentHub: {
+				snapshot: () => this._agentHubGateway.snapshot(),
+				detail: (id: Parameters<AgentHubGateway["detail"]>[0], tailLines: number) => this._agentHubGateway.detail(id, tailLines),
+				chat: (id: Parameters<AgentHubGateway["chat"]>[0], text: string, idempotencyKey: string | null) =>
+					this._agentHubGateway.chat(id, text, idempotencyKey),
+				kill: (id: Parameters<AgentHubGateway["kill"]>[0], confirmToken?: string) =>
+					this._agentHubGateway.kill(id, confirmToken),
+				revive: (id: Parameters<AgentHubGateway["revive"]>[0]) => this._agentHubGateway.revive(id),
+			},
 		};
 	}
 
@@ -565,14 +656,28 @@ export class ControlServer {
 			}
 		});
 
-		await new Promise<void>((resolve, reject) => {
-			const server = this.server!;
-			server.once("error", reject);
-			server.listen(port, host, () => {
-				server.off("error", reject);
-				resolve();
-			});
-		});
+		const maxAttempts = 1 + this.portRetries;
+		let lastListenError: unknown;
+		let listened = false;
+		for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+			const candidatePort = port + attempt;
+			try {
+				await new Promise<void>((resolve, reject) => {
+					const server = this.server!;
+					server.once("error", reject);
+					server.listen(candidatePort, host, () => {
+						server.off("error", reject);
+						resolve();
+					});
+				});
+				listened = true;
+				break;
+			} catch (error) {
+				lastListenError = error;
+				if ((error as { code?: string })?.code !== "EADDRINUSE") throw error;
+			}
+		}
+		if (!listened) throw lastListenError;
 		const address = this.server.address();
 		if (address && typeof address === "object") {
 			this.state.port = address.port;
@@ -623,6 +728,13 @@ export class ControlServer {
 		await new Promise<void>((resolve) => {
 			server.close(() => resolve());
 		});
+		// Best-effort recursive cleanup of any remaining staged speech artifacts
+		// so a gateway shutdown (mid-flight) doesn't leave pi-speak-speech-* dirs.
+		for (const id of [...this.speechArtifacts.keys()]) {
+			const artifact = this.speechArtifacts.get(id);
+			this.speechArtifacts.delete(id);
+			if (artifact) void rm(artifact.cleanupDir, { recursive: true, force: true }).catch(() => {});
+		}
 		this.onStateChange({ enabled: false });
 	}
 
@@ -1212,6 +1324,7 @@ export class ControlServer {
 		if (await this.handleMonoRoute(req, res, url)) return;
 		if (await this.handlePhoneRoute(req, res, url)) return;
 		if (await this.handleSpeakRoute(req, res, url)) return;
+		if (await this.handleSpeechRoute(req, res, url)) return;
 
 		if (req.method === "POST" && url.pathname === "/v1/turn/cancel") {
 			if (!this.onTurnCancel) {
@@ -1302,6 +1415,7 @@ export class ControlServer {
 			this.writeJson(res, 200, {
 				ok: true,
 				app: "pi-speak",
+				role: this.state.role ?? "gateway",
 				authRequired: !!this.state.authToken,
 			});
 			return true;
@@ -1362,6 +1476,11 @@ export class ControlServer {
 
 		if (url.pathname === "/orb/orb.js") {
 			await this.serveStaticFile(join(REMOTE_APP_DIR, "orb.js"), "application/javascript; charset=utf-8", res, "no-store");
+			return true;
+		}
+
+		if (url.pathname === "/orb/orb-approvals.js") {
+			await this.serveStaticFile(join(REMOTE_APP_DIR, "orb-approvals.js"), "application/javascript; charset=utf-8", res, "no-store");
 			return true;
 		}
 
@@ -1808,6 +1927,149 @@ export class ControlServer {
 		return false;
 	}
 
+	/**
+	 * One-shot TTS playback staging + speech-disable controls for the orb
+	 * speech mode. Separate from /v1/speak (which drives the extension's
+	 * speakState). Body is raw audio bytes only — never accepts a path —
+	 * to avoid turning the gateway into an arbitrary local-file reader.
+	 */
+	private async handleSpeechRoute(req: IncomingMessage, res: ServerResponse, url: URL) {
+		if (!url.pathname.startsWith("/v1/speech/")) return false;
+
+		// GET /v1/speech/staged/:id — orb fetches metadata + audio URL.
+		if (req.method === "GET" && url.pathname.startsWith("/v1/speech/staged/")) {
+			const id = decodeURIComponent(url.pathname.slice("/v1/speech/staged/".length)).trim();
+			if (!id) { this.writeJson(res, 400, { ok: false, error: "Missing speech id." }); return true; }
+			const artifact = this.speechArtifacts.get(id);
+			if (!artifact || artifact.expiresAt <= Date.now()) {
+				if (artifact) this.deleteSpeechArtifact(id, artifact);
+				this.writeJson(res, 404, { ok: false, error: "Speech artifact not found or expired." });
+				return true;
+			}
+			this.writeJson(res, 200, {
+				ok: true,
+				id: artifact.id,
+				text: artifact.text,
+				audioUrl: `/v1/speech/audio/${artifact.id}`,
+				mimeType: artifact.mimeType,
+				expiresAt: artifact.expiresAt,
+				speechDisabled: isRootVoiceDisabled(),
+			});
+			return true;
+		}
+
+		// GET /v1/speech/audio/:id — orb audio element fetches bytes.
+		// Reuses the same TTL/expiry/cleanup path as /v1/audio.
+		if (req.method === "GET" && url.pathname.startsWith("/v1/speech/audio/")) {
+			const id = decodeURIComponent(url.pathname.slice("/v1/speech/audio/".length)).trim();
+			if (!id) { this.writeJson(res, 400, { ok: false, error: "Missing speech id." }); return true; }
+			const artifact = this.speechArtifacts.get(id);
+			if (!artifact || artifact.expiresAt <= Date.now() || !existsSync(artifact.path)) {
+				if (artifact) this.deleteSpeechArtifact(id, artifact);
+				this.writeJson(res, 404, { ok: false, error: "Speech artifact not found or expired." });
+				return true;
+			}
+			res.statusCode = 200;
+			res.setHeader("Content-Type", artifact.mimeType);
+			res.setHeader("Cache-Control", "no-store");
+			createReadStream(artifact.path).pipe(res);
+			return true;
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/speech/stage") {
+			const mimeType = (getPrimaryHeaderValue(req.headers["content-type"]) || "").toLowerCase();
+			if (!SPEECH_ALLOWED_MIME_TYPES.includes(mimeType)) {
+				this.writeJson(res, 415, { ok: false, error: `Unsupported audio MIME type: ${mimeType || "unknown"}. Allowed: ${SPEECH_ALLOWED_MIME_TYPES.join(", ")}.` });
+				return true;
+			}
+			// Reply text travels out-of-band in a base64url-encoded UTF-8 header
+			// (X-Pi-Speak-Speech-Text-B64): Node's HTTP parser rejects most
+			// non-ASCII and control chars in raw header values, so passing the
+			// text directly would silently corrupt/lose text on emoji/CJK/etc.
+			// Byte-limit BEFORE utf8 decode so multi-byte chars can't push past cap.
+			const encodedText = (getPrimaryHeaderValue(req.headers["x-pi-speak-speech-text-b64"]) || "").trim();
+			let text = "";
+			if (encodedText) {
+				const decoded = Buffer.from(encodedText, "base64url");
+				if (decoded.byteLength > SPEECH_TEXT_LIMIT_BYTES) {
+					this.writeJson(res, 400, { ok: false, error: `Speech text exceeds ${SPEECH_TEXT_LIMIT_BYTES}-byte limit.` });
+					return true;
+				}
+				text = decoded.toString("utf8");
+			}
+			const buffer = await this.readBinaryBody(req, SPEECH_ARTIFACT_BODY_LIMIT_BYTES);
+			if (buffer.byteLength === 0) {
+				this.writeJson(res, 400, { ok: false, error: "Empty audio body." });
+				return true;
+			}
+			let stagedPath: string;
+			let cleanupDir: string;
+			try {
+				cleanupDir = await mkdtemp(join(tmpdir(), "pi-speak-speech-"));
+				const ext = mimeTypeToExtension(mimeType);
+				stagedPath = join(cleanupDir, `speech.${ext}`);
+				await writeFile(stagedPath, buffer);
+			} catch (error) {
+				this.writeJson(res, 500, { ok: false, error: `Failed to stage audio: ${getErrorMessage(error)}` });
+				return true;
+			}
+			const id = randomUUID();
+			const artifact: SpeechArtifact = {
+				id,
+				path: stagedPath,
+				mimeType,
+				expiresAt: Date.now() + SPEECH_ARTIFACT_TTL_MS,
+				text,
+				createdAt: Date.now(),
+				cleanupDir,
+			};
+			this.speechArtifacts.set(id, artifact);
+			this.writeJson(res, 200, {
+				ok: true,
+				id,
+				audioUrl: `/v1/speech/audio/${id}`,
+				stagedUrl: `/v1/speech/staged/${id}`,
+				expiresAt: artifact.expiresAt,
+			});
+			return true;
+		}
+
+		// POST /v1/speech/disable — flips the hard-stop sentinel so future
+		// terminal-initiated TTS no-ops. Idempotent.
+		if (req.method === "POST" && url.pathname === "/v1/speech/disable") {
+			enableRootVoiceDisable();
+			this.writeJson(res, 200, { ok: true, disabled: true, message: "Speech disabled from orb." });
+			return true;
+		}
+
+		// POST /v1/speech/enable — clears the hard-stop sentinel.
+		if (req.method === "POST" && url.pathname === "/v1/speech/enable") {
+			clearRootVoiceDisable();
+			this.writeJson(res, 200, { ok: true, disabled: false, message: "Speech re-enabled from orb." });
+			return true;
+		}
+
+		// GET /v1/speech/disabled — orb polls to render current state.
+		if (req.method === "GET" && url.pathname === "/v1/speech/disabled") {
+			this.writeJson(res, 200, { ok: true, disabled: isRootVoiceDisabled() });
+			return true;
+		}
+
+		// Unknown /v1/speech/* path: 404 rather than fall through.
+		this.writeJson(res, 404, { ok: false, error: "Unknown speech route." });
+		return true;
+	}
+
+	/**
+	 * Centralized recursive cleanup of a staged speech artifact. Removes the
+	 * parent mkdtemp dir so we don't leak pi-speak-speech-* directories on
+	 * expiry, 404, or stop().
+	 */
+	private deleteSpeechArtifact(id: string, artifact: SpeechArtifact) {
+		this.speechArtifacts.delete(id);
+		void rm(artifact.cleanupDir, { recursive: true, force: true }).catch(() => {});
+	}
+
 	private recordRemoteClient(req: IncomingMessage, url: URL) {
 		// Pairing-status polls are how UIs *observe* connection state; they must
 		// never count as the phone activity they are trying to detect.
@@ -1940,8 +2202,8 @@ export class ControlServer {
 			return;
 		}
 		// Enforce the TTL at read time, not only via the periodic sweep: between
-		// sweeps (or if cleanup is delayed/disabled) an expired artifact must not
-		// remain accessible. Treat expired as 404 and drop it opportunistically.
+		// sweeps (or if cleanup is delayed/disabled) an expired artifact must
+		// not remain accessible. Treat expired as 404 and drop opportunistically.
 		if (artifact.expiresAt <= Date.now()) {
 			this.audioArtifacts.delete(id);
 			void rm(artifact.path, { force: true }).catch(() => {});
@@ -1962,6 +2224,11 @@ export class ControlServer {
 				this.audioArtifacts.delete(id);
 				void rm(artifact.path, { force: true }).catch(() => {});
 			}
+		}
+		// Speech artifacts share the same sweep (separate TTL/size cap, but
+		// same disk-backed lifecycle so we don't leak staged TTS files).
+		for (const [id, artifact] of this.speechArtifacts.entries()) {
+			if (artifact.expiresAt <= now) this.deleteSpeechArtifact(id, artifact);
 		}
 	}
 
@@ -2886,6 +3153,23 @@ function getBearerToken(value?: string) {
 function isSupportedVoiceContentType(mimeType?: string) {
 	const normalized = (mimeType || "").toLowerCase().split(";")[0].trim();
 	return !!normalized && ALLOWED_VOICE_CONTENT_TYPES.includes(normalized);
+}
+
+function mimeTypeToExtension(mimeType: string): string {
+	switch (mimeType.toLowerCase()) {
+		case "audio/mpeg":
+		case "audio/mp3":
+			return "mp3";
+		case "audio/wav":
+		case "audio/x-wav":
+			return "wav";
+		case "audio/ogg":
+			return "ogg";
+		case "audio/webm":
+			return "webm";
+		default:
+			return "bin";
+	}
 }
 
 function parsePositiveInt(value: string | null, defaultValue: number) {

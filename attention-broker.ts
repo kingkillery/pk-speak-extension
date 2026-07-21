@@ -123,6 +123,20 @@ export function claimAttentionLeader(ownerSessionId: string, pid = process.pid, 
 	return true;
 }
 
+/** Mark a real foreground/interaction event as the current attention owner. */
+export function focusAttentionLeader(ownerSessionId: string, pid = process.pid, now = Date.now()) {
+	ensureBrokerDirs();
+	writeJsonFile(getLeasePath(), { ownerSessionId, pid, updatedAt: now } satisfies AttentionLeaderLease);
+}
+
+/** Refresh only an already-owned lease; heartbeats must never steal focus. */
+export function renewAttentionLeader(ownerSessionId: string, pid = process.pid, now = Date.now()) {
+	const current = readJsonFile<AttentionLeaderLease>(getLeasePath());
+	if (!current || current.ownerSessionId !== ownerSessionId) return false;
+	writeJsonFile(getLeasePath(), { ownerSessionId, pid, updatedAt: now } satisfies AttentionLeaderLease);
+	return true;
+}
+
 export function releaseAttentionLeader(ownerSessionId: string) {
 	const current = readJsonFile<AttentionLeaderLease>(getLeasePath());
 	if (!current || current.ownerSessionId !== ownerSessionId) return;

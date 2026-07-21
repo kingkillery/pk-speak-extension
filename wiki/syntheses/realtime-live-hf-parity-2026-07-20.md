@@ -54,6 +54,12 @@ Clients never talk to provider APIs directly — only `/v1/live`.
 - `StreamingPcmPlayer.setSampleRate` for format announcements
 - Standard + Boox listeners wired
 
+## Backend limits
+
+- OpenAI-Realtime/HF does **not** use Gemini `resumptionHandle`; reconnect is a clean upstream re-dial on the same client socket.
+- Gemini `NON_BLOCKING` slow tools remain developer-API only (Vertex blocks).
+- Desktop orb now handles `tool_approval_*` (Approve/Reject) without opening `/app/`.
+
 ## Operator cheatsheet
 
 ```text

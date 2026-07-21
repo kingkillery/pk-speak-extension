@@ -1,3 +1,22 @@
+/**
+ * Choose the realtime approval control message for a pending tool.
+ * Terminal command approvals use the terminal registry; every other mutation
+ * uses the command registry (launch/archive/chat/kill/recover).
+ * @param {Record<string, unknown>} message
+ * @param {boolean} approved
+ * @returns {"terminal_approve"|"terminal_reject"|"command_approve"|"command_reject"}
+ */
+export function approvalControlType(message, approved) {
+	const name = typeof message?.name === "string" ? message.name : "";
+	const reason = typeof message?.reason === "string" ? message.reason : "";
+	const isTerminal = name === "execute_terminal_command"
+		|| reason === "requires_confirmation"
+		|| reason === "confirm"
+		|| reason === "allow";
+	if (isTerminal) return approved ? "terminal_approve" : "terminal_reject";
+	return approved ? "command_approve" : "command_reject";
+}
+
 export const STORAGE_TOKEN = "piSpeakRemoteToken";
 export const STORAGE_AUDIO = "piSpeakRemoteAudio";
 export const STORAGE_AUTOPLAY = "piSpeakRemoteAutoplay";
@@ -6,6 +25,7 @@ export const STORAGE_LAUNCH_PATH = "piSpeakRemoteLaunchPath";
 export const STORAGE_LIVE_MODE = "piSpeakRemoteLiveMode";
 export const STORAGE_LIVE_GATE = "piSpeakRemoteLiveNoiseGate";
 export const STORAGE_LIVE_GATE_DB = "piSpeakRemoteLiveNoiseGateDb";
+
 
 export function buildRealtimeWebSocketUrl(origin, token = "") {
 	const url = new URL("/v1/live", origin);
@@ -149,6 +169,7 @@ if (typeof document !== "undefined") {
 		liveSocket: null,
 		liveConnected: false,
 		liveSessionId: "",
+		liveReconnectToken: "",
 		liveLastServerSequenceId: 0,
 		liveReconnectAttempts: 0,
 		liveReconnectTimer: null,
@@ -156,6 +177,8 @@ if (typeof document !== "undefined") {
 		liveClientSequenceId: 0,
 		liveReplyBuffer: "",
 		liveAgentMessage: null,
+		liveUserBuffer: "",
+		liveUserMessage: null,
 		liveSettleTimer: null,
 		liveTurnInProgress: false,
 		liveAudioContext: null,
@@ -388,6 +411,7 @@ if (typeof document !== "undefined") {
 		}
 		state.pendingTerminalApprovals[message.approvalId] = {
 			approvalId: message.approvalId,
+			name: message.name || parsed.name || "",
 			command: message.command || parsed.command || "",
 			reason: message.reason || parsed.reason || "",
 			cwd: message.cwd || parsed.cwd || "",
@@ -395,7 +419,7 @@ if (typeof document !== "undefined") {
 		};
 		renderTerminalApprovals();
 		appendMessage("system", `Approval needed: ${message.command || parsed.command || "terminal command"}`);
-		setStatus("Terminal approval needed.");
+		setStatus("Approval needed.");
 	}
 
 	function clearTerminalApproval(approvalId) {
@@ -557,6 +581,18 @@ if (typeof document !== "undefined") {
 		state.liveAgentMessage.textContent = state.liveReplyBuffer.trim();
 		els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 		if (els.reply) els.reply.textContent = state.liveReplyBuffer.trim() || "No reply yet.";
+	}
+
+	function appendOrUpdateLiveUser(text) {
+		if (!els.chatMessages || !text) return;
+		state.liveUserBuffer += text;
+		if (!state.liveUserMessage || !els.chatMessages.contains(state.liveUserMessage)) {
+			state.liveUserMessage = document.createElement("div");
+			state.liveUserMessage.className = "message user";
+			els.chatMessages.appendChild(state.liveUserMessage);
+		}
+		state.liveUserMessage.textContent = state.liveUserBuffer.trim();
+		els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 	}
 
 	function scheduleLiveTurnSettled() {
@@ -1344,6 +1380,7 @@ if (typeof document !== "undefined") {
 		}
 		state.liveConnected = false;
 		state.liveSessionId = "";
+		state.liveReconnectToken = "";
 		state.liveLastServerSequenceId = 0;
 		state.liveReconnectAttempts = 0;
 		state.liveState = "idle";
@@ -1445,6 +1482,7 @@ if (typeof document !== "undefined") {
 		if (message.type === "start") {
 			state.liveConnected = true;
 			state.liveSessionId = message.session || state.liveSessionId;
+			state.liveReconnectToken = message.reconnectToken || state.liveReconnectToken;
 			state.liveState = "listening";
 			window.clearTimeout(state.liveStableTimer);
 			state.liveStableTimer = window.setTimeout(() => { state.liveReconnectAttempts = 0; }, 30_000);
@@ -1452,8 +1490,19 @@ if (typeof document !== "undefined") {
 			return;
 		}
 		if (message.type === "transcript" && message.text) {
-			appendOrUpdateLiveReply(message.text);
-			scheduleLiveTurnSettled();
+			if (message.role === "user") appendOrUpdateLiveUser(message.text);
+			else appendOrUpdateLiveReply(message.text);
+			return;
+		}
+		if (message.type === "transcript_complete") {
+			if (message.role === "user") {
+				state.liveUserBuffer = "";
+				state.liveUserMessage = null;
+			} else {
+				state.liveReplyBuffer = "";
+				state.liveAgentMessage = null;
+				scheduleLiveTurnSettled();
+			}
 			return;
 		}
 		if (message.type === "interrupt") {
@@ -1526,6 +1575,7 @@ if (typeof document !== "undefined") {
 				socket.send(JSON.stringify({
 					type: "reconnect",
 					session: state.liveSessionId,
+					reconnectToken: state.liveReconnectToken,
 					serverSequenceId: state.liveLastServerSequenceId,
 					clientSequenceId: state.liveClientSequenceId,
 				}));
@@ -1730,8 +1780,9 @@ if (typeof document !== "undefined") {
 
 	function sendTerminalApproval(approvalId, approved) {
 		if (!approvalId) return;
+		const approval = state.pendingTerminalApprovals[approvalId] || { approvalId };
 		void sendLiveControl({
-			type: approved ? "terminal_approve" : "terminal_reject",
+			type: approvalControlType(approval, approved),
 			approvalId,
 		}).catch((error) => {
 			setStatus(String(error.message || error), "error");

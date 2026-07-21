@@ -21,6 +21,7 @@ export type PiSpeakSetupConfig = {
 	minimaxVoiceId?: string;
 	minimaxModel?: string;
 	remoteSttProvider?: string;
+	remoteSttBackend?: string;
 	httpPort?: string;
 	httpToken?: string;
 	publicBaseUrl?: string;
@@ -28,7 +29,21 @@ export type PiSpeakSetupConfig = {
 	installMobileApp?: boolean;
 	preferTray?: boolean;
 	updatedAt?: string;
+	/**
+	 * Schema version stamp written by savePiSpeakSetupConfig. Missing or
+	 * older values indicate a legacy persisted config that may carry defaults
+	 * the operator never explicitly chose (e.g. speakPlaybackGate="immediate"
+	 * before the interactive orb default shipped).
+	 */
+	configSchemaVersion?: number;
 };
+
+/**
+ * Current setup-config schema version. Bump when the persisted defaults
+ * change semantically; applyPiSpeakSetupConfig only migrates configs whose
+ * configSchemaVersion is missing or older than this.
+ */
+export const CURRENT_PI_SPEAK_CONFIG_SCHEMA_VERSION = 1;
 
 const ENV_TO_CONFIG: Array<[keyof PiSpeakSetupConfig, string]> = [
 	["agentProvider", "AGENT_PROVIDER"],
@@ -49,6 +64,7 @@ const ENV_TO_CONFIG: Array<[keyof PiSpeakSetupConfig, string]> = [
 	["minimaxVoiceId", "PI_SPEAK_MINIMAX_VOICE_ID"],
 	["minimaxModel", "PI_SPEAK_MINIMAX_MODEL"],
 	["remoteSttProvider", "PI_SPEAK_REMOTE_STT_PROVIDER"],
+	["remoteSttBackend", "PI_SPEAK_REMOTE_STT_BACKEND"],
 	["httpPort", "PI_SPEAK_HTTP_PORT"],
 	["httpToken", "PI_SPEAK_HTTP_TOKEN"],
 	["publicBaseUrl", "PI_SPEAK_PUBLIC_BASE_URL"],
@@ -80,7 +96,7 @@ export function loadPiSpeakSetupConfig(env: NodeJS.ProcessEnv = process.env): Pi
 export function savePiSpeakSetupConfig(config: PiSpeakSetupConfig, env: NodeJS.ProcessEnv = process.env) {
 	const configPath = getPiSpeakSetupConfigPath(env);
 	mkdirSync(dirname(configPath), { recursive: true });
-	writeFileSync(configPath, `${JSON.stringify({ ...config, updatedAt: new Date().toISOString() }, null, 2)}\n`, {
+	writeFileSync(configPath, `${JSON.stringify({ ...config, configSchemaVersion: CURRENT_PI_SPEAK_CONFIG_SCHEMA_VERSION, updatedAt: new Date().toISOString() }, null, 2)}\n`, {
 		encoding: "utf8",
 		mode: 0o600,
 	});
@@ -88,10 +104,30 @@ export function savePiSpeakSetupConfig(config: PiSpeakSetupConfig, env: NodeJS.P
 }
 
 export function applyPiSpeakSetupConfig(env: NodeJS.ProcessEnv = process.env, config = loadPiSpeakSetupConfig(env)) {
+	// Capture which env keys the operator already set this session, so the
+	// legacy-default migration below can't be defeated by the ENV_TO_CONFIG
+	// loop copying a persisted "immediate" into env immediately before the
+	// migration check runs.
+	const explicitEnvKeys = new Set<string>();
+	for (const key of Object.keys(env)) {
+		if (typeof env[key] === "string" && (env[key] as string).trim()) explicitEnvKeys.add(key);
+	}
 	for (const [configKey, envKey] of ENV_TO_CONFIG) {
 		const value = config[configKey];
-		if (typeof value === "string" && value.trim() && !env[envKey]) {
-			env[envKey] = value.trim();
+		if (typeof value === "string" && value.trim() && !explicitEnvKeys.has(envKey)) {
+			// Legacy-default migration: setups persisted before the interactive
+			// orb default shipped (configSchemaVersion missing or < 1) stored
+			// speakPlaybackGate="immediate", which meant terminal auto-play —
+			// exactly the behavior operators asked us to stop shipping as the
+			// default. Force-upgrade that legacy value to "orb". Current-version
+			// configs are never rewritten: if the operator deliberately chose
+			// "immediate" via the current setup UI, their choice wins.
+			const isLegacy = (config.configSchemaVersion ?? 0) < CURRENT_PI_SPEAK_CONFIG_SCHEMA_VERSION;
+			if (isLegacy && configKey === "speakPlaybackGate" && value.trim() === "immediate") {
+				env[envKey] = "orb";
+			} else {
+				env[envKey] = value.trim();
+			}
 		}
 	}
 	return env;

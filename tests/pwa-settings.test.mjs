@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+	approvalControlType,
 	buildRealtimeWebSocketUrl,
 	decodeLivePcmFrame,
 	encodeLivePcmFrame,
@@ -94,4 +95,12 @@ test("remember-device persistence only stores local token when enabled", () => {
 	assert.deepEqual(sessionOnly.session, { [STORAGE_TOKEN]: "session-token" });
 	assert.equal(sessionOnly.clearLocalToken, true);
 	assert.equal(sessionOnly.local[STORAGE_REMEMBER], "false");
+});
+
+test("live approvals select terminal versus command control messages", () => {
+	assert.equal(approvalControlType({ name: "execute_terminal_command" }, true), "terminal_approve");
+	assert.equal(approvalControlType({ name: "execute_terminal_command" }, false), "terminal_reject");
+	assert.equal(approvalControlType({ name: "launch_agent", reason: "launch_agent" }, true), "command_approve");
+	assert.equal(approvalControlType({ name: "archive_session", reason: "archive_session" }, false), "command_reject");
+	assert.equal(approvalControlType({ name: "chat_agent" }, true), "command_approve");
 });

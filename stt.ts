@@ -4,17 +4,67 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { withAbortTimeout } from "./request-timeout.js";
+import {
+	getMoonshineWorkerStatus,
+	MoonshineSttError,
+	shutdownMoonshineSttWorker,
+	transcribeWithMoonshine as runMoonshineTranscription,
+} from "./moonshine-stt.js";
 
 export type SttProvider = "auto" | "local" | "openai" | "elevenlabs" | "google";
+export type SttBackendMode = "existing" | "moonshine" | "auto";
+export type SttBackend = "existing" | "moonshine";
+export type SttFailureCode =
+	| "aborted"
+	| "rate_limited"
+	| "upstream_unavailable"
+	| "transport_unavailable"
+	| "attempt_timeout"
+	| "worker_unavailable"
+	| "dependency_unavailable"
+	| "model_unavailable"
+	| "invalid_audio"
+	| "configuration"
+	| "protocol"
+	| "inference_failed"
+	| "unknown";
+
+export type SttAttempt = {
+	backend: SttBackend;
+	provider?: Exclude<SttProvider, "auto"> | "moonshine";
+	outcome: "success" | "failed";
+	code?: SttFailureCode;
+	durationMs: number;
+};
+
+export type SttTelemetryEvent = {
+	type: "selection" | "primary_failure" | "fallback_activated" | "fallback_failure";
+	requestedBackend: SttBackendMode;
+	selectedBackend?: SttBackend;
+	provider?: Exclude<SttProvider, "auto"> | "moonshine";
+	code?: SttFailureCode;
+};
 
 export type SttResult = {
-	/**
-	 * Selected provider identity from resolveSttProvider().
-	 * When allowProviderFallback defaults to true, another backend may have produced `text`.
-	 */
-	provider: Exclude<SttProvider, "auto">;
+	provider: Exclude<SttProvider, "auto"> | "moonshine";
 	text: string;
 	durationMs: number;
+	requestedBackend: SttBackendMode;
+	selectedBackend: SttBackend;
+	fallback?: { from: "existing"; to: "moonshine"; code: SttFailureCode };
+	attempts: SttAttempt[];
+};
+
+export type SttDiagnostics = {
+	configuredBackend: SttBackendMode;
+	existingProvider: Exclude<SttProvider, "auto">;
+	moonshine: ReturnType<typeof getMoonshineWorkerStatus>;
+	lastAttempt?: {
+		requestedBackend: SttBackendMode;
+		selectedBackend?: SttBackend;
+		fallbackCode?: SttFailureCode;
+		attempts: SttAttempt[];
+	};
 };
 
 type WorkerRequest = {
@@ -88,6 +138,8 @@ export const testOverrides = {
 	createGoogleSpeechClient: null as
 		| null
 		| ((options: { apiEndpoint: string; location: string }) => GoogleSpeechClientLike | Promise<GoogleSpeechClientLike>),
+	transcribeWithMoonshine: null as null | ((filePath: string, signal?: AbortSignal) => Promise<string>),
+	onSttTelemetry: null as null | ((event: SttTelemetryEvent) => void),
 };
 
 function getPythonExecutable() {
@@ -120,9 +172,27 @@ function getLocalSttWorkerEnv(): NodeJS.ProcessEnv {
 	return env;
 }
 
-export function resolveSttProvider(): Exclude<SttProvider, "auto"> {
-	const configured = (process.env.PI_SPEAK_REMOTE_STT_PROVIDER || "auto").trim().toLowerCase() as SttProvider;
-	if (configured !== "auto") return configured;
+const VALID_STT_PROVIDERS: Record<SttProvider, true> = {
+	auto: true,
+	local: true,
+	openai: true,
+	elevenlabs: true,
+	google: true,
+};
+
+export function resolveSttBackendMode(env: NodeJS.ProcessEnv = process.env): SttBackendMode {
+	const configured = (env.PI_SPEAK_REMOTE_STT_BACKEND || "existing").trim().toLowerCase();
+	if (configured === "existing" || configured === "moonshine" || configured === "auto") return configured;
+	throw new Error(`Unsupported PI_SPEAK_REMOTE_STT_BACKEND '${configured}'. Expected existing, moonshine, or auto.`);
+}
+
+export function resolveSttProvider(env: NodeJS.ProcessEnv = process.env): Exclude<SttProvider, "auto"> {
+	const configured = (env.PI_SPEAK_REMOTE_STT_PROVIDER || "auto").trim().toLowerCase();
+	if (!VALID_STT_PROVIDERS[configured as SttProvider]) {
+		const hint = configured === "moonshine" ? " Use PI_SPEAK_REMOTE_STT_BACKEND=moonshine instead." : "";
+		throw new Error(`Unsupported PI_SPEAK_REMOTE_STT_PROVIDER '${configured}'. Expected auto, local, openai, elevenlabs, or google.${hint}`);
+	}
+	if (configured !== "auto") return configured as Exclude<SttProvider, "auto">;
 	if (getElevenLabsKey()) return "elevenlabs";
 	if (getOpenAiAudioKey()) return "openai";
 	return "local";
@@ -495,19 +565,33 @@ async function transcribeWithLocal(filePath: string, signal?: AbortSignal) {
 }
 
 export async function shutdownLocalSttWorker() {
-	await localWorker.stop();
-	await shutdownGoogleSpeechClients();
+	await Promise.all([
+		localWorker.stop(),
+		shutdownGoogleSpeechClients(),
+		shutdownMoonshineSttWorker(),
+	]);
 }
 
 export type TranscribeAudioBufferOptions = {
 	signal?: AbortSignal;
-	/**
-	 * When false, remote STT 429/5xx errors are not retried via another provider,
-	 * pinning the actual backend (needed for benchmarks). Defaults to true so
-	 * existing callers keep current fallback behavior.
-	 */
+	/** Disable both the established provider fallback chain and cross-backend fallback. */
 	allowProviderFallback?: boolean;
+	onTelemetry?: (event: SttTelemetryEvent) => void;
 };
+
+let lastSttAttempt: SttDiagnostics["lastAttempt"];
+
+export function getSttDiagnostics(): SttDiagnostics {
+	return {
+		configuredBackend: resolveSttBackendMode(),
+		existingProvider: resolveSttProvider(),
+		moonshine: getMoonshineWorkerStatus(),
+		lastAttempt: lastSttAttempt ? {
+			...lastSttAttempt,
+			attempts: lastSttAttempt.attempts.map((attempt) => ({ ...attempt })),
+		} : undefined,
+	};
+}
 
 function isAbortSignal(value: unknown): value is AbortSignal {
 	return typeof AbortSignal !== "undefined" && value instanceof AbortSignal;
@@ -517,10 +601,98 @@ function normalizeTranscribeAudioBufferOptions(
 	signalOrOptions?: AbortSignal | TranscribeAudioBufferOptions,
 ): TranscribeAudioBufferOptions {
 	if (!signalOrOptions) return {};
-	if (isAbortSignal(signalOrOptions)) {
-		return { signal: signalOrOptions };
-	}
+	if (isAbortSignal(signalOrOptions)) return { signal: signalOrOptions };
 	return signalOrOptions as TranscribeAudioBufferOptions;
+}
+
+function emitSttTelemetry(event: SttTelemetryEvent, options: TranscribeAudioBufferOptions) {
+	try { options.onTelemetry?.(event); } catch {}
+	try { testOverrides.onSttTelemetry?.(event); } catch {}
+	if ((process.env.PI_SPEAK_STT_TELEMETRY || "on").trim().toLowerCase() !== "off") {
+		console.info(`[pi-speak:stt] ${JSON.stringify(event)}`);
+	}
+}
+
+function errorMessage(error: unknown) {
+	return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+export function classifySttFailure(error: unknown): SttFailureCode {
+	if (error instanceof MoonshineSttError) {
+		if (error.code === "dependency_unavailable" || error.code === "model_unavailable" || error.code === "invalid_audio" || error.code === "protocol" || error.code === "worker_unavailable" || error.code === "aborted" || error.code === "inference_failed") return error.code;
+		return "unknown";
+	}
+	const details = error && typeof error === "object" ? error as { code?: unknown; name?: unknown; cause?: unknown } : undefined;
+	const cause = details?.cause && typeof details.cause === "object" ? details.cause as { code?: unknown; name?: unknown } : undefined;
+	const rawCode = typeof details?.code === "string" ? details.code : typeof cause?.code === "string" ? cause.code : "";
+	const nativeCode = rawCode.toUpperCase();
+	const message = errorMessage(error);
+	if (details?.name === "AbortError" || cause?.name === "AbortError" || /^(Transcription aborted|The operation was aborted)/i.test(message)) return "aborted";
+	if (/transcription failed \(429\)/i.test(message) || nativeCode === "RESOURCE_EXHAUSTED") return "rate_limited";
+	if (/transcription failed \(5\d\d\)/i.test(message) || ["UNAVAILABLE", "INTERNAL"].includes(nativeCode)) return "upstream_unavailable";
+	if (["ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EPIPE"].includes(nativeCode)) return "transport_unavailable";
+	if (/^(Outbound request timed out|Moonshine STT worker initialization timed out)$/i.test(message) || nativeCode === "DEADLINE_EXCEEDED") return "attempt_timeout";
+	if (/^(Local|Moonshine) STT worker (?:exited|stopped)|^spawn /i.test(message) || nativeCode === "ENOENT") return "worker_unavailable";
+	if (/No module named ['\"](?:faster_whisper|moonshine_voice)['\"]|Moonshine STT is not installed/i.test(message)) return "dependency_unavailable";
+	if (/transcription failed \(400\)|invalid audio|unsupported (?:audio|content)/i.test(message)) return "invalid_audio";
+	if (/transcription failed \((?:401|403)\)|(?:API key|API_KEY) is required|GOOGLE_CLOUD_PROJECT|Application Default Credentials|ADC|Unsupported PI_SPEAK_/i.test(message)) return "configuration";
+	return "unknown";
+}
+
+const MOONSHINE_FALLBACK_CODES: Record<SttFailureCode, boolean> = {
+	aborted: false,
+	rate_limited: true,
+	upstream_unavailable: true,
+	transport_unavailable: true,
+	attempt_timeout: true,
+	worker_unavailable: true,
+	dependency_unavailable: true,
+	model_unavailable: false,
+	invalid_audio: false,
+	configuration: false,
+	protocol: false,
+	inference_failed: false,
+	unknown: false,
+};
+
+export function shouldFallbackToMoonshine(error: unknown) {
+	return MOONSHINE_FALLBACK_CODES[classifySttFailure(error)];
+}
+
+async function transcribeWithMoonshineBackend(filePath: string, signal?: AbortSignal) {
+	if (testOverrides.transcribeWithMoonshine) return await testOverrides.transcribeWithMoonshine(filePath, signal);
+	return await runMoonshineTranscription(filePath, signal);
+}
+
+async function transcribeWithExistingBackend(
+	filePath: string,
+	mimeType: string | undefined,
+	options: TranscribeAudioBufferOptions,
+) {
+	const allowProviderFallback = options.allowProviderFallback !== false;
+	const provider = resolveSttProvider();
+	const text = provider === "google"
+		? await transcribeWithGoogleFallback(filePath, mimeType, options.signal, allowProviderFallback)
+		: provider === "elevenlabs"
+			? await transcribeWithElevenLabsFallback(filePath, mimeType, options.signal, allowProviderFallback)
+			: provider === "openai"
+				? await transcribeWithOpenAiFallback(filePath, mimeType, options.signal, allowProviderFallback)
+				: await transcribeWithLocal(filePath, options.signal);
+	return { provider, text };
+}
+
+function saveDiagnostics(
+	requestedBackend: SttBackendMode,
+	attempts: SttAttempt[],
+	selectedBackend?: SttBackend,
+	fallbackCode?: SttFailureCode,
+) {
+	lastSttAttempt = {
+		requestedBackend,
+		selectedBackend,
+		fallbackCode,
+		attempts: attempts.map((attempt) => ({ ...attempt })),
+	};
 }
 
 export async function transcribeAudioBuffer(
@@ -529,22 +701,73 @@ export async function transcribeAudioBuffer(
 	signalOrOptions?: AbortSignal | TranscribeAudioBufferOptions,
 ): Promise<SttResult> {
 	const options = normalizeTranscribeAudioBufferOptions(signalOrOptions);
-	const allowProviderFallback = options.allowProviderFallback !== false;
+	const requestedBackend = resolveSttBackendMode();
 	const tempDir = await mkdtemp(join(tmpdir(), "pi-speak-stt-"));
 	const extension = mimeTypeToExtension(mimeType);
 	const filePath = join(tempDir, `input${extension}`);
 	const startedAt = Date.now();
+	const attempts: SttAttempt[] = [];
 	try {
+		if (options.signal?.aborted) throw new Error("Transcription aborted");
 		await writeFile(filePath, buffer);
-		const provider = resolveSttProvider();
-		const text = provider === "google"
-			? await transcribeWithGoogleFallback(filePath, mimeType, options.signal, allowProviderFallback)
-			: provider === "elevenlabs"
-				? await transcribeWithElevenLabsFallback(filePath, mimeType, options.signal, allowProviderFallback)
-				: provider === "openai"
-					? await transcribeWithOpenAiFallback(filePath, mimeType, options.signal, allowProviderFallback)
-					: await transcribeWithLocal(filePath, options.signal);
-		return { provider, text, durationMs: Date.now() - startedAt };
+		if (requestedBackend === "moonshine") {
+			const attemptStartedAt = Date.now();
+			emitSttTelemetry({ type: "selection", requestedBackend, selectedBackend: "moonshine", provider: "moonshine" }, options);
+			try {
+				const text = await transcribeWithMoonshineBackend(filePath, options.signal);
+				attempts.push({ backend: "moonshine", provider: "moonshine", outcome: "success", durationMs: Date.now() - attemptStartedAt });
+				saveDiagnostics(requestedBackend, attempts, "moonshine");
+				return { provider: "moonshine", text, durationMs: Date.now() - startedAt, requestedBackend, selectedBackend: "moonshine", attempts };
+			} catch (error) {
+				attempts.push({ backend: "moonshine", provider: "moonshine", outcome: "failed", code: classifySttFailure(error), durationMs: Date.now() - attemptStartedAt });
+				saveDiagnostics(requestedBackend, attempts);
+				throw error;
+			}
+		}
+
+		const primaryStartedAt = Date.now();
+		try {
+			const result = await transcribeWithExistingBackend(filePath, mimeType, options);
+			attempts.push({ backend: "existing", provider: result.provider, outcome: "success", durationMs: Date.now() - primaryStartedAt });
+			emitSttTelemetry({ type: "selection", requestedBackend, selectedBackend: "existing", provider: result.provider }, options);
+			saveDiagnostics(requestedBackend, attempts, "existing");
+			return { ...result, durationMs: Date.now() - startedAt, requestedBackend, selectedBackend: "existing", attempts };
+		} catch (primaryError) {
+			const primaryCode = classifySttFailure(primaryError);
+			attempts.push({ backend: "existing", provider: resolveSttProvider(), outcome: "failed", code: primaryCode, durationMs: Date.now() - primaryStartedAt });
+			if (requestedBackend !== "auto" || options.allowProviderFallback === false || !shouldFallbackToMoonshine(primaryError) || options.signal?.aborted) {
+				saveDiagnostics(requestedBackend, attempts);
+				throw primaryError;
+			}
+			emitSttTelemetry({ type: "primary_failure", requestedBackend, selectedBackend: "existing", code: primaryCode }, options);
+			emitSttTelemetry({ type: "fallback_activated", requestedBackend, selectedBackend: "moonshine", provider: "moonshine", code: primaryCode }, options);
+			const fallbackStartedAt = Date.now();
+			try {
+				const text = await transcribeWithMoonshineBackend(filePath, options.signal);
+				attempts.push({ backend: "moonshine", provider: "moonshine", outcome: "success", durationMs: Date.now() - fallbackStartedAt });
+				saveDiagnostics(requestedBackend, attempts, "moonshine", primaryCode);
+				return {
+					provider: "moonshine",
+					text,
+					durationMs: Date.now() - startedAt,
+					requestedBackend,
+					selectedBackend: "moonshine",
+					fallback: { from: "existing", to: "moonshine", code: primaryCode },
+					attempts,
+				};
+			} catch (fallbackError) {
+				const fallbackCode = classifySttFailure(fallbackError);
+				attempts.push({ backend: "moonshine", provider: "moonshine", outcome: "failed", code: fallbackCode, durationMs: Date.now() - fallbackStartedAt });
+				emitSttTelemetry({ type: "fallback_failure", requestedBackend, selectedBackend: "moonshine", provider: "moonshine", code: fallbackCode }, options);
+				saveDiagnostics(requestedBackend, attempts, undefined, primaryCode);
+				const combined = new AggregateError(
+					[primaryError, fallbackError],
+					`Both STT backends failed. Existing: ${errorMessage(primaryError)}. Moonshine: ${errorMessage(fallbackError)}`,
+				);
+				(combined as AggregateError & { cause?: unknown }).cause = primaryError;
+				throw combined;
+			}
+		}
 	} finally {
 		await rm(tempDir, { recursive: true, force: true });
 	}

@@ -27,7 +27,9 @@ export type RealtimeControlType =
 export interface RealtimeControlMessage {
 	type: RealtimeControlType;
 	text?: string;
+	role?: "user" | "assistant";
 	session?: string;
+	reconnectToken?: string;
 	approvalId?: string;
 	name?: string;
 	command?: string;

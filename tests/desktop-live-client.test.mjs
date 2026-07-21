@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
 	buildDesktopLiveClientUrl,
+	buildDesktopSpeechClientUrl,
 	findEdgePath,
 	openDesktopLiveClient,
+	openDesktopSpeechClient,
 } from "../dist/desktop-live-client.js";
 
 test("desktop live URL selects the terminal orb surface by default", () => {
@@ -88,4 +90,82 @@ test("desktop live launcher falls back to the platform browser", () => {
 	});
 	assert.equal(result.mode, "default-browser");
 	assert.equal(calls[0].command, "xdg-open");
+});
+
+
+test("speech URL is distinct from live URL: no autoconnect, speech= instead of mode=live", () => {
+	const speechUrl = buildDesktopSpeechClientUrl(8767, "abc-123", { cwd: "C:\\dev\\repo", authToken: "secret-token" });
+	const parsed = new URL(speechUrl);
+	assert.equal(parsed.pathname, "/orb/");
+	assert.equal(parsed.searchParams.get("mode"), "speech");
+	assert.equal(parsed.searchParams.get("speech"), "abc-123");
+	assert.equal(parsed.searchParams.get("token"), "secret-token");
+	assert.equal(parsed.searchParams.get("autoconnect"), null, "speech mode must NOT set autoconnect=1");
+	assert.equal(parsed.searchParams.get("cwd"), "C:\\dev\\repo");
+});
+
+test("speech URL rejects invalid port and empty id", () => {
+	assert.throws(() => buildDesktopSpeechClientUrl(0, "id"), /invalid.*port/i);
+	assert.throws(() => buildDesktopSpeechClientUrl(8767, "   "), /speech id/i);
+});
+
+test("openDesktopSpeechClient uses the speech URL on Windows", () => {
+	const calls = [];
+	const processStub = { pid: 7, on() { return this; }, unref() {} };
+	const result = openDesktopSpeechClient({
+		port: 8767,
+		cwd: "C:\\dev\\repo",
+		speechId: "abc-123",
+		authToken: "tok",
+		platform: "win32",
+		env: { ProgramFiles: "C:\\Program Files" },
+		pathExists: () => true,
+		spawnProcess(command, args, options) {
+			calls.push({ command, args, options });
+			return processStub;
+		},
+	});
+	assert.equal(result.mode, "edge-app");
+	assert.equal(result.pid, 7);
+	assert.match(calls[0].args[0], /^--app=http:\/\/127\.0\.0\.1:8767\/orb\/\?mode=speech&speech=abc-123/);
+	assert.doesNotMatch(calls[0].args[0], /autoconnect=1/);
+});
+
+test("launched resolves ok:false when the launcher command fails to spawn (async ENOENT)", async () => {
+	// Command-not-found is an ASYNC "error" event — a sync try/catch around
+	// openDesktopSpeechClient can never see it. The speech path deletes the
+	// synthesized temp file on success, so this MUST surface as ok:false.
+	const listeners = {};
+	const processStub = {
+		on(event, listener) { listeners[event] = listener; return this; },
+		unref() {},
+	};
+	const result = openDesktopSpeechClient({
+		port: 8767,
+		speechId: "abc-123",
+		platform: "linux",
+		spawnProcess() { return processStub; },
+	});
+	queueMicrotask(() => listeners.error?.(new Error("spawn xdg-open ENOENT")));
+	const launch = await result.launched;
+	assert.equal(launch.ok, false);
+	assert.match(launch.error, /ENOENT/);
+});
+
+test("launched resolves ok:true when the child emits spawn", async () => {
+	const listeners = {};
+	const processStub = {
+		pid: 11,
+		on(event, listener) { listeners[event] = listener; return this; },
+		unref() {},
+	};
+	const result = openDesktopSpeechClient({
+		port: 8767,
+		speechId: "abc-123",
+		platform: "linux",
+		spawnProcess() { return processStub; },
+	});
+	queueMicrotask(() => listeners.spawn?.());
+	const launch = await result.launched;
+	assert.equal(launch.ok, true);
 });

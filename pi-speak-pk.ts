@@ -80,8 +80,9 @@ async function runSetup(args: Args) {
 		config.speakPlaybackGate = await choice(rl, {
 			label: "Spoken playback gate",
 			current: config.speakPlaybackGate,
-			defaultValue: valueArg(args.gate || args["speak-gate"]) || "immediate",
-			choices: ["immediate", "enter"],
+			argValue: valueArg(args.gate || args["speak-gate"]),
+			defaultValue: "orb",
+			choices: ["orb", "enter", "immediate"],
 			yes,
 			nonInteractive,
 		});
@@ -131,11 +132,19 @@ async function runSetup(args: Args) {
 				nonInteractive,
 			});
 		}
+		config.remoteSttBackend = await choice(rl, {
+			label: "Uploaded voice STT backend policy",
+			current: config.remoteSttBackend,
+			defaultValue: valueArg(args["stt-backend"]) || "existing",
+			choices: ["existing", "moonshine", "auto"],
+			yes,
+			nonInteractive,
+		});
 		config.remoteSttProvider = await choice(rl, {
 			label: "Phone voice transcription",
 			current: config.remoteSttProvider,
 			defaultValue: valueArg(args.stt) || "auto",
-			choices: ["auto", "local", "openai"],
+			choices: ["auto", "local", "openai", "elevenlabs", "google"],
 			yes,
 			nonInteractive,
 		});
@@ -186,10 +195,10 @@ function printConfigSummary(config: PiSpeakSetupConfig, heading: string) {
 	console.log(`Agent: ${config.agentProvider || "codex"}`);
 	console.log(`Voice router: ${config.executionRouterMode || "auto"}`);
 	console.log(`TTS: ${config.ttsProvider || "auto"}`);
-	console.log(`Playback gate: ${describeSpeakPlaybackGate(normalizeSpeakPlaybackGate(config.speakPlaybackGate) || "immediate")}`);
+	console.log(`Playback gate: ${describeSpeakPlaybackGate(normalizeSpeakPlaybackGate(config.speakPlaybackGate) || "orb")}`);
 	if (config.elevenLabsApiKey) console.log(`ElevenLabs key: ${maskSecret(config.elevenLabsApiKey)}`);
 	if (config.openAiKey) console.log(`OpenAI audio key: ${maskSecret(config.openAiKey)}`);
-	console.log(`STT: ${config.remoteSttProvider || "auto"}`);
+	console.log(`STT: ${config.remoteSttProvider || "auto"} · backend ${config.remoteSttBackend || "existing"}`);
 	console.log(`Port: ${config.httpPort || "8767"}`);
 	console.log(`Mobile app setup: ${config.installMobileApp ? "yes" : "no"}`);
 }
@@ -229,6 +238,8 @@ function printHelp() {
 		"  --provider <codex|claude|pi>",
 		"  --router <auto|codex|claude|pi>",
 		"  --tts <edge|gemini|elevenlabs|openai|sag|auto>",
+		"  --stt <auto|local|openai|elevenlabs|google>",
+		"  --stt-backend <existing|moonshine|auto>  Uploaded voice turns only",
 		"  --speak-gate <immediate|enter>  Require Enter before spoken playback",
 		"  --mobile <true|false>     Include Android setup in next steps",
 		"  --tray <true|false>       Prefer the Windows tray launcher",
@@ -244,11 +255,14 @@ function printHelp() {
 async function choice(rl: ReturnType<typeof createInterface> | undefined, options: {
 	label: string;
 	current?: string;
+	/** Explicit CLI arg — always wins over a persisted current value (mirrors secret()). */
+	argValue?: string;
 	defaultValue: string;
 	choices: string[];
 	yes: boolean;
 	nonInteractive: boolean;
 }) {
+	if (options.argValue) return normalizeChoice(options.argValue, options.choices, options.defaultValue);
 	const fallback = options.current || options.defaultValue;
 	if (!rl || options.yes || options.nonInteractive) return normalizeChoice(fallback, options.choices, options.defaultValue);
 	const answer = await rl.question(`${options.label} (${options.choices.join("/")}) [${fallback}]: `);

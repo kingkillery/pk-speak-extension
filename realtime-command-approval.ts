@@ -1,8 +1,12 @@
 // Separate from realtime-terminal-approval.ts (which is keyed on a raw shell
-// command string) so this can cover any mutating tool call — currently
-// launching an agent or archiving/recovering a session — behind one
-// kind+description shape without reshaping the terminal flow.
-export type RealtimeCommandKind = "launch_agent" | "archive_session";
+// command string) so every non-terminal mutation shares one approval shape.
+export type RealtimeCommandKind =
+	| "launch_agent"
+	| "archive_session"
+	| "resume_session"
+	| "send_session_message"
+	| "kill_agent"
+	| "revive_agent";
 
 export type RealtimeCommandApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 

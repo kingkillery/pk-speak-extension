@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret } from "./setup-config.js";
+import { applyPiSpeakSetupConfig, buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret } from "./setup-config.js";
 import { getAudioMimeType, resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { transcribeAudioBuffer } from "./stt.js";
 import { runGeminiTextTurn } from "./gemini-live-turn.js";
@@ -17,13 +17,16 @@ import {
 	type SpeakPlaybackGate,
 } from "./speak-gate.js";
 import { getRealtimeTerminalAuditPath } from "./realtime-terminal-audit.js";
+import { clearRootVoiceDisable, enableRootVoiceDisable, isRootVoiceDisabled } from "./pairing.js";
 import { playAudioFile } from "./audio-playback.js";
-import { buildDesktopLiveClientUrl, openDesktopLiveClient } from "./desktop-live-client.js";
+import { buildDesktopLiveClientUrl, buildDesktopSpeechClientUrl, openDesktopLiveClient, openDesktopSpeechClient } from "./desktop-live-client.js";
 
 type Args = Record<string, string | boolean>;
 
 const DIST_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(DIST_DIR, "..");
+
+applyPiSpeakSetupConfig();
 
 async function main() {
 	const argv = process.argv.slice(2);
@@ -77,6 +80,16 @@ async function main() {
 	}
 	if (command === "speak" || command === "say") {
 		await runSpeakCommand(commandArgv);
+		return;
+	}
+	if (command === "enable" || command === "on") {
+		if (wantsHelp) { printEnableHelp(); return; }
+		runEnableSpeechCommand();
+		return;
+	}
+	if (command === "disable" || command === "stop") {
+		if (wantsHelp) { printDisableHelp(); return; }
+		runDisableSpeechCommand();
 		return;
 	}
 	if (command === "wrap") {
@@ -199,10 +212,11 @@ function printHelp() {
 		"  setup       Run first-time setup (no --dry-run)",
 		"  doctor      Show configured backend, voice, APK, and gateway status inputs (--dry-run)",
 		"  speak       Speak text from args or stdin using configured TTS (--dry-run)",
+		"  enable      Re-enable speech after it was disabled from the orb or `pk-speak disable`",
+		"  disable     Disable speech (writes the hard-stop sentinel; orb's Stop-Disable uses the same primitive)",
 		"  wrap        Run a CLI command and speak start/finish notices (--dry-run)",
 		"  brainstorm  Transcribe brainstorm audio using WhisperX and structure it (--dry-run)",
 		"  gateway     Start the headless phone/control gateway (add --live for Gemini Live barge-in) (--dry-run)",
-		"  live        Start/reuse the gateway and open the local Gemini Live desktop client (--dry-run)",
 		"  tray        Start the Windows tray controller and gateway (--dry-run)",
 		"  mobile      Print the Android setup/download QR (--dry-run)",
 		"  admin       Open the sessions admin pane (--dry-run)",
@@ -229,6 +243,30 @@ function printHelp() {
 		"  pk-speak wrap -- codex",
 		"  pk-speak wrap --label \"Claude Code\" -- claude",
 		"  pk-speak wrap --provider sag -- npm test",
+	].join("\n"));
+}
+function printEnableHelp() {
+	console.log([
+		"Usage: pk-speak enable",
+		"       pk-speak on",
+		"",
+		"Clears the hard-stop sentinel written by the orb's \"Disable speech\"",
+		"button or `pk-speak disable`. Idempotent: a no-op if speech is already enabled.",
+		"",
+		"Once speech is disabled, `pk-speak speak` exits before opening the orb,",
+		"so this command is the supported re-enable path from the terminal.",
+	].join("\n"));
+}
+
+function printDisableHelp() {
+	console.log([
+		"Usage: pk-speak disable",
+		"       pk-speak stop",
+		"",
+		"Writes the hard-stop sentinel so subsequent `pk-speak speak` invocations",
+		"and assistant replies no-op before synthesis. Idempotent.",
+		"",
+		"Re-enable with: pk-speak enable",
 	].join("\n"));
 }
 
@@ -592,6 +630,16 @@ async function speakText(text: string, options: SpeakTextOptions) {
 		console.log(`Provider: ${resolvedProvider}`);
 		console.log(`Text: ${spokenPreview}`);
 		console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ cliGate: options.gate, env: process.env, config: loadPiSpeakSetupConfig() }))}`);
+		if (isRootVoiceDisabled()) console.log("Speech disabled: yes (a real run would exit before synthesis; re-enable with `pk-speak enable`)");
+		return;
+	}
+	// The orb's "Disable speech" button (and `pk-speak disable`) write the
+	// hard-stop sentinel. Honor it BEFORE synthesis so we don't burn a TTS
+	// call, stage an artifact, or pop the orb open while claiming silence.
+	// Deliberately AFTER the dry-run return: dry-run never synthesizes or
+	// plays, and keeping it working preserves diagnostics while disabled.
+	if (isRootVoiceDisabled()) {
+		console.error("pk-speak: speech is disabled. Re-enable with: pk-speak enable");
 		return;
 	}
 	const tempDir = options.output ? undefined : await mkdtemp(join(tmpdir(), "pk-speak-"));
@@ -615,6 +663,26 @@ async function speakText(text: string, options: SpeakTextOptions) {
 				removeTempDir = false;
 				return;
 			}
+			if (gate === "orb") {
+				// Interactive orb path: stage at the gateway and open the orb.
+				// Audio NEVER auto-plays from the terminal; the orb's <audio>
+				// element + Stop/Disable buttons are the operator's controls.
+				// On any failure we leave the file on disk with a clear error
+				// rather than fall back to local auto-play.
+			const orbResult = await stageAndOpenSpeechOrb({ text, outputPath, signal: options.signal });
+			if (!orbResult.ok) {
+				// Staging/open failed: leave the synthesized file on disk so the
+				// operator can replay/upload manually. removeTempDir stays false.
+				console.error(`pk-speak: audio left at ${outputPath}. ${orbResult.error}`);
+				removeTempDir = false;
+			} else if (!options.quiet) {
+				console.log(`Speech orb opened. Audio staged at gateway; controls are in the orb window.`);
+				// Success: the gateway owns its own staged copy now. Let the
+				// temp dir cleanup run normally (no-op when --output was passed,
+				// since tempDir is undefined in that case).
+			}
+			return;
+		}
 			const playback = await playAudioFile(outputPath, {
 				allowOpenFallback: options.allowOpenFallback,
 				wait: options.wait,
@@ -628,6 +696,127 @@ async function speakText(text: string, options: SpeakTextOptions) {
 			await rm(tempDir, { recursive: true, force: true }).catch(() => {});
 		}
 	}
+}
+
+/**
+ * `pk-speak enable` / `pk-speak on` — clears the hard-stop sentinel written by
+ * the orb's "Disable speech" button (or `pk-speak disable`). This is the
+ * supported re-enable path: once speech is disabled, `pk-speak speak` exits
+ * before opening the orb, so the orb's own "Re-enable speech" button is not
+ * reachable from the CLI surface.
+ */
+function runEnableSpeechCommand() {
+	if (!isRootVoiceDisabled()) {
+		console.log("Speech is already enabled.");
+		return;
+	}
+	clearRootVoiceDisable();
+	console.log("Speech re-enabled. Future `pk-speak speak` invocations will synthesize and open the orb again.");
+}
+
+/**
+ * `pk-speak disable` / `pk-speak stop` — writes the hard-stop sentinel. The
+ * orb's "Disable speech" button calls the same primitive via /v1/speech/disable.
+ */
+function runDisableSpeechCommand() {
+	if (isRootVoiceDisabled()) {
+		console.log("Speech is already disabled.");
+		return;
+	}
+	enableRootVoiceDisable();
+	console.log("Speech disabled. Re-enable with: pk-speak enable");
+}
+
+/**
+ * Stage a synthesized TTS artifact at the gateway and open the speech-mode
+ * orb. The audio file is uploaded as raw bytes (never referenced by path),
+ * so an authenticated remote client can't turn this into a local-file read
+ * primitive. Reply text travels base64url-encoded in a header so Node's
+ * HTTP parser doesn't choke on Unicode.
+ *
+ * Never auto-plays. On any failure (gateway down, staging 4xx/5xx, orb
+ * spawn failure), returns ok:false so the caller leaves the file on disk
+ * with an actionable error. No silent autoplay fallback.
+ */
+async function stageAndOpenSpeechOrb({ text, outputPath, signal }: { text: string; outputPath: string; signal?: AbortSignal }): Promise<{ ok: true } | { ok: false; error: string }> {
+	const port = resolveSpeechGatewayPort();
+	if (!port) return { ok: false, error: "PI_SPEAK_HTTP_PORT unset; cannot reach the gateway." };
+	const authToken = process.env.PI_SPEAK_HTTP_TOKEN?.trim() || "";
+
+	let audioBuffer: Buffer;
+	try {
+		audioBuffer = await readFile(outputPath);
+	} catch (error) {
+		return { ok: false, error: `Could not read synthesized audio: ${getErrorMessage(error)}` };
+	}
+	if (audioBuffer.byteLength === 0) return { ok: false, error: "Synthesized audio is empty." };
+
+	const mimeType = inferAudioMimeType(outputPath);
+	const encodedText = Buffer.from(text, "utf8").toString("base64url");
+	const stageUrl = `http://127.0.0.1:${port}/v1/speech/stage`;
+	const headers: Record<string, string> = {
+		"Content-Type": mimeType,
+		"X-Pi-Speak-Speech-Text-B64": encodedText,
+	};
+	if (authToken) headers["X-Pi-Speak-Token"] = authToken;
+
+	const audioBody = new Blob([audioBuffer as unknown as BlobPart], { type: mimeType });
+	let staged: { id?: string } | undefined;
+	try {
+		const res = await fetch(stageUrl, {
+			method: "POST",
+			headers,
+			body: audioBody,
+			signal,
+		});
+		if (!res.ok) {
+			const err = await res.json().catch(() => ({})) as { error?: string };
+			return { ok: false, error: `Gateway rejected staging (HTTP ${res.status}): ${err.error || res.statusText}` };
+		}
+		staged = await res.json() as { id?: string };
+	} catch (error) {
+		return { ok: false, error: `Could not reach gateway at ${stageUrl}: ${getErrorMessage(error)}` };
+	}
+	if (!staged?.id) return { ok: false, error: "Gateway did not return a speech artifact id." };
+
+	const orbUrl = buildDesktopSpeechClientUrl(port, staged.id, { authToken });
+	try {
+		const launch = openDesktopSpeechClient({ port, cwd: process.cwd(), speechId: staged.id, authToken });
+		// Command-not-found (missing xdg-open/Edge/explorer) arrives as an
+		// ASYNC "error" event — a sync try/catch alone would report success
+		// and let the caller delete the synthesized file. Await confirmation.
+		const spawned = await launch.launched;
+		if (!spawned.ok) {
+			return { ok: false, error: `Gateway staged the audio but the orb did not open: ${spawned.error}. Browse to ${orbUrl} manually.` };
+		}
+	} catch (error) {
+		return { ok: false, error: `Gateway staged the audio but the orb did not open: ${getErrorMessage(error)}. Browse to ${orbUrl} manually.` };
+	}
+	return { ok: true };
+}
+
+function resolveSpeechGatewayPort(): number | undefined {
+	// Default to the standard gateway port (DEFAULT_PORT in control-server.ts
+	// is 8767) so a default-config install without PI_SPEAK_HTTP_PORT set
+	// still finds its gateway. Explicitly invalid values are rejected.
+	const raw = process.env.PI_SPEAK_HTTP_PORT?.trim();
+	const candidate = raw ? Number.parseInt(raw, 10) : 8767;
+	if (!Number.isFinite(candidate) || candidate < 1 || candidate > 65_535) return undefined;
+	return candidate;
+}
+
+function inferAudioMimeType(filePath: string): string {
+	const lower = filePath.toLowerCase();
+	if (lower.endsWith(".mp3")) return "audio/mpeg";
+	if (lower.endsWith(".wav")) return "audio/wav";
+	if (lower.endsWith(".ogg")) return "audio/ogg";
+	if (lower.endsWith(".webm")) return "audio/webm";
+	return "audio/mpeg";
+}
+
+function getErrorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	return String(error);
 }
 
 async function runWrapCommand(argv: string[]) {
@@ -694,7 +883,7 @@ function printWrapHelp() {
 		"  --no-speak                 Run command without speaking notices",
 		"  --no-start                 Skip the start notice",
 		"  --allow-open-fallback      If hidden playback fails, open audio with the OS default app",
-		"  --gate <immediate|enter>    Require Enter before speaking notices",
+		"  --gate <orb|immediate|enter>  Playback gate: orb opens the interactive UI (default, no autoplay), enter requires Enter, immediate auto-plays",
 		"  --start-text <text>        Override start notice",
 		"  --success-text <text>      Override success notice",
 		"  --failure-text <text>      Override failure prefix",
@@ -725,7 +914,7 @@ function printSpeakHelp() {
 		"  --no-play             Synthesize only; do not play audio",
 		"  --no-wait             Return after a detached supervisor starts; it retains temp audio until playback completes",
 		"  --allow-open-fallback  If hidden playback fails, open the file with the OS default app",
-		"  --gate <immediate|enter>  Require Enter before playing audio",
+		"  --gate <orb|immediate|enter>  Playback gate: orb opens the interactive UI (default, no autoplay), enter requires Enter, immediate auto-plays",
 		"  --keep                Keep the temp audio file when no --output is supplied",
 		"  --rewrite <true|false>",
 		"  --dry-run             Print provider and spoken text without synthesis (supported)",

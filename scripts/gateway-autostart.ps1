@@ -36,7 +36,7 @@ $startupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Star
 $startupVbs = Join-Path $startupDir 'PiSpeakGateway.vbs'
 
 function Test-GatewayHealthy {
-  try { return ((Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/health" -f $Port) -TimeoutSec 3).app -eq 'pi-speak') }
+  try { $r = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/health" -f $Port) -TimeoutSec 3; return ($r.app -eq 'pi-speak' -and $r.role -eq 'gateway') }
   catch { return $false }
 }
 function Get-GatewayProcesses {
@@ -61,7 +61,7 @@ function Get-ListeningPid {
 }
 function Start-SupervisorNow {
   Start-Process -FilePath 'powershell.exe' `
-    -ArgumentList ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $supervisor) `
+    -ArgumentList ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Port {1}' -f $supervisor, $Port) `
     -WorkingDirectory $repo -WindowStyle Hidden | Out-Null
 }
 function Install-StartupEntry {

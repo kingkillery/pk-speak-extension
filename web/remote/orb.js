@@ -1,4 +1,5 @@
 // @ts-check
+import { approvalControlType, normalizeApproval } from "/orb/orb-approvals.js";
 /**
  * Desktop/terminal Live orb — HF methodology audio path against pi-speak /v1/live.
  * Meant to run outside the full remote chrome (Edge --app=/orb/).
@@ -10,6 +11,8 @@ const STORAGE = {
 	token: "piSpeakRemoteToken",
 };
 
+
+
 /** @typedef {"idle"|"connecting"|"ready"|"listening"|"user-speaking"|"processing"|"ai-speaking"|"error"} OrbState */
 
 const $ = (sel) => /** @type {HTMLElement} */ (document.querySelector(sel));
@@ -18,6 +21,7 @@ const caption = $("#caption");
 const subcaption = $("#subcaption");
 const backendLabel = $("#backend-label");
 const chat = $("#chat");
+const approvalsEl = $("#approvals");
 const muteBtn = /** @type {HTMLButtonElement} */ ($("#mute-btn"));
 const camBtn = /** @type {HTMLButtonElement} */ ($("#cam-btn"));
 const closeBtn = /** @type {HTMLButtonElement} */ ($("#close-btn"));
@@ -26,6 +30,13 @@ const gateInput = /** @type {HTMLInputElement} */ ($("#gate-db"));
 const gateValue = $("#gate-value");
 const meterFill = $("#meter-fill");
 const camPip = /** @type {HTMLVideoElement} */ ($("#cam-pip"));
+const speechPanel = $("#speech-panel");
+const speechText = $("#speech-text");
+const speechAudio = /** @type {HTMLAudioElement} */ ($("#speech-audio"));
+const speechStopBtn = /** @type {HTMLButtonElement} */ ($("#speech-stop-btn"));
+const speechDisableBtn = /** @type {HTMLButtonElement} */ ($("#speech-disable-btn"));
+const speechEnableBtn = /** @type {HTMLButtonElement} */ ($("#speech-enable-btn"));
+const speechStatus = $("#speech-status");
 
 /** @type {OrbState} */
 let state = "idle";
@@ -33,6 +44,8 @@ let ws = /** @type {WebSocket | null} */ (null);
 let sessionId = "";
 let clientSeq = 0;
 let lastServerSeq = 0;
+const transcriptBuffers = { user: "", assistant: "" };
+const transcriptBubbles = { user: null, assistant: null };
 let audioCtx = /** @type {AudioContext | null} */ (null);
 let captureNode = /** @type {AudioWorkletNode | null} */ (null);
 let playbackNode = /** @type {AudioWorkletNode | null} */ (null);
@@ -44,6 +57,8 @@ let cameraOn = false;
 let playbackRate = 24000;
 let workletsReady = false;
 let liveConnected = false;
+/** @type {Record<string, ReturnType<typeof normalizeApproval>>} */
+const pendingApprovals = {};
 
 function token() {
 	const q = new URL(location.href).searchParams.get("token");
@@ -85,6 +100,66 @@ function setState(next) {
 }
 
 /** @param {"user"|"assistant"|"tool"|"system"} role @param {string} text */
+
+function renderApprovals() {
+	if (!approvalsEl) return;
+	approvalsEl.innerHTML = "";
+	const list = Object.values(pendingApprovals).filter(Boolean);
+	for (const approval of list) {
+		const card = document.createElement("div");
+		card.className = "approval-card";
+		const title = document.createElement("strong");
+		title.textContent = approval.name === "execute_terminal_command" ? "Terminal approval" : "Action approval";
+		const command = document.createElement("code");
+		command.textContent = approval.command || approval.message || "(unknown)";
+		const reason = document.createElement("span");
+		reason.className = "muted";
+		reason.textContent = approval.reason ? `Reason: ${approval.reason}` : (approval.message || "Needs confirmation.");
+		const actions = document.createElement("div");
+		actions.className = "approval-actions";
+		const approve = document.createElement("button");
+		approve.type = "button";
+		approve.className = "btn primary";
+		approve.textContent = "Approve";
+		approve.addEventListener("click", () => sendApproval(approval, true));
+		const reject = document.createElement("button");
+		reject.type = "button";
+		reject.className = "btn";
+		reject.textContent = "Reject";
+		reject.addEventListener("click", () => sendApproval(approval, false));
+		actions.appendChild(approve);
+		actions.appendChild(reject);
+		card.appendChild(title);
+		card.appendChild(command);
+		card.appendChild(reason);
+		card.appendChild(actions);
+		approvalsEl.appendChild(card);
+	}
+}
+
+function rememberApproval(message) {
+	const normalized = normalizeApproval(message);
+	if (!normalized) return;
+	pendingApprovals[normalized.approvalId] = normalized;
+	renderApprovals();
+	pushBubble("system", `Approval needed: ${normalized.command || normalized.name || "action"}`);
+	setState("processing");
+}
+
+function clearApproval(approvalId) {
+	if (!approvalId) return;
+	delete pendingApprovals[approvalId];
+	renderApprovals();
+}
+
+function sendApproval(approval, approved) {
+	if (!approval?.approvalId) return;
+	const type = approvalControlType(approval, approved);
+	sendJson({ type, approvalId: approval.approvalId });
+	clearApproval(approval.approvalId);
+	pushBubble("system", approved ? `Approved ${approval.approvalId}` : `Rejected ${approval.approvalId}`);
+}
+
 function pushBubble(role, text) {
 	if (!text?.trim()) return;
 	const el = document.createElement("div");
@@ -94,6 +169,28 @@ function pushBubble(role, text) {
 	chat.appendChild(el);
 	while (chat.children.length > 40) chat.firstChild?.remove();
 	chat.scrollTop = chat.scrollHeight;
+}
+
+function appendTranscript(role, text) {
+	const normalizedRole = role === "user" ? "user" : "assistant";
+	if (!text) return;
+	transcriptBuffers[normalizedRole] += text;
+	let el = transcriptBubbles[normalizedRole];
+	if (!el || !chat.contains(el)) {
+		el = document.createElement("div");
+		el.className = `bubble ${normalizedRole}`;
+		el.innerHTML = `<div class="role">${normalizedRole}</div><div class="body"></div>`;
+		chat.appendChild(el);
+		transcriptBubbles[normalizedRole] = el;
+	}
+	el.querySelector(".body").textContent = transcriptBuffers[normalizedRole].trim();
+	chat.scrollTop = chat.scrollHeight;
+}
+
+function finishTranscript(role) {
+	const normalizedRole = role === "user" ? "user" : "assistant";
+	transcriptBuffers[normalizedRole] = "";
+	transcriptBubbles[normalizedRole] = null;
 }
 
 function loadGate() {
@@ -268,10 +365,15 @@ async function connect() {
 			return;
 		}
 		if (msg.type === "transcript" && msg.text) {
-			pushBubble("assistant", msg.text);
+			appendTranscript(msg.role, msg.text);
+			return;
+		}
+		if (msg.type === "transcript_complete") {
+			finishTranscript(msg.role);
 			return;
 		}
 		if (msg.type === "interrupt") {
+			finishTranscript("assistant");
 			clearPlayback();
 			setState("listening");
 			return;
@@ -284,6 +386,16 @@ async function connect() {
 		if (msg.type === "tool_complete") {
 			setState("listening");
 			pushBubble("tool", `${msg.name || "tool"} done`);
+			return;
+		}
+		if (msg.type === "tool_approval_required") {
+			rememberApproval(msg);
+			return;
+		}
+		if (msg.type === "tool_approval_resolved") {
+			clearApproval(msg.approvalId);
+			pushBubble("system", msg.message || "Approval resolved.");
+			setState("listening");
 			return;
 		}
 		if (msg.type === "camera_capture") {
@@ -421,7 +533,116 @@ loadGate();
 setState("idle");
 requestAnimationFrame(() => document.body.classList.remove("booting"));
 
-const auto = new URL(location.href).searchParams.get("autoconnect");
-if (auto === "1") {
-	orb.click();
+const launchParams = new URL(location.href).searchParams;
+const launchMode = launchParams.get("mode");
+const speechId = launchParams.get("speech");
+
+if (launchMode === "speech" && speechId) {
+	// One-shot TTS playback mode: never connect /v1/live, never request mic.
+	bootSpeechMode(speechId).catch((err) => {
+		speechStatus.textContent = `Failed to load speech: ${err?.message || err}`;
+	});
+} else {
+	const auto = launchParams.get("autoconnect");
+	if (auto === "1") {
+		orb.click();
+	}
+}
+
+/**
+ * @param {string} speechId
+ */
+async function bootSpeechMode(speechId) {
+	// Mark the body so CSS suppresses realtime Live chrome (hero/dock/mic/cam/
+	// chat/approvals) and renders the speech panel. Avoids piecemeal .hidden
+	// juggling and keeps the layout in CSS where it belongs.
+	document.body.classList.add("speech-mode");
+	closeBtn.classList.remove("hidden");
+	speechPanel.classList.remove("hidden");
+	setCaption("Pi Speak reply ready");
+
+	const authHeaders = { "Accept": "application/json" };
+	const t = token();
+	if (t) authHeaders["x-pi-speak-token"] = t;
+
+	let staged;
+	try {
+		const res = await fetch(`/v1/speech/staged/${encodeURIComponent(speechId)}`, { headers: authHeaders });
+		if (!res.ok) {
+			const err = await res.json().catch(() => ({}));
+			throw new Error(err.error || `HTTP ${res.status}`);
+		}
+		staged = await res.json();
+	} catch (err) {
+		speechText.textContent = "(Could not load reply text.)";
+		speechStatus.textContent = String(err?.message || err);
+		return;
+	}
+	speechText.textContent = staged.text || "(no text)";
+	// The <audio> element is the operator's control surface: pause/resume
+	// via the native controls, Stop and Disable speech via the buttons below.
+	const audioUrl = new URL(staged.audioUrl, location.origin).toString();
+	const audioParams = new URLSearchParams();
+	if (t) audioParams.set("token", t);
+	speechAudio.src = `${audioUrl}?${audioParams.toString()}`;
+	// Deliberately do NOT call speechAudio.play() — the user explicitly
+	// asked for "no autoplay, controls in the UI".
+
+	updateDisableButtonState(!!staged.speechDisabled);
+
+	speechAudio.addEventListener("ended", () => {
+		speechStatus.textContent = "Playback finished.";
+	});
+	speechAudio.addEventListener("error", () => {
+		speechStatus.textContent = "Audio playback error.";
+	});
+	speechStopBtn.addEventListener("click", () => {
+		speechAudio.pause();
+		speechAudio.currentTime = 0;
+		speechStatus.textContent = "Stopped.";
+	});
+	speechDisableBtn.addEventListener("click", async () => {
+		speechDisableBtn.disabled = true;
+		try {
+			const res = await fetch("/v1/speech/disable", {
+				method: "POST",
+				headers: { ...authHeaders, "Content-Type": "application/json" },
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			updateDisableButtonState(true);
+			speechStatus.textContent = "Speech disabled. Future terminal replies will be silent.";
+		} catch (err) {
+			speechDisableBtn.disabled = false;
+			speechStatus.textContent = `Failed to disable: ${err?.message || err}`;
+		}
+	});
+	speechEnableBtn.addEventListener("click", async () => {
+		speechEnableBtn.disabled = true;
+		try {
+			const res = await fetch("/v1/speech/enable", {
+				method: "POST",
+				headers: { ...authHeaders, "Content-Type": "application/json" },
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			updateDisableButtonState(false);
+			speechStatus.textContent = "Speech re-enabled.";
+		} catch (err) {
+			speechEnableBtn.disabled = false;
+			speechStatus.textContent = `Failed to re-enable: ${err?.message || err}`;
+		}
+	});
+}
+
+/** @param {boolean} disabled */
+function updateDisableButtonState(disabled) {
+	speechDisableBtn.hidden = disabled;
+	speechDisableBtn.disabled = false;
+	speechEnableBtn.hidden = !disabled;
+	speechEnableBtn.disabled = false;
+}
+
+/** @param {string} text */
+function setCaption(text) {
+	caption.textContent = text;
+	subcaption.textContent = "";
 }

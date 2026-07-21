@@ -1,17 +1,14 @@
+import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { Behavior, FunctionResponseScheduling, GoogleGenAI, Modality } from "@google/genai";
 import type { LiveServerMessage } from "@google/genai";
 import { createGeminiClient, getGeminiLiveModel } from "./gemini-live-turn.js";
-import { readAttentionSnapshots, readAttentionLeaderLease, claimAttentionLeader } from "./attention-broker.js";
+import { readAttentionSnapshots, readAttentionLeaderLease } from "./attention-broker.js";
 import { readSessionWorkingDirectory } from "./session-working-directory.js";
 import { loadPersistedSessionRouting } from "./session-routing-store.js";
-import { discoverAgentInventoryCached } from "./agent-discovery.js";
-import { buildAgentResumeArgs, isResumableAgentSession } from "./agent-provider-registry.js";
-import { resolveAgentProviderConfig } from "./agent-provider.js";
 import { resolveWindowsNpmShim } from "./agent-discovery.js";
 import { normalizeOptionalString } from "./agent-hub-actions.js";
 import { safeSpawn } from "./spawn-shim.js";
-import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import type { RealtimeControlMessage } from "./realtime-types.js";
 import {
@@ -48,55 +45,45 @@ import {
 	isOpenAiRealtimeLiveConfigured,
 	resolveOpenAiRealtimeConnectUrl,
 } from "./openai-realtime-live.js";
+import {
+	buildRealtimeSessionCandidates,
+	resolveRealtimeSessionTarget,
+	selectRealtimeCurrentTarget,
+	type RealtimeSessionTargetCandidate,
+	type RealtimeSessionTargetSources,
+} from "./realtime-session-target.js";
 
 
-// Resolve the configured live-client workspace first, then fall back to the active attention session.
-function getCurrentCwd(activeSession?: { cwd?: string }): string {
+// A live client's selected OMPK target is connection-local. The global
+// attention lease is observation/fallback only, so concurrent voice clients
+// cannot silently retarget one another.
+function getCurrentCwd(activeSession?: { cwd?: string; selectedTarget?: RealtimeSessionTargetCandidate }): string {
+	if (activeSession?.selectedTarget?.cwd) return activeSession.selectedTarget.cwd;
 	if (activeSession?.cwd) return activeSession.cwd;
 	const lease = readAttentionLeaderLease();
 	if (lease?.ownerSessionId) {
-		const snapshots = readAttentionSnapshots();
-		const activeSnapshot = snapshots.find(s => s.sessionId === lease.ownerSessionId);
+		const activeSnapshot = readAttentionSnapshots().find((snapshot) => snapshot.sessionId === lease.ownerSessionId);
 		if (activeSnapshot?.sessionPath) {
 			const cwd = readSessionWorkingDirectory(activeSnapshot.sessionPath);
 			if (cwd) return cwd;
 		}
 	}
-	const snapshots = readAttentionSnapshots();
-	if (snapshots.length > 0 && snapshots[0].sessionPath) {
-		const cwd = readSessionWorkingDirectory(snapshots[0].sessionPath);
-		if (cwd) return cwd;
-	}
 	return process.cwd();
 }
 
-function resolveResumeExecutable(provider: string | undefined) {
-	const normalized = provider?.trim().toLowerCase();
-	if (normalized === "codex") {
-		return resolveAgentProviderConfig(process.env).codexBin;
+function resolveOpenAiInputTranscriptionModel(): string | null {
+	const configured = process.env.PI_SPEAK_OPENAI_REALTIME_TRANSCRIPTION_MODEL?.trim();
+	if (configured && ["off", "false", "none"].includes(configured.toLowerCase())) return null;
+	if (configured) return configured;
+	try {
+		return new URL(resolveOpenAiRealtimeConnectUrl()).hostname.toLowerCase() === "api.openai.com"
+			? "gpt-4o-mini-transcribe"
+			: null;
+	} catch {
+		return null;
 	}
-	if (normalized === "claude") {
-		return process.env.CLAUDE_BIN || resolveWindowsNpmShim("claude.cmd") || "claude";
-	}
-	return undefined;
 }
 
-function launchDetachedCli(command: string, args: string[], cwd: string, title: string) {
-	if (process.platform === "win32") {
-		const child = spawn("cmd.exe", ["/c", "start", title, "/D", cwd, command, ...args], {
-			detached: true,
-			stdio: "ignore",
-		});
-		child.unref();
-	} else {
-		const child = spawn(command, args, {
-			cwd,
-			detached: true,
-			stdio: "ignore",
-		});
-		child.unref();
-	}
-}
 
 function resolveOhMyPiCommand(): string {
 	return process.env.PI_SPEAK_OH_MY_PK_BIN?.trim()
@@ -125,12 +112,15 @@ function spawnNarratedOmp(prompt: string, cwd: string) {
 interface ActiveSession {
 	sessionId: string;
 	ws: WebSocket;
+	reconnectToken: string;
 	session: any; // Gemini Live session
 	clientSequenceId: number; // last processed client sequence ID
 	serverSequenceId: number; // last assigned server sequence ID
 	upstreamSetupComplete: boolean;
 	clientHandlersReady: boolean;
+	handlersSocket?: WebSocket;
 	startSent: boolean;
+	reconnectingUpstream: boolean;
 	disconnectTimeout?: NodeJS.Timeout;
 	pendingServerMessages: { seqId: number; isBinary: boolean; data: any }[];
 	terminalApprovals: RealtimeTerminalApprovalRegistry;
@@ -143,6 +133,7 @@ interface ActiveSession {
 	model: string;
 	server: any; // store server reference
 	cwd?: string;
+	selectedTarget?: RealtimeSessionTargetCandidate;
 	configurationError?: string;
 	/** Backend of the Live connection ("developer-api" | "vertex"). */
 	backend: string;
@@ -150,12 +141,72 @@ interface ActiveSession {
 	nonBlockingEnabled: boolean;
 	/** Latest session-resumption handle from sessionResumptionUpdate. */
 	resumptionHandle?: string;
+	outputAudioRate: number;
+	upstreamGeneration: number;
 	/** FunctionResponses queued while the session is mid-reconnect. */
 	pendingToolResponses: Record<string, unknown>[];
 	/** Resolved Live backend kind (gemini | openai-realtime). */
 	liveBackendKind: string;
 	/** OpenAI-Realtime adapter session when liveBackendKind is not gemini. */
 	liveBackendSession?: LiveBackendSession;
+}
+
+function getRealtimeBridge(activeSession: ActiveSession) {
+	return activeSession.server?.realtimeBridge;
+}
+
+function getRealtimeDashboard(activeSession: ActiveSession) {
+	return getRealtimeBridge(activeSession)?.getSessionDashboard?.()
+		?? activeSession.server?.getSessionDashboard?.();
+}
+
+async function loadRealtimeTargetSources(activeSession: ActiveSession): Promise<RealtimeSessionTargetSources> {
+	const bridge = getRealtimeBridge(activeSession);
+	const hub = bridge?.agentHub ?? activeSession.server?.agentHubGateway;
+	let hubAgents: readonly any[] = [];
+	try {
+		hubAgents = (await hub?.snapshot?.())?.agents ?? [];
+	} catch {}
+	return {
+		dashboard: getRealtimeDashboard(activeSession),
+		attentionSnapshots: readAttentionSnapshots(),
+		hubAgents,
+	};
+}
+
+function enrichRealtimeTarget(candidate: RealtimeSessionTargetCandidate): RealtimeSessionTargetCandidate {
+	if (candidate.cwd || !candidate.sessionPath) return candidate;
+	return { ...candidate, cwd: readSessionWorkingDirectory(candidate.sessionPath) };
+}
+
+async function getRealtimeCurrentTarget(activeSession: ActiveSession) {
+	if (activeSession.selectedTarget) {
+		return { ok: true as const, candidate: activeSession.selectedTarget, match: "selected-connection" as const };
+	}
+	const sources = await loadRealtimeTargetSources(activeSession);
+	const current = selectRealtimeCurrentTarget({
+		...sources,
+		attentionLeader: readAttentionLeaderLease(),
+	});
+	return current.ok ? { ...current, candidate: enrichRealtimeTarget(current.candidate) } : current;
+}
+
+function serializeRealtimeTarget(candidate: RealtimeSessionTargetCandidate | undefined) {
+	if (!candidate) return undefined;
+	return {
+		name: candidate.name,
+		agentId: candidate.agentId,
+		sessionId: candidate.sessionId,
+		sessionPath: candidate.sessionPath,
+		provider: candidate.provider,
+		cwd: candidate.cwd,
+		aliases: candidate.aliases,
+		sources: candidate.sources,
+	};
+}
+
+function realtimeTargetLabel(candidate: RealtimeSessionTargetCandidate): string {
+	return candidate.name || candidate.agentId || candidate.sessionId || candidate.sessionPath || "unnamed session";
 }
 
 type PendingTerminalCall = {
@@ -177,14 +228,14 @@ export const activeSessions = new Map<string, ActiveSession>();
 // acknowledge briefly and keep conversing instead of going silent, narrate progress
 // only when it receives an update, and never narrate SILENT-scheduled updates.
 export const REALTIME_SYSTEM_PROMPT = [
-	"You are a conversational assistant with full read access to this workspace: sessions, background agents, and the filesystem.",
-	"Use your read-only tools (list_sessions, get_session_info, list_agent_hub_agents, get_agent_hub_agent, browse_workspace, read_workspace_file, web_search) freely and proactively to understand the real state before answering — never guess.",
-	"When the user asks about something on camera or shows you something, call camera_snapshot — do not claim you can see without it.",
-	"When a request is ambiguous or could mean more than one thing, ask a short clarifying question before acting instead of assuming.",
-	"When a user request needs web_search or camera_snapshot, say a brief acknowledgement and call the tool in the same response — do not describe the capability and wait.",
-	"Mutating actions — launching a background agent, archiving or recovering a session, or running a terminal command outside the read-only allowlist — always require the operator's explicit approval. Call the tool normally; if the result says it requires confirmation, tell the user what you are about to do and wait for them to approve or reject it before treating it as done.",
+	"You are the realtime conversational assistant and voice control plane for Pi Speak and Oh-my-pk (OMPK).",
+	"You have real tools for terminal commands, OMPK session selection and messaging, agent launch/lifecycle, workspace reads, web search, and camera input. Never say you cannot perform an available action: call the matching tool and report its actual result.",
+	"Before acting on a session, call get_session_info or list_sessions. Use switch_session to select one unambiguous connection-local target, then send_session_message, resume_session, or an agent lifecycle tool as requested.",
+	"Use read-only tools freely and proactively to understand real state; never guess session identity, tool output, workspace content, or camera content.",
+	"When the user asks about something on camera or shows you something, call camera_snapshot immediately — do not claim you can see without it.",
+	"When a request is ambiguous or could mean more than one thing, ask one short clarifying question before acting.",
+	"Mutating tools require the operator's explicit approval and automatically open an approval card. Call the tool normally; do not refuse or ask for approval only in prose. Wait for the resolved tool result before claiming success.",
 	"Never claim an action completed until you receive a real tool result confirming it.",
-	"When you fire a background tool (launch_agent, execute_terminal_command), acknowledge in one short sentence, then continue the conversation normally.",
 	"Do not narrate a tool's progress unless you receive an explicit progress update.",
 	"When a tool result arrives, discuss it — do not read JSON, dumps, file contents, logs, or long excerpts aloud.",
 	"Prefer the result's summary field when present. Mention only the facts that matter for the next decision, quote at most one short phrase when useful, and offer more detail if the user wants it.",
@@ -200,10 +251,11 @@ function sendLiveStartWhenReady(activeSession: ActiveSession) {
 	activeSession.startSent = true;
 	// HF methodology: announce output PCM rate once so the playback worklet can
 	// configure itself. Gemini Live native audio is 24 kHz mono PCM16.
-	sendToClient(activeSession, { type: "audio_format", rate: 24_000 }, false);
+	sendToClient(activeSession, { type: "audio_format", rate: activeSession.outputAudioRate }, false);
 	sendToClient(activeSession, {
 		type: "start",
 		session: activeSession.sessionId,
+		reconnectToken: activeSession.reconnectToken,
 		message: activeSession.liveBackendKind,
 	}, false);
 }
@@ -346,7 +398,9 @@ export function sendRealtimeToolResponse(
 			? modelResponse.output
 			: JSON.stringify(modelResponse);
 		try {
-			activeSession.liveBackendSession.sendToolResult(call.id, call.name, shaped);
+			if (!activeSession.liveBackendSession.sendToolResult(call.id, call.name, shaped)) {
+				activeSession.pendingToolResponses.push(functionResponse);
+			}
 		} catch {
 			activeSession.pendingToolResponses.push(functionResponse);
 		}
@@ -574,6 +628,11 @@ async function executeLaunchAgentMutation(
 		sendToClient(activeSession, { type: "tool_progress", name: call.name, message: "Launching agent…" }, false);
 		return undefined;
 	}
+	const bridge = getRealtimeBridge(activeSession);
+	if (bridge?.launchSession) {
+		const result = await bridge.launchSession({ prompt, cwd, hubOnly, targetNode });
+		return JSON.stringify(result);
+	}
 	if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
 		const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly, targetNode });
 		return JSON.stringify(result);
@@ -588,11 +647,80 @@ async function executeArchiveSessionMutation(
 	const sessionPath = args.sessionPath as string | undefined;
 	const action = (args.action as string) === "recover" ? "recover" : "archive";
 	if (!sessionPath) return JSON.stringify({ ok: false, error: "Missing 'sessionPath' argument" });
+	const bridge = getRealtimeBridge(activeSession);
+	if (bridge?.archiveSession) {
+		return JSON.stringify(await bridge.archiveSession({ sessionPath, action }));
+	}
 	if (activeSession.server && typeof activeSession.server.onSessionArchive === "function") {
 		const result = await activeSession.server.onSessionArchive({ sessionPath, action });
 		return JSON.stringify(result);
 	}
 	return JSON.stringify({ ok: false, error: "Session archive is not available." });
+}
+
+async function executeResumeSessionMutation(activeSession: ActiveSession, args: Record<string, unknown>): Promise<string> {
+	const target = (args.target ?? {}) as Record<string, unknown>;
+	const bridge = getRealtimeBridge(activeSession);
+	if (!bridge?.resumeSession) return JSON.stringify({ ok: false, error: "Session resume is not available." });
+	const result = await bridge.resumeSession({
+		sessionPath: target.sessionPath as string | undefined,
+		sessionId: target.sessionId as string | undefined,
+		provider: target.provider as string | undefined,
+		cwd: target.cwd as string | undefined,
+	});
+	return JSON.stringify(result);
+}
+
+async function executeSendSessionMessageMutation(activeSession: ActiveSession, args: Record<string, unknown>): Promise<string> {
+	const text = normalizeOptionalString(args.text, 8192, "text");
+	if (typeof text !== "string") return JSON.stringify({ ok: false, error: text?.error || "Invalid message." });
+	const target = (args.target ?? {}) as Record<string, unknown>;
+	const bridge = getRealtimeBridge(activeSession);
+	const agentId = parseHubAgentId(target.agentId as string | undefined);
+	if (agentId && bridge?.agentHub?.chat) {
+		const result = await bridge.agentHub.chat(agentId, text, `realtime-${activeSession.sessionId}-${randomUUID()}`);
+		return JSON.stringify(result);
+	}
+	if (!bridge?.sendSessionTurn) return JSON.stringify({ ok: false, error: "Session messaging is not available." });
+	const result = await bridge.sendSessionTurn(text, target);
+	const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+	return JSON.stringify({
+		ok: warnings.length === 0,
+		target: target.name || target.sessionId || target.sessionPath,
+		result,
+	});
+}
+
+async function executeAgentLifecycleMutation(
+	activeSession: ActiveSession,
+	kind: "kill_agent" | "revive_agent",
+	args: Record<string, unknown>,
+): Promise<string> {
+	const id = parseHubAgentId(args.id as string | undefined);
+	if (!id) return JSON.stringify({ ok: false, error: "Missing or invalid agent id." });
+	const hub = getRealtimeBridge(activeSession)?.agentHub;
+	if (!hub) return JSON.stringify({ ok: false, error: "Agent hub mutation bridge is not available." });
+	if (kind === "revive_agent") return JSON.stringify(await hub.revive(id));
+	const confirmation = await hub.kill(id, undefined);
+	if (!confirmation.ok && confirmation.code === "confirm_required") {
+		return JSON.stringify(await hub.kill(id, confirmation.confirmToken));
+	}
+	return JSON.stringify(confirmation);
+}
+
+async function executeApprovedCommandMutation(
+	activeSession: ActiveSession,
+	pending: PendingCommandCall,
+	args: Record<string, unknown>,
+): Promise<string | undefined> {
+	switch (pending.kind) {
+		case "launch_agent": return await executeLaunchAgentMutation(activeSession, pending.call, args);
+		case "archive_session": return await executeArchiveSessionMutation(activeSession, args);
+		case "resume_session": return await executeResumeSessionMutation(activeSession, args);
+		case "send_session_message": return await executeSendSessionMessageMutation(activeSession, args);
+		case "kill_agent":
+		case "revive_agent": return await executeAgentLifecycleMutation(activeSession, pending.kind, args);
+	}
 }
 
 async function resolveCommandApproval(
@@ -655,9 +783,7 @@ async function resolveCommandApproval(
 	const args = (pending.call.args ?? {}) as Record<string, unknown>;
 	let outputText: string | undefined;
 	try {
-		outputText = pending.kind === "launch_agent"
-			? await executeLaunchAgentMutation(activeSession, pending.call, args)
-			: await executeArchiveSessionMutation(activeSession, args);
+		outputText = await executeApprovedCommandMutation(activeSession, pending, args);
 	} catch (err: any) {
 		outputText = JSON.stringify({ ok: false, error: err?.message || String(err) });
 	}
@@ -685,7 +811,7 @@ function resultLooksOk(outputText: string | undefined): boolean {
 }
 
 
-const CAMERA_CAPTURE_TIMEOUT_MS = 15_000;
+export const CAMERA_CAPTURE_TIMEOUT_MS = 15_000;
 
 function normalizeImageMimeType(raw: string | undefined): string {
 	const value = (raw || "image/jpeg").trim().toLowerCase();
@@ -700,33 +826,27 @@ function stripDataUrl(data: string): { mimeType?: string; base64: string } {
 	return { base64: data.trim() };
 }
 
-function sendImageToLiveSession(activeSession: ActiveSession, data: string, mimeType?: string): boolean {
+function sendImageToLiveSession(activeSession: ActiveSession, data: string, mimeType?: string, deferResponse = false): boolean {
 	if (!data.trim()) return false;
 	const parsed = stripDataUrl(data);
 	const mime = normalizeImageMimeType(mimeType || parsed.mimeType);
 	if (activeSession.liveBackendSession?.sendImage) {
 		try {
-			activeSession.liveBackendSession.sendImage({ data: parsed.base64, mimeType: mime });
-			return true;
+			return activeSession.liveBackendSession.sendImage({ data: parsed.base64, mimeType: mime, deferResponse }) !== false;
 		} catch {
 			return false;
 		}
 	}
 	if (!activeSession.session) return false;
 	try {
-		activeSession.session.sendRealtimeInput({
-			media: {
-				mimeType: mime,
-				data: parsed.base64,
-			},
-		});
+		activeSession.session.sendRealtimeInput({ media: { mimeType: mime, data: parsed.base64 } });
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-function clearPendingCameraCall(activeSession: ActiveSession, callId: string | undefined): void {
+export function clearPendingCameraCall(activeSession: ActiveSession, callId: string | undefined): void {
 	if (!callId) return;
 	const pending = activeSession.pendingCameraCalls.get(callId);
 	if (!pending) return;
@@ -734,7 +854,7 @@ function clearPendingCameraCall(activeSession: ActiveSession, callId: string | u
 	activeSession.pendingCameraCalls.delete(callId);
 }
 
-function handleClientImage(activeSession: ActiveSession, ctrl: RealtimeControlMessage): void {
+export function handleClientImage(activeSession: ActiveSession, ctrl: RealtimeControlMessage): void {
 	const data = typeof ctrl.data === "string" ? ctrl.data : "";
 	if (!data.trim()) {
 		if (ctrl.callId) {
@@ -746,8 +866,9 @@ function handleClientImage(activeSession: ActiveSession, ctrl: RealtimeControlMe
 		}
 		return;
 	}
-	const delivered = sendImageToLiveSession(activeSession, data, ctrl.mimeType);
-	if (ctrl.callId && activeSession.pendingCameraCalls.has(ctrl.callId)) {
+	const pendingCameraTool = !!ctrl.callId && activeSession.pendingCameraCalls.has(ctrl.callId);
+	const delivered = sendImageToLiveSession(activeSession, data, ctrl.mimeType, pendingCameraTool);
+	if (pendingCameraTool && ctrl.callId) {
 		const pending = activeSession.pendingCameraCalls.get(ctrl.callId);
 		clearPendingCameraCall(activeSession, ctrl.callId);
 		if (pending) {
@@ -770,7 +891,7 @@ function handleClientImage(activeSession: ActiveSession, ctrl: RealtimeControlMe
 	}
 }
 
-function requestCameraSnapshot(
+export function requestCameraSnapshot(
 	activeSession: ActiveSession,
 	toolCall: { id: string; name: string },
 	reason?: string,
@@ -799,8 +920,11 @@ function requestCameraSnapshot(
 
 function setupSocketHandlers(activeSession: ActiveSession) {
 	const ws = activeSession.ws;
+	if (activeSession.handlersSocket === ws) return;
+	activeSession.handlersSocket = ws;
 	
 	ws.on("message", (rawMsg, isBinary) => {
+		if (activeSession.ws !== ws) return;
 		try {
 			if (isBinary) {
 				// Binary message is [4 bytes sequence ID] [raw PCM audio frame] from client
@@ -863,12 +987,12 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 				} else if (ctrl.type === "interrupt") {
 					// Barge-in / Interrupt from client
 					if (activeSession.liveBackendSession) {
+						// The adapter emits the canonical interrupt event after cancelling upstream.
 						activeSession.liveBackendSession.interrupt();
 					} else if (activeSession.session) {
 						activeSession.session.sendRealtimeInput({ activityStart: {} });
+						sendToClient(activeSession, { type: "interrupt" }, false);
 					}
-					// Echo interrupt back to client to clear buffers immediately
-					sendToClient(activeSession, { type: "interrupt" }, false);
 				} else if (ctrl.type === "text" && ctrl.text) {
 					// Text turn from client
 					if (activeSession.liveBackendSession) {
@@ -892,6 +1016,7 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 	});
 
 	ws.on("close", () => {
+		if (activeSession.ws !== ws) return;
 		// A prior disconnect timer may still be pending if this socket churned;
 		// clear it so we keep a single grace timer, not a growing pile.
 		if (activeSession.disconnectTimeout) clearTimeout(activeSession.disconnectTimeout);
@@ -912,6 +1037,7 @@ type ReconnectContext = {
 	pendingToolResponses: Record<string, unknown>[];
 	priorSessionId: string;
 	cwd?: string;
+	activeSession?: ActiveSession;
 };
 
 // Extracted (rather than inlined in startNewSession) so the tool surface —
@@ -1025,154 +1151,95 @@ async function dispatchRealtimeToolCall(
 						}
 					}
 				} else if (call.name === "switch_session") {
-					const name = call.args?.name as string;
-					if (!name) {
-						outputText = JSON.stringify({ ok: false, error: "Missing 'name' argument" });
+					const target = call.args?.name as string | undefined;
+					const sources = await loadRealtimeTargetSources(activeSession);
+					const resolved = resolveRealtimeSessionTarget(target, sources);
+					if (!resolved.ok) {
+						outputText = JSON.stringify({
+							ok: false,
+							code: resolved.reason,
+							error: resolved.reason === "ambiguous"
+								? `Session target is ambiguous: ${target}`
+								: `Session not found: ${target || "(missing)"}`,
+							matches: resolved.candidates?.map(serializeRealtimeTarget),
+						});
 					} else {
-						const persisted = loadPersistedSessionRouting();
-
-						// Find matching sessionPath
-						let matchedPath: string | undefined;
-						let matchedName: string | undefined;
-
-						// 1. Match directly by name in registry
-						for (const [sName, sPath] of Object.entries(persisted.sessions)) {
-							if (sName.toLowerCase() === name.toLowerCase()) {
-								matchedPath = sPath;
-								matchedName = sName;
-								break;
-							}
-						}
-						// 2. Match by alias
-						if (!matchedPath) {
-							for (const [alias, sPath] of Object.entries(persisted.aliases)) {
-								if (alias.toLowerCase() === name.toLowerCase()) {
-									matchedPath = sPath;
-									matchedName = findSessionNameByPath(sPath, persisted.sessions) || alias;
-									break;
-								}
-							}
-						}
-						// 3. Match by path substring or exact path
-						if (!matchedPath) {
-							for (const sPath of Object.values(persisted.sessions)) {
-								if (sPath.toLowerCase() === name.toLowerCase() || sPath.toLowerCase().includes(name.toLowerCase())) {
-									matchedPath = sPath;
-									matchedName = findSessionNameByPath(sPath, persisted.sessions) || "path-match";
-									break;
-								}
-							}
-						}
-
-						if (!matchedPath) {
-							outputText = JSON.stringify({ ok: false, error: `Session not found: ${name}` });
-						} else {
-							// Check if running
-							const snapshots = readAttentionSnapshots();
-							const runningSession = snapshots.find(s => s.sessionPath === matchedPath);
-
-							if (runningSession) {
-								// Already running, claim leader lease
-								claimAttentionLeader(runningSession.sessionId);
-								// Update routing target
-								if (activeSession.server && typeof activeSession.server.setRoutingTarget === "function") {
-									await activeSession.server.setRoutingTarget(matchedName || matchedPath);
-								}
-								outputText = JSON.stringify({
-									ok: true,
-									message: `Switched routing target to active session: ${matchedName || matchedPath}`,
-									sessionPath: matchedPath,
-									sessionId: runningSession.sessionId,
-									active: true,
-								});
-							} else {
-								// Not running, resume it
-								if (activeSession.server && typeof activeSession.server.onSessionResume === "function") {
-									const resumeRes = await activeSession.server.onSessionResume({ sessionPath: matchedPath });
-									outputText = JSON.stringify({
-										ok: resumeRes.ok,
-										message: resumeRes.message,
-										sessionPath: matchedPath,
-										active: false,
-									});
-								} else {
-									// Fallback to manual launch
-									const inventory = discoverAgentInventoryCached();
-									const session = inventory.recent.find(s => s.path === matchedPath);
-									if (session) {
-										const executable = resolveResumeExecutable(session.provider);
-										const args = buildAgentResumeArgs(session.provider, session.sessionId || "", session.cwd);
-										if (executable && args) {
-											launchDetachedCli(executable, args, session.cwd || process.cwd(), `${session.provider} resume`);
-											outputText = JSON.stringify({
-												ok: true,
-												message: `Launching detached resume for ${session.provider} session.`,
-												sessionPath: matchedPath,
-												active: false,
-											});
-										} else {
-											outputText = JSON.stringify({
-												ok: false,
-												error: `Unable to resume session: unsupported provider ${session.provider}`,
-											});
-										}
-									} else {
-										outputText = JSON.stringify({
-											ok: false,
-											error: "Session found in routing store but not in recent resume inventory.",
-										});
-									}
-								}
-							}
-						}
+						activeSession.selectedTarget = enrichRealtimeTarget(resolved.candidate);
+						outputText = JSON.stringify({
+							ok: true,
+							message: `Selected ${realtimeTargetLabel(activeSession.selectedTarget)} for this live connection.`,
+							match: resolved.match,
+							target: serializeRealtimeTarget(activeSession.selectedTarget),
+						});
 					}
 				} else if (call.name === "get_session_info") {
 					const persisted = loadPersistedSessionRouting();
 					const snapshots = readAttentionSnapshots();
 					const lease = readAttentionLeaderLease();
-					const cwd = getCurrentCwd(activeSession);
-
+					const current = await getRealtimeCurrentTarget(activeSession);
+					const target = current.ok ? current.candidate : undefined;
 					outputText = JSON.stringify({
-						currentSession: lease?.ownerSessionId || "unknown",
-						currentCwd: cwd,
+						ok: true,
+						currentSession: target ? realtimeTargetLabel(target) : "none selected",
+						selectedForConnection: !!activeSession.selectedTarget,
+						target: serializeRealtimeTarget(target),
+						currentCwd: getCurrentCwd(activeSession),
+						attentionLeader: lease?.ownerSessionId,
 						persistedSessions: persisted.sessions,
 						persistedAliases: persisted.aliases,
-						runningSnapshots: snapshots.map(s => ({
-							sessionId: s.sessionId,
-							sessionName: s.sessionName,
-							sessionPath: s.sessionPath,
-							pid: s.pid,
-							phase: s.phase,
-							waitingForAttention: s.waitingForAttention,
+						runningSnapshots: snapshots.map((snapshot) => ({
+							sessionId: snapshot.sessionId,
+							sessionName: snapshot.sessionName,
+							sessionPath: snapshot.sessionPath,
+							pid: snapshot.pid,
+							phase: snapshot.phase,
+							waitingForAttention: snapshot.waitingForAttention,
 						})),
 					});
+				} else if (call.name === "get_realtime_capabilities") {
+					const bridge = getRealtimeBridge(activeSession);
+					outputText = JSON.stringify({
+						ok: true,
+						backend: activeSession.liveBackendKind,
+						model: activeSession.model,
+						features: {
+							fullDuplexAudio: true,
+							bargeIn: true,
+							inputTranscription: activeSession.liveBackendKind === "gemini" || resolveOpenAiInputTranscriptionModel() !== null,
+							camera: typeof activeSession.liveBackendSession?.sendImage === "function" || activeSession.liveBackendKind === "gemini",
+							tools: true,
+							nonBlockingTools: activeSession.nonBlockingEnabled,
+							sessionResumption: activeSession.liveBackendKind === "gemini",
+							sessionRead: bridge?.capabilities?.sessionRead ?? !!activeSession.server?.getSessionDashboard,
+							sessionMessage: bridge?.capabilities?.sessionMessage ?? false,
+							sessionResume: bridge?.capabilities?.sessionResume ?? false,
+							agentHubMutations: bridge?.capabilities?.agentHubMutations ?? false,
+						},
+					});
 				} else if (call.name === "list_sessions") {
-					if (activeSession.server && typeof activeSession.server.getSessionDashboard === "function") {
-						const dashboard = activeSession.server.getSessionDashboard();
-						outputText = JSON.stringify({
-							ok: true,
-							current: dashboard.current,
-							workspaces: (dashboard.workspaces || []).map((w: any) => ({
-								workspace: w.workspace,
-								sessions: w.sessions.map((s: any) => ({
-									name: s.name,
-									provider: s.provider,
-									stale: !!s.stale,
-									sessionPath: s.sessionPath,
-								})),
-							})),
-						});
-					} else {
-						outputText = JSON.stringify({ ok: false, error: "Session dashboard is not available." });
-					}
-		} else if (call.name === "launch_agent") {
+					const dashboard = getRealtimeDashboard(activeSession);
+					const sources = await loadRealtimeTargetSources(activeSession);
+					const current = await getRealtimeCurrentTarget(activeSession);
+					const candidates = buildRealtimeSessionCandidates(sources);
+					outputText = JSON.stringify({
+						ok: true,
+						current: current.ok ? serializeRealtimeTarget(current.candidate) : undefined,
+						dashboardCurrent: dashboard?.current,
+						sessions: candidates.map(serializeRealtimeTarget),
+						workspaces: dashboard?.workspaces ?? [],
+					});
+				} else if (call.name === "launch_agent") {
 			const prompt = call.args?.prompt as string | undefined;
 			const cwd = (call.args?.cwd as string | undefined) || getCurrentCwd(activeSession);
 			const hubOnly = call.args?.hubOnly as boolean | undefined;
 			const targetNode = call.args?.targetNode as string | undefined;
 			if (isNavigationalLaunch({ prompt, hubOnly, targetNode })) {
 		// Navigational only (opens the hub/dashboard); nothing mutates, so no approval needed.
-		if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
+		const bridge = getRealtimeBridge(activeSession);
+		if (bridge?.launchSession) {
+			const result = await bridge.launchSession({ prompt, cwd, hubOnly: true, targetNode });
+			outputText = JSON.stringify(result);
+		} else if (activeSession.server && typeof activeSession.server.onSessionLaunch === "function") {
 			const result = await activeSession.server.onSessionLaunch({ prompt, cwd, hubOnly: true, targetNode });
 			outputText = JSON.stringify(result);
 		} else {
@@ -1211,6 +1278,57 @@ async function dispatchRealtimeToolCall(
 			requestCommandApproval(activeSession, toolCall, { prompt: distilledPrompt, cwd, hubOnly, targetNode }, "launch_agent", description);
 		}
 			}
+				} else if (call.name === "resume_session") {
+					const requested = call.args?.target as string | undefined;
+					const sources = await loadRealtimeTargetSources(activeSession);
+					const resolved = requested
+						? resolveRealtimeSessionTarget(requested, sources)
+						: await getRealtimeCurrentTarget(activeSession);
+					if (!resolved.ok) {
+						outputText = JSON.stringify({ ok: false, code: resolved.reason, error: "Select one unambiguous session before resuming it." });
+					} else if (resolved.candidate.isCurrent || resolved.candidate.sources.includes("attention")) {
+						// UX precheck; onSessionResume re-checks at execution time to close the TOCTOU window.
+						outputText = JSON.stringify({
+							ok: false,
+							code: "session-already-active",
+							error: `${realtimeTargetLabel(resolved.candidate)} is currently running. Use send_session_message to reach an active session instead of resuming it.`,
+						});
+					} else {
+						const target = enrichRealtimeTarget(resolved.candidate);
+						deferToolResponse = true;
+						requestCommandApproval(activeSession, toolCall, { target: serializeRealtimeTarget(target) }, "resume_session", `Resume ${realtimeTargetLabel(target)}.`);
+					}
+				} else if (call.name === "send_session_message") {
+					const text = call.args?.text as string | undefined;
+					const requested = call.args?.target as string | undefined;
+					const sources = await loadRealtimeTargetSources(activeSession);
+					const resolved = requested
+						? resolveRealtimeSessionTarget(requested, sources)
+						: await getRealtimeCurrentTarget(activeSession);
+					if (!text?.trim()) {
+						outputText = JSON.stringify({ ok: false, error: "Missing 'text' argument." });
+					} else if (!resolved.ok) {
+						outputText = JSON.stringify({ ok: false, code: resolved.reason, error: "Select one unambiguous session before messaging it." });
+					} else {
+						const target = enrichRealtimeTarget(resolved.candidate);
+						deferToolResponse = true;
+						requestCommandApproval(
+							activeSession,
+							toolCall,
+							{ text, target: serializeRealtimeTarget(target) },
+							"send_session_message",
+							`Send a message to ${realtimeTargetLabel(target)}: "${text.slice(0, 160)}"`,
+						);
+					}
+				} else if (call.name === "kill_agent" || call.name === "revive_agent") {
+					const id = parseHubAgentId(call.args?.id as string | undefined);
+					if (!id) {
+						outputText = JSON.stringify({ ok: false, error: "Missing or invalid agent id." });
+					} else {
+						const kind = call.name as "kill_agent" | "revive_agent";
+						deferToolResponse = true;
+						requestCommandApproval(activeSession, toolCall, { id }, kind, `${kind === "kill_agent" ? "Archive/stop" : "Revive"} agent ${id}.`);
+					}
 				} else if (call.name === "archive_session") {
 					const sessionPath = call.args?.sessionPath as string;
 					const action = (call.args?.action as string) === "recover" ? "recover" : "archive";
@@ -1222,8 +1340,9 @@ async function dispatchRealtimeToolCall(
 						requestCommandApproval(activeSession, toolCall, { sessionPath, action }, "archive_session", description);
 					}
 				} else if (call.name === "list_agent_hub_agents") {
-					if (activeSession.server?.agentHubGateway) {
-						const snapshot = await activeSession.server.agentHubGateway.snapshot();
+					const hub = getRealtimeBridge(activeSession)?.agentHub ?? activeSession.server?.agentHubGateway;
+					if (hub) {
+						const snapshot = await hub.snapshot();
 						outputText = JSON.stringify({ ok: true, folders: snapshot.folders, agents: snapshot.agents });
 					} else {
 						outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
@@ -1234,11 +1353,14 @@ async function dispatchRealtimeToolCall(
 					const tailLines = typeof call.args?.tailLines === "number" ? call.args.tailLines : 40;
 					if (!id) {
 						outputText = JSON.stringify({ ok: false, error: `Missing or invalid 'id' argument: ${rawId ?? ""}` });
-					} else if (activeSession.server?.agentHubGateway) {
-						const detail = await activeSession.server.agentHubGateway.detail(id, Math.min(Math.max(tailLines, 1), 500));
-						outputText = detail ? JSON.stringify({ ok: true, agent: detail }) : JSON.stringify({ ok: false, error: `Unknown agent: ${id}` });
 					} else {
-						outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
+						const hub = getRealtimeBridge(activeSession)?.agentHub ?? activeSession.server?.agentHubGateway;
+						if (!hub) {
+							outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
+						} else {
+							const detail = await hub.detail(id, Math.min(Math.max(tailLines, 1), 500));
+							outputText = detail ? JSON.stringify({ ok: true, agent: detail }) : JSON.stringify({ ok: false, error: `Unknown agent: ${id}` });
+						}
 					}
 				} else if (call.name === "browse_workspace") {
 					outputText = JSON.stringify({ ok: true, workspace: listWorkspaceDirectory(call.args?.path as string | undefined) });
@@ -1319,7 +1441,7 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 				},
 				{
 					name: "switch_session",
-					description: "Resumes or switches the active workspace session to the specified session name, alias, or path.",
+					description: "Selects one OMPK session or agent for this live connection by exact id, path, name, alias, or an unambiguous fragment. Selection does not resume or mutate the target.",
 					parameters: {
 						type: "OBJECT",
 						properties: {
@@ -1338,6 +1460,11 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 						type: "OBJECT",
 						properties: {}
 					}
+				},
+				{
+					name: "get_realtime_capabilities",
+					description: "Reports the actual selected live backend and which audio, camera, session, agent, and tool features are available on this connection.",
+					parameters: { type: "OBJECT", properties: {} }
 				},
 				{
 					name: "list_sessions",
@@ -1360,6 +1487,36 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 						}
 					},
 					...(nonBlockingEnabled ? { behavior: Behavior.NON_BLOCKING } : {}),
+				},
+				{
+					name: "resume_session",
+					description: "Resumes a saved OMPK session selected with switch_session, or a named target supplied explicitly. Requires operator approval.",
+					parameters: {
+						type: "OBJECT",
+						properties: { target: { type: "STRING", description: "Optional session id, path, name, or alias. Defaults to the connection-local selection." } }
+					}
+				},
+				{
+					name: "send_session_message",
+					description: "Sends a task or follow-up message to a selected OMPK session/background agent and returns its real response. Requires operator approval.",
+					parameters: {
+						type: "OBJECT",
+						properties: {
+							text: { type: "STRING", description: "The exact message or task to send." },
+							target: { type: "STRING", description: "Optional id, path, name, or alias. Defaults to the connection-local selection." }
+						},
+						required: ["text"]
+					}
+				},
+				{
+					name: "kill_agent",
+					description: "Stops/archives one active OMPK Agent Hub agent by exact id. Requires operator approval.",
+					parameters: { type: "OBJECT", properties: { id: { type: "STRING" } }, required: ["id"] }
+				},
+				{
+					name: "revive_agent",
+					description: "Revives one archived OMPK Agent Hub agent by exact id when the live binding supports recovery. Requires operator approval.",
+					parameters: { type: "OBJECT", properties: { id: { type: "STRING" } }, required: ["id"] }
 				},
 				{
 					name: "archive_session",
@@ -1450,25 +1607,25 @@ async function startNewSession(
 	const sessionId = reconnect?.priorSessionId || ("sess_" + Date.now().toString(36) + Math.random().toString(36).substring(2, 5));
 	const resumptionHandle = reconnect?.resumptionHandle;
 
-	// Resolve the model + client before touching session state. These can throw
-	// synchronously (bad config / missing credentials); catching here prevents an
-	// unhandled rejection from crashing the whole gateway process.
+	const liveBackendKind = resolveLiveBackendKind();
 	let model: string;
-	let clientConfig: ReturnType<typeof createGeminiClient>;
-	try {
-		model = getGeminiLiveModel();
-		clientConfig = createGeminiClient(process.env, { live: true });
-	} catch (error: any) {
-		ws.close(1011, `Failed to initialize Gemini Live client: ${error?.message ?? String(error)}`);
-		return;
+	let clientConfig: ReturnType<typeof createGeminiClient> | undefined;
+	if (liveBackendKind === "gemini") {
+		try {
+			model = getGeminiLiveModel();
+			clientConfig = createGeminiClient(process.env, { live: true });
+		} catch (error: any) {
+			ws.close(1011, `Failed to initialize Gemini Live client: ${error?.message ?? String(error)}`);
+			return;
+		}
+	} else {
+		model = process.env.PI_SPEAK_OPENAI_REALTIME_MODEL?.trim() || "gpt-realtime";
 	}
-	const ai = clientConfig.ai;
-	// NON_BLOCKING function behavior is developer-API only (not supported on Vertex
-	// AI per the @google/genai FunctionDeclaration contract). On Vertex we keep the
-	// existing blocking dispatch so tool calls still resolve correctly.
-	const nonBlockingEnabled = clientConfig.backend === "developer-api";
+	// NON_BLOCKING function behavior is a Gemini Developer API capability.
+	const nonBlockingEnabled = liveBackendKind === "gemini" && clientConfig?.backend === "developer-api";
 
-	const activeSession: ActiveSession = {
+	const activeSession: ActiveSession = reconnect?.activeSession ?? {
+		reconnectToken: randomUUID(),
 		sessionId,
 		ws,
 		session: null,
@@ -1478,26 +1635,42 @@ async function startNewSession(
 		upstreamSetupComplete: false,
 		clientHandlersReady: false,
 		startSent: false,
+		reconnectingUpstream: false,
 		server,
 		terminalApprovals: createRealtimeTerminalApprovalRegistry(),
 		pendingTerminalCalls: new Map(),
 		commandApprovals: createRealtimeCommandApprovalRegistry(),
 		pendingCommandCalls: new Map(),
 		pendingCameraCalls: new Map(),
-		provider: process.env.AGENT_PROVIDER || "gemini-live",
+		provider: liveBackendKind,
 		model,
-		backend: clientConfig.backend,
+		backend: liveBackendKind === "gemini" ? (clientConfig?.backend || "developer-api") : "openai-realtime",
 		nonBlockingEnabled,
-		resumptionHandle,
+		resumptionHandle: liveBackendKind === "gemini" ? resumptionHandle : undefined,
 		cwd: reconnect?.cwd,
+		outputAudioRate: 24_000,
+		upstreamGeneration: 0,
 		pendingToolResponses: reconnect?.pendingToolResponses ?? [],
-		liveBackendKind: resolveLiveBackendKind(),
+		liveBackendKind,
 	};
+	if (reconnect?.activeSession) {
+		Object.assign(activeSession, {
+			provider: liveBackendKind,
+			model,
+			backend: liveBackendKind === "gemini" ? (clientConfig?.backend || "developer-api") : "openai-realtime",
+			nonBlockingEnabled,
+			resumptionHandle: liveBackendKind === "gemini" ? resumptionHandle : undefined,
+			pendingToolResponses: reconnect.pendingToolResponses,
+			liveBackendKind,
+			upstreamSetupComplete: false,
+			startSent: false,
+		});
+	}
 	activeSessions.set(sessionId, activeSession);
 
 
+	const upstreamGeneration = ++activeSession.upstreamGeneration;
 	const tools = buildRealtimeTools(nonBlockingEnabled);
-	const liveBackendKind = activeSession.liveBackendKind;
 
 	try {
 		if (liveBackendKind === "openai-realtime") {
@@ -1512,6 +1685,8 @@ async function startNewSession(
 					connectUrl,
 					apiKey: process.env.PI_SPEAK_OPENAI_REALTIME_KEY || process.env.OPENAI_API_KEY || undefined,
 					voice: process.env.PI_SPEAK_OPENAI_REALTIME_VOICE || undefined,
+					inputSampleRate: Number.parseInt(process.env.PI_SPEAK_OPENAI_REALTIME_INPUT_RATE || "24000", 10),
+					inputTranscriptionModel: resolveOpenAiInputTranscriptionModel(),
 					instructions: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || REALTIME_SYSTEM_PROMPT,
 				},
 				{
@@ -1520,11 +1695,16 @@ async function startNewSession(
 				},
 				{
 					onOutbound: (event) => {
+						if (upstreamGeneration !== activeSession.upstreamGeneration) return;
 						if (event.kind === "audio") {
+							if (event.sampleRate !== activeSession.outputAudioRate) {
+								activeSession.outputAudioRate = event.sampleRate;
+								sendToClient(activeSession, { type: "audio_format", rate: event.sampleRate }, false);
+							}
 							sendToClient(activeSession, event.pcm, true);
 						} else if (event.kind === "transcript") {
-							sendToClient(activeSession, { type: "transcript", text: event.text }, false);
-							if (event.final) sendToClient(activeSession, { type: "transcript_complete" }, false);
+							if (event.text) sendToClient(activeSession, { type: "transcript", text: event.text, role: event.role }, false);
+							if (event.final) sendToClient(activeSession, { type: "transcript_complete", role: event.role }, false);
 						} else if (event.kind === "interrupt") {
 							sendToClient(activeSession, { type: "interrupt" }, false);
 						} else if (event.kind === "error") {
@@ -1549,12 +1729,38 @@ async function startNewSession(
 							})();
 						} else if (event.kind === "status" && event.status === "ready") {
 							activeSession.upstreamSetupComplete = true;
+							activeSession.reconnectingUpstream = false;
+							if (activeSession.pendingToolResponses.length > 0 && activeSession.liveBackendSession?.sendToolResult) {
+								const queued = activeSession.pendingToolResponses.splice(0);
+								for (const fr of queued) {
+									const id = typeof fr.id === "string" ? fr.id : "";
+									const name = typeof fr.name === "string" ? fr.name : "";
+									if (!id || !name) continue;
+									const response = fr.response;
+									const output = response && typeof response === "object" && "output" in response
+										? String((response as { output?: unknown }).output ?? "")
+										: JSON.stringify(response ?? {});
+									try {
+									if (!activeSession.liveBackendSession.sendToolResult(id, name, output)) {
+										activeSession.pendingToolResponses.push(fr);
+									}
+									} catch {
+										activeSession.pendingToolResponses.push(fr);
+									}
+								}
+							}
 							sendLiveStartWhenReady(activeSession);
+						} else if (event.kind === "status" && event.status === "closed" && !activeSession.reconnectingUpstream) {
+							activeSessions.delete(activeSession.sessionId);
+							sendToClient(activeSession, { type: "error", message: "Realtime upstream closed; reconnect the live client." }, false);
+							if (activeSession.ws.readyState === WebSocket.OPEN) activeSession.ws.close(1011, "Realtime upstream closed");
 						}
 					},
 				},
 			);
 			activeSession.liveBackendSession = backendSession;
+			// Clear any Gemini-only resumption handle — OpenAI/HF has no equivalent.
+			activeSession.resumptionHandle = undefined;
 			// Duck-type enough of the Gemini session surface used by setupSocketHandlers / close.
 			activeSession.session = {
 				sendRealtimeInput: (payload: { media?: { data?: string }; activityStart?: object }) => {
@@ -1578,7 +1784,8 @@ async function startNewSession(
 				},
 				close: () => backendSession.close(),
 			};
-			activeSession.upstreamSetupComplete = true;
+			// Do NOT mark upstreamSetupComplete until session.created/updated → status ready.
+			// sendLiveStartWhenReady is invoked from onOutbound status=ready.
 			setupSocketHandlers(activeSession);
 			// Wire OpenAI tool calls into the same dispatch as Gemini by handling on the client socket message path is awkward;
 			// process tool calls inline here via a dedicated listener.
@@ -1594,11 +1801,12 @@ async function startNewSession(
 			return;
 		}
 
-		const geminiSession = await ai.live.connect({
+		const geminiSession = await clientConfig!.ai.live.connect({
 			model,
 			config: {
 				responseModalities: [Modality.AUDIO],
 				outputAudioTranscription: {},
+				inputAudioTranscription: {},
 				systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || REALTIME_SYSTEM_PROMPT,
 				tools: tools as any,
 				// Keep long coding sessions alive: compress context before the ~128k
@@ -1615,6 +1823,7 @@ async function startNewSession(
 					// Connection opened
 				},
 				onmessage: async (message: LiveServerMessage) => {
+					if (upstreamGeneration !== activeSession.upstreamGeneration) return;
 					if (message.setupComplete) {
 						activeSession.upstreamSetupComplete = true;
 						sendLiveStartWhenReady(activeSession);
@@ -1628,17 +1837,25 @@ async function startNewSession(
 						}
 					}
 
-					// 2. Forward transcript text updates
+					// 2. Forward role-aware input and output transcript updates.
+					const inputText = message.serverContent?.inputTranscription?.text;
+					if (inputText) {
+						sendToClient(activeSession, { type: "transcript", text: inputText, role: "user" }, false);
+					}
+					if (message.serverContent?.inputTranscription?.finished) {
+						sendToClient(activeSession, { type: "transcript_complete", role: "user" }, false);
+					}
 					const text = extractText(message);
 					if (text) {
 						sendToClient(activeSession, {
 							type: "transcript",
 							text,
+							role: "assistant",
 						}, false);
 					}
 					const outputTranscription = message.serverContent?.outputTranscription;
 					if (outputTranscription?.finished || (!outputTranscription && message.serverContent?.turnComplete)) {
-						sendToClient(activeSession, { type: "transcript_complete" }, false);
+						sendToClient(activeSession, { type: "transcript_complete", role: "assistant" }, false);
 					}
 
 					// 3. Handle model interruption/barge-in signal from server
@@ -1685,12 +1902,14 @@ async function startNewSession(
 					}
 				},
 				onerror: (event) => {
+					if (upstreamGeneration !== activeSession.upstreamGeneration) return;
 					sendToClient(activeSession, {
 						type: "error",
 						message: event.error?.message || event.message || "Gemini Live error",
 					}, false);
 				},
 				onclose: (event) => {
+					if (upstreamGeneration !== activeSession.upstreamGeneration) return;
 					activeSessions.delete(activeSession.sessionId);
 					if (activeSession.ws.readyState === WebSocket.OPEN) {
 						activeSession.ws.close(event.code || 1000, event.reason || "Gemini Live closed connection");
@@ -1738,22 +1957,46 @@ async function startNewSession(
 async function reconnectLiveSession(activeSession: ActiveSession) {
 	const ws = activeSession.ws;
 	const server = activeSession.server;
+	const kind = activeSession.liveBackendKind || resolveLiveBackendKind();
+	// OpenAI-Realtime / HF S2S has no Gemini-style resumption handle. Always do a
+	// clean upstream re-connect on the same client WS, preserving pending tool
+	// responses and cwd, but never passing a Gemini handle into the OpenAI path.
 	const reconnect: ReconnectContext = {
-		resumptionHandle: activeSession.resumptionHandle,
+		resumptionHandle: kind === "openai-realtime" ? undefined : activeSession.resumptionHandle,
 		pendingToolResponses: activeSession.pendingToolResponses,
 		priorSessionId: activeSession.sessionId,
 		cwd: activeSession.cwd,
+		activeSession,
 	};
+	activeSession.reconnectingUpstream = true;
+	try {
+		activeSession.liveBackendSession?.close();
+	} catch {}
+	activeSession.liveBackendSession = undefined;
 	try {
 		activeSession.session?.close();
 	} catch {}
 	activeSession.session = null;
+	activeSession.upstreamSetupComplete = false;
+	activeSession.startSent = false;
+	if (kind === "openai-realtime") {
+		sendToClient(activeSession, {
+			type: "reconnecting",
+			message: "OpenAI-Realtime/HF backend does not support mid-call Gemini resumption; reconnecting cleanly.",
+		}, false);
+	}
 	await startNewSession(ws, server, undefined, undefined, reconnect);
 }
 
 function resumeSession(ws: WebSocket, reconnectMsg: RealtimeControlMessage) {
 	const sessionId = reconnectMsg.session!;
-	const activeSession = activeSessions.get(sessionId)!;
+	const activeSession = activeSessions.get(sessionId);
+	if (!activeSession || reconnectMsg.reconnectToken !== activeSession.reconnectToken) {
+		ws.close(1008, "Invalid live reconnect token");
+		return;
+	}
+	const supersededSocket = activeSession.ws;
+	activeSession.reconnectToken = randomUUID();
 
 	if (activeSession.disconnectTimeout) {
 		clearTimeout(activeSession.disconnectTimeout);
@@ -1761,12 +2004,15 @@ function resumeSession(ws: WebSocket, reconnectMsg: RealtimeControlMessage) {
 	}
 
 	activeSession.ws = ws;
+	if (supersededSocket !== ws && supersededSocket.readyState === WebSocket.OPEN) {
+		supersededSocket.close(1000, "Live session resumed on another socket");
+	}
 	setupSocketHandlers(activeSession);
 
 	// Flush pending/buffered server messages that client has not yet received
 	const lastClientReceived = reconnectMsg.serverSequenceId || 0;
 	flushPendingServerMessages(activeSession, lastClientReceived);
-	sendToClient(activeSession, { type: "start", session: sessionId }, false);
+	sendToClient(activeSession, { type: "start", session: sessionId, reconnectToken: activeSession.reconnectToken }, false);
 }
 
 export async function handleRealtimeGateway(this: any, ws: WebSocket) {

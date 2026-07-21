@@ -14,11 +14,12 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
+import java.util.concurrent.ConcurrentHashMap
 interface RealtimeVoiceSessionListener {
     fun onConnected(sessionId: String)
     fun onAudioChunk(seqId: Int, pcm: ByteArray)
-    fun onTranscript(text: String)
-    fun onTranscriptComplete()
+    fun onTranscript(text: String, role: String)
+    fun onTranscriptComplete(role: String)
     fun onInterrupt()
     fun onToolStart(name: String)
     fun onToolComplete(name: String, output: String)
@@ -50,6 +51,21 @@ internal fun classifyRealtimeFailure(t: Throwable, response: Response?): Realtim
     )
 }
 
+internal fun realtimeApprovalControlType(name: String, reason: String, approved: Boolean): String {
+    val normalizedName = name.trim()
+    val normalizedReason = reason.trim().lowercase()
+    val terminal = normalizedName == "execute_terminal_command"
+        || normalizedReason == "requires_confirmation"
+        || normalizedReason == "confirm"
+        || normalizedReason == "allow"
+    return when {
+        terminal && approved -> "terminal_approve"
+        terminal -> "terminal_reject"
+        approved -> "command_approve"
+        else -> "command_reject"
+    }
+}
+
 class RealtimeVoiceSession(
     private val prefs: AppPreferences,
     private val listener: RealtimeVoiceSessionListener
@@ -69,6 +85,7 @@ class RealtimeVoiceSession(
 
     @Volatile private var webSocket: WebSocket? = null
     @Volatile private var sessionId: String? = null
+    @Volatile private var reconnectToken: String? = null
     @Volatile private var lastServerSequenceId: Int = 0
 
     private val clientSequenceCounter = AtomicInteger(0)
@@ -76,6 +93,7 @@ class RealtimeVoiceSession(
     private val reconnectAttempts = AtomicInteger(0)
 
     @Volatile private var reconnectThread: Thread? = null
+    private val pendingApprovalMetadata = ConcurrentHashMap<String, Pair<String, String>>()
 
     fun connect() {
         intentionalDisconnect.set(false)
@@ -83,7 +101,9 @@ class RealtimeVoiceSession(
         reconnectThread?.interrupt()
         reconnectThread = null
         sessionId = null
+        reconnectToken = null
         lastServerSequenceId = 0
+        pendingApprovalMetadata.clear()
         openWebSocket(isReconnect = false)
     }
 
@@ -107,6 +127,7 @@ class RealtimeVoiceSession(
                         val msg = JSONObject()
                             .put("type", "reconnect")
                             .put("session", sid)
+                            .put("reconnectToken", reconnectToken)
                             .put("serverSequenceId", lastServerSequenceId)
                         ws.send(msg.toString())
                         Log.d(TAG, "Sent reconnect for session=$sid serverSequenceId=$lastServerSequenceId")
@@ -185,14 +206,15 @@ class RealtimeVoiceSession(
                 "start" -> {
                     val sid = json.optString("session", "")
                     sessionId = sid
+                    json.optString("reconnectToken", "").takeIf { it.isNotBlank() }?.let { reconnectToken = it }
                     Log.d(TAG, "Session started: $sid serverSequenceId=$seqId")
                     listener.onConnected(sid)
                 }
                 "transcript" -> {
-                    listener.onTranscript(json.optString("text", ""))
+                    listener.onTranscript(json.optString("text", ""), json.optString("role", "assistant"))
                 }
                 "transcript_complete" -> {
-                    listener.onTranscriptComplete()
+                    listener.onTranscriptComplete(json.optString("role", "assistant"))
                 }
                 "interrupt" -> {
                     listener.onInterrupt()
@@ -210,10 +232,16 @@ class RealtimeVoiceSession(
                     )
                 }
                 "tool_approval_required" -> {
+                    val approvalId = json.optString("approvalId", "")
+                    val name = json.optString("name", "")
+                    val reason = json.optString("reason", "")
+                    if (approvalId.isNotBlank()) {
+                        pendingApprovalMetadata[approvalId] = name to reason
+                    }
                     listener.onApprovalRequired(
-                        json.optString("approvalId", ""),
+                        approvalId,
                         json.optString("command", ""),
-                        json.optString("reason", ""),
+                        reason,
                         json.optString("cwd", ""),
                         json.optInt("timeoutMs", 0)
                     )
@@ -221,6 +249,7 @@ class RealtimeVoiceSession(
                 "tool_approval_resolved" -> {
                     val approvalId = json.optString("approvalId", "")
                     if (approvalId.isNotBlank()) {
+                        pendingApprovalMetadata.remove(approvalId)
                         listener.onApprovalResolved(approvalId)
                     }
                 }
@@ -297,17 +326,27 @@ class RealtimeVoiceSession(
     }
 
     fun approveTerminal(approvalId: String) {
-        val ws = webSocket ?: return
-        val msg = JSONObject()
-            .put("type", "terminal_approve")
-            .put("approvalId", approvalId)
-        ws.send(msg.toString())
+        sendApproval(approvalId, true)
     }
 
     fun rejectTerminal(approvalId: String): Boolean {
+        return sendApproval(approvalId, false)
+    }
+
+    fun approveCommand(approvalId: String) {
+        sendApproval(approvalId, true)
+    }
+
+    fun rejectCommand(approvalId: String): Boolean {
+        return sendApproval(approvalId, false)
+    }
+
+    private fun sendApproval(approvalId: String, approved: Boolean): Boolean {
         val ws = webSocket ?: return false
+        val metadata = pendingApprovalMetadata[approvalId]
+        val type = realtimeApprovalControlType(metadata?.first ?: "", metadata?.second ?: "", approved)
         val msg = JSONObject()
-            .put("type", "terminal_reject")
+            .put("type", type)
             .put("approvalId", approvalId)
         return ws.send(msg.toString())
     }

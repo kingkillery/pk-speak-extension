@@ -1021,11 +1021,12 @@ private fun BooxCockpit(
                                         player.write(seqId, pcm)
                                     }
 
-                                    override fun onTranscript(text: String) {
-                                        transcriptBuffer.append(text)
+                                    override fun onTranscript(text: String, role: String) {
+                                        if (role != "user") transcriptBuffer.append(text)
                                     }
 
-                                    override fun onTranscriptComplete() {
+                                    override fun onTranscriptComplete(role: String) {
+                                        if (role == "user") return
                                         val completedText = transcriptBuffer.drain()
                                         if (completedText.isNotBlank()) {
                                             scope.launch {
@@ -1078,6 +1079,17 @@ private fun BooxCockpit(
                                     override fun onCameraCapture(callId: String, reason: String) {
                                         scope.launch {
                                             appendChat(state, prefs, "system", "[camera] ${reason.ifBlank { "Capturing frame…" }}")
+                                            if (!com.example.audio.CameraSnapshot.hasPermission(context)) {
+                                                try {
+                                                    (context as? android.app.Activity)?.requestPermissions(
+                                                        arrayOf(android.Manifest.permission.CAMERA),
+                                                        0xCA,
+                                                    )
+                                                } catch (_: Exception) { }
+                                                liveSessionRef.value?.sendCameraFrame(callId, "image/jpeg", "", "Camera permission required for Live snapshot")
+                                                appendChat(state, prefs, "system", "[camera] Grant CAMERA permission and ask again")
+                                                return@launch
+                                            }
                                             val owner = context as? androidx.lifecycle.LifecycleOwner
                                             val frame = if (owner != null) {
                                                 try {
@@ -1087,10 +1099,10 @@ private fun BooxCockpit(
                                                 }
                                             } else null
                                             if (frame == null) {
-                                                session.sendCameraFrame(callId, "image/jpeg", "", "Camera capture failed or permission denied")
+                                                liveSessionRef.value?.sendCameraFrame(callId, "image/jpeg", "", "Camera capture failed or permission denied")
                                                 appendChat(state, prefs, "system", "[camera] Capture failed")
                                             } else {
-                                                session.sendCameraFrame(callId, frame.mimeType, frame.base64, reason)
+                                                liveSessionRef.value?.sendCameraFrame(callId, frame.mimeType, frame.base64, reason)
                                                 appendChat(state, prefs, "system", "[camera] Frame sent")
                                             }
                                         }

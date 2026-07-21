@@ -20,9 +20,14 @@ const DEFAULT_OUTPUT = "stt_benchmark_results.json";
 const DEFAULT_ITERATIONS = 5;
 const DEFAULT_PROVIDERS = ["local", "openai", "elevenlabs"] as const;
 
-type BenchmarkSttProvider = Exclude<SttProvider, "auto"> | "google";
+type BenchmarkSttProvider = Exclude<SttProvider, "auto">;
 
-const VALID_PROVIDERS = new Set<BenchmarkSttProvider>(["local", "openai", "elevenlabs", "google"]);
+const VALID_PROVIDERS: Record<BenchmarkSttProvider, true> = {
+	local: true,
+	openai: true,
+	elevenlabs: true,
+	google: true,
+};
 
 type CliOptions = {
 	help: boolean;
@@ -184,8 +189,8 @@ function normalizeProviders(names: string[]): BenchmarkSttProvider[] {
 	const seen = new Set<BenchmarkSttProvider>();
 	for (const raw of names) {
 		const name = raw.trim().toLowerCase() as BenchmarkSttProvider;
-		if (!VALID_PROVIDERS.has(name)) {
-			throw new Error(`Unknown STT provider: ${raw}. Valid: ${[...VALID_PROVIDERS].join(", ")}`);
+		if (!VALID_PROVIDERS[name]) {
+			throw new Error(`Unknown STT provider: ${raw}. Valid: ${Object.keys(VALID_PROVIDERS).join(", ")}`);
 		}
 		if (seen.has(name)) continue;
 		seen.add(name);
