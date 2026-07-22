@@ -29,13 +29,13 @@ Pi Speak is a voice- and phone-controlled gateway around coding-agent sessions. 
 
 - **Purpose:** Authenticated HTTP API and mobile/desktop web-app host.
 - **Key exports/symbols:** Gateway server creation and handlers for `/v1/*`, static hosting for `/app/` (full remote) and `/orb/` (desktop Live companion), status/diagnostics, turn submission, routing, sessions, workspace, events, Agent Hub, live config, and web-search proxy.
-- **Driven by:** Browser/PWA, desktop orb, Android, Telegram bridge, and other HTTP clients. It validates/authenticates requests, routes turns into the extension runtime, and exposes the gateway API.
+- **Driven by:** Browser/PWA, desktop orb, Android, and other HTTP clients. It validates/authenticates requests, routes turns into the extension runtime, and exposes the mobile-app gateway API. Telegram is a separate transport in `phone-bridge.ts`, not an HTTP client of this server.
 
 ### `headless-gateway.ts`
 
 - **Purpose:** Standalone gateway process; the long-running daemon behind `pk-speak gateway`.
 - **Key exports/symbols:** Headless gateway startup and shutdown wiring, control-server startup, and standalone provider/runtime initialization.
-- **Driven by:** The CLI/service lifecycle rather than Pi's extension host. It lets phone, browser, and Android clients reach the same HTTP turn and control surface without an interactive Pi terminal.
+- **Driven by:** The CLI/service lifecycle rather than Pi's extension host. It can host the distinct Telegram bridge and mobile-app HTTP gateway against one long-lived provider runtime without merging their pairing or authentication models.
 
 ### `gemini-live-turn.ts`
 
@@ -125,7 +125,7 @@ The gateway is HTTP-based; clients use the following high-frequency routes:
 | `/v1/workspace` | Browse the configured workspace root (with file reads exposed by the workspace file variant). |
 | `/v1/events` | Tail the server-sent event stream for session and administrative updates. |
 
-Requests are authenticated with `PI_SPEAK_HTTP_TOKEN` where required. The same gateway surface serves the browser, desktop orb, Android, Telegram bridge, and standalone daemon clients.
+Mobile-app gateway requests are authenticated with `PI_SPEAK_HTTP_TOKEN` where required. Browser, desktop orb, and Android use that HTTP surface. Telegram uses bot polling and its own `/link` pairing through `phone-bridge.ts`; the standalone daemon may host both transports while keeping their credentials and client protocols separate.
 
 ## 6. Android, PWA, and desktop orb clients
 

@@ -178,6 +178,15 @@ test("pk-speak help includes speak command", async () => {
 	assert.match(stdout, /Speak examples:/);
 });
 
+test("pk-speak phone help renders distinct Telegram gateway guidance on real lines", async () => {
+	const { stdout } = await execFileAsync(process.execPath, ["dist/pk-speak.js", "phone", "--help"], {
+		cwd: process.cwd(),
+	});
+	assert.match(stdout, /Telegram transport for ompk and Agent Hub sessions/);
+	assert.match(stdout, /\nExamples:\n/);
+	assert.doesNotMatch(stdout, /\\\\n/);
+});
+
 test("pk-speak live dry-run reports gateway and desktop plans", async () => {
 	const { stdout } = await execFileAsync(process.execPath, [
 		"dist/pk-speak.js",

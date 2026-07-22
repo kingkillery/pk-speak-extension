@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyPiSpeakSetupConfig, buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret } from "./setup-config.js";
+import { applyPiSpeakSetupConfig, buildPiSpeakEnv, getPiSpeakSetupConfigPath, loadPiSpeakSetupConfig, maskSecret, savePiSpeakSetupConfig } from "./setup-config.js";
 import { getAudioMimeType, resolveTtsProvider, sanitizeForSpeech, synthesizeToFile, type TtsProvider } from "./tts.js";
 import { transcribeAudioBuffer } from "./stt.js";
 import { runGeminiTextTurn } from "./gemini-live-turn.js";
@@ -198,6 +198,18 @@ async function main() {
 		printConfig();
 		return;
 	}
+	if (command === "phone" || command === "telegram") {
+		if (wantsHelp) {
+			printPhoneHelp();
+			return;
+		}
+		if (dryRun) {
+			printPhoneDryRun();
+			return;
+		}
+		await runPhoneCommand(stripMetaFlags(commandArgv));
+		return;
+	}
 	console.error(`Unknown pk-speak command: ${command}`);
 	printHelp();
 	process.exitCode = 1;
@@ -221,6 +233,7 @@ function printHelp() {
 		"  mobile      Print the Android setup/download QR (--dry-run)",
 		"  admin       Open the sessions admin pane (--dry-run)",
 		"  config      Show the saved setup profile path and masked values (--dry-run)",
+		"  phone       Configure or control Telegram pairing for the gateway (--dry-run)",
 		"  help        Show this help",
 		"",
 		"--dry-run support:",
@@ -302,6 +315,76 @@ function printDoctorHelp() {
 		"  pk-speak doctor --dry-run",
 		"  pk-speak doctor",
 	].join("\n"));
+}
+
+function printPhoneHelp() {
+	console.log([
+		"Usage: pk-speak phone [status|on|off|code|unpair]",
+		"       pk-speak phone token <bot-token>",
+		"",
+		"Stores the Telegram bot token in the local Pi Speak setup profile, then controls",
+		"the daemon-hosted Telegram transport for ompk and Agent Hub sessions.",
+		"",
+		"Examples:",
+		"  pk-speak phone token 123456:ABC...",
+		"  pk-speak phone code",
+		"  pk-speak phone status",
+	].join("\n"));
+}
+
+function printPhoneDryRun() {
+	console.log("dry-run: pk-speak phone");
+	console.log("Would save a supplied Telegram bot token to the local setup profile, or call the local gateway phone action.");
+	console.log("Would not send Telegram requests, start the bridge, or expose the token.");
+}
+
+async function runPhoneCommand(commandArgv: string[]) {
+	const [rawAction = "status", ...rest] = commandArgv;
+	const action = rawAction.toLowerCase();
+	if (action === "token") {
+		const token = rest.join(" ").trim();
+		if (!token) throw new Error("Usage: pk-speak phone token <bot-token>");
+		const config = loadPiSpeakSetupConfig();
+		savePiSpeakSetupConfig({ ...config, telegramBotToken: token });
+		console.log("Telegram bot token saved. Starting the pairing bridge on the local gateway...");
+		const result = await callGatewayPhoneAction("on");
+		console.log(result.message);
+		return;
+	}
+	if (!["status", "on", "off", "code", "unpair"].includes(action)) {
+		throw new Error("Usage: pk-speak phone [status|on|off|code|unpair] or pk-speak phone token <bot-token>");
+	}
+	const result = await callGatewayPhoneAction(action as "on" | "off" | "status" | "code" | "unpair");
+	console.log(result.message);
+}
+
+async function callGatewayPhoneAction(action: "on" | "off" | "status" | "code" | "unpair") {
+	const config = loadPiSpeakSetupConfig();
+	const configuredPort = config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767";
+	const host = process.env.PI_SPEAK_HTTP_HOST || "127.0.0.1";
+	const token = config.httpToken || process.env.PI_SPEAK_HTTP_TOKEN || "";
+	// Older tray installs used 8768 while current setup defaults to 8767. Probe
+	// only a Pi Speak gateway health route before sending an authenticated action.
+	const ports = [...new Set([configuredPort, "8767", "8768"])];
+	const failures: string[] = [];
+	for (const port of ports) {
+		try {
+			const health = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(1_500) });
+			const healthPayload = await health.json() as { ok?: boolean; app?: string; role?: string };
+			if (!health.ok || healthPayload.app !== "pi-speak" || healthPayload.role !== "gateway") continue;
+			const response = await fetch(`http://${host}:${port}/v1/phone/${action}`, {
+				method: action === "status" ? "GET" : "POST",
+				headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+				signal: AbortSignal.timeout(10_000),
+			});
+			const payload = await response.json() as { ok?: boolean; message?: string };
+			if (!response.ok || !payload.ok) throw new Error(payload.message || `Gateway returned ${response.status}.`);
+			return { message: payload.message || "Phone action completed." };
+		} catch (error) {
+			failures.push(`${port}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	throw new Error(`Could not reach a Pi Speak gateway at ${host} (tried ${ports.join(", ")}). ${failures.at(-1) || ""}`.trim());
 }
 
 function printConfigHelp() {
@@ -508,6 +591,7 @@ function printConfig() {
 	console.log(`ElevenLabs key: ${maskSecret(config.elevenLabsApiKey)}`);
 	console.log(`OpenAI audio key: ${maskSecret(config.openAiKey)}`);
 	console.log(`Gateway token: ${maskSecret(config.httpToken)}`);
+	console.log(`Telegram bot token: ${maskSecret(config.telegramBotToken)}`);
 }
 
 function describeSecretSource(envName: string, configValue?: string) {

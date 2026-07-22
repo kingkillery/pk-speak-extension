@@ -116,6 +116,20 @@ This is the easiest remote path. It works well when you want reliability more th
 
 `/phone setup` prints the running-session setup steps. If the token is not already in the environment, paste it with `/phone token <bot-token>`; the extension saves it, starts the bridge, and prints the `/link` code. `PI_SPEAK_TELEGRAM_BOT_TOKEN` can still point to an existing bot you already control.
 
+Pi Speak has two distinct phone-facing gateway surfaces:
+
+- The **Telegram gateway** in `phone-bridge.ts` owns bot polling, `/link` pairing, and Telegram text/voice session control.
+- The **Pi Speak mobile-app gateway** in `control-server.ts` owns the authenticated HTTP API, browser/PWA, Android app, and APK download.
+
+They remain separate transports and pairing models even when the persistent `pk-speak gateway` daemon hosts both against the same ompk / Agent Hub runtime. To configure the persistent Telegram surface rather than an in-terminal Pi session:
+
+```text
+pk-speak phone token <bot-token>
+pk-speak phone code
+```
+
+The Telegram surface stores its bot credential and pairing state in the local setup profile and starts its poller automatically when configured. The mobile-app surface continues to use its own HTTP token and machine profile. Use `pk-speak phone status`, `off`, or `unpair` to inspect or revoke only the Telegram bridge.
+
 ### 4. Remote In From Your Phone With The Built-In Web App
 
 ```text

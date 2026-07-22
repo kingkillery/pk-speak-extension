@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { applyPiSpeakSetupConfig, getPiSpeakSetupConfigPath, savePiSpeakSetupConfig, CURRENT_PI_SPEAK_CONFIG_SCHEMA_VERSION } = await import("../dist/setup-config.js");
+const { applyPiSpeakSetupConfig, getPiSpeakSetupConfigPath, resolveTelegramBotToken, savePiSpeakSetupConfig, CURRENT_PI_SPEAK_CONFIG_SCHEMA_VERSION } = await import("../dist/setup-config.js");
 
 /**
  * The interactive orb default shipped after this change must not be defeated by
@@ -78,6 +78,22 @@ test("a current-schema persisted 'immediate' is preserved (deliberate re-opt-in 
 		if (previous === undefined) delete process.env.PI_SPEAK_CONFIG_DIR;
 		else process.env.PI_SPEAK_CONFIG_DIR = previous;
 		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a saved Telegram token resolves for the Telegram gateway without leaking its secret or pairing state into env", () => {
+	const config = {
+		telegramBotToken: "123456:telegram-test-token",
+		phoneState: { linkCode: "123456", linkedChatId: "42" },
+	};
+	const { env, cleanup } = loadConfigIntoEnv(config);
+	try {
+		assert.equal(env.PI_SPEAK_TELEGRAM_BOT_TOKEN, undefined);
+		assert.equal(resolveTelegramBotToken(env, config), "123456:telegram-test-token");
+		assert.equal(env.linkCode, undefined);
+		assert.equal(env.linkedChatId, undefined);
+	} finally {
+		cleanup();
 	}
 });
 

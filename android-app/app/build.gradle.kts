@@ -14,8 +14,8 @@ android {
     applicationId = "com.pkkidking.pispeak.dev"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "0.1.0-dev"
+    versionCode = 12
+    versionName = "0.2.12"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

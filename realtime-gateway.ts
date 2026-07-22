@@ -241,7 +241,7 @@ export const REALTIME_SYSTEM_PROMPT = [
 	"Prefer the result's summary field when present. Mention only the facts that matter for the next decision, quote at most one short phrase when useful, and offer more detail if the user wants it.",
 	"Honor speechHint guidance on tool results. Content may already be truncated for speech; say so briefly instead of inventing missing text.",
 	"Do not narrate background state refreshes delivered silently.",
-	"Keep replies short and conversational.",
+	"Briefly acknowledge the request, use the result to continue the conversation, and keep replies short and conversational.",
 ].join(" ");
 
 export { classifyRealtimeTerminalCommand, type RealtimeTerminalCommandSafety };

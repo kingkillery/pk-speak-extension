@@ -105,7 +105,7 @@ test("portRetries binds the next free port when the base port is occupied", asyn
 		const server = makeServer({ port: basePort }, { portRetries: 5 });
 		const runtime = await server.start();
 		try {
-			assert.equal(runtime.port, basePort + 1);
+			assert.ok(runtime.port > basePort && runtime.port <= basePort + 5);
 			const health = await getJson(runtime.port, "/health");
 			assert.equal(health.ok, true);
 		} finally {

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { spawnDetached } from "../dist/spawn-shim.js";
 import { buildOhMyPiLaunchArgv } from "../dist/agent-hub-actions.js";
@@ -53,12 +54,13 @@ test("spawnDetached passes arguments literally without shell interpretation", as
 		// arriving as a single literal element.
 		const script = "require('fs').writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))";
 		const child = spawnDetached(process.execPath, ["-e", script, outFile, evil], tmp);
-		child.on("error", (err) => assert.fail(err));
+		const childExited = once(child, "exit");
 		// The child is detached, so poll for its output rather than trusting the
 		// parent-side "close" event (which can fire before the file is flushed).
 		await waitForFile(outFile);
 		const received = JSON.parse(readFileSync(outFile, "utf8"));
 		assert.deepEqual(received, [evil]);
+		await childExited;
 	} finally {
 		// The detached child keeps `tmp` as its cwd briefly after writing the
 		// file, so a bare rmSync can hit EPERM on Windows. Retry instead.

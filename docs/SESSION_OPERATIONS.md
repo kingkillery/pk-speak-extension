@@ -21,7 +21,64 @@ This is the focused operator guide for `/sess` in `pi-speak-pk`. `/sess` is how 
 /sess export
 /sess ui
 /sess ui open
+/sess bundle voice-work --note needs Chrome open with the dev profile
+/sess bundle list
+/sess bundle rm voice-work
+/sess send mac-mini voice-work
+/sess pickup
+/sess import voice-work --cwd /Users/k/dev/proj --git
 ```
+
+## Transfer sessions between hosts (pickup from anywhere)
+
+A session bundle is a single portable JSON file carrying everything a session needs to continue on another machine:
+
+- the full session transcript (JSONL)
+- its routing name and wake aliases
+- workspace git state: origin remote, branch, HEAD commit, the uncommitted diff as a binary patch, and the *names* of untracked files (contents never travel, so secrets stay put)
+- an optional operator note for environment expectations that cannot travel — e.g. "agentic browser tests expect Chrome open with the dev profile"
+
+### Save and list
+
+```text
+/sess bundle                       # bundle the current session under its name
+/sess bundle voice-work            # bundle a named session
+/sess bundle voice-work --note needs Chrome open
+/sess bundle list
+/sess bundle rm voice-work
+```
+
+Bundles live in `~/.pi-speak/session-bundles/<name>.pi-session.json`. This doubles as a local save/restore surface: `/sess bundle` is "save state", `/sess import <name>` is "restore".
+
+### Move between hosts
+
+Over ssh (the remote needs a POSIX shell for `mkdir -p`; pre-create `~/.pi-speak/session-inbox` on Windows remotes):
+
+```text
+/sess send mac-mini voice-work     # ssh mkdir + scp into mac-mini:~/.pi-speak/session-inbox/
+```
+
+then on the other host:
+
+```text
+/sess pickup                       # import every bundle waiting in the inbox
+```
+
+Any other transport works too — scp the bundle file by hand, drop it in a synced folder, or commit it to a git repo — then `/sess import <file>`.
+
+### Import
+
+```text
+/sess import voice-work
+/sess import voice-work --cwd /Users/k/dev/proj
+/sess import voice-work --cwd /Users/k/dev/proj --git
+```
+
+Import writes the transcript into pi's per-cwd session directory (header cwd rewritten to the target workspace), registers the routing name (suffixing `-imported` on conflicts), and re-adds wake aliases that don't collide with existing routes — the `one`/`two` compact-lane families are never stolen. Resume with `/sess switch <name>`.
+
+Without `--git`, the import prints the exact git commands needed to recreate a missing workspace. With `--git` it does the work: clones from the bundle's remote when the target cwd is missing, checks out the bundle's branch/commit, and applies the carried uncommitted diff with `git apply --3way` — but only onto a clean tree; local work is never overwritten.
+
+The one thing a bundle cannot carry is the live environment itself. Whatever you record with `--note` (open browsers, running emulators, logged-in profiles) is surfaced verbatim on import as a checklist reminder.
 
 ## What `/sess` shows
 

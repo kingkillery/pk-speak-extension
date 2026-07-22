@@ -1,6 +1,6 @@
 {
   "name": "pk-speak",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "type": "module",
   "description": "Desktop setup and phone gateway CLI for conversational coding agents.",
   "keywords": [
@@ -52,7 +52,7 @@
     "verify": "npm run typecheck && npm run test:parallel && npm run test:stress && npm run test:coverage",
     "test": "npm run build && npm run build:ui && node --test tests/*.test.mjs",
     "test:parallel": "npm run build && npm run build:ui && node --test --test-concurrency=4 tests/*.test.mjs",
-    "test:coverage": "npm run build && npm run build:ui && c8 --reporter=text --reporter=lcov --include='dist/**/*.js' node --test tests/*.test.mjs",
+    "test:coverage": "npm run build && npm run build:ui && c8 --reporter=text --reporter=lcov --include='dist/**/*.js' node --test --test-concurrency=1 tests/*.test.mjs",
     "test:stress": "npm run build && npm run build:ui && node --test tests/stress-adversarial.test.mjs",
     "test:realtime-live": "npm run build && npm run build:ui && node --experimental-test-module-mocks --test tests/integration/*.test.mjs",
     "prepublishOnly": "npm run build && npm run build:ui",

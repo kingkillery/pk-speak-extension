@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type RemoteSlashCommand, type SessionResumePayload } from "./control-server.js";
-import { applyPiSpeakSetupConfig } from "./setup-config.js";
+import { applyPiSpeakSetupConfig, loadPiSpeakSetupConfig, resolveTelegramBotToken, savePiSpeakSetupConfig } from "./setup-config.js";
+import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { createInitialAgentProviders, createOmpResumeProvider, createTurnAgentProvider } from "./agent-provider-factory.js";
 import {
@@ -45,6 +46,123 @@ const state = {
 	authToken: process.env.PI_SPEAK_HTTP_TOKEN || "",
 	role: "gateway" as const,
 };
+
+// The headless gateway is the long-lived remote surface used by ompk and the
+// Agent Hub. Keep its Telegram pairing state outside of a short-lived Pi TUI
+// session so a bot never silently polls a different, inactive runtime.
+let phoneState: PhoneBridgeState = {
+	...loadPiSpeakSetupConfig().phoneState,
+	enabled: false,
+};
+let phoneBridge: TelegramPhoneBridge | undefined;
+
+function getTelegramBotToken() {
+	return resolveTelegramBotToken();
+}
+
+function syncPhoneState(patch: Partial<PhoneBridgeState>, persist = false) {
+	phoneState = { ...phoneState, ...patch };
+	if (!persist) return;
+	const { botToken: _ignoredBotToken, ...persistedPhoneState } = phoneState;
+	const config = loadPiSpeakSetupConfig();
+	savePiSpeakSetupConfig({ ...config, phoneState: persistedPhoneState });
+}
+
+function getPhoneStatus() {
+	const runtime = phoneBridge?.getStatus();
+	return {
+		enabled: phoneState.enabled,
+		linkedChatId: runtime?.linkedChatId || phoneState.linkedChatId,
+		linkCode: runtime?.linkCode || phoneState.linkCode,
+		lastPollAt: runtime?.lastPollAt || phoneState.lastPollAt,
+		consecutivePollFailures: runtime?.consecutivePollFailures ?? phoneState.consecutivePollFailures ?? 0,
+		lastError: runtime?.lastError || phoneState.lastError,
+	};
+}
+
+function getPhoneStatusText() {
+	const phone = getPhoneStatus();
+	if (!getTelegramBotToken()) return "Telegram is not configured. Set a bot token with pk-speak phone token <bot-token>.";
+	return [
+		`Phone bridge ${phone.enabled ? "running" : "stopped"}.`,
+		phone.linkedChatId ? "Phone is linked." : `Awaiting link code ${phone.linkCode || "unknown"}.`,
+		phone.lastPollAt ? `Last Telegram poll: ${new Date(phone.lastPollAt).toLocaleTimeString()}.` : "Last Telegram poll: none.",
+		phone.consecutivePollFailures ? `Telegram poll failures: ${phone.consecutivePollFailures}.` : "Telegram poll failures: 0.",
+		phone.lastError ? `Last phone error: ${phone.lastError}.` : "",
+	].filter(Boolean).join(" ");
+}
+
+async function startPhoneBridge() {
+	const token = getTelegramBotToken();
+	if (!token) return false;
+	if (!phoneBridge) {
+		phoneBridge = new TelegramPhoneBridge({
+			token,
+			state: phoneState,
+			getStatusText: getPhoneStatusText,
+			onStateChange: (patch) => {
+				// Poll timestamps and update cursors change continuously. Persist only
+				// durable pairing/security transitions, not each 25-second long poll.
+				const persistentKeys: Array<keyof PhoneBridgeState> = [
+					"enabled", "linkedChatId", "linkCode", "lastError", "linkAttempts", "linkLockoutUntil", "linkCodeIssuedAt",
+				];
+				const shouldPersist = persistentKeys.some((key) =>
+					Object.prototype.hasOwnProperty.call(patch, key) && patch[key] !== phoneState[key],
+				);
+				syncPhoneState(patch, shouldPersist);
+			},
+			onTextTurn: (text) => remoteTurnManager.enqueue(
+				"telegram-text",
+				() => runTextTurn(text, true, undefined, undefined, undefined, undefined, undefined, "telegram"),
+			),
+			onVoiceBuffer: (buffer, mimeType) => remoteTurnManager.enqueue(
+				"telegram-voice",
+				() => runVoiceTurn(buffer, mimeType, true, undefined, undefined, undefined, undefined, "telegram"),
+			),
+		});
+	}
+	phoneBridge.start();
+	const runtime = phoneBridge.getStatus();
+	syncPhoneState({
+		enabled: true,
+		linkedChatId: runtime.linkedChatId,
+		linkCode: runtime.linkCode,
+		lastUpdateId: runtime.lastUpdateId,
+	}, true);
+	return true;
+}
+
+async function stopPhoneBridge() {
+	if (phoneBridge) {
+		await phoneBridge.stop().catch(() => {});
+		phoneBridge = undefined;
+	}
+	syncPhoneState({ enabled: false }, true);
+}
+
+async function handlePhoneAction(action: "on" | "off" | "status" | "code" | "unpair"): Promise<ControlActionResult> {
+	if (action === "on") {
+		const started = await startPhoneBridge();
+		return { ok: started, message: getPhoneStatusText(), phone: getPhoneStatus() };
+	}
+	if (action === "off") {
+		await stopPhoneBridge();
+		return { ok: true, message: "Phone bridge stopped.", phone: getPhoneStatus() };
+	}
+	if (action === "status") return { ok: true, message: getPhoneStatusText(), phone: getPhoneStatus() };
+	if (action === "code") {
+		const started = await startPhoneBridge();
+		if (!started || !phoneBridge) return { ok: false, message: getPhoneStatusText(), phone: getPhoneStatus() };
+		return { ok: true, message: `Send /link ${phoneBridge.getStatus().linkCode} to your Telegram bot to pair this phone.`, phone: getPhoneStatus() };
+	}
+	if (!phoneBridge) {
+		syncPhoneState({ linkedChatId: undefined, linkCode: undefined }, true);
+		return { ok: true, message: "Phone bridge is not running. Start it with /phone on to get a new link code.", phone: getPhoneStatus() };
+	}
+	const linkCode = phoneBridge.resetLink();
+	syncPhoneState({ linkedChatId: undefined, linkCode }, true);
+	return { ok: true, message: `Phone unpaired. New link code: ${linkCode}.`, phone: getPhoneStatus() };
+}
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
@@ -117,7 +235,7 @@ function status(): ControlServerStatus {
 		},
 		speak: { enabled: false, configuredProvider: "auto", provider: "tray", rewriteEnabled: false, phase: "standby" },
 		mono: { running: false, voiceInputActive: false, keepAliveSeconds: 0, status: "off" },
-		phone: { enabled: false, consecutivePollFailures: 0 },
+		phone: getPhoneStatus(),
 		remote: {
 			enabled: true,
 			host: state.host,
@@ -946,7 +1064,7 @@ server = new ControlServer({
 	},
 	onMonoAction: (action) => ok(`Mono ${action} is unavailable in tray gateway mode.`),
 	onSpeakAction: (action) => ok(`Speak ${action} is unavailable in tray gateway mode.`),
-	onPhoneAction: (action) => ok(`Phone ${action} is unavailable in tray gateway mode.`),
+	onPhoneAction: handlePhoneAction,
 	getSlashCommands: () => HEADLESS_SLASH_COMMANDS,
 	onTextTurn: async (text, includeAudio, target, cwd, _mode, agentProvider, model, clientKey) =>
 		remoteTurnManager.enqueue("http-text", () => runTextTurn(text, includeAudio, cwd, undefined, target, agentProvider, model, clientKey)),
@@ -1100,6 +1218,11 @@ ${text}
 });
 
 Promise.resolve(provider.start?.())
+	.then(async () => {
+		// A configured gateway owns the bot lifecycle. This is what makes a
+		// Telegram link code target the same ompk/Agent Hub process as the app.
+		if (getTelegramBotToken()) await startPhoneBridge();
+	})
 	.then(() => server.start())
 	.then((runtime) => {
 		console.log(`Pi Speak headless gateway listening on ${runtime.host}:${runtime.port} with ${provider.name}`);
@@ -1134,7 +1257,9 @@ process.on("SIGINT", () => shutdown());
 process.on("SIGTERM", () => shutdown());
 
 function shutdown() {
-	Promise.resolve(provider.stop?.())
+	Promise.resolve(stopPhoneBridge())
+		.catch(() => {})
+		.then(() => provider.stop?.())
 		.catch(() => {})
 		.then(() => shutdownLocalSttWorker())
 		.catch(() => {})

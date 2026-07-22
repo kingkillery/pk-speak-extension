@@ -42,7 +42,24 @@ import { discoverAgentInventoryCached, discoverOpenAgentTargetsCached, resolveWi
 import { handleRealtimeGateway } from "./realtime-gateway.js";
 import { openDesktopLiveClient } from "./desktop-live-client.js";
 import { canonicalRealtimeSessionPath } from "./realtime-session-target.js";
-import { buildSessionWorkingDirectoryMap } from "./session-working-directory.js";
+import { buildSessionWorkingDirectoryMap, readSessionWorkingDirectory } from "./session-working-directory.js";
+import {
+	applySessionImport,
+	buildSendCommands,
+	createSessionBundle,
+	getSessionBundleDir,
+	getSessionInboxDir,
+	listInboxBundleFiles,
+	listStoredBundles,
+	parseSessionBundle,
+	planSessionImport,
+	removeStoredBundle,
+	resolveBundleSource,
+	restoreGitWorkspace,
+	runSendCommands,
+	saveBundleToStore,
+	type SessionBundle,
+} from "./session-transfer.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { PiAgentProvider } from "./pi-agent-provider.js";
@@ -1254,7 +1271,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getSessCompletions = (prefix: string) => {
 		const trimmed = prefix.trimStart();
 		const complete = (value: string, label = value) => ({ value, label });
-		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "launch", "list", "name", "wake", "slots", "ui", "export"];
+		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "launch", "list", "name", "wake", "slots", "ui", "export", "bundle", "import", "send", "pickup"];
 		if (!trimmed) return top.map((value) => complete(value));
 		const firstSpace = trimmed.indexOf(" ");
 		if (firstSpace === -1) return top.filter((value) => value.startsWith(trimmed.toLowerCase())).map((value) => complete(value));
@@ -3420,6 +3437,97 @@ export default function speakExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	const buildSessionBundleForTarget = (
+		nameArg: string,
+		ctx: { sessionManager: { getSessionFile: () => string | undefined } },
+		note?: string,
+	): { error: string } | { bundle: SessionBundle; bundlePath: string; warnings: string[] } => {
+		let sessionPath: string | undefined;
+		let name: string;
+		if (nameArg) {
+			const match = resolveSessionByName(nameArg);
+			if (!match) return { error: `Session "${nameArg}" not found. Known: ${getKnownTargetsText()}` };
+			sessionPath = match.sessionPath;
+			name = match.sessionName || nameArg;
+		} else {
+			sessionPath = ctx.sessionManager.getSessionFile();
+			name = pi.getSessionName() || "current";
+		}
+		if (!sessionPath) return { error: "No active session file to bundle. Name one with /sess bundle <name>." };
+		if (sessionPath.startsWith("pending:")) return { error: `Session "${name}" has no session file yet. Send it a first message, then bundle it.` };
+		const cwd = readSessionWorkingDirectory(sessionPath) || process.cwd();
+		const aliases = Object.entries(sessionWakeAliases)
+			.filter(([, path]) => path === sessionPath)
+			.map(([alias]) => alias);
+		try {
+			const { bundle, warnings } = createSessionBundle({ name, aliases, sessionPath, cwd, note });
+			const bundlePath = saveBundleToStore(bundle);
+			return { bundle, bundlePath, warnings };
+		} catch (error) {
+			return { error: `Could not bundle session ${name}: ${error instanceof Error ? error.message : String(error)}` };
+		}
+	};
+
+	const importSessionBundleFile = (
+		bundleFilePath: string,
+		opts: { targetCwd?: string; applyGit?: boolean },
+		source: SessionEventSource,
+	): { ok: boolean; lines: string[] } => {
+		let text: string;
+		try {
+			text = readFileSync(bundleFilePath, "utf8");
+		} catch (error) {
+			return { ok: false, lines: [`Could not read bundle ${bundleFilePath}: ${error instanceof Error ? error.message : String(error)}`] };
+		}
+		const parsed = parseSessionBundle(text);
+		if (!parsed.bundle) return { ok: false, lines: [`Invalid bundle ${bundleFilePath}: ${parsed.error}`] };
+		const bundle = parsed.bundle;
+		const plan = planSessionImport(bundle, { targetCwd: opts.targetCwd });
+		let applied: { sessionPath: string; cwdRewritten: boolean };
+		try {
+			applied = applySessionImport(bundle, plan);
+		} catch (error) {
+			return { ok: false, lines: [`Could not write imported session: ${error instanceof Error ? error.message : String(error)}`] };
+		}
+		const lines: string[] = [`Imported session "${bundle.name}" from ${bundle.host.hostname} -> ${applied.sessionPath}`];
+		if (!applied.cwdRewritten) lines.push("Warning: session header cwd could not be rewritten; pi may list this session under its original workspace.");
+		let registeredName = bundle.name;
+		let named = setNamedSession(sessionRegistry, registeredName, applied.sessionPath);
+		if (!named.ok) {
+			registeredName = `${bundle.name}-imported`;
+			named = setNamedSession(sessionRegistry, registeredName, applied.sessionPath);
+		}
+		if (named.ok) {
+			sessionRegistry = named.sessions;
+			persistSessionRegistry();
+			lines.push(`Routing name: ${registeredName} — resume with /sess switch ${registeredName}`);
+		} else {
+			lines.push(`Could not register routing name "${bundle.name}": ${named.error}`);
+		}
+		const registeredAliases: string[] = [];
+		for (const alias of bundle.aliases) {
+			if (getWakeAliasConflictText(alias, applied.sessionPath)) continue;
+			const nextAlias = setWakeAlias(sessionWakeAliases, alias, applied.sessionPath);
+			sessionWakeAliases = nextAlias.aliases;
+			registeredAliases.push(nextAlias.alias);
+		}
+		if (registeredAliases.length > 0) {
+			persistSessionWakeAliases();
+			lines.push(`Wake aliases: ${registeredAliases.join(", ")}`);
+		}
+		if (opts.applyGit) {
+			const restore = restoreGitWorkspace(bundle, plan.targetCwd);
+			for (const step of restore.steps) lines.push(`git: ${step}`);
+			for (const warning of restore.warnings) lines.push(`git warning: ${warning}`);
+		} else {
+			if (plan.workspace === "missing") lines.push(`Workspace ${plan.targetCwd} is missing on this host.`);
+			for (const advice of plan.gitAdvice) lines.push(`  ${advice}`);
+		}
+		for (const warning of plan.warnings) lines.push(warning);
+		appendSessionEvent("sess.import", source, { name: registeredName, path: applied.sessionPath, from: bundleFilePath });
+		return { ok: true, lines };
+	};
+
 	const handleSessCommand = async (args: string, ctx: any, source: SessionEventSource = "command") => {
 			lastCtx = ctx;
 			reloadSessionRoutingIfExternallyChanged();
@@ -3785,7 +3893,153 @@ export default function speakExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|launch|list|name|wake|slots|ui|export] <args>", "error");
+			if (sub === "bundle") {
+				const bundleSub = (parts[1] || "").toLowerCase();
+				if (bundleSub === "list" || bundleSub === "ls") {
+					const bundles = listStoredBundles();
+					if (bundles.length === 0) {
+						ctx.ui.notify(`No saved session bundles in ${getSessionBundleDir()}.`, "info");
+						return;
+					}
+					ctx.ui.notify(
+						bundles
+							.map((entry) => `${entry.name} — from ${entry.host}, cwd ${entry.cwd}${entry.hasGit ? ", git" : ""}${entry.note ? `, note: ${entry.note}` : ""}`)
+							.join("\n"),
+						"info",
+					);
+					return;
+				}
+				if (bundleSub === "rm" || bundleSub === "remove") {
+					const target = parts.slice(2).join(" ").trim();
+					if (!target) {
+						ctx.ui.notify("Usage: /sess bundle rm <name>", "error");
+						return;
+					}
+					if (removeStoredBundle(target)) ctx.ui.notify(`Removed bundle ${target}.`, "info");
+					else ctx.ui.notify(`No bundle named ${target}.`, "error");
+					return;
+				}
+				const noteIndex = parts.indexOf("--note");
+				const note = noteIndex >= 0 ? parts.slice(noteIndex + 1).join(" ").trim() || undefined : undefined;
+				const nameArg = (noteIndex >= 0 ? parts.slice(1, noteIndex) : parts.slice(1)).join(" ").trim();
+				const built = buildSessionBundleForTarget(nameArg, ctx, note);
+				if ("error" in built) {
+					ctx.ui.notify(built.error, "error");
+					return;
+				}
+				appendSessionEvent("sess.bundle", source, { name: built.bundle.name, path: built.bundlePath });
+				ctx.ui.notify(
+					[
+						`Bundled "${built.bundle.name}" -> ${built.bundlePath}`,
+						"Move it to another host with /sess send <ssh-host>, scp, or a synced folder, then run /sess import there.",
+						...built.warnings,
+					].join("\n"),
+					"info",
+				);
+				return;
+			}
+
+			if (sub === "import") {
+				const flagParts = parts.slice(1);
+				let targetCwd: string | undefined;
+				let applyGit = false;
+				const positional: string[] = [];
+				for (let i = 0; i < flagParts.length; i += 1) {
+					const part = flagParts[i];
+					if (part === "--git") {
+						applyGit = true;
+						continue;
+					}
+					if (part === "--cwd") {
+						const cwdTokens: string[] = [];
+						while (i + 1 < flagParts.length && !flagParts[i + 1].startsWith("--")) {
+							i += 1;
+							cwdTokens.push(flagParts[i]);
+						}
+						targetCwd = cwdTokens.join(" ").trim() || undefined;
+						continue;
+					}
+					positional.push(part);
+				}
+				const bundleArg = positional.join(" ").trim();
+				if (!bundleArg) {
+					ctx.ui.notify("Usage: /sess import <bundle-file-or-name> [--cwd <path>] [--git]", "error");
+					return;
+				}
+				const bundleFile = resolveBundleSource(bundleArg);
+				if (!bundleFile) {
+					ctx.ui.notify(`No bundle "${bundleArg}" found as a file, in ${getSessionBundleDir()}, or in ${getSessionInboxDir()}. Use /sess bundle list.`, "error");
+					return;
+				}
+				const result = importSessionBundleFile(bundleFile, { targetCwd, applyGit }, source);
+				ctx.ui.notify(result.lines.join("\n"), result.ok ? "info" : "error");
+				return;
+			}
+
+			if (sub === "send") {
+				const host = (parts[1] || "").trim();
+				if (!host) {
+					ctx.ui.notify("Usage: /sess send <ssh-host> [session-name]", "error");
+					return;
+				}
+				const nameArg = parts.slice(2).join(" ").trim();
+				const built = buildSessionBundleForTarget(nameArg, ctx);
+				if ("error" in built) {
+					ctx.ui.notify(built.error, "error");
+					return;
+				}
+				const commands = buildSendCommands(host, built.bundlePath);
+				const sendResult = runSendCommands(commands);
+				if (!sendResult.ok) {
+					ctx.ui.notify(
+						[
+							`Transfer to ${host} failed at: ${sendResult.failedStep}`,
+							sendResult.stderr || "",
+							"Run manually:",
+							...commands.map((step) => `  ${step.command} ${step.args.join(" ")}`),
+						].filter((line) => line).join("\n"),
+						"error",
+					);
+					return;
+				}
+				appendSessionEvent("sess.send", source, { name: built.bundle.name, host });
+				ctx.ui.notify(
+					[
+						`Sent bundle "${built.bundle.name}" to ${host}:.pi-speak/session-inbox/`,
+						`On ${host}, run /sess pickup to import it.`,
+						...built.warnings,
+					].join("\n"),
+					"info",
+				);
+				return;
+			}
+
+			if (sub === "pickup") {
+				const inboxFiles = listInboxBundleFiles();
+				if (inboxFiles.length === 0) {
+					ctx.ui.notify(`Session inbox is empty (${getSessionInboxDir()}).`, "info");
+					return;
+				}
+				const lines: string[] = [];
+				let allOk = true;
+				for (const file of inboxFiles) {
+					const result = importSessionBundleFile(file, {}, source);
+					lines.push(...result.lines);
+					if (result.ok) {
+						try {
+							rmSync(file, { force: true });
+						} catch {
+							lines.push(`Warning: could not remove processed inbox file ${file}.`);
+						}
+					} else {
+						allOk = false;
+					}
+				}
+				ctx.ui.notify(lines.join("\n"), allOk ? "info" : "warning");
+				return;
+			}
+
+			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|launch|list|name|wake|slots|ui|export|bundle|import|send|pickup] <args>", "error");
 	};
 
 	pi.registerCommand("sess", {

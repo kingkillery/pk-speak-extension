@@ -24,6 +24,21 @@ export type PiSpeakSetupConfig = {
 	remoteSttBackend?: string;
 	httpPort?: string;
 	httpToken?: string;
+	/** Telegram bot credential used by the standalone headless gateway. */
+	telegramBotToken?: string;
+	/** Durable Telegram pairing state (never includes the bot credential). */
+	phoneState?: {
+		enabled?: boolean;
+		linkedChatId?: string;
+		linkCode?: string;
+		lastUpdateId?: number;
+		lastPollAt?: number;
+		consecutivePollFailures?: number;
+		lastError?: string;
+		linkAttempts?: number;
+		linkLockoutUntil?: number;
+		linkCodeIssuedAt?: number;
+	};
 	publicBaseUrl?: string;
 	trayBaseUrl?: string;
 	installMobileApp?: boolean;
@@ -136,6 +151,16 @@ export function applyPiSpeakSetupConfig(env: NodeJS.ProcessEnv = process.env, co
 export function buildPiSpeakEnv(baseEnv: NodeJS.ProcessEnv = process.env, config = loadPiSpeakSetupConfig(baseEnv)) {
 	const env = { ...baseEnv };
 	return applyPiSpeakSetupConfig(env, config);
+}
+
+export function resolveTelegramBotToken(
+	env: NodeJS.ProcessEnv = process.env,
+	config = loadPiSpeakSetupConfig(env),
+) {
+	return env.PI_SPEAK_TELEGRAM_BOT_TOKEN?.trim()
+		|| env.TELEGRAM_BOT_TOKEN?.trim()
+		|| config.telegramBotToken?.trim()
+		|| "";
 }
 
 export function maskSecret(value: string | undefined) {
