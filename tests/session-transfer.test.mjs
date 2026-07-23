@@ -336,3 +336,90 @@ test("buildSendCommands targets the home-relative inbox", () => {
 	assert.deepEqual(commands[0], { command: "ssh", args: ["mac-mini", "mkdir -p .pi-speak/session-inbox"] });
 	assert.deepEqual(commands[1], { command: "scp", args: ["C:\\bundles\\x.pi-session.json", "mac-mini:.pi-speak/session-inbox/"] });
 });
+
+// ---------------------------------------------------------------------------
+// Provider-aware placement (claude / codex native stores)
+// ---------------------------------------------------------------------------
+
+test("encodeClaudeProjectDirName dashes every non-alphanumeric character", async () => {
+	const { encodeClaudeProjectDirName } = await import("../dist/session-transfer.js");
+	if (process.platform === "win32") {
+		assert.equal(encodeClaudeProjectDirName("C:\\dev\\Desktop-Projects\\.graphtree\\parity-p2"), "C--dev-Desktop-Projects--graphtree-parity-p2");
+	} else {
+		assert.equal(encodeClaudeProjectDirName("/Users/k/dev/proj.x"), "-Users-k-dev-proj-x");
+	}
+});
+
+test("planSessionImport places claude bundles under the claude projects root without cwd rewrite", async () => {
+	const { planSessionImport } = await import("../dist/session-transfer.js");
+	const bundle = fixtureBundle({ provider: "claude", sessionFileName: "abc123.jsonl" });
+	const claudeRoot = resolve(sep, "home", "k", ".claude", "projects");
+	const plan = planSessionImport(bundle, { claudeRoot, pathExists: () => false });
+	assert.equal(plan.provider, "claude");
+	assert.equal(plan.rewriteCwd, false);
+	assert.ok(plan.sessionDir.startsWith(claudeRoot), plan.sessionDir);
+	assert.ok(!plan.sessionDir.slice(claudeRoot.length + 1).includes(sep), "claude project dir must be a single encoded segment");
+	assert.ok(plan.sessionPath.endsWith("abc123.jsonl"));
+});
+
+test("planSessionImport places codex bundles under the rollout date tree", async () => {
+	const { planSessionImport } = await import("../dist/session-transfer.js");
+	const bundle = fixtureBundle({
+		provider: "codex",
+		sessionFileName: "rollout-2026-07-22T13-42-20-019f8b59-b73f-7e82-814f-ced9db05f4b6.jsonl",
+	});
+	const codexRoot = resolve(sep, "home", "k", ".codex", "sessions");
+	const plan = planSessionImport(bundle, { codexRoot, pathExists: () => false });
+	assert.equal(plan.sessionDir, join(codexRoot, "2026", "07", "22"));
+	assert.equal(plan.rewriteCwd, false);
+});
+
+test("applySessionImport leaves claude transcripts byte-identical", async () => {
+	const { planSessionImport, applySessionImport } = await import("../dist/session-transfer.js");
+	const root = tempDir("pi-speak-claude-");
+	try {
+		const bundle = fixtureBundle({ provider: "claude", cwd: join(root, "ws") });
+		mkdirSync(join(root, "ws"), { recursive: true });
+		const plan = planSessionImport(bundle, { claudeRoot: join(root, "projects") });
+		const applied = applySessionImport(bundle, plan);
+		assert.equal(applied.cwdRewritten, false);
+		assert.equal(readFileSync(applied.sessionPath, "utf8"), bundle.transcript);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("parseSessionBundle defaults provider to pi for pre-provider bundles", () => {
+	const legacy = { ...fixtureBundle() };
+	delete legacy.provider;
+	const parsed = parseSessionBundle(JSON.stringify(legacy));
+	assert.ok(parsed.bundle, parsed.error);
+	assert.equal(parsed.bundle.provider, "pi");
+});
+
+test("normalizeSessionProvider maps discovery labels onto transferable providers", async () => {
+	const { normalizeSessionProvider } = await import("../dist/session-transfer.js");
+	assert.equal(normalizeSessionProvider("ompk"), "pi");
+	assert.equal(normalizeSessionProvider("oh-my-pi"), "pi");
+	assert.equal(normalizeSessionProvider(undefined), "pi");
+	assert.equal(normalizeSessionProvider("Claude"), "claude");
+	assert.equal(normalizeSessionProvider("codex"), "codex");
+	assert.equal(normalizeSessionProvider("antigravity"), undefined);
+});
+
+test("getTransferHosts parses comma/space separated host lists", async () => {
+	const { getTransferHosts } = await import("../dist/session-transfer.js");
+	assert.deepEqual(getTransferHosts({ PI_SPEAK_TRANSFER_HOSTS: "gcloud-vm, mac" }), ["gcloud-vm", "mac"]);
+	assert.deepEqual(getTransferHosts({ PI_SPEAK_TRANSFER_HOSTS: "one two;three,two" }), ["one", "two", "three"]);
+	assert.deepEqual(getTransferHosts({}), []);
+});
+
+test("runSendCommandsAsync reports the failing step", async () => {
+	const { runSendCommandsAsync } = await import("../dist/session-transfer.js");
+	const result = await runSendCommandsAsync([
+		{ command: "git", args: ["--version"] },
+		{ command: "git", args: ["definitely-not-a-real-subcommand"] },
+	]);
+	assert.equal(result.ok, false);
+	assert.ok(result.failedStep.includes("definitely-not-a-real-subcommand"));
+});

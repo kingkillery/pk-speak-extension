@@ -15,6 +15,8 @@ export type RealtimeSessionTargetCandidate = {
 	sessionPath?: string;
 	provider?: string;
 	cwd?: string;
+	/** Epoch ms of last observed activity; drives recency-first ordering for the assistant. */
+	lastActivity?: number;
 	isCurrent: boolean;
 	sources: RealtimeSessionTargetSource[];
 };
@@ -85,6 +87,7 @@ function newCandidate(
 		sessionPath: partial.sessionPath?.trim() || undefined,
 		provider: partial.provider?.trim() || undefined,
 		cwd: partial.cwd?.trim() || undefined,
+		lastActivity: partial.lastActivity,
 		isCurrent: partial.isCurrent === true,
 		sources: [partial.source],
 	};
@@ -105,6 +108,9 @@ function mergeCandidate(target: RealtimeSessionTargetCandidate, incoming: Realti
 	target.sessionPath ||= incoming.sessionPath;
 	target.provider ||= incoming.provider;
 	target.cwd ||= incoming.cwd;
+	if (incoming.lastActivity !== undefined && (target.lastActivity === undefined || incoming.lastActivity > target.lastActivity)) {
+		target.lastActivity = incoming.lastActivity;
+	}
 	target.isCurrent ||= incoming.isCurrent;
 	for (const source of incoming.sources) if (!target.sources.includes(source)) target.sources.push(source);
 	if (!target.name) target.name = incoming.name;
@@ -128,6 +134,7 @@ export function buildRealtimeSessionCandidates(sources: RealtimeSessionTargetSou
 			sessionPath: entry.sessionPath ?? entry.path,
 			provider: entry.provider,
 			cwd: entry.cwd ?? entry.workingDirectory,
+			lastActivity: typeof entry.lastActivity === "number" ? entry.lastActivity : undefined,
 			source: "dashboard",
 			isCurrent: entry.isCurrent,
 		}));
@@ -154,7 +161,12 @@ export function buildRealtimeSessionCandidates(sources: RealtimeSessionTargetSou
 			isCurrent: false,
 		}));
 	}
-	return candidates;
+	// Recent sessions surface first so the assistant naturally weighs recency
+	// ("recent = higher visibility"); the current session always leads.
+	return candidates.sort((left, right) => {
+		if (left.isCurrent !== right.isCurrent) return left.isCurrent ? -1 : 1;
+		return (right.lastActivity ?? 0) - (left.lastActivity ?? 0);
+	});
 }
 
 function candidateValues(candidate: RealtimeSessionTargetCandidate, field: "agentId" | "sessionId" | "path" | "name" | "alias"): string[] {

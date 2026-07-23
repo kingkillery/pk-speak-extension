@@ -467,6 +467,11 @@ Named sessions, wake aliases, and routing summaries for the assistant. In realti
 /sess export
 /sess ui
 /sess ui open
+/sess bundle voice-work --note needs Chrome open with the dev profile
+/sess bundle list
+/sess send mac-mini voice-work
+/sess pickup
+/sess import voice-work --cwd /Users/k/dev/proj --git
 ```
 
 This matters because `PK bugfix` can route voice input to that named session, while compact routes like `PK one` / `PK1` and `PK two` / `PK2` can stay stable and distinct.
@@ -474,6 +479,8 @@ This matters because `PK bugfix` can route voice input to that named session, wh
 `/sess` with no args shows the current session, ready sessions, aliases, store path, a compact `1` vs `2` lane summary, and inline state for known sessions.
 
 Use `/sess slots` when you want the explicit compact-route view for `PK one` / `PK1` and `PK two` / `PK2`.
+
+Use `/sess bundle` / `/sess send` / `/sess pickup` / `/sess import` to move a session between hosts: a bundle is one portable JSON file carrying the transcript, routing name + aliases, and workspace git state (remote, branch, HEAD, uncommitted diff; untracked file *names* only). `--git` on import recreates the workspace (clone / checkout / patch, never over local changes); `--note` records environment expectations — open browsers for agentic testing, logged-in profiles — surfaced verbatim on pickup. Details in `docs/SESSION_OPERATIONS.md`.
 
 Use `/sess ui` for inline guidance without opening another terminal. Use `/sess ui open` only when you explicitly want the older terminal pane; repeat launches reuse the existing pane instead of creating more terminal windows. The pane mirrors the `/sess` dashboard, refreshes within one second of external mutations, supports focus movement with arrow keys, `tab`, or `j` / `k`, shows the compact PK1/PK2 route lanes plus a focused-session footer, and adds keybindings `[r] rename`, `[a] alias`, `[x] remove`, and `[q] quit`.
 

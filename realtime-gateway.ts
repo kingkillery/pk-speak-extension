@@ -52,6 +52,14 @@ import {
 	type RealtimeSessionTargetCandidate,
 	type RealtimeSessionTargetSources,
 } from "./realtime-session-target.js";
+import {
+	buildSendCommands,
+	createSessionBundle,
+	getTransferHosts,
+	normalizeSessionProvider,
+	runSendCommandsAsync,
+	saveBundleToStore,
+} from "./session-transfer.js";
 
 
 // A live client's selected OMPK target is connection-local. The global
@@ -202,6 +210,9 @@ function serializeRealtimeTarget(candidate: RealtimeSessionTargetCandidate | und
 		cwd: candidate.cwd,
 		aliases: candidate.aliases,
 		sources: candidate.sources,
+		...(candidate.lastActivity !== undefined
+			? { lastActivity: candidate.lastActivity, lastActive: new Date(candidate.lastActivity).toISOString() }
+			: {}),
 	};
 }
 
@@ -230,7 +241,8 @@ export const activeSessions = new Map<string, ActiveSession>();
 export const REALTIME_SYSTEM_PROMPT = [
 	"You are the realtime conversational assistant and voice control plane for Pi Speak and Oh-my-pk (OMPK).",
 	"You have real tools for terminal commands, OMPK session selection and messaging, agent launch/lifecycle, workspace reads, web search, and camera input. Never say you cannot perform an available action: call the matching tool and report its actual result.",
-	"Before acting on a session, call get_session_info or list_sessions. Use switch_session to select one unambiguous connection-local target, then send_session_message, resume_session, or an agent lifecycle tool as requested.",
+	"Before acting on a session, call get_session_info or list_sessions. Session lists are ordered current-first then most-recent-first; when the user is vague about which session they mean, prefer the most recent ones. Use switch_session to select one unambiguous connection-local target, then send_session_message, resume_session, or an agent lifecycle tool as requested.",
+	"When the user wants to continue work on another machine (or worries this one may go offline), use transfer_session to copy the selected session's full state to a configured remote host. Tell the user to run /sess pickup there.",
 	"Use read-only tools freely and proactively to understand real state; never guess session identity, tool output, workspace content, or camera content.",
 	"When the user asks about something on camera or shows you something, call camera_snapshot immediately — do not claim you can see without it.",
 	"When a request is ambiguous or could mean more than one thing, ask one short clarifying question before acting.",
@@ -708,6 +720,48 @@ async function executeAgentLifecycleMutation(
 	return JSON.stringify(confirmation);
 }
 
+// Copies a session's full state (transcript + git workspace state) to a
+// configured ssh host so work can continue there. Uses the async send path:
+// scp of a multi-MB bundle must never stall the realtime event loop.
+async function executeTransferSessionMutation(activeSession: ActiveSession, args: Record<string, unknown>): Promise<string> {
+	const host = typeof args.host === "string" ? args.host.trim() : "";
+	const note = typeof args.note === "string" && args.note.trim() ? args.note.trim() : undefined;
+	const target = args.target && typeof args.target === "object" ? (args.target as Record<string, unknown>) : undefined;
+	const sessionPath = typeof target?.sessionPath === "string" ? target.sessionPath : "";
+	const hosts = getTransferHosts();
+	if (!hosts.includes(host)) {
+		return JSON.stringify({ ok: false, error: `Host "${host}" is not a configured transfer destination. Configured: ${hosts.join(", ") || "none (set PI_SPEAK_TRANSFER_HOSTS)"}.` });
+	}
+	if (!sessionPath) return JSON.stringify({ ok: false, error: "The selected session has no session file to transfer." });
+	const provider = normalizeSessionProvider(typeof target?.provider === "string" ? target.provider : undefined);
+	if (!provider) {
+		return JSON.stringify({ ok: false, error: `Provider "${String(target?.provider)}" is not transferable.` });
+	}
+	const cwd = (typeof target?.cwd === "string" && target.cwd.trim()) || readSessionWorkingDirectory(sessionPath) || getCurrentCwd(activeSession);
+	const name = (typeof target?.name === "string" && target.name.trim())
+		|| (typeof target?.sessionId === "string" && target.sessionId.trim())
+		|| sessionPath.replace(/^.*[\\/]/, "").replace(/\.jsonl$/i, "");
+	try {
+		const { bundle, warnings } = createSessionBundle({ name, aliases: [], sessionPath, cwd, note, provider });
+		const bundlePath = saveBundleToStore(bundle);
+		const send = await runSendCommandsAsync(buildSendCommands(host, bundlePath));
+		if (!send.ok) {
+			return JSON.stringify({ ok: false, error: `Transfer to ${host} failed at "${send.failedStep}": ${send.stderr || "unknown error"}. The bundle is saved locally at ${bundlePath}.` });
+		}
+		return JSON.stringify({
+			ok: true,
+			host,
+			provider,
+			session: name,
+			remoteInbox: ".pi-speak/session-inbox/",
+			nextStep: `On ${host}, run /sess pickup to import the session${provider === "pi" ? "" : ` (it will appear in ${provider}'s native session store)`}.`,
+			warnings,
+		});
+	} catch (error) {
+		return JSON.stringify({ ok: false, error: `Could not bundle session: ${error instanceof Error ? error.message : String(error)}` });
+	}
+}
+
 async function executeApprovedCommandMutation(
 	activeSession: ActiveSession,
 	pending: PendingCommandCall,
@@ -720,6 +774,7 @@ async function executeApprovedCommandMutation(
 		case "send_session_message": return await executeSendSessionMessageMutation(activeSession, args);
 		case "kill_agent":
 		case "revive_agent": return await executeAgentLifecycleMutation(activeSession, pending.kind, args);
+		case "transfer_session": return await executeTransferSessionMutation(activeSession, args);
 	}
 }
 
@@ -1320,6 +1375,34 @@ async function dispatchRealtimeToolCall(
 							`Send a message to ${realtimeTargetLabel(target)}: "${text.slice(0, 160)}"`,
 						);
 					}
+				} else if (call.name === "transfer_session") {
+					const host = (call.args?.host as string | undefined)?.trim() || "";
+					const requested = call.args?.target as string | undefined;
+					const note = call.args?.note as string | undefined;
+					const hosts = getTransferHosts();
+					const sources = await loadRealtimeTargetSources(activeSession);
+					const resolved = requested
+						? resolveRealtimeSessionTarget(requested, sources)
+						: await getRealtimeCurrentTarget(activeSession);
+					if (hosts.length === 0) {
+						outputText = JSON.stringify({ ok: false, error: "No transfer hosts are configured. Set PI_SPEAK_TRANSFER_HOSTS (e.g. \"gcloud-vm,mac\") on this machine." });
+					} else if (!hosts.includes(host)) {
+						outputText = JSON.stringify({ ok: false, error: `Unknown transfer host "${host}".`, configuredHosts: hosts });
+					} else if (!resolved.ok) {
+						outputText = JSON.stringify({ ok: false, code: resolved.reason, error: "Select one unambiguous session before transferring it." });
+					} else if (!resolved.candidate.sessionPath) {
+						outputText = JSON.stringify({ ok: false, error: `${realtimeTargetLabel(resolved.candidate)} has no session file to transfer.` });
+					} else {
+						const target = enrichRealtimeTarget(resolved.candidate);
+						deferToolResponse = true;
+						requestCommandApproval(
+							activeSession,
+							toolCall,
+							{ host, note, target: serializeRealtimeTarget(target) },
+							"transfer_session",
+							`Copy ${realtimeTargetLabel(target)} to ${host} over ssh (state travels off this machine).`,
+						);
+					}
 				} else if (call.name === "kill_agent" || call.name === "revive_agent") {
 					const id = parseHubAgentId(call.args?.id as string | undefined);
 					if (!id) {
@@ -1494,6 +1577,19 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 					parameters: {
 						type: "OBJECT",
 						properties: { target: { type: "STRING", description: "Optional session id, path, name, or alias. Defaults to the connection-local selection." } }
+					}
+				},
+				{
+					name: "transfer_session",
+					description: "Copies a session's full state (transcript, routing, and git workspace state) to a configured remote host over ssh so work can continue there — e.g. before this machine goes offline. Works for OMPK, Claude, and Codex sessions. State leaves this machine, so it requires operator approval.",
+					parameters: {
+						type: "OBJECT",
+						properties: {
+							host: { type: "STRING", description: "Destination ssh host alias. Must be one of the configured transfer hosts (PI_SPEAK_TRANSFER_HOSTS)." },
+							target: { type: "STRING", description: "Optional session id, path, name, or alias. Defaults to the connection-local selection." },
+							note: { type: "STRING", description: "Optional environment note surfaced on the target host (e.g. 'needs Chrome open with the dev profile for agentic tests')." }
+						},
+						required: ["host"]
 					}
 				},
 				{

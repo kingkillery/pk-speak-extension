@@ -638,3 +638,76 @@ test("resume_session precheck rejects a live (attention-backed) session and neve
 	assert.equal(output.code, "session-already-active");
 	assert.match(output.error, /currently running/i);
 });
+
+test("transfer_session validates hosts read-only and gates the copy behind approval", async () => {
+	setVertexEnv();
+	const previousHosts = process.env.PI_SPEAK_TRANSFER_HOSTS;
+	process.env.PI_SPEAK_TRANSFER_HOSTS = "gcloud-vm,mac";
+	try {
+		const dashboard = {
+			current: "pk",
+			ready: ["pk"],
+			sessions: [{
+				name: "pk",
+				path: "C:/sessions/pk.jsonl",
+				sessionPath: "C:/sessions/pk.jsonl",
+				sessionId: "pk-session-id",
+				provider: "oh-my-pk",
+				cwd: "C:/work/pk",
+				workingDirectory: "C:/work/pk",
+				current: true,
+				isCurrent: true,
+				ready: true,
+				isReady: true,
+				activity: "idle",
+				aliases: ["primary"],
+			}],
+		};
+		const server = {
+			realtimeBridge: {
+				getSessionDashboard: () => dashboard,
+				agentHub: { snapshot: async () => ({ folders: [], agents: [] }) },
+			},
+		};
+		const { ws, connection } = await startFakeSession(server);
+
+		// Unknown host: rejected immediately, read-only, no approval card.
+		await connection.callbacks.onmessage({
+			toolCall: { functionCalls: [{ id: "call-transfer-bad", name: "transfer_session", args: { host: "random-box", target: "pk" } }] },
+		});
+		const badComplete = ws.jsonMessages().find((message) => message.type === "tool_complete" && message.name === "transfer_session");
+		assert.ok(badComplete, "expected an immediate tool_complete for the invalid host");
+		const badOutput = JSON.parse(badComplete.output);
+		assert.equal(badOutput.ok, false);
+		assert.deepEqual(badOutput.configuredHosts, ["gcloud-vm", "mac"]);
+		assert.ok(
+			!ws.jsonMessages().some((message) => message.type === "tool_approval_required" && message.name === "transfer_session"),
+			"invalid host must never reach the approval boundary",
+		);
+
+		// Configured host: nothing leaves the machine before operator approval.
+		await connection.callbacks.onmessage({
+			toolCall: { functionCalls: [{ id: "call-transfer-ok", name: "transfer_session", args: { host: "mac", target: "pk", note: "keep Chrome open" } }] },
+		});
+		const approval = ws.jsonMessages().find((message) => message.type === "tool_approval_required" && message.name === "transfer_session");
+		assert.ok(approval, "transfer must wait for command approval");
+
+		// Approved: the frozen target's sessionPath does not exist on disk, so the
+		// mutation fails at the bundling step -- proving the approved continuation
+		// executes the real transfer path (and no ssh/scp ever ran in this test).
+		ws.emit("message", Buffer.from(JSON.stringify({ type: "command_approve", approvalId: approval.approvalId })), false);
+		await waitFor(
+			() => connection.session.toolResponses.some((entry) => entry.functionResponses?.[0]?.id === "call-transfer-ok"),
+			"expected the approved transfer to resolve",
+		);
+		const resolved = connection.session.toolResponses
+			.map((entry) => entry.functionResponses?.[0])
+			.find((entry) => entry?.id === "call-transfer-ok");
+		const output = readOutput(resolved);
+		assert.equal(output.ok, false);
+		assert.match(output.error, /Could not bundle session/);
+	} finally {
+		if (previousHosts === undefined) delete process.env.PI_SPEAK_TRANSFER_HOSTS;
+		else process.env.PI_SPEAK_TRANSFER_HOSTS = previousHosts;
+	}
+});

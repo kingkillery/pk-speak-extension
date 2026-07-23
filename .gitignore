@@ -104,3 +104,6 @@ test-rl.js
 # Generated multi-agent collaboration and planning artifacts
 .llm-router/
 .omo/
+
+# Obsidian vault workspace state (wiki/ is browsed as a vault)
+.obsidian/

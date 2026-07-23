@@ -53,6 +53,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -484,6 +485,12 @@ fun GatewaySessionsHeader(
     showAllSessions: Boolean = false,
     onToggleShowAll: (() -> Unit)? = null
 ) {
+    var controlsExpanded by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(showAllSessions) {
+        if (showAllSessions) controlsExpanded = false
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -499,29 +506,44 @@ fun GatewaySessionsHeader(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("OMPK agent hub", color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    "Persistent oh-my-pk sessions on the host. Route voice/text turns into a lane or launch a new hub.",
-                    color = InkMuted,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp
-                )
-                Spacer(modifier = Modifier.height(5.dp))
-                Text("Gateway: ${prefs.targetIpAddress.ifBlank { "(no gateway)" }}", color = Ink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Target: ${prefs.codexSessionName.ifBlank { "default" }}", color = Ink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Workspace: ${prefs.workspacePath}", color = InkMuted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (state is GatewaySessionsUiState.Loaded) {
-                    val dashboard = state.dashboard
-                    val ompLaneCount = dashboard.sessions.count { gatewaySessionIsOmpLane(it) }
+                if (controlsExpanded) {
+                    Spacer(modifier = Modifier.height(3.dp))
                     Text(
-                        "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | OMPK lanes: $ompLaneCount",
+                        "Persistent oh-my-pk sessions on the host. Route voice/text turns into a lane or launch a new hub.",
                         color = InkMuted,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
                     )
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Text("Gateway: ${prefs.targetIpAddress.ifBlank { "(no gateway)" }}", color = Ink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Target: ${prefs.codexSessionName.ifBlank { "default" }}", color = Ink, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Workspace: ${prefs.workspacePath}", color = InkMuted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (state is GatewaySessionsUiState.Loaded) {
+                        val dashboard = state.dashboard
+                        val ompLaneCount = dashboard.sessions.count { gatewaySessionIsOmpLane(it) }
+                        Text(
+                            "Current: ${dashboard.current.ifBlank { "none" }} | Ready: ${dashboard.ready.size} | OMPK lanes: $ompLaneCount",
+                            color = InkMuted,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
+            }
+            TextButton(
+                onClick = { controlsExpanded = !controlsExpanded },
+                modifier = Modifier.heightIn(min = 44.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    if (controlsExpanded) "Hide controls" else "Show controls",
+                    color = Accent,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
+                )
             }
             OutlinedButton(
                 onClick = onRefresh,
@@ -534,24 +556,26 @@ fun GatewaySessionsHeader(
                 Text("Refresh", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
-        Spacer(modifier = Modifier.height(8.dp))
-        GatewayHubCommandButton(
-            text = if (launchingHub) "Launching..." else "Launch OMPK hub",
-            enabled = !launchingHub,
-            onClick = onLaunchHub
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-        GatewayHubCommandButton(
-            text = if (launchingColab) "Launching..." else "Launch Colab",
-            enabled = !launchingColab,
-            onClick = onLaunchColab
-        )
-        Spacer(modifier = Modifier.height(6.dp))
-        GatewayHubCommandButton(
-            text = if (joiningCollab) "Joining..." else "Join collab",
-            enabled = !joiningCollab,
-            onClick = onJoinCollab
-        )
+        if (controlsExpanded) {
+            Spacer(modifier = Modifier.height(8.dp))
+            GatewayHubCommandButton(
+                text = if (launchingHub) "Launching..." else "Launch OMPK hub",
+                enabled = !launchingHub,
+                onClick = onLaunchHub
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            GatewayHubCommandButton(
+                text = if (launchingColab) "Launching..." else "Launch Colab",
+                enabled = !launchingColab,
+                onClick = onLaunchColab
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            GatewayHubCommandButton(
+                text = if (joiningCollab) "Joining..." else "Join collab",
+                enabled = !joiningCollab,
+                onClick = onJoinCollab
+            )
+        }
         if (onToggleShowAll != null) {
             Spacer(modifier = Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {

@@ -214,3 +214,35 @@ test("merged candidate carries attention source when a live snapshot backs the p
 	assert.ok(!cold.sources.includes("attention"), "cold on-disk session must not look live");
 	assert.ok(!cold.isCurrent);
 });
+
+test("buildRealtimeSessionCandidates orders current first, then most recent activity", () => {
+	const candidates = buildRealtimeSessionCandidates({
+		dashboard: {
+			sessions: [
+				dashboardEntry({ name: "stale", sessionId: "sess-stale", sessionPath: "C:/s/stale.jsonl", lastActivity: 1_000 }),
+				dashboardEntry({ name: "fresh", sessionId: "sess-fresh", sessionPath: "C:/s/fresh.jsonl", lastActivity: 3_000 }),
+				dashboardEntry({ name: "active", sessionId: "sess-active", sessionPath: "C:/s/active.jsonl", lastActivity: 2_000, isCurrent: true }),
+				dashboardEntry({ name: "undated", sessionId: "sess-undated", sessionPath: "C:/s/undated.jsonl" }),
+			],
+		},
+	});
+	assert.deepEqual(
+		candidates.map((entry) => entry.name),
+		["active", "fresh", "stale", "undated"],
+	);
+	assert.equal(candidates[0].lastActivity, 2_000);
+});
+
+test("merged candidates keep the newest lastActivity across sources", () => {
+	const path = "C:/s/merge.jsonl";
+	const candidates = buildRealtimeSessionCandidates({
+		dashboard: {
+			sessions: [
+				dashboardEntry({ name: "lane", sessionId: "sess-merge", sessionPath: path, lastActivity: 1_000 }),
+				dashboardEntry({ name: "lane-alias", sessionId: "sess-merge", sessionPath: path, lastActivity: 5_000 }),
+			],
+		},
+	});
+	assert.equal(candidates.length, 1);
+	assert.equal(candidates[0].lastActivity, 5_000);
+});

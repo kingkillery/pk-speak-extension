@@ -6,7 +6,8 @@ export type RealtimeCommandKind =
 	| "resume_session"
 	| "send_session_message"
 	| "kill_agent"
-	| "revive_agent";
+	| "revive_agent"
+	| "transfer_session";
 
 export type RealtimeCommandApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
