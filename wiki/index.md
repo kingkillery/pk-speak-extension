@@ -13,7 +13,6 @@
 - [wt-001 Conversational Assistant Pivot Assist (2026-07-14)](sessions/2026-07-14-wt001-conversational-assistant-assist.md) - verification pass, spawn-shim EPERM flake fix, branch open items.
 - [Realtime Platform Update — 2026-07-20](syntheses/realtime-platform-2026-07-20.md) - conversational assistant safety boundary, voice modes, desktop Live client, compiled-OMPK bundle, and deterministic simulator.
 - [Realtime Live HF Parity + Desktop Orb — 2026-07-20](syntheses/realtime-live-hf-parity-2026-07-20.md) - HF worklets, `/orb/` terminal companion, OpenAI-Realtime/HF S2S adapter, web_search/camera tools, Android Live camera parity.
-- [Kanban Startup Performance + omp Session GC (2026-07-23)](sessions/2026-07-23-kanban-startup-performance.md) - startup cost map, snapshot-gate fixes (`dd7ffa902`), tool-detection async rewrite, `omp gc` runbook and retention knobs.
 
 ## Concepts
 - [[herdr-agent-hub- Module]]: concept (status: developing)
