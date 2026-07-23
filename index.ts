@@ -46,6 +46,7 @@ import { buildSessionWorkingDirectoryMap, readSessionWorkingDirectory } from "./
 import {
 	applySessionImport,
 	buildSendCommands,
+	buildSessionManifest,
 	createSessionBundle,
 	getSessionBundleDir,
 	getSessionInboxDir,
@@ -60,6 +61,13 @@ import {
 	saveBundleToStore,
 	type SessionBundle,
 } from "./session-transfer.js";
+import {
+	formatWorktreeList,
+	hydrateSessionWorktree,
+	listWorktreeStatuses,
+	sweepWorktrees,
+	updateWorktreeLease,
+} from "./session-worktree.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { PiAgentProvider } from "./pi-agent-provider.js";
@@ -1271,7 +1279,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 	const getSessCompletions = (prefix: string) => {
 		const trimmed = prefix.trimStart();
 		const complete = (value: string, label = value) => ({ value, label });
-		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "launch", "list", "name", "wake", "slots", "ui", "export", "bundle", "import", "send", "pickup"];
+		const top = ["new", "switch", "rename", "edit", "remove", "confirm", "alias", "launch", "list", "name", "wake", "slots", "ui", "export", "bundle", "import", "send", "pickup", "wt"];
 		if (!trimmed) return top.map((value) => complete(value));
 		const firstSpace = trimmed.indexOf(" ");
 		if (firstSpace === -1) return top.filter((value) => value.startsWith(trimmed.toLowerCase())).map((value) => complete(value));
@@ -2802,6 +2810,32 @@ export default function speakExtension(pi: ExtensionAPI) {
 			await stopRemoteServerRuntime();
 		}
 		syncRemoteState(getDesiredRemoteState(mode), true);
+		const buildGatewaySessionDashboard = () => {
+			const persisted = loadPersistedSessionRouting();
+			const currentSessionPath = lastCtx?.sessionManager?.getSessionFile?.();
+			const currentSessionName = pi.getSessionName?.() || undefined;
+			const snapshots = readAttentionSnapshots();
+			const sessionPaths = [
+				...Object.values(persisted.sessions),
+				currentSessionPath || undefined,
+				...snapshots.map((snapshot) => snapshot.sessionPath),
+			];
+			const dashboard = buildSessionDashboard({
+				sessions: persisted.sessions,
+				aliases: persisted.aliases,
+				runtimeSnapshots: snapshots,
+				currentSessionPath: currentSessionPath || undefined,
+				currentSessionName: currentSessionName || undefined,
+				currentBusy: remoteTurnManager.getSnapshot().processing,
+				currentReady: !remoteTurnManager.getSnapshot().processing,
+				workingDirectories: buildSessionWorkingDirectoryMap(
+					sessionPaths,
+					currentSessionPath ? { [currentSessionPath]: process.cwd() } : {},
+				),
+				storePath: getSessionRoutingStorePath(),
+			});
+			return mergeOhMyPiAgentHubSessions(dashboard);
+		};
 		if (!remoteServer) {
 			remoteServer = new ControlServer({
 				state: remoteState,
@@ -2899,32 +2933,8 @@ export default function speakExtension(pi: ExtensionAPI) {
 					remoteTurnManager.cancelAll("Remote turn cancelled by phone.");
 					return { ok: true, message: "Remote turn cancellation requested." };
 				},
-				getSessionDashboard: () => {
-					const persisted = loadPersistedSessionRouting();
-					const currentSessionPath = lastCtx?.sessionManager?.getSessionFile?.();
-					const currentSessionName = pi.getSessionName?.() || undefined;
-					const snapshots = readAttentionSnapshots();
-					const sessionPaths = [
-						...Object.values(persisted.sessions),
-						currentSessionPath || undefined,
-						...snapshots.map((snapshot) => snapshot.sessionPath),
-					];
-					const dashboard = buildSessionDashboard({
-						sessions: persisted.sessions,
-						aliases: persisted.aliases,
-						runtimeSnapshots: snapshots,
-						currentSessionPath: currentSessionPath || undefined,
-						currentSessionName: currentSessionName || undefined,
-						currentBusy: remoteTurnManager.getSnapshot().processing,
-						currentReady: !remoteTurnManager.getSnapshot().processing,
-						workingDirectories: buildSessionWorkingDirectoryMap(
-							sessionPaths,
-							currentSessionPath ? { [currentSessionPath]: process.cwd() } : {},
-						),
-						storePath: getSessionRoutingStorePath(),
-					});
-					return mergeOhMyPiAgentHubSessions(dashboard);
-				},
+				getSessionDashboard: buildGatewaySessionDashboard,
+				getSessionManifest: () => buildSessionManifest(buildGatewaySessionDashboard().sessions),
 				getCompactRouteSlots: () => buildCompactRouteSlots({ sessions: sessionRegistry, aliases: sessionWakeAliases }),
 				agentHub: createLiveAgentHubBinding({
 					dashboardFn: () => buildOhMyPiAgentHubDashboardCached(),
@@ -3470,7 +3480,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 
 	const importSessionBundleFile = (
 		bundleFilePath: string,
-		opts: { targetCwd?: string; applyGit?: boolean },
+		opts: { targetCwd?: string; applyGit?: boolean; useWorktree?: boolean },
 		source: SessionEventSource,
 	): { ok: boolean; lines: string[] } => {
 		let text: string;
@@ -3482,40 +3492,67 @@ export default function speakExtension(pi: ExtensionAPI) {
 		const parsed = parseSessionBundle(text);
 		if (!parsed.bundle) return { ok: false, lines: [`Invalid bundle ${bundleFilePath}: ${parsed.error}`] };
 		const bundle = parsed.bundle;
-		const plan = planSessionImport(bundle, { targetCwd: opts.targetCwd });
+		const worktreeLines: string[] = [];
+		let worktreePath: string | undefined;
+		if (opts.useWorktree) {
+			const hydrated = hydrateSessionWorktree(bundle);
+			for (const step of hydrated.steps) worktreeLines.push(`worktree: ${step}`);
+			for (const warning of hydrated.warnings) worktreeLines.push(`worktree warning: ${warning}`);
+			if (!hydrated.ok || !hydrated.worktreePath) {
+				return { ok: false, lines: [`Could not hydrate a worktree for "${bundle.name}".`, ...worktreeLines] };
+			}
+			worktreePath = hydrated.worktreePath;
+		}
+		const plan = planSessionImport(bundle, { targetCwd: worktreePath ?? opts.targetCwd });
 		let applied: { sessionPath: string; cwdRewritten: boolean };
 		try {
 			applied = applySessionImport(bundle, plan);
 		} catch (error) {
 			return { ok: false, lines: [`Could not write imported session: ${error instanceof Error ? error.message : String(error)}`] };
 		}
-		const lines: string[] = [`Imported session "${bundle.name}" from ${bundle.host.hostname} -> ${applied.sessionPath}`];
-		if (!applied.cwdRewritten) lines.push("Warning: session header cwd could not be rewritten; pi may list this session under its original workspace.");
+		if (worktreePath) updateWorktreeLease(worktreePath, { sessionPath: applied.sessionPath });
+		const lines: string[] = [`Imported ${bundle.provider} session "${bundle.name}" from ${bundle.host.hostname} -> ${applied.sessionPath}`];
 		let registeredName = bundle.name;
-		let named = setNamedSession(sessionRegistry, registeredName, applied.sessionPath);
-		if (!named.ok) {
-			registeredName = `${bundle.name}-imported`;
-			named = setNamedSession(sessionRegistry, registeredName, applied.sessionPath);
-		}
-		if (named.ok) {
-			sessionRegistry = named.sessions;
-			persistSessionRegistry();
-			lines.push(`Routing name: ${registeredName} — resume with /sess switch ${registeredName}`);
+		if (bundle.provider !== "pi") {
+			// Claude/codex sessions land in their provider's native store, so existing
+			// discovery + resume tooling pick them up without OMPK routing entries.
+			const sessionId = bundle.sessionFileName.replace(/\.jsonl$/i, "");
+			const codexId = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(sessionId)?.[1] ?? sessionId;
+			lines.push(
+				bundle.provider === "claude"
+					? `Now visible to session discovery; drop in with: claude --resume ${sessionId} (from ${plan.targetCwd})`
+					: `Now visible to session discovery; drop in with: codex resume ${codexId}`,
+			);
 		} else {
-			lines.push(`Could not register routing name "${bundle.name}": ${named.error}`);
+			if (!applied.cwdRewritten) lines.push("Warning: session header cwd could not be rewritten; pi may list this session under its original workspace.");
+			let named = setNamedSession(sessionRegistry, registeredName, applied.sessionPath);
+			if (!named.ok) {
+				registeredName = `${bundle.name}-imported`;
+				named = setNamedSession(sessionRegistry, registeredName, applied.sessionPath);
+			}
+			if (named.ok) {
+				sessionRegistry = named.sessions;
+				persistSessionRegistry();
+				lines.push(`Routing name: ${registeredName} — resume with /sess switch ${registeredName}`);
+			} else {
+				lines.push(`Could not register routing name "${bundle.name}": ${named.error}`);
+			}
+			const registeredAliases: string[] = [];
+			for (const alias of bundle.aliases) {
+				if (getWakeAliasConflictText(alias, applied.sessionPath)) continue;
+				const nextAlias = setWakeAlias(sessionWakeAliases, alias, applied.sessionPath);
+				sessionWakeAliases = nextAlias.aliases;
+				registeredAliases.push(nextAlias.alias);
+			}
+			if (registeredAliases.length > 0) {
+				persistSessionWakeAliases();
+				lines.push(`Wake aliases: ${registeredAliases.join(", ")}`);
+			}
 		}
-		const registeredAliases: string[] = [];
-		for (const alias of bundle.aliases) {
-			if (getWakeAliasConflictText(alias, applied.sessionPath)) continue;
-			const nextAlias = setWakeAlias(sessionWakeAliases, alias, applied.sessionPath);
-			sessionWakeAliases = nextAlias.aliases;
-			registeredAliases.push(nextAlias.alias);
-		}
-		if (registeredAliases.length > 0) {
-			persistSessionWakeAliases();
-			lines.push(`Wake aliases: ${registeredAliases.join(", ")}`);
-		}
-		if (opts.applyGit) {
+		if (worktreePath) {
+			lines.push(...worktreeLines);
+			lines.push(`Workspace: fresh worktree at ${worktreePath}`);
+		} else if (opts.applyGit) {
 			const restore = restoreGitWorkspace(bundle, plan.targetCwd);
 			for (const step of restore.steps) lines.push(`git: ${step}`);
 			for (const warning of restore.warnings) lines.push(`git warning: ${warning}`);
@@ -3943,11 +3980,16 @@ export default function speakExtension(pi: ExtensionAPI) {
 				const flagParts = parts.slice(1);
 				let targetCwd: string | undefined;
 				let applyGit = false;
+				let useWorktree = false;
 				const positional: string[] = [];
 				for (let i = 0; i < flagParts.length; i += 1) {
 					const part = flagParts[i];
 					if (part === "--git") {
 						applyGit = true;
+						continue;
+					}
+					if (part === "--worktree") {
+						useWorktree = true;
 						continue;
 					}
 					if (part === "--cwd") {
@@ -3963,7 +4005,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				}
 				const bundleArg = positional.join(" ").trim();
 				if (!bundleArg) {
-					ctx.ui.notify("Usage: /sess import <bundle-file-or-name> [--cwd <path>] [--git]", "error");
+					ctx.ui.notify("Usage: /sess import <bundle-file-or-name> [--cwd <path>] [--git] [--worktree]", "error");
 					return;
 				}
 				const bundleFile = resolveBundleSource(bundleArg);
@@ -3971,7 +4013,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 					ctx.ui.notify(`No bundle "${bundleArg}" found as a file, in ${getSessionBundleDir()}, or in ${getSessionInboxDir()}. Use /sess bundle list.`, "error");
 					return;
 				}
-				const result = importSessionBundleFile(bundleFile, { targetCwd, applyGit }, source);
+				const result = importSessionBundleFile(bundleFile, { targetCwd, applyGit, useWorktree }, source);
 				ctx.ui.notify(result.lines.join("\n"), result.ok ? "info" : "error");
 				return;
 			}
@@ -4015,6 +4057,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 			}
 
 			if (sub === "pickup") {
+				const useWorktree = parts.slice(1).includes("--worktree");
 				const inboxFiles = listInboxBundleFiles();
 				if (inboxFiles.length === 0) {
 					ctx.ui.notify(`Session inbox is empty (${getSessionInboxDir()}).`, "info");
@@ -4023,7 +4066,7 @@ export default function speakExtension(pi: ExtensionAPI) {
 				const lines: string[] = [];
 				let allOk = true;
 				for (const file of inboxFiles) {
-					const result = importSessionBundleFile(file, {}, source);
+					const result = importSessionBundleFile(file, { useWorktree }, source);
 					lines.push(...result.lines);
 					if (result.ok) {
 						try {
@@ -4035,11 +4078,41 @@ export default function speakExtension(pi: ExtensionAPI) {
 						allOk = false;
 					}
 				}
+				// Every pickup doubles as a GC pass so idle worktrees never need a manual sweep.
+				const swept = sweepWorktrees();
+				for (const step of swept.steps) lines.push(`worktree gc: ${step}`);
+				for (const warning of swept.warnings) lines.push(`worktree gc warning: ${warning}`);
 				ctx.ui.notify(lines.join("\n"), allOk ? "info" : "warning");
 				return;
 			}
 
-			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|launch|list|name|wake|slots|ui|export|bundle|import|send|pickup] <args>", "error");
+			if (sub === "wt") {
+				const wtSub = (parts[1] || "list").toLowerCase();
+				if (wtSub === "list") {
+					ctx.ui.notify(formatWorktreeList(listWorktreeStatuses()).join("\n"), "info");
+					return;
+				}
+				if (wtSub === "gc" || wtSub === "rm") {
+					const force = wtSub === "rm" ? [parts.slice(2).join(" ").trim()].filter((name) => name) : [];
+					if (wtSub === "rm" && force.length === 0) {
+						ctx.ui.notify("Usage: /sess wt rm <session-name>", "error");
+						return;
+					}
+					const swept = sweepWorktrees({ force });
+					const lines = [
+						...swept.steps.map((step) => `worktree gc: ${step}`),
+						...swept.warnings.map((warning) => `worktree gc warning: ${warning}`),
+					];
+					if (lines.length === 0) lines.push(wtSub === "rm" ? `No worktree matched "${force[0]}".` : "Nothing to clean up.");
+					appendSessionEvent("sess.worktree.gc", source, { steps: swept.steps, warnings: swept.warnings });
+					ctx.ui.notify(lines.join("\n"), swept.warnings.length > 0 ? "warning" : "info");
+					return;
+				}
+				ctx.ui.notify("Usage: /sess wt [list|rm <session-name>|gc]", "error");
+				return;
+			}
+
+			ctx.ui.notify("Usage: /sess [new|switch|rename|edit|alias|remove|confirm remove|launch|list|name|wake|slots|ui|export|bundle|import|send|pickup|wt] <args>", "error");
 	};
 
 	pi.registerCommand("sess", {
@@ -4657,6 +4730,21 @@ export default function speakExtension(pi: ExtensionAPI) {
 			await resolvePendingPhoneTurn(ctx);
 		}
 	});
+
+	// Reclaim idle session worktrees (pickup workspaces on secondary hosts) shortly
+	// after startup, off the activation path. Dirty trees are rescued into bundles
+	// by sweepWorktrees before removal; a failed rescue keeps the worktree.
+	const worktreeGcTimer = setTimeout(() => {
+		try {
+			const swept = sweepWorktrees();
+			if (swept.steps.length > 0 || swept.warnings.length > 0) {
+				appendSessionEvent("sess.worktree.gc", "admin", { steps: swept.steps, warnings: swept.warnings });
+			}
+		} catch {
+			// GC is best-effort; never disturb startup.
+		}
+	}, 15_000);
+	worktreeGcTimer.unref?.();
 
 	// Voice tool-use approval. Off by default for backwards compatibility.
 	// PI_SPEAK_VOICE_APPROVAL=writes  → gate bash/write/edit

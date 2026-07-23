@@ -26,17 +26,24 @@ This is the focused operator guide for `/sess` in `pi-speak-pk`. `/sess` is how 
 /sess bundle rm voice-work
 /sess send mac-mini voice-work
 /sess pickup
+/sess pickup --worktree
 /sess import voice-work --cwd /Users/k/dev/proj --git
+/sess import voice-work --worktree
+/sess wt list
+/sess wt rm voice-work
+/sess wt gc
 ```
 
 ## Transfer sessions between hosts (pickup from anywhere)
 
 A session bundle is a single portable JSON file carrying everything a session needs to continue on another machine:
 
-- the full session transcript (JSONL)
-- its routing name and wake aliases
+- the full session transcript (JSONL) and its owning provider (`pi`/OMPK, `claude`, or `codex`)
+- its routing name and wake aliases (OMPK sessions)
 - workspace git state: origin remote, branch, HEAD commit, the uncommitted diff as a binary patch, and the *names* of untracked files (contents never travel, so secrets stay put)
 - an optional operator note for environment expectations that cannot travel — e.g. "agentic browser tests expect Chrome open with the dev profile"
+
+Claude and Codex bundles import into the provider's **native** session store on the target host (`~/.claude/projects/<encoded-cwd>/`, `~/.codex/sessions/<yyyy/mm/dd>/`), so the recent-session dashboard, Android client, and resume tooling pick them up with no extra registration — drop back in with `claude --resume <id>` or `codex resume <id>`.
 
 ### Save and list
 
@@ -49,6 +56,16 @@ A session bundle is a single portable JSON file carrying everything a session ne
 ```
 
 Bundles live in `~/.pi-speak/session-bundles/<name>.pi-session.json`. This doubles as a local save/restore surface: `/sess bundle` is "save state", `/sess import <name>` is "restore".
+
+### From the phone / voice assistant
+
+The realtime assistant has an approval-gated `transfer_session` tool: "copy this session to the mac" proposes the transfer, shows an approval card on your client (web remote or Android), and only runs the ssh/scp copy after you approve. Destinations are allowlisted on the host machine:
+
+```text
+PI_SPEAK_TRANSFER_HOSTS=gcloud-vm,mac
+```
+
+An unknown host is rejected read-only, before the approval boundary. If this machine may go offline (laptop leaving, MSI shutting down), transfer while it is still reachable — a powered-off host cannot be copied from. For standing insurance, bundle + send active sessions before stepping away.
 
 ### Move between hosts
 
@@ -77,6 +94,32 @@ Any other transport works too — scp the bundle file by hand, drop it in a sync
 Import writes the transcript into pi's per-cwd session directory (header cwd rewritten to the target workspace), registers the routing name (suffixing `-imported` on conflicts), and re-adds wake aliases that don't collide with existing routes — the `one`/`two` compact-lane families are never stolen. Resume with `/sess switch <name>`.
 
 Without `--git`, the import prints the exact git commands needed to recreate a missing workspace. With `--git` it does the work: clones from the bundle's remote when the target cwd is missing, checks out the bundle's branch/commit, and applies the carried uncommitted diff with `git apply --3way` — but only onto a clean tree; local work is never overwritten.
+
+### Worktree imports on a secondary host (pulled + auto-cleanup)
+
+When this machine is not where the session's workspace lives (e.g. picking up on the Mac), use `--worktree` instead of `--cwd`/`--git`:
+
+```text
+/sess pickup --worktree
+/sess import voice-work --worktree
+```
+
+Each session gets its own workspace instead of reconciling into a shared checkout:
+
+- one **bare base clone** per remote under `~/.pi-speak/repos/<repo-key>/`
+- `git fetch origin` runs at invoke time, so the branch tip is freshly **pulled** the moment the session is hydrated — re-importing an existing clean worktree fast-forwards it
+- the session's worktree lands under `~/.pi-speak/worktrees/<name>/`, born clean, so the bundled uncommitted diff always applies; sessions on different branches of the same repo coexist
+- a sibling lease file (`<name>.lease.json`) records ownership and last use
+
+Cleanup is automatic and never lossy. A sweep runs at extension startup and after every `/sess pickup`: worktrees idle past `PI_SPEAK_WORKTREE_TTL_DAYS` (default 7) are removed when clean; dirty ones are first auto-rescued into a `<name>-rescued` session bundle (transcript + git state, visible in `/sess bundle list`) and kept in place if the rescue fails. Manual controls:
+
+```text
+/sess wt list          # every worktree: branch, clean/dirty, idle days
+/sess wt rm <name>     # remove one now (dirty work is rescued first)
+/sess wt gc            # sweep on demand
+```
+
+A secondary host can also list this host's sessions without any bundle transfer: `GET /v1/sessions/manifest` on the gateway returns a read-only manifest of session names, aliases, providers, workspaces, and each workspace's git identity (remote/branch/head/dirty) — enough to decide what to pick up and to hydrate a worktree for it.
 
 The one thing a bundle cannot carry is the live environment itself. Whatever you record with `--note` (open browsers, running emulators, logged-in profiles) is surfaced verbatim on import as a checklist reminder.
 

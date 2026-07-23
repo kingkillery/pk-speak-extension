@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -24,6 +24,18 @@ export type SessionBundleGit = {
 	untracked?: string[];
 };
 
+/** Which agent CLI owns the session. Determines where an import lands on the target host. */
+export type SessionProvider = "pi" | "claude" | "codex";
+
+/** Normalize discovery/dashboard provider labels ("ompk", "oh-my-pi", …) to a transferable provider. */
+export function normalizeSessionProvider(provider: string | undefined): SessionProvider | undefined {
+	const normalized = provider?.trim().toLowerCase();
+	if (!normalized || normalized === "pi" || normalized === "ompk" || normalized === "oh-my-pi" || normalized === "oh-my-pk" || normalized === "omp") return "pi";
+	if (normalized === "claude") return "claude";
+	if (normalized === "codex") return "codex";
+	return undefined;
+}
+
 export type SessionBundle = {
 	kind: "pi-speak-session-bundle";
 	version: 1;
@@ -32,6 +44,8 @@ export type SessionBundle = {
 	name: string;
 	/** Wake aliases that pointed at this session on the source host. */
 	aliases: string[];
+	/** Owning agent CLI. Bundles from older versions omit this and default to "pi". */
+	provider: SessionProvider;
 	host: { hostname: string; platform: string };
 	/** Workspace cwd on the source host. */
 	cwd: string;
@@ -44,10 +58,13 @@ export type SessionBundle = {
 };
 
 export type SessionImportPlan = {
+	provider: SessionProvider;
 	targetCwd: string;
 	sessionDir: string;
 	sessionPath: string;
 	workspace: "existing" | "missing";
+	/** pi transcripts get their header cwd rewritten; claude/codex transcripts are placed verbatim. */
+	rewriteCwd: boolean;
 	/** Suggested (or, with --git, executed) git commands to recreate the workspace. */
 	gitAdvice: string[];
 	warnings: string[];
@@ -99,6 +116,37 @@ export function getPiSessionsRoot(env: NodeJS.ProcessEnv = process.env): string 
 	return join(homedir(), ".pi", "agent", "sessions");
 }
 
+/** Claude Code encodes a project directory as the absolute cwd with every non-alphanumeric character dashed. */
+export function encodeClaudeProjectDirName(cwd: string): string {
+	return resolve(cwd).replace(/[^A-Za-z0-9]/g, "-");
+}
+
+export function getClaudeProjectsRoot(home: string = homedir()): string {
+	return join(home, ".claude", "projects");
+}
+
+export function getCodexSessionsRoot(home: string = homedir()): string {
+	return join(home, ".codex", "sessions");
+}
+
+/** Codex files live under sessions/YYYY/MM/DD; derive the date dir from the rollout filename, then bundle age, then now. */
+export function codexSessionDateParts(sessionFileName: string, createdAt: number): [string, string, string] {
+	const match = /^rollout-(\d{4})-(\d{2})-(\d{2})T/.exec(sessionFileName);
+	if (match) return [match[1], match[2], match[3]];
+	const date = createdAt > 0 ? new Date(createdAt) : new Date();
+	return [
+		String(date.getUTCFullYear()),
+		String(date.getUTCMonth() + 1).padStart(2, "0"),
+		String(date.getUTCDate()).padStart(2, "0"),
+	];
+}
+
+/** Comma/space separated ssh host aliases allowed as transfer destinations (e.g. "gcloud-vm, mac"). */
+export function getTransferHosts(env: NodeJS.ProcessEnv = process.env): string[] {
+	const raw = env.PI_SPEAK_TRANSFER_HOSTS ?? "";
+	return [...new Set(raw.split(/[\s,;]+/).map((entry) => entry.trim()).filter(Boolean))];
+}
+
 // ---------------------------------------------------------------------------
 // Transfer directories (home-based so scp targets are predictable cross-host)
 // ---------------------------------------------------------------------------
@@ -124,9 +172,9 @@ export function bundleFileName(name: string): string {
 // Git capture / restore
 // ---------------------------------------------------------------------------
 
-type GitResult = { ok: boolean; stdout: string; stderr: string };
+export type GitResult = { ok: boolean; stdout: string; stderr: string };
 
-function runGit(cwd: string | undefined, args: string[]): GitResult {
+export function runGit(cwd: string | undefined, args: string[]): GitResult {
 	const result = spawnSync("git", args, {
 		cwd,
 		encoding: "utf8",
@@ -170,6 +218,73 @@ export function captureGitState(cwd: string): { git?: SessionBundleGit; warnings
 	}
 	if (!git.remote) warnings.push("No origin remote configured; the target host cannot clone this workspace automatically.");
 	return { git, warnings };
+}
+
+export type GitSummary = { remote?: string; branch?: string; head?: string; dirty?: boolean };
+
+/** Cheap git identity for manifests: remote/branch/head/dirty, no diff capture. */
+export function captureGitSummary(cwd: string): GitSummary | undefined {
+	const inside = runGit(cwd, ["rev-parse", "--is-inside-work-tree"]);
+	if (!inside.ok || inside.stdout.trim() !== "true") return undefined;
+	const summary: GitSummary = {};
+	const remote = runGit(cwd, ["config", "--get", "remote.origin.url"]);
+	if (remote.ok && remote.stdout.trim()) summary.remote = remote.stdout.trim();
+	const branch = runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+	if (branch.ok && branch.stdout.trim() && branch.stdout.trim() !== "HEAD") summary.branch = branch.stdout.trim();
+	const head = runGit(cwd, ["rev-parse", "HEAD"]);
+	if (head.ok && head.stdout.trim()) summary.head = head.stdout.trim();
+	const status = runGit(cwd, ["status", "--porcelain"]);
+	if (status.ok) summary.dirty = !!status.stdout.trim();
+	return summary;
+}
+
+export type SessionManifestEntry = {
+	name: string;
+	provider?: string;
+	sessionPath?: string;
+	cwd?: string;
+	aliases: string[];
+	lastActivity?: number;
+	git?: GitSummary;
+};
+
+/**
+ * Read-only cross-host session manifest: what a secondary host (e.g. the Mac)
+ * needs to list this host's sessions and hydrate a worktree for one — names,
+ * aliases, provider, workspace, and the workspace's git identity. Git summaries
+ * are computed once per unique cwd.
+ */
+export function buildSessionManifest(
+	sessions: readonly {
+		name: string;
+		provider?: string;
+		sessionPath?: string;
+		path?: string;
+		workingDirectory?: string;
+		cwd?: string;
+		aliases?: readonly string[];
+		lastActivity?: number;
+	}[],
+	summarize: (cwd: string) => GitSummary | undefined = captureGitSummary,
+): SessionManifestEntry[] {
+	const gitByCwd = new Map<string, GitSummary | undefined>();
+	return sessions.map((session) => {
+		const cwd = session.workingDirectory || session.cwd || undefined;
+		let git: GitSummary | undefined;
+		if (cwd) {
+			if (!gitByCwd.has(cwd)) gitByCwd.set(cwd, existsSync(cwd) ? summarize(cwd) : undefined);
+			git = gitByCwd.get(cwd);
+		}
+		return {
+			name: session.name,
+			...(session.provider ? { provider: session.provider } : {}),
+			...(session.sessionPath || session.path ? { sessionPath: session.sessionPath || session.path } : {}),
+			...(cwd ? { cwd } : {}),
+			aliases: [...(session.aliases ?? [])],
+			...(session.lastActivity ? { lastActivity: session.lastActivity } : {}),
+			...(git ? { git } : {}),
+		};
+	});
 }
 
 export type GitRestoreResult = { ok: boolean; steps: string[]; warnings: string[] };
@@ -248,6 +363,7 @@ export function createSessionBundle(input: {
 	sessionPath: string;
 	cwd: string;
 	note?: string;
+	provider?: SessionProvider;
 	includeGit?: boolean;
 }): { bundle: SessionBundle; warnings: string[] } {
 	const transcript = readFileSync(input.sessionPath, "utf8");
@@ -264,6 +380,7 @@ export function createSessionBundle(input: {
 		createdAt: Date.now(),
 		name: input.name,
 		aliases: [...input.aliases],
+		provider: input.provider ?? "pi",
 		host: { hostname: hostname(), platform: platform() },
 		cwd: input.cwd,
 		...(input.note ? { note: input.note } : {}),
@@ -321,6 +438,7 @@ export function parseSessionBundle(text: string): { bundle?: SessionBundle; erro
 			createdAt: typeof record.createdAt === "number" ? record.createdAt : 0,
 			name,
 			aliases,
+			provider: normalizeSessionProvider(stringField(record.provider)) ?? "pi",
 			host: {
 				hostname: stringField(hostRecord.hostname) ?? "unknown",
 				platform: stringField(hostRecord.platform) ?? "unknown",
@@ -370,6 +488,8 @@ export function planSessionImport(
 	opts: {
 		targetCwd?: string;
 		sessionsRoot?: string;
+		claudeRoot?: string;
+		codexRoot?: string;
 		home?: string;
 		tmp?: string;
 		pathExists?: (path: string) => boolean;
@@ -377,8 +497,17 @@ export function planSessionImport(
 ): SessionImportPlan {
 	const pathExists = opts.pathExists ?? existsSync;
 	const targetCwd = resolve(opts.targetCwd?.trim() || bundle.cwd);
-	const sessionsRoot = opts.sessionsRoot ?? getPiSessionsRoot();
-	const sessionDir = join(sessionsRoot, encodePiSessionDirName(targetCwd, { home: opts.home, tmp: opts.tmp }));
+	const provider = bundle.provider ?? "pi";
+	let sessionDir: string;
+	if (provider === "claude") {
+		sessionDir = join(opts.claudeRoot ?? getClaudeProjectsRoot(opts.home), encodeClaudeProjectDirName(targetCwd));
+	} else if (provider === "codex") {
+		const [year, month, day] = codexSessionDateParts(bundle.sessionFileName, bundle.createdAt);
+		sessionDir = join(opts.codexRoot ?? getCodexSessionsRoot(opts.home), year, month, day);
+	} else {
+		const sessionsRoot = opts.sessionsRoot ?? getPiSessionsRoot();
+		sessionDir = join(sessionsRoot, encodePiSessionDirName(targetCwd, { home: opts.home, tmp: opts.tmp }));
+	}
 	let fileName = bundle.sessionFileName;
 	if (pathExists(join(sessionDir, fileName))) {
 		const stem = fileName.replace(/\.jsonl$/i, "");
@@ -405,12 +534,25 @@ export function planSessionImport(
 		warnings.push(`Bundle source had ${bundle.git.untracked.length} untracked file(s) that did not travel: ${bundle.git.untracked.slice(0, 5).join(", ")}${bundle.git.untracked.length > 5 ? ", …" : ""}`);
 	}
 	if (bundle.note) warnings.push(`Environment note from ${bundle.host.hostname}: ${bundle.note}`);
-	return { targetCwd, sessionDir, sessionPath: join(sessionDir, fileName), workspace, gitAdvice, warnings };
+	return {
+		provider,
+		targetCwd,
+		sessionDir,
+		sessionPath: join(sessionDir, fileName),
+		workspace,
+		// Claude/codex resume machinery locates sessions by directory/scan, and their
+		// transcripts embed cwd per line; only pi keys resume off the header cwd.
+		rewriteCwd: provider === "pi",
+		gitAdvice,
+		warnings,
+	};
 }
 
 export function applySessionImport(bundle: SessionBundle, plan: SessionImportPlan): { sessionPath: string; cwdRewritten: boolean } {
 	mkdirSync(plan.sessionDir, { recursive: true });
-	const { transcript, rewritten } = rewriteTranscriptCwd(bundle.transcript, plan.targetCwd);
+	const { transcript, rewritten } = plan.rewriteCwd
+		? rewriteTranscriptCwd(bundle.transcript, plan.targetCwd)
+		: { transcript: bundle.transcript, rewritten: false };
 	writeFileSync(plan.sessionPath, transcript, "utf8");
 	return { sessionPath: plan.sessionPath, cwdRewritten: rewritten };
 }
@@ -427,6 +569,7 @@ export type StoredBundleInfo = {
 	cwd: string;
 	hasGit: boolean;
 	note?: string;
+	provider: SessionProvider;
 };
 
 export function saveBundleToStore(bundle: SessionBundle, dir: string = getSessionBundleDir()): string {
@@ -458,6 +601,7 @@ export function listStoredBundles(dir: string = getSessionBundleDir()): StoredBu
 				cwd: bundle.cwd,
 				hasGit: Boolean(bundle.git),
 				note: bundle.note,
+				provider: bundle.provider,
 			});
 		} catch {
 			// Unreadable file: skip.
@@ -525,6 +669,19 @@ export function runSendCommands(commands: SendCommand[]): { ok: boolean; failedS
 			const stderr = result.error ? String(result.error.message || result.error) : (result.stderr ?? "").trim();
 			return { ok: false, failedStep: `${step.command} ${step.args.join(" ")}`, stderr };
 		}
+	}
+	return { ok: true };
+}
+
+/** Non-blocking variant for server contexts: never stalls the gateway event loop on ssh/scp. */
+export async function runSendCommandsAsync(commands: SendCommand[]): Promise<{ ok: boolean; failedStep?: string; stderr?: string }> {
+	for (const step of commands) {
+		const result = await new Promise<{ ok: boolean; stderr: string }>((resolvePromise) => {
+			execFile(step.command, step.args, { encoding: "utf8", windowsHide: true, timeout: 120_000 }, (error, _stdout, stderr) => {
+				resolvePromise({ ok: !error, stderr: error ? `${stderr || ""}${stderr ? "\n" : ""}${error.message}`.trim() : "" });
+			});
+		});
+		if (!result.ok) return { ok: false, failedStep: `${step.command} ${step.args.join(" ")}`, stderr: result.stderr };
 	}
 	return { ok: true };
 }

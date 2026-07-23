@@ -271,6 +271,8 @@ export type ControlServerOptions = {
 	) => Promise<RemoteTurnResult>;
 	onTurnCancel?: () => Promise<ControlActionResult> | ControlActionResult;
 	getSessionDashboard?: () => SessionDashboard;
+	/** Read-only cross-host manifest: session names + workspace git identity for secondary hosts. */
+	getSessionManifest?: () => unknown;
 	getCompactRouteSlots?: () => CompactRouteSlot[];
 	onSessionRename?: (body: SessionRenamePayload) => Promise<ControlActionResult> | ControlActionResult;
 	onSessionAlias?: (body: SessionAliasPayload) => Promise<ControlActionResult> | ControlActionResult;
@@ -417,6 +419,7 @@ export class ControlServer {
 	private readonly onVoiceTurn: ControlServerOptions["onVoiceTurn"];
 	private readonly onTurnCancel?: ControlServerOptions["onTurnCancel"];
 	private readonly getSessionDashboard?: ControlServerOptions["getSessionDashboard"];
+	private readonly getSessionManifest?: ControlServerOptions["getSessionManifest"];
 	private readonly getCompactRouteSlots?: ControlServerOptions["getCompactRouteSlots"];
 	private readonly onSessionRename?: ControlServerOptions["onSessionRename"];
 	private readonly onSessionAlias?: ControlServerOptions["onSessionAlias"];
@@ -477,6 +480,7 @@ export class ControlServer {
 		this.onVoiceTurn = options.onVoiceTurn;
 		this.onTurnCancel = options.onTurnCancel;
 		this.getSessionDashboard = options.getSessionDashboard;
+		this.getSessionManifest = options.getSessionManifest;
 		this.getCompactRouteSlots = options.getCompactRouteSlots;
 		this.onSessionRename = options.onSessionRename;
 		this.onSessionAlias = options.onSessionAlias;
@@ -1058,6 +1062,15 @@ export class ControlServer {
 				return;
 			}
 			this.writeJson(res, 200, { ok: true, dashboard: this.getSessionDashboard() });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/sessions/manifest") {
+			if (!this.getSessionManifest) {
+				this.writeJson(res, 501, { ok: false, error: "Session manifest is not available on this gateway." });
+				return;
+			}
+			this.writeJson(res, 200, { ok: true, manifest: this.getSessionManifest() });
 			return;
 		}
 
@@ -1684,6 +1697,7 @@ export class ControlServer {
 				hubPublish: "/v1/hub/publish",
 				hubResume: "/v1/hub/resume",
 				slots: "/v1/sessions/slots",
+				sessionManifest: "/v1/sessions/manifest",
 				agents: "/v1/agents",
 				events: "/v1/events",
 				warp: "/v1/warp",
