@@ -43,7 +43,7 @@ class AppPreferences(context: Context) {
     private val chatMessageListAdapter = moshi.adapter<List<ChatMessage>>(chatMessageListAdapterType)
 
     var activeAgent: String
-        get() = prefs.getString("active_agent", "Local Codex (Pi)") ?: "Local Codex (Pi)"
+        get() = prefs.getString("active_agent", "Gateway OMPK (oh-my-pk)") ?: "Gateway OMPK (oh-my-pk)"
         set(value) = prefs.edit().putString("active_agent", value).apply()
 
     var elevenLabsApiKey: String

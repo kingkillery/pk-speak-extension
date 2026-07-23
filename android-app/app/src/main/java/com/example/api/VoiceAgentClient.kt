@@ -506,7 +506,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
     suspend fun discoverMachines(): List<DiscoveredMachine> {
         return withContext(Dispatchers.IO) {
             val discovered = linkedMapOf<String, DiscoveredMachine>()
-            (discoverMdnsMachines() + discoverUdpMachines()).forEach { machine ->
+            (discoverMdnsMachines() + discoverUdpMachines() + discoverTailnetGatewayMachines()).forEach { machine ->
                 discovered[machine.ip] = machine
             }
             if (discovered.isNotEmpty()) return@withContext discovered.values.toList()
@@ -770,6 +770,45 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         } catch (e: Exception) {
             Log.d("VoiceAgent", "Descriptor fetch failed for $baseUrl: ${e.message}")
             null
+        }
+    }
+
+    /**
+     * Tailnet leg of discovery: mDNS/UDP broadcast cannot traverse the WireGuard
+     * tunnel, so ask the configured gateway for its roster of other live
+     * gateways (GET /v1/gateways), then probe each one's own descriptor for
+     * fresh pairing info. Falls back to roster metadata when the direct probe
+     * fails (e.g. the peer answered the host but not this phone).
+     */
+    private fun discoverTailnetGatewayMachines(): List<DiscoveredMachine> {
+        val base = gatewayBaseUrl()
+        if (base.isBlank()) return emptyList()
+        return try {
+            val request = Request.Builder()
+                .url("$base/v1/gateways")
+                .header("X-Pi-Speak-Token", prefs.remoteToken)
+                .get()
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return emptyList()
+                val body = response.body?.string() ?: return emptyList()
+                val roster = parseGatewayRoster(JSONObject(body))
+                roster.gateways.map { entry ->
+                    descriptorMachine(entry.baseUrl, entry.hostName)
+                        ?: DiscoveredMachine(
+                            name = entry.name ?: entry.hostName,
+                            ip = entry.baseUrl,
+                            status = if (entry.online) "online" else "offline",
+                            latencyMs = 0L,
+                            activeSessions = emptyList(),
+                            authRequired = entry.authRequired,
+                            pairingRequired = true
+                        )
+                }
+            }
+        } catch (e: Exception) {
+            Log.d("VoiceAgent", "Tailnet roster fetch failed: ${e.message}")
+            emptyList()
         }
     }
 
@@ -2017,6 +2056,7 @@ class VoiceAgentClient(private val context: Context, private val prefs: AppPrefe
         "Gateway Claude (Claude Code)" -> "claude"
         "Gateway Voice (ElevenLabs)" -> "elevenlabs"
         "Gateway Gemini (Vertex AI)" -> "gemini"
+        "Gateway Hermes" -> "hermes"
         "Gateway OMPK (oh-my-pk)", "Gateway OMP (oh-my-pi)" -> "oh-my-pk"
         else -> "codex"
     }

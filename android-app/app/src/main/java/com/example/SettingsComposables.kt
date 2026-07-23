@@ -109,7 +109,9 @@ fun SettingsTabContent(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    val agents = listOf("Local Codex (Pi)", "Gateway OMPK (oh-my-pk)", "Gateway Claude (Claude Code)", "Gateway Voice (ElevenLabs)", "Gateway Gemini (Vertex AI)")
+    // Provider picker is intentionally exactly these four; voice/TTS backends are
+    // configured elsewhere, and legacy prefs values (ElevenLabs/Gemini) still work.
+    val agents = listOf("Gateway OMPK (oh-my-pk)", "Gateway Claude (Claude Code)", "Local Codex (Pi)", "Gateway Hermes")
     val workspacePresets = listOf(
         "C:/Dev" to AppPreferences.DEFAULT_WORKSPACE_PATH
     )

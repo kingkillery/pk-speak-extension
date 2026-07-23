@@ -54,6 +54,7 @@ fun applySetupDeepLink(prefs: AppPreferences, setup: SetupDeepLink) {
         "codex", "pi" -> prefs.activeAgent = "Local Codex (Pi)"
         "claude" -> prefs.activeAgent = "Gateway Claude (Claude Code)"
         "oh-my-pk", "ompk", "oh-my-pi", "omp" -> prefs.activeAgent = "Gateway OMPK (oh-my-pk)"
+        "hermes" -> prefs.activeAgent = "Gateway Hermes"
         "elevenlabs" -> prefs.activeAgent = "Gateway Voice (ElevenLabs)"
         "gemini", "gemini-live", "vertex" -> prefs.activeAgent = "Gateway Gemini (Vertex AI)"
     }

@@ -60,6 +60,7 @@ import {
 	runSendCommands,
 	saveBundleToStore,
 	type SessionBundle,
+	getTransferHosts,
 } from "./session-transfer.js";
 import {
 	formatWorktreeList,
@@ -68,6 +69,7 @@ import {
 	sweepWorktrees,
 	updateWorktreeLease,
 } from "./session-worktree.js";
+import { parseUploadChatArgs, resolveSyncHost, resolveSyncScript, runCodespaceSync, summarizeSyncOutput } from "./upload-chat.js";
 import { getPythonCommand, getSpeakInvocationFromEnv } from "./runtime-paths.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { PiAgentProvider } from "./pi-agent-provider.js";
@@ -4122,6 +4124,53 @@ export default function speakExtension(pi: ExtensionAPI) {
 			const source = pendingSessSource ?? "command";
 			pendingSessSource = undefined;
 			await handleSessCommand(args, ctx, source);
+		},
+	});
+
+	pi.registerCommand("upload-chat", {
+		description: "Sync repo state (and chat bundle) to/from a remote host: /upload-chat [push|pull|status] <host>",
+		getArgumentCompletions: (prefix) => {
+			const options = ["push", "pull", "status", ...getTransferHosts()];
+			return options.filter((option) => option.startsWith(prefix)).map((value) => ({ value, label: value }));
+		},
+		handler: async (args, ctx) => {
+			const parsed = parseUploadChatArgs(args ?? "");
+			if (!parsed.ok) {
+				ctx.ui.notify(parsed.error, "error");
+				return;
+			}
+			const { action, host } = parsed.args;
+			const target = resolveSyncHost(host);
+			const startCwd = parsed.args.cwd || DEFAULT_AGENT_CWD || process.cwd();
+			const located = resolveSyncScript(startCwd);
+			if (!located) {
+				ctx.ui.notify(`No scripts/codespace-sync.ts found from ${startCwd} up to the repo root. This repo does not support codespace sync.`, "error");
+				return;
+			}
+			const direction = action === "push" ? `uploading ${located.repoRoot} TO ${target}` : action === "pull" ? `bringing ${target}'s state back into ${located.repoRoot}` : `checking what would transfer to ${target}`;
+			ctx.ui.notify(`codespace-sync ${action}: ${direction}…`, "info");
+			const result = await runCodespaceSync(located.script, located.repoRoot, action, target);
+			appendSessionEvent("sess.codespace-sync", "command", {
+				action,
+				host,
+				target,
+				repoRoot: located.repoRoot,
+				ok: result.ok,
+				exitCode: result.exitCode,
+			});
+			const lines = [summarizeSyncOutput(result.output)];
+			if (result.ok && action === "push") {
+				if (getTransferHosts().includes(host) || getTransferHosts().includes(target)) {
+					lines.push(`Repo state uploaded. Sending the chat bundle too (/sess send ${host})…`);
+					await handleSessCommand(`send ${host}`, ctx, "command");
+				} else {
+					lines.push(`Repo state uploaded. Chat bundle NOT sent: add "${host}" to PI_SPEAK_TRANSFER_HOSTS to ship the session too, or run /sess send ${host}.`);
+				}
+			}
+			if (result.ok && action === "pull") {
+				lines.push("Pulled state is staged in .codespace-sync-incoming/ (non-destructive); fetched branches live under origin-sync/*.");
+			}
+			ctx.ui.notify(lines.join("\n"), result.ok ? "info" : "error");
 		},
 	});
 

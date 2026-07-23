@@ -32,7 +32,22 @@ This is the focused operator guide for `/sess` in `pi-speak-pk`. `/sess` is how 
 /sess wt list
 /sess wt rm voice-work
 /sess wt gc
+/upload-chat mac2
+/upload-chat pull mac2
+/upload-chat status mac2
 ```
+
+## /upload-chat: whole-repo hand-off (codespace sync)
+
+`/upload-chat` moves the **entire working tree** (all branches, uncommitted edits, untracked files, stash) between this machine and a remote dev box, wrapping the repo's own `scripts/codespace-sync.ts`. Use it for the "leave now, continue on the phone via the Mac" flow; use `/sess send` when only the session should travel.
+
+- `/upload-chat <host>` or `/upload-chat push <host>` — **upload TO the host** (push). If the host is also in `PI_SPEAK_TRANSFER_HOSTS`, the current chat bundle is sent right after the repo state.
+- `/upload-chat pull <host>` — bring the host's repo state **back here**: branches land under `origin-sync/*`, the working tree stages non-destructively in `.codespace-sync-incoming/`.
+- `/upload-chat status <host>` — dry-run plan: branch, dirty/untracked counts, transfer size.
+- `<host>` is an ssh alias (`~/.ssh/config`), a `PI_SPEAK_SYNC_HOSTS` alias (`mac2=k@100.109.244.1 …`), or a raw `user@ip`. Optional `--cwd <path>` picks the repo; otherwise the agent workspace is used, walking up to find `scripts/codespace-sync.ts`.
+
+Every run is audited to the session event log as `sess.codespace-sync`.
+
 
 ## Transfer sessions between hosts (pickup from anywhere)
 
