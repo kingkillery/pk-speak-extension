@@ -25,6 +25,7 @@ import { parseHubAgentId, parseHubChatRequest, parseHubKillConfirm } from "./her
 import { buildOhMyPiAgentHubDashboardCached } from "./agent-hub-dashboard.js";
 import { isWebSearchConfigured, runWebSearch } from "./web-search.js";
 import { canonicalRealtimeSessionPath } from "./realtime-session-target.js";
+import { discoverTailnetGateways } from "./gateway-discovery.js";
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
@@ -1074,6 +1075,14 @@ export class ControlServer {
 			return;
 		}
 
+		if (req.method === "GET" && url.pathname === "/v1/gateways") {
+			// Host-assisted tailnet discovery: phones cannot enumerate peers, so any
+			// paired gateway doubles as the roster of every other live gateway.
+			const roster = await discoverTailnetGateways({ ports: [...new Set([this.state.port ?? DEFAULT_PORT, 8767])] });
+			this.writeJson(res, 200, { ok: true, ...roster });
+			return;
+		}
+
 		if (req.method === "GET" && url.pathname === "/v1/sessions/slots") {
 			if (!this.getCompactRouteSlots) {
 				this.writeJson(res, 501, { ok: false, error: "Route slots are not available on this gateway." });
@@ -1698,6 +1707,7 @@ export class ControlServer {
 				hubResume: "/v1/hub/resume",
 				slots: "/v1/sessions/slots",
 				sessionManifest: "/v1/sessions/manifest",
+				gateways: "/v1/gateways",
 				agents: "/v1/agents",
 				events: "/v1/events",
 				warp: "/v1/warp",

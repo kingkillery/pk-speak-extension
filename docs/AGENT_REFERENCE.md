@@ -26,6 +26,7 @@ npm test         # Run tests
 | `session-routing.ts` | Session naming, alias helpers, summaries, removal helpers, and the `buildSessionDashboard` selector shared with the pane |
 | `session-transfer.ts` | Portable session bundles: git capture/restore, ssh send/inbox, `captureGitSummary` + `buildSessionManifest` for `GET /v1/sessions/manifest` |
 | `session-worktree.ts` | Per-session git worktrees for secondary-host pickup (`/sess pickup --worktree`): bare base clone per remote, fetch-at-invoke hydration, lease-based sweep with dirty-work rescue |
+| `gateway-discovery.ts` | Host-assisted tailnet gateway roster (`GET /v1/gateways`): parses `tailscale status --json`, probes online peers' `/.well-known/pi-speak` |
 | `session-routing-store.ts` | Durable routing persistence |
 | `session-events.ts` | Append-only voice/admin event log the management pane tails for toasts |
 | `ui-launcher.ts` | Spawns `/sess ui` in a separate terminal (detached from pi-coding-agent) |
