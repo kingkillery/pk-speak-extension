@@ -114,3 +114,49 @@ test("live binding: chat is honestly rejected for subagents (no independent rout
 		assert.equal(result.code, "action_rejected");
 	});
 });
+
+test("snapshot: lane description comes from the background role and subagents are labeled", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-herdr-desc-"));
+	try {
+		const sessionsRoot = join(tmp, "sessions");
+		const projectDir = join(sessionsRoot, "repo");
+		mkdirSync(projectDir, { recursive: true });
+		const withRole = join(projectDir, "2026-07-23T000000_dispatch.jsonl");
+		writeFileSync(
+			withRole,
+			jsonLine({ type: "session", version: 3, id: "dispatch", cwd: "/repo", timestamp: "2026-07-23T10:00:00.000Z" })
+				+ jsonLine({ type: "background_instance", name: "queue-dispatcher", status: "active", model: "gpt-5", role: "linear queue dispatch worker" }),
+		);
+		// Subagent transcript lives in the lane's artifacts dir <session>/ (same basename, no .jsonl).
+		const artifactsDir = withRole.slice(0, -".jsonl".length);
+		mkdirSync(artifactsDir, { recursive: true });
+		writeFileSync(join(artifactsDir, "researcher.jsonl"), jsonLine({ type: "session", id: "sub" }));
+		const withoutRole = join(projectDir, "2026-07-23T000001_plain.jsonl");
+		writeFileSync(
+			withoutRole,
+			jsonLine({ type: "session", version: 3, id: "plain", cwd: "/repo", timestamp: "2026-07-23T11:00:00.000Z" })
+				+ jsonLine({ type: "background_instance", name: "plain-lane", status: "active" }),
+		);
+
+		const { gateway } = makeGateway(sessionsRoot);
+		const { agents } = await gateway.snapshot();
+
+		const dispatcher = agents.find((agent) => agent.displayName === "queue-dispatcher");
+		assert.ok(dispatcher, "expected the role-carrying lane in the snapshot");
+		assert.equal(dispatcher.description, "linear queue dispatch worker");
+
+		const sub = agents.find((agent) => agent.kind === "sub" && agent.parentId === dispatcher.id);
+		assert.ok(sub, "expected the researcher subagent under its lane");
+		assert.equal(sub.description, "background subagent");
+
+		const plain = agents.find((agent) => agent.displayName === "plain-lane");
+		assert.ok(plain, "expected the role-less lane in the snapshot");
+		assert.equal(plain.description, null);
+
+		// The gateway detail path carries the description through untouched.
+		const detail = await gateway.detail(dispatcher.id, 10);
+		assert.equal(detail.description, "linear queue dispatch worker");
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});

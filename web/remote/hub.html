@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+	<meta name="theme-color" content="#ffffff" />
+	<title>PK Hub</title>
+	<link rel="stylesheet" href="/hub/hub.css" />
+</head>
+<body>
+	<header id="top">
+		<h1>PK&nbsp;HUB</h1>
+		<div id="topRight">
+			<span id="clock" aria-hidden="true"></span>
+			<button id="refreshBtn" type="button" aria-label="Refresh now">REFRESH</button>
+		</div>
+	</header>
+
+	<div id="banner" hidden></div>
+
+	<main id="listView">
+		<section id="attention" hidden>
+			<h2>NEEDS DECISION</h2>
+			<div id="attentionCards"></div>
+		</section>
+
+		<section id="agents">
+			<h2 id="agentsHeading">AGENTS</h2>
+			<div id="agentCards"></div>
+		</section>
+
+		<nav id="pager" hidden>
+			<button id="prevBtn" type="button">&#9664;&nbsp;PREV</button>
+			<span id="pageLabel"></span>
+			<button id="nextBtn" type="button">NEXT&nbsp;&#9654;</button>
+		</nav>
+	</main>
+
+	<main id="detailView" hidden>
+		<button id="backBtn" type="button">&#9664;&nbsp;BACK</button>
+		<h2 id="detailName"></h2>
+		<p id="detailDescription"></p>
+		<p id="detailMeta"></p>
+		<pre id="detailTranscript" aria-label="Transcript tail"></pre>
+		<div id="detailActions">
+			<button id="chatBtn" type="button">SEND&nbsp;MESSAGE</button>
+			<button id="reviveBtn" type="button">REVIVE</button>
+			<button id="killBtn" type="button">ARCHIVE</button>
+		</div>
+	</main>
+
+	<script src="/hub/hub.js"></script>
+</body>
+</html>

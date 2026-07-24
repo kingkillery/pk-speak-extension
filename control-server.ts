@@ -1511,6 +1511,27 @@ export class ControlServer {
 			return true;
 		}
 
+		if (url.pathname === "/hub/" || url.pathname === "/hub/index.html" || url.pathname === "/hub") {
+			if (url.pathname === "/hub") {
+				res.statusCode = 302;
+				res.setHeader("Location", "/hub/");
+				res.end();
+				return true;
+			}
+			await this.serveStaticFile(join(REMOTE_APP_DIR, "hub.html"), "text/html; charset=utf-8", res, "no-store");
+			return true;
+		}
+
+		if (url.pathname === "/hub/hub.js") {
+			await this.serveStaticFile(join(REMOTE_APP_DIR, "hub.js"), "application/javascript; charset=utf-8", res, "no-store");
+			return true;
+		}
+
+		if (url.pathname === "/hub/hub.css") {
+			await this.serveStaticFile(join(REMOTE_APP_DIR, "hub.css"), "text/css; charset=utf-8", res, "no-store");
+			return true;
+		}
+
 		if (url.pathname === "/app/app.js") {
 			await this.serveStaticFile(
 				join(REMOTE_APP_DIR, "app.js"),

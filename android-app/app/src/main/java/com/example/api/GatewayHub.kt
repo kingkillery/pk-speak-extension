@@ -26,6 +26,8 @@ data class HubAgent(
     val model: String? = null,
     val cwd: String? = null,
     val activity: String? = null,
+    /** Stable purpose of the lane (gateway: background instance role); null when unknown. */
+    val description: String? = null,
     val createdAtMs: Long = 0L,
     val lastActivityMs: Long = 0L,
     val needsAttention: Boolean = false,
@@ -83,6 +85,7 @@ fun parseHubAgent(json: JSONObject): HubAgent? {
         model = json.optString("model").ifBlank { null },
         cwd = json.optString("cwd").ifBlank { null },
         activity = json.optString("activity").ifBlank { null },
+        description = json.optString("description").ifBlank { null },
         createdAtMs = json.optLong("createdAtMs", 0L),
         lastActivityMs = json.optLong("lastActivityMs", 0L),
         needsAttention = json.optBoolean("needsAttention", false),

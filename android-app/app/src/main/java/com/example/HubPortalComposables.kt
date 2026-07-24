@@ -253,6 +253,15 @@ fun HubAgentRow(agent: HubAgent, expanded: Boolean, onToggle: () -> Unit) {
                     Text("!", color = Error, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
+            agent.description?.let { desc ->
+                Text(
+                    text = desc,
+                    color = InkMuted,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             val subtitle = listOfNotNull(agent.model, agent.cwd).joinToString(" · ")
             if (subtitle.isNotBlank()) {
                 Text(
@@ -327,6 +336,15 @@ fun HubAgentDetailPanel(
             .background(SurfaceSubtle, RoundedCornerShape(12.dp))
             .padding(12.dp)
     ) {
+        agentSummary.description?.let { desc ->
+            Text(
+                text = desc,
+                color = Ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+        }
         Text(
             text = if (streamConnected) "Live · $streamStatusText" else streamStatusText,
             color = InkMuted,

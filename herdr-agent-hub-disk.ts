@@ -70,11 +70,14 @@ function buildSnapshotFromDashboard(
 		if (!laneId) continue;
 		agents.push(backgroundAgent(session, laneId, key, cwd));
 		for (const sub of session.subagents ?? []) {
-			const subId = parseHubAgentId(`${laneId}/${sub.id}`);
+			// sub.id embeds the dashboard lane id ("background:<sessionId>/<name>"),
+			// whose colon can never pass parseHubAgentId — every subagent used to be
+			// silently dropped here. The hub id is the lane-scoped bare name instead.
+			const subId = parseHubAgentId(`${laneId}/${sub.name}`);
 			if (!subId) continue;
 			agents.push({
 				id: subId,
-				displayName: sub.id,
+				displayName: sub.name,
 				kind: "sub",
 				parentId: laneId,
 				folderKey: key,
@@ -83,6 +86,7 @@ function buildSnapshotFromDashboard(
 				model: null,
 				cwd: null,
 				activity: null,
+				description: "background subagent",
 				createdAtMs: sub.lastActivity,
 				lastActivityMs: sub.lastActivity,
 				needsAttention: false,
@@ -112,6 +116,7 @@ function backgroundAgent(
 		model: session.model ?? null,
 		cwd,
 		activity: null,
+		description: session.role ?? null,
 		createdAtMs: session.createdAt ?? now,
 		lastActivityMs: session.lastActivity ?? session.createdAt ?? now,
 		needsAttention: false,

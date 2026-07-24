@@ -23,6 +23,8 @@ export interface HubAgent {
 	readonly model: string | null;
 	readonly cwd: string | null;
 	readonly activity: string | null;
+	/** Stable purpose of the lane (today: the background instance role); null when unknown. */
+	readonly description: string | null;
 	readonly createdAtMs: number;
 	readonly lastActivityMs: number;
 	readonly needsAttention: boolean;
