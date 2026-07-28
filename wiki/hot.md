@@ -14,7 +14,7 @@ updated: 2026-07-20T14:30:00-06:00
 
 ## Recent Changes
 - Terminal Live opens Edge `--app=/orb/` by default; full remote stays `/app/?mode=live`.
-- HF speech-to-speech is the default S2S upstream: any S2S URL (or `PI_SPEAK_LIVE_BACKEND=hf|openai-realtime`) selects it, URL defaults to `ws://localhost:8765/v1/realtime`; Gemini is the no-config fallback. Clients always use `/v1/live`.
+- HF speech-to-speech is the default S2S upstream: any S2S URL (or `PI_SPEAK_LIVE_BACKEND=hf|openai-realtime|s2s`) selects it, URL defaults to `ws://localhost:8765/v1/realtime`; Gemini is the no-config fallback. Clients always use `/v1/live`.
 - Live tools: `web_search` (Serper), `camera_snapshot` (client JPEG), shared `dispatchRealtimeToolCall`.
 
 ## Active Threads

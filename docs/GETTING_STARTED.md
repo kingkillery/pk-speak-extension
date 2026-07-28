@@ -116,7 +116,7 @@ Create and select named sessions, then inspect the compact voice lanes:
 
 ## 8. Live voice quick-start
 
-Live mode is full-duplex conversation over `/v1/live`. The default upstream is the **HF speech-to-speech** server (OpenAI-Realtime wire) whenever an S2S URL or `PI_SPEAK_LIVE_BACKEND=hf` is configured — with the URL defaulting to the local server at `ws://localhost:8765/v1/realtime`. **Gemini Live** is the fallback when nothing S2S-related is set.
+Live mode is full-duplex conversation over `/v1/live`. The default upstream is the **HF speech-to-speech** server (OpenAI-Realtime wire) whenever an S2S URL (`SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`, or `PI_SPEAK_OPENAI_REALTIME_URL`) or `PI_SPEAK_LIVE_BACKEND=hf|openai-realtime|s2s` is configured — with the URL defaulting to the local server at `ws://localhost:8765/v1/realtime`. **Gemini Live** is the fallback when nothing S2S-related is set; explicit `PI_SPEAK_LIVE_BACKEND=gemini` always selects Gemini.
 
 ### Terminal (desktop orb)
 

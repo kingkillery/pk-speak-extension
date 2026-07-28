@@ -1693,6 +1693,13 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 	];
 }
 
+// RFC 6455 caps close reasons at 123 UTF-8 bytes; the ws package throws on longer values.
+function toWsCloseReason(message: string): string {
+	let reason = message;
+	while (Buffer.byteLength(reason, "utf8") > 123) reason = reason.slice(0, -1);
+	return reason;
+}
+
 async function startNewSession(
 	ws: WebSocket,
 	server: any,
@@ -1711,7 +1718,7 @@ async function startNewSession(
 			model = getGeminiLiveModel();
 			clientConfig = createGeminiClient(process.env, { live: true });
 		} catch (error: any) {
-			ws.close(1011, `Failed to initialize Gemini Live client: ${error?.message ?? String(error)}`);
+			ws.close(1011, toWsCloseReason(`Failed to initialize Gemini Live client: ${error?.message ?? String(error)}`));
 			return;
 		}
 	} else {
@@ -1895,7 +1902,7 @@ async function startNewSession(
 			if (activeSession.configurationError) {
 				activeSessions.delete(sessionId);
 				try { backendSession.close(); } catch {}
-				ws.close(1008, activeSession.configurationError);
+				ws.close(1008, toWsCloseReason(activeSession.configurationError));
 				return;
 			}
 			activeSession.clientHandlersReady = true;
@@ -2049,7 +2056,13 @@ async function startNewSession(
 		sendLiveStartWhenReady(activeSession);
 	} catch (error: any) {
 		activeSessions.delete(sessionId);
-		ws.close(1011, `Failed to connect to Gemini Live: ${error.message}`);
+		const upstreamLabel = liveBackendKind === "openai-realtime" ? "speech-to-speech upstream" : "Gemini Live";
+		const message = `Failed to connect to ${upstreamLabel}: ${error.message}`;
+		// Full detail travels as a JSON error event; the close reason stays bounded.
+		if (ws.readyState === WebSocket.OPEN) {
+			try { ws.send(JSON.stringify({ type: "error", message })); } catch {}
+		}
+		ws.close(1011, toWsCloseReason(message));
 	}
 }
 

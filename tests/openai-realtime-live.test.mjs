@@ -187,6 +187,12 @@ test("resolveLiveBackendKind defaults to HF speech-to-speech when an S2S URL is 
 		resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "gemini", SPEECH_TO_SPEECH_URL: "ws://localhost:8765" }),
 		"gemini",
 	);
+	// An unrecognized backend value must not suppress URL-based S2S selection.
+	assert.equal(
+		resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "typo", SPEECH_TO_SPEECH_URL: "ws://localhost:8765" }),
+		"openai-realtime",
+	);
+	assert.equal(resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "typo" }), "gemini");
 });
 
 

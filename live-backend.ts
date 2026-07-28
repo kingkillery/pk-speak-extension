@@ -91,7 +91,9 @@ export function resolveLiveBackendKind(env: NodeJS.ProcessEnv = process.env): Li
 	if (raw === "gemini" || raw === "google") {
 		return "gemini";
 	}
-	if (!raw && hasConfiguredS2sUrl(env)) {
+	// Unset or unrecognized backend value: a configured S2S URL still selects
+	// the HF speech-to-speech upstream rather than silently falling to Gemini.
+	if (hasConfiguredS2sUrl(env)) {
 		return "openai-realtime";
 	}
 	return "gemini";
