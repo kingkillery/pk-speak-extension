@@ -145,7 +145,7 @@ The Telegram surface stores its bot credential and pairing state in the local se
 3. detected local LAN IPv4 address
 4. configured fallback
 
-Scan the QR from the Android phone to open the setup page. From there you can download the bundled APK, open the native `pi-speak://setup` link, and save the machine URL, token, profile name, connection mode, and Codex route metadata. If you want the browser app instead, open one of the printed browser URLs:
+Scan the QR from the Android phone to open the setup page. From there you can download the bundled APK, open the native `pi-speak://setup` link, and save the machine URL, fallback token, profile name, connection mode, and Codex route metadata. A direct peer verified by the host's Tailscale daemon does not need to present that token; LAN, Funnel, public/tunnel, and unknown peers do. If you want the browser app instead, open one of the printed browser URLs:
 
 ```text
 http://localhost:8767/app/

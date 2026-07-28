@@ -102,7 +102,7 @@ type AgentProviderName =
   | "gemini" | "gemini-live" | "elevenlabs" | "9router";
 ```
 
-`AGENT_PROVIDER` selects the server-side backend (defaulting to `pi` when unset). `pi`, `codex`, `claude`, and `oh-my-pk` are routing/coding-agent providers: they run an external or embedded coding agent and can target workspaces and, where supported, resumable sessions. `gemini`, `gemini-live`, `elevenlabs`, and `9router` are voice-native or direct model providers in the registry; Gemini Live is the bidirectional audio path, while Gemini is the text/model path. Provider capabilities differ: for example Gemini and Gemini Live do not provide session routing, and 9router disables routing, steering, and resumable sessions.
+`AGENT_PROVIDER` selects the server-side backend (defaulting to `oh-my-pk` when unset). `pi`, `codex`, `claude`, and `oh-my-pk` are routing/coding-agent providers: they run an external or embedded coding agent and can target workspaces and, where supported, resumable sessions. `gemini`, `gemini-live`, `elevenlabs`, and `9router` are voice-native or direct model providers in the registry; Gemini Live is the bidirectional audio path, while Gemini is the text/model path. Provider capabilities differ: for example Gemini and Gemini Live do not provide session routing, and 9router disables routing, steering, and resumable sessions.
 
 `9router/ag/gemini-3-5-flash-high` is a text model option, not a separate `AgentProviderName`. It appears in `GEMINI_TEXT_MODEL_OPTIONS` and can therefore be selected as the model used by the `gemini` text provider.
 
@@ -125,7 +125,7 @@ The gateway is HTTP-based; clients use the following high-frequency routes:
 | `/v1/workspace` | Browse the configured workspace root (with file reads exposed by the workspace file variant). |
 | `/v1/events` | Tail the server-sent event stream for session and administrative updates. |
 
-Mobile-app gateway requests are authenticated with `PI_SPEAK_HTTP_TOKEN` where required. Browser, desktop orb, and Android use that HTTP surface. Telegram uses bot polling and its own `/link` pairing through `phone-bridge.ts`; the standalone daemon may host both transports while keeping their credentials and client protocols separate.
+Mobile-app gateway requests use `PI_SPEAK_HTTP_TOKEN` unless the actual socket peer is verified by the host's Tailscale WhoIs/LocalAPI identity path, or a loopback-bound Tailscale Serve proxy supplies its sanitized user identity header. Funnel, LAN, public/tunnel, shared-node direct, and failed/unknown identity paths remain token-gated. Browser, desktop orb, and Android use that HTTP surface. Telegram uses bot polling and its own `/link` pairing through `phone-bridge.ts`; the standalone daemon may host both transports while keeping their credentials and client protocols separate.
 
 ## 6. Android, PWA, and desktop orb clients
 
@@ -135,19 +135,19 @@ The full web remote is hosted at `/app/`: text/voice turns, target selection, se
 
 | Name | Purpose | Values / format | Required by |
 |---|---|---|---|
-| `AGENT_PROVIDER` | Select the active agent backend. | `pi`, `codex`, `claude`, `oh-my-pk`, `gemini`, `gemini-live`, `elevenlabs`, `9router`; defaults to `pi`. | Provider config/factory, `index.ts`, gateway |
+| `AGENT_PROVIDER` | Select the active agent backend. | `pi`, `codex`, `claude`, `oh-my-pk`, `gemini`, `gemini-live`, `elevenlabs`, `9router`; defaults to `oh-my-pk`. | Provider config/factory, `index.ts`, gateway |
 | `PI_SPEAK_TTS_PROVIDER` | Explicitly select speech synthesis instead of auto-resolution. | `legacy`, `gemini`, `elevenlabs`, `openai`, or `edge`. | `tts.ts` |
 | `PI_SPEAK_GEMINI_BACKEND` | Choose Gemini API backend. | `developer-api`/`developer`/`api`, `vertex`/`vertexai`/`gcloud`, or `simulated`/`sim`. | `gemini-live-turn.ts` |
 | `PI_SPEAK_GEMINI_TEXT_MODEL` | Override the Gemini text model. | Model ID, including `9router/ag/gemini-3-5-flash-high`. | Gemini text turns |
 | `PI_SPEAK_GEMINI_LIVE_MODEL` | Override the Gemini Live model. | Live model ID, such as `gemini-3.1-flash-live-preview`. | Gemini Live turns |
-| `PI_SPEAK_LIVE_BACKEND` | Select Live upstream adapter. | `gemini` (default), `openai-realtime`, `hf`, `s2s`. | `live-backend.ts`, `realtime-gateway.ts` |
+| `PI_SPEAK_LIVE_BACKEND` | Override Live upstream adapter. | `gemini`, `openai-realtime`, `hf`, `s2s`; a configured compatible realtime URL is selected automatically, otherwise Gemini is used. | `live-backend.ts`, `realtime-gateway.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_MODEL` | Select the official OpenAI Realtime model; appended to `api.openai.com` URLs. | Defaults to `gpt-realtime`. | `openai-realtime-live.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_INPUT_RATE` | Override upstream PCM input rate for compatible custom/HF endpoints. | Defaults to `24000`; gateway client PCM is resampled. | `openai-realtime-live.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_TRANSCRIPTION_MODEL` | Enable input transcription on OpenAI-compatible endpoints. | Official default `gpt-4o-mini-transcribe`; set `off` to disable. | `openai-realtime-live.ts` |
-| `PI_SPEAK_OPENAI_REALTIME_URL` | OpenAI-Realtime / HF S2S WebSocket URL. | `wss://…/v1/realtime…` (aliases: `SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`). | `openai-realtime-live.ts` |
+| `PI_SPEAK_HF_REALTIME_URL` | Preferred HF-compatible S2S WebSocket URL. | `wss://…/v1/realtime…` (aliases: `HF_REALTIME_URL`, `PI_SPEAK_OPENAI_REALTIME_URL`, `SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`). | `openai-realtime-live.ts` |
 | `SERPER_API_KEY` | Enable Live `web_search` tool. | Serper.dev key (alias `PI_SPEAK_SERPER_API_KEY`). | `web-search.ts`, `/v1/search` |
 | `GOOGLE_CLOUD_PROJECT` | Vertex AI project identifier. | GCP project ID. | Gemini Vertex client |
-| `PI_SPEAK_HTTP_TOKEN` | Authenticate HTTP gateway requests. | Shared bearer/token string. | `control-server.ts`, clients |
+| `PI_SPEAK_HTTP_TOKEN` | Authenticate HTTP gateway requests outside a host-verified same-tailnet path. | Shared bearer/token string; still required for LAN, Funnel, public/tunnel, and unknown peers. | `control-server.ts`, clients |
 | `PI_SPEAK_BASE_URL` | Advertise or use the gateway base URL for remote clients. | Reachable HTTP(S) base URL. | Pairing/setup and clients |
 | `PI_SPEAK_WORKSPACE_ROOT` | Constrain workspace browsing and file reads. | Directory path; defaults to the agent working directory. | `control-server.ts` workspace API |
 | `PI_SPEAK_WAKE_SENSITIVITY` | Set wake-word matching tolerance. | `low`, `medium`, or `high`. | `listener.py` / wake routing |

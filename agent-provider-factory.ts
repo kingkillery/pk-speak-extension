@@ -183,6 +183,29 @@ class PiCliProvider implements AgentProvider {
 	}
 }
 
+const MAX_PENDING_OMP_CLI_TURNS = 3;
+let pendingOmpCliTurns = 0;
+let ompCliTurnTail: Promise<void> = Promise.resolve();
+
+async function runOmpCli(
+	command: string,
+	args: string[],
+	options: { cwd: string; name: string; env?: NodeJS.ProcessEnv },
+): Promise<string> {
+	if (pendingOmpCliTurns >= MAX_PENDING_OMP_CLI_TURNS) {
+		throw new Error("oh-my-pk is busy; retry shortly");
+	}
+	pendingOmpCliTurns += 1;
+	const execute = () => runCli(command, args, options);
+	const turn = ompCliTurnTail.then(execute, execute);
+	ompCliTurnTail = turn.then(() => undefined, () => undefined);
+	try {
+		return await turn;
+	} finally {
+		pendingOmpCliTurns -= 1;
+	}
+}
+
 class OmpCliProvider implements AgentProvider {
 	readonly name = "oh-my-pk" as const;
 	constructor(private readonly ompBin: string, private readonly cwd: string, private readonly env?: NodeJS.ProcessEnv) {}
@@ -193,7 +216,7 @@ class OmpCliProvider implements AgentProvider {
 		const model = options.model?.trim();
 		if (model) args.push("--model", model);
 		args.push("--auto-approve", prompt);
-		const text = await runCli(this.ompBin, args, {
+		const text = await runOmpCli(this.ompBin, args, {
 			cwd,
 			name: "oh-my-pk",
 			env: this.env,
@@ -217,7 +240,7 @@ class OmpResumeProvider implements AgentProvider {
 		const model = options.model?.trim();
 		if (model) args.push("--model", model);
 		args.push("--auto-approve", prompt);
-		const text = await runCli(this.ompBin, args, {
+		const text = await runOmpCli(this.ompBin, args, {
 			cwd,
 			name: "oh-my-pk-resume",
 			env: this.env,

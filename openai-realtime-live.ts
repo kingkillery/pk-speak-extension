@@ -41,6 +41,8 @@ function trimSlash(url: string): string {
 
 export function resolveOpenAiRealtimeConnectUrl(env: NodeJS.ProcessEnv = process.env): string {
 	const direct =
+		env.PI_SPEAK_HF_REALTIME_URL?.trim() ||
+		env.HF_REALTIME_URL?.trim() ||
 		env.PI_SPEAK_OPENAI_REALTIME_URL?.trim() ||
 		env.PI_SPEAK_S2S_URL?.trim() ||
 		env.SPEECH_TO_SPEECH_URL?.trim() ||
@@ -66,6 +68,24 @@ export function resolveOpenAiRealtimeConnectUrl(env: NodeJS.ProcessEnv = process
 
 export function isOpenAiRealtimeLiveConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
 	return resolveOpenAiRealtimeConnectUrl(env).length > 0;
+}
+
+export function resolveOpenAiRealtimeApiKey(
+	env: NodeJS.ProcessEnv = process.env,
+	connectUrl = resolveOpenAiRealtimeConnectUrl(env),
+): string | undefined {
+	const hfEndpoint = env.PI_SPEAK_HF_REALTIME_URL?.trim() || env.HF_REALTIME_URL?.trim();
+	if (hfEndpoint) {
+		return env.PI_SPEAK_HF_TOKEN?.trim() || env.HF_TOKEN?.trim() || undefined;
+	}
+	try {
+		if (new URL(connectUrl).hostname.toLowerCase() === "api.openai.com") {
+			return env.PI_SPEAK_OPENAI_REALTIME_KEY?.trim() || env.OPENAI_API_KEY?.trim() || undefined;
+		}
+	} catch {}
+	// A custom OpenAI-compatible endpoint may use a dedicated bearer token, but
+	// must never receive a global OpenAI or Hugging Face provider credential.
+	return env.PI_SPEAK_OPENAI_REALTIME_KEY?.trim() || undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

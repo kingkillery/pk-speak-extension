@@ -58,13 +58,16 @@ The native Android setup link marks the profile as Bluetooth, so Tailscale is no
 
 ### Connect over Tailscale
 
-Both the desktop and phone need to be signed into the same Tailscale tailnet. On the desktop running Pi Speak, start the gateway with `/remote on`, then expose it with Tailscale Serve:
+Both the desktop and phone need to be signed into the same Tailscale tailnet. Direct native-app traffic to the host's Tailscale IP is accepted without a separate Pi Speak token only after the host's `tailscaled` daemon resolves the actual socket peer. An address in `100.64.0.0/10` alone is never enough.
+
+For tokenless HTTPS through Tailscale Serve, bind the gateway to loopback before starting it, then expose it:
 
 ```powershell
+$env:PI_SPEAK_HTTP_HOST = "127.0.0.1"
 tailscale serve --bg http://127.0.0.1:8767
 ```
 
-Use the HTTPS URL printed by Tailscale as the Android Base URL, or run `/remote setup` after `PI_SPEAK_PUBLIC_BASE_URL` is set to that URL so the setup link is prefilled. Keep Tailscale enabled on Android before sending voice or text turns.
+Use the HTTPS URL printed by Tailscale as the Android Base URL, or run `/remote setup` after `PI_SPEAK_PUBLIC_BASE_URL` is set to that URL so the setup link is prefilled. The loopback restriction lets the gateway trust Serve's sanitized identity header. Do not substitute Tailscale Funnel: Funnel is public, receives no Serve identity header, and therefore remains token-gated. Keep Tailscale enabled on Android before sending voice or text turns.
 
 ### Choose the launch path
 
@@ -129,6 +132,7 @@ This gives you:
 3. Treat `/remote token` like a secret
 4. Use header auth for remote requests; query-string auth is only for `/app/?token=...` bootstrap and reply-audio playback
 5. If a token leaks, set a new one and restart `/remote`
+6. Treat only daemon-verified direct peers or identity-bearing, loopback-bound Tailscale Serve requests as tokenless; every other remote path must present the token
 
 ## Operator Checks
 

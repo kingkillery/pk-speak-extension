@@ -32,7 +32,7 @@ import { enrichDashboardWithWorkspaces, normalizeArchivePath, type SessionDashbo
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { OmpSelectionStore } from "./omp-selection.js";
 import { spawnDetached } from "./spawn-shim.js";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath, sep as pathSep } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -191,7 +191,6 @@ const HEADLESS_SLASH_COMMANDS: RemoteSlashCommand[] = [
 
 const agentConfig = resolveAgentProviderConfig({
 	...process.env,
-	AGENT_PROVIDER: process.env.AGENT_PROVIDER || resolveDefaultAgentProvider(),
 	CODEX_BIN: process.env.CODEX_BIN || resolveWindowsNpmShim("codex.cmd") || "codex",
 	CLAUDE_BIN: process.env.CLAUDE_BIN || resolveWindowsNpmShim("claude.cmd") || "claude",
 	PI_BIN: process.env.PI_BIN || resolveWindowsNpmShim("pi.cmd") || "pi",
@@ -1268,19 +1267,3 @@ function shutdown() {
 		.finally(() => process.exit(0));
 }
 
-function resolveDefaultAgentProvider(): "pi" | "codex" {
-	if (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY) return "codex";
-	const codexBin = process.env.CODEX_BIN || resolveWindowsNpmShim("codex.cmd") || "codex";
-	try {
-		const output = execFileSync(codexBin, ["login", "status"], {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-			windowsHide: true,
-			shell: process.platform === "win32" && /\.(?:cmd|bat)$/i.test(codexBin),
-			timeout: 5000,
-		});
-		return /logged in|authenticated/i.test(output) && !/not logged in/i.test(output) ? "codex" : "pi";
-	} catch {
-		return "pi";
-	}
-}

@@ -43,6 +43,7 @@ import type { LiveBackendSession } from "./live-backend.js";
 import {
 	connectOpenAiRealtimeLive,
 	isOpenAiRealtimeLiveConfigured,
+	resolveOpenAiRealtimeApiKey,
 	resolveOpenAiRealtimeConnectUrl,
 } from "./openai-realtime-live.js";
 import {
@@ -1772,14 +1773,14 @@ async function startNewSession(
 		if (liveBackendKind === "openai-realtime") {
 			if (!isOpenAiRealtimeLiveConfigured()) {
 				throw new Error(
-					"OpenAI Realtime / HF S2S backend selected but PI_SPEAK_OPENAI_REALTIME_URL (or SPEECH_TO_SPEECH_URL) is not set.",
+					"OpenAI-compatible realtime backend selected but PI_SPEAK_HF_REALTIME_URL, PI_SPEAK_OPENAI_REALTIME_URL, or SPEECH_TO_SPEECH_URL is not set.",
 				);
 			}
 			const connectUrl = resolveOpenAiRealtimeConnectUrl();
 			const backendSession = await connectOpenAiRealtimeLive(
 				{
 					connectUrl,
-					apiKey: process.env.PI_SPEAK_OPENAI_REALTIME_KEY || process.env.OPENAI_API_KEY || undefined,
+					apiKey: resolveOpenAiRealtimeApiKey(process.env, connectUrl),
 					voice: process.env.PI_SPEAK_OPENAI_REALTIME_VOICE || undefined,
 					inputSampleRate: Number.parseInt(process.env.PI_SPEAK_OPENAI_REALTIME_INPUT_RATE || "24000", 10),
 					inputTranscriptionModel: resolveOpenAiInputTranscriptionModel(),

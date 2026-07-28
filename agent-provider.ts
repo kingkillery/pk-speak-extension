@@ -44,7 +44,7 @@ export type AgentProviderConfig = {
 };
 
 export function resolveAgentProviderConfig(env: NodeJS.ProcessEnv = process.env): AgentProviderConfig {
-	const configuredProvider = (env.AGENT_PROVIDER || "pi").trim().toLowerCase();
+	const configuredProvider = (env.AGENT_PROVIDER || "oh-my-pk").trim().toLowerCase();
 	const provider: AgentProviderName = configuredProvider === "codex"
 		? "codex"
 		: configuredProvider === "claude"

@@ -8,6 +8,7 @@ import {
 	connectOpenAiRealtimeLive,
 	isOpenAiRealtimeLiveConfigured,
 	mapRealtimeToolsToOpenAi,
+	resolveOpenAiRealtimeApiKey,
 	resolveOpenAiRealtimeConnectUrl,
 	resamplePcm16Mono,
 } from "../dist/openai-realtime-live.js";
@@ -27,8 +28,10 @@ async function startHandshakeServer() {
 	await once(server, "listening");
 	const sockets = [];
 	const messages = [];
-	server.on("connection", (socket) => {
+	const requests = [];
+	server.on("connection", (socket, request) => {
 		sockets.push(socket);
+		requests.push(request);
 		socket.send(JSON.stringify({ type: "session.created", session: { id: "sess_test" } }));
 		socket.on("message", (raw) => {
 			let message;
@@ -41,7 +44,7 @@ async function startHandshakeServer() {
 	});
 	const address = server.address();
 	assert.ok(address && typeof address === "object");
-	return { server, sockets, messages, url: `ws://127.0.0.1:${address.port}/v1/realtime` };
+	return { server, sockets, messages, requests, url: `ws://127.0.0.1:${address.port}/v1/realtime` };
 }
 
 test("resolveOpenAiRealtimeConnectUrl accepts full realtime URLs and bare hosts", () => {
@@ -58,6 +61,54 @@ test("resolveOpenAiRealtimeConnectUrl accepts full realtime URLs and bare hosts"
 		resolveOpenAiRealtimeConnectUrl({ PI_SPEAK_S2S_URL: "s2s.example:8080" }),
 		"wss://s2s.example:8080/v1/realtime",
 	);
+	assert.equal(
+		resolveOpenAiRealtimeConnectUrl({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime" }),
+		"wss://hf.example/v1/realtime",
+	);
+});
+test("realtime credentials remain host-only and are bound to the selected endpoint", () => {
+	assert.equal(resolveOpenAiRealtimeApiKey({
+		PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime",
+		OPENAI_API_KEY: "openai-key",
+		HF_TOKEN: "hf-token",
+	}), "hf-token");
+	assert.equal(resolveOpenAiRealtimeApiKey({
+		PI_SPEAK_OPENAI_REALTIME_URL: "wss://api.openai.com/v1/realtime",
+		OPENAI_API_KEY: "openai-key",
+		HF_TOKEN: "hf-token",
+	}), "openai-key");
+	assert.equal(resolveOpenAiRealtimeApiKey({
+		PI_SPEAK_OPENAI_REALTIME_URL: "wss://custom.example/v1/realtime",
+		OPENAI_API_KEY: "openai-key",
+		HF_TOKEN: "hf-token",
+	}), undefined);
+	assert.equal(resolveOpenAiRealtimeApiKey({
+		PI_SPEAK_OPENAI_REALTIME_URL: "wss://custom.example/v1/realtime",
+		PI_SPEAK_OPENAI_REALTIME_KEY: "endpoint-key",
+	}), "endpoint-key");
+});
+test("adapter sends only the bearer credential bound to the selected endpoint", async () => {
+	const mock = await startHandshakeServer();
+	const env = {
+		PI_SPEAK_HF_REALTIME_URL: mock.url,
+		OPENAI_API_KEY: "openai-key",
+		HF_TOKEN: "hf-token",
+	};
+	let session;
+	try {
+		const connectUrl = resolveOpenAiRealtimeConnectUrl(env);
+		session = await connectOpenAiRealtimeLive(
+			{ connectUrl, apiKey: resolveOpenAiRealtimeApiKey(env, connectUrl) },
+			{},
+			{ onOutbound: () => {} },
+		);
+		await waitFor(() => mock.requests.length === 1);
+		assert.equal(mock.requests[0].headers.authorization, "Bearer hf-token");
+	} finally {
+		session?.close();
+		for (const socket of mock.server.clients) socket.terminate();
+		await new Promise((resolve) => mock.server.close(resolve));
+	}
 });
 test("official OpenAI URL carries a model and 16 kHz client PCM is resampled", () => {
 	assert.equal(
@@ -174,9 +225,11 @@ test("OpenAI adapter closes a socket when connect times out", async () => {
 	}
 });
 
-test("resolveLiveBackendKind still defaults to gemini", () => {
+test("resolveLiveBackendKind uses a configured compatible endpoint and otherwise falls back to Gemini", () => {
 	assert.equal(resolveLiveBackendKind({}), "gemini");
 	assert.equal(resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "openai-realtime" }), "openai-realtime");
+	assert.equal(resolveLiveBackendKind({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime" }), "openai-realtime");
+	assert.equal(resolveLiveBackendKind({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime", PI_SPEAK_LIVE_BACKEND: "gemini" }), "gemini");
 });
 
 
