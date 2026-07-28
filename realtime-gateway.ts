@@ -1770,12 +1770,10 @@ async function startNewSession(
 
 	try {
 		if (liveBackendKind === "openai-realtime") {
-			if (!isOpenAiRealtimeLiveConfigured()) {
-				throw new Error(
-					"OpenAI Realtime / HF S2S backend selected but PI_SPEAK_OPENAI_REALTIME_URL (or SPEECH_TO_SPEECH_URL) is not set.",
-				);
-			}
+			// No URL env needed: resolveOpenAiRealtimeConnectUrl falls back to the
+			// local HF speech-to-speech default (ws://localhost:8765/v1/realtime).
 			const connectUrl = resolveOpenAiRealtimeConnectUrl();
+			const usingDefaultS2sUrl = !isOpenAiRealtimeLiveConfigured();
 			const backendSession = await connectOpenAiRealtimeLive(
 				{
 					connectUrl,
@@ -1853,7 +1851,15 @@ async function startNewSession(
 						}
 					},
 				},
-			);
+			).catch((error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				if (usingDefaultS2sUrl) {
+					throw new Error(
+						`${message} (default HF speech-to-speech URL ${connectUrl}; start the local speech-to-speech server or set SPEECH_TO_SPEECH_URL / PI_SPEAK_OPENAI_REALTIME_URL)`,
+					);
+				}
+				throw error instanceof Error ? error : new Error(message);
+			});
 			activeSession.liveBackendSession = backendSession;
 			// Clear any Gemini-only resumption handle — OpenAI/HF has no equivalent.
 			activeSession.resumptionHandle = undefined;

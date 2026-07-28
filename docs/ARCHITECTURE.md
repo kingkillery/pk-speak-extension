@@ -46,8 +46,8 @@ Pi Speak is a voice- and phone-controlled gateway around coding-agent sessions. 
 ### `realtime-gateway.ts`, `live-backend.ts`, `openai-realtime-live.ts`
 
 - **Purpose:** Full-duplex Live conversational assistant on `/v1/live`.
-- **Key exports/symbols:** `handleRealtimeGateway`, `buildRealtimeTools`, `dispatchRealtimeToolCall`, `REALTIME_SYSTEM_PROMPT`; backend selection via `resolveLiveBackendKind` (`gemini` default, `openai-realtime`/`hf` optional).
-- **Driven by:** WebSocket clients (desktop orb, `/app/?mode=live`, Android Live). Upstream is Gemini Live by default, or an OpenAI-Realtime-compatible S2S URL (`PI_SPEAK_OPENAI_REALTIME_URL` / `SPEECH_TO_SPEECH_URL`). Tool surface includes session/hub/workspace reads, `web_search`, `camera_snapshot`, and approval-gated mutations.
+- **Key exports/symbols:** `handleRealtimeGateway`, `buildRealtimeTools`, `dispatchRealtimeToolCall`, `REALTIME_SYSTEM_PROMPT`; backend selection via `resolveLiveBackendKind` — the HF speech-to-speech S2S upstream (`openai-realtime`) is the default whenever an S2S URL is configured or `PI_SPEAK_LIVE_BACKEND=hf|openai-realtime|s2s` is set; Gemini Live is the fallback when nothing S2S-related is configured.
+- **Driven by:** WebSocket clients (desktop orb, `/app/?mode=live`, Android Live). The S2S upstream connect URL defaults to the local HF speech-to-speech server (`ws://localhost:8765/v1/realtime`, override via `PI_SPEAK_OPENAI_REALTIME_URL` / `SPEECH_TO_SPEECH_URL`). Tool surface includes session/hub/workspace reads, `web_search`, `camera_snapshot`, and approval-gated mutations.
 - **OMPK bridge:** `realtime-session-target.ts` merges dashboard, attention-heartbeat, and Agent Hub identities. Resolution prefers exact agent/session IDs, canonical paths, names, and aliases; ambiguous fragments fail explicitly. The chosen target is stored on the individual live connection, never in the global routing target. `ControlServer.realtimeBridge` exposes trusted in-process actions, but realtime dispatch invokes mutations only after command approval.
 
 ### `desktop-live-client.ts` and `web/remote/orb.*`
@@ -140,11 +140,11 @@ The full web remote is hosted at `/app/`: text/voice turns, target selection, se
 | `PI_SPEAK_GEMINI_BACKEND` | Choose Gemini API backend. | `developer-api`/`developer`/`api`, `vertex`/`vertexai`/`gcloud`, or `simulated`/`sim`. | `gemini-live-turn.ts` |
 | `PI_SPEAK_GEMINI_TEXT_MODEL` | Override the Gemini text model. | Model ID, including `9router/ag/gemini-3-5-flash-high`. | Gemini text turns |
 | `PI_SPEAK_GEMINI_LIVE_MODEL` | Override the Gemini Live model. | Live model ID, such as `gemini-3.1-flash-live-preview`. | Gemini Live turns |
-| `PI_SPEAK_LIVE_BACKEND` | Select Live upstream adapter. | `gemini` (default), `openai-realtime`, `hf`, `s2s`. | `live-backend.ts`, `realtime-gateway.ts` |
+| `PI_SPEAK_LIVE_BACKEND` | Select Live upstream adapter. | `openai-realtime`/`hf`/`s2s` (HF speech-to-speech; auto-selected when an S2S URL is set), `gemini` (fallback when nothing S2S-related is configured). | `live-backend.ts`, `realtime-gateway.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_MODEL` | Select the official OpenAI Realtime model; appended to `api.openai.com` URLs. | Defaults to `gpt-realtime`. | `openai-realtime-live.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_INPUT_RATE` | Override upstream PCM input rate for compatible custom/HF endpoints. | Defaults to `24000`; gateway client PCM is resampled. | `openai-realtime-live.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_TRANSCRIPTION_MODEL` | Enable input transcription on OpenAI-compatible endpoints. | Official default `gpt-4o-mini-transcribe`; set `off` to disable. | `openai-realtime-live.ts` |
-| `PI_SPEAK_OPENAI_REALTIME_URL` | OpenAI-Realtime / HF S2S WebSocket URL. | `wss://…/v1/realtime…` (aliases: `SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`). | `openai-realtime-live.ts` |
+| `PI_SPEAK_OPENAI_REALTIME_URL` | OpenAI-Realtime / HF S2S WebSocket URL; setting it (or an alias) makes the S2S backend the default. | `wss://…/v1/realtime…` (aliases: `SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`); unset falls back to the HF speech-to-speech default `ws://localhost:8765/v1/realtime`. | `openai-realtime-live.ts` |
 | `SERPER_API_KEY` | Enable Live `web_search` tool. | Serper.dev key (alias `PI_SPEAK_SERPER_API_KEY`). | `web-search.ts`, `/v1/search` |
 | `GOOGLE_CLOUD_PROJECT` | Vertex AI project identifier. | GCP project ID. | Gemini Vertex client |
 | `PI_SPEAK_HTTP_TOKEN` | Authenticate HTTP gateway requests. | Shared bearer/token string. | `control-server.ts`, clients |
@@ -157,7 +157,7 @@ The full web remote is hosted at `/app/`: text/voice turns, target selection, se
 | Capability | Gemini (`PI_SPEAK_LIVE_BACKEND=gemini`) | OpenAI-Realtime / HF |
 | --- | --- | --- |
 | Client wire | `/v1/live` seq PCM + JSON | same |
-| Upstream | `@google/genai` live.connect | `openai-realtime-live.ts` → `wss://…/v1/realtime` |
+| Upstream | `@google/genai` live.connect | `openai-realtime-live.ts` → `wss://…/v1/realtime` (default `ws://localhost:8765/v1/realtime`, the HF speech-to-speech server) |
 | Session resumption | `sessionResumption` handle + `goAway` reconnect | **not supported** — `reconnectLiveSession` clears handle and clean-reconnects |
 | Tool dispatch | `dispatchRealtimeToolCall` | same |
 | NON_BLOCKING tools | developer-API only | n/a |

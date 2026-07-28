@@ -48,11 +48,12 @@ test("runWebSearch maps Serper organic results via injected fetch", async () => 
 	assert.match(speech, /1\. One/);
 });
 
-test("resolveLiveBackendKind defaults to gemini and accepts HF/S2S aliases", () => {
+test("resolveLiveBackendKind accepts HF/S2S aliases and URL-based default", () => {
 	assert.equal(resolveLiveBackendKind({}), "gemini");
 	assert.equal(resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "hf" }), "openai-realtime");
 	assert.equal(resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "openai-realtime" }), "openai-realtime");
 	assert.equal(resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "gemini" }), "gemini");
+	assert.equal(resolveLiveBackendKind({ SPEECH_TO_SPEECH_URL: "ws://localhost:8765" }), "openai-realtime");
 });
 
 test("OpenAI Realtime event name constants stay aligned with HF methodology", () => {

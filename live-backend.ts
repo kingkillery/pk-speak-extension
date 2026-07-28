@@ -66,10 +66,32 @@ export type LiveBackendFactory = {
 	connect(options: LiveBackendConnectOptions, handlers: LiveBackendHandlers): Promise<LiveBackendSession>;
 };
 
-/** Resolve which Live backend the gateway should use. Default remains Gemini. */
+/** True when an S2S / OpenAI-Realtime WebSocket URL is explicitly configured. */
+export function hasConfiguredS2sUrl(env: NodeJS.ProcessEnv = process.env): boolean {
+	return Boolean(
+		env.PI_SPEAK_OPENAI_REALTIME_URL?.trim() ||
+		env.PI_SPEAK_S2S_URL?.trim() ||
+		env.SPEECH_TO_SPEECH_URL?.trim(),
+	);
+}
+
+/**
+ * Resolve which Live backend the gateway should use.
+ *
+ * The HF speech-to-speech server (https://github.com/huggingface/speech-to-speech)
+ * is the default S2S upstream: any configured S2S URL selects `openai-realtime`
+ * without needing PI_SPEAK_LIVE_BACKEND. Gemini remains the fallback when
+ * nothing S2S-related is configured, and an explicit `gemini` always wins.
+ */
 export function resolveLiveBackendKind(env: NodeJS.ProcessEnv = process.env): LiveBackendKind {
 	const raw = (env.PI_SPEAK_LIVE_BACKEND || env.PI_SPEAK_S2S_BACKEND || "").trim().toLowerCase();
 	if (raw === "openai" || raw === "openai-realtime" || raw === "s2s" || raw === "hf" || raw === "huggingface") {
+		return "openai-realtime";
+	}
+	if (raw === "gemini" || raw === "google") {
+		return "gemini";
+	}
+	if (!raw && hasConfiguredS2sUrl(env)) {
 		return "openai-realtime";
 	}
 	return "gemini";

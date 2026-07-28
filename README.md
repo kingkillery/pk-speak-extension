@@ -312,7 +312,7 @@ One easy toggle for the whole local voice layer, with a persistent status-bar in
 /voice status     # show each switch: TTS, STT, realtime readiness
 ```
 
-`combo` is the turn-based speak/transcribe loop — it is **not** a realtime emotive voice agent. `realtime` is the full-duplex Live path (Gemini Live by default; optional OpenAI-Realtime/HF S2S via `PI_SPEAK_LIVE_BACKEND`). Selecting it stands the local TTS/wake loop down so the two audio paths never fight, checks credentials, ensures the gateway serves `/v1/live`, and for local operators opens the **desktop orb** at `/orb/` (Edge app mode) rather than the full remote chrome. Phones and the PWA use `/app/?mode=live` or the Android Live button against the same socket. The chosen mode persists across sessions.
+`combo` is the turn-based speak/transcribe loop — it is **not** a realtime emotive voice agent. `realtime` is the full-duplex Live path (HF speech-to-speech S2S by default when an S2S URL or `PI_SPEAK_LIVE_BACKEND=hf` is configured, defaulting to the local server at `ws://localhost:8765/v1/realtime`; Gemini Live when nothing S2S-related is set). Selecting it stands the local TTS/wake loop down so the two audio paths never fight, checks credentials, ensures the gateway serves `/v1/live`, and for local operators opens the **desktop orb** at `/orb/` (Edge app mode) rather than the full remote chrome. Phones and the PWA use `/app/?mode=live` or the Android Live button against the same socket. The chosen mode persists across sessions.
 
 ### `/speak`
 

@@ -24,6 +24,7 @@ import { AgentHubGateway, type AgentHubBinding } from "./herdr-agent-hub-gateway
 import { parseHubAgentId, parseHubChatRequest, parseHubKillConfirm } from "./herdr-agent-hub-schema.js";
 import { buildOhMyPiAgentHubDashboardCached } from "./agent-hub-dashboard.js";
 import { isWebSearchConfigured, runWebSearch } from "./web-search.js";
+import { resolveLiveBackendKind } from "./live-backend.js";
 import { canonicalRealtimeSessionPath } from "./realtime-session-target.js";
 import { discoverTailnetGateways } from "./gateway-discovery.js";
 
@@ -796,6 +797,7 @@ export class ControlServer {
 				ok: true,
 				webSearch: isWebSearchConfigured(),
 				camera: true,
+				backend: resolveLiveBackendKind(),
 				backends: ["gemini", "openai-realtime"],
 			});
 			return;

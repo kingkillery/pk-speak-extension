@@ -116,7 +116,7 @@ Create and select named sessions, then inspect the compact voice lanes:
 
 ## 8. Live voice quick-start
 
-Live mode is full-duplex conversation over `/v1/live`. The default upstream is **Gemini Live**; an OpenAI-Realtime / HF speech-to-speech backend is optional.
+Live mode is full-duplex conversation over `/v1/live`. The default upstream is the **HF speech-to-speech** server (OpenAI-Realtime wire) whenever an S2S URL or `PI_SPEAK_LIVE_BACKEND=hf` is configured — with the URL defaulting to the local server at `ws://localhost:8765/v1/realtime`. **Gemini Live** is the fallback when nothing S2S-related is set.
 
 ### Terminal (desktop orb)
 
@@ -129,7 +129,7 @@ That starts the gateway if needed and opens the **orb companion** at `http://127
 - Full remote (sessions, hub, workspace): `http://127.0.0.1:<port>/app/?mode=live`
 - Orb only: `http://127.0.0.1:<port>/orb/?mode=live&autoconnect=1`
 
-### Gemini credentials (default backend)
+### Gemini credentials (fallback backend)
 
 Developer API:
 
@@ -159,11 +159,13 @@ Keyless CI / local simulation:
 $env:PI_SPEAK_GEMINI_BACKEND = "simulated"
 ```
 
-### Optional OpenAI-Realtime / HF S2S backend
+### Default OpenAI-Realtime / HF S2S backend
+
+The HF speech-to-speech server (https://github.com/huggingface/speech-to-speech) is the default S2S upstream. Setting any S2S URL selects it automatically — no `PI_SPEAK_LIVE_BACKEND` needed — and with the backend selected but no URL set, the connect URL defaults to the local server at `ws://localhost:8765/v1/realtime` (run `speech-to-speech` locally and `/voice realtime` just works). Gemini Live remains the fallback when nothing S2S-related is configured.
 
 ```powershell
-$env:PI_SPEAK_LIVE_BACKEND = "openai-realtime"   # or hf / s2s
-$env:PI_SPEAK_OPENAI_REALTIME_URL = "wss://<host>/v1/realtime?session_token=..."
+$env:PI_SPEAK_LIVE_BACKEND = "openai-realtime"   # or hf / s2s; optional when a URL below is set
+$env:PI_SPEAK_OPENAI_REALTIME_URL = "wss://<host>/v1/realtime?session_token=..."  # optional; defaults to ws://localhost:8765/v1/realtime
 $env:PI_SPEAK_OPENAI_REALTIME_MODEL = "gpt-realtime" # required by official api.openai.com URLs; appended as ?model=
 # Client PCM is resampled from 16 kHz to the official 24 kHz input rate by default.
 # Set PI_SPEAK_OPENAI_REALTIME_INPUT_RATE only for a compatible custom/HF endpoint.
