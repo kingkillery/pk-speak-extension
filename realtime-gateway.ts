@@ -305,6 +305,7 @@ function sendLiveStartWhenReady(activeSession: ActiveSession) {
 	// HF methodology: announce output PCM rate once so the playback worklet can
 	// configure itself. Gemini Live native audio is 24 kHz mono PCM16.
 	sendToClient(activeSession, { type: "audio_format", rate: activeSession.outputAudioRate }, false);
+	const turnConfig = resolveRealtimeTurnDetection();
 	sendToClient(activeSession, {
 		type: "start",
 		session: activeSession.sessionId,
@@ -312,6 +313,8 @@ function sendLiveStartWhenReady(activeSession: ActiveSession) {
 		message: activeSession.liveBackendKind,
 		provider: activeSession.liveBackendKind,
 		model: activeSession.model,
+		turnDetection: turnConfig.kind,
+		eagerness: turnConfig.eagerness || "default",
 		voiceMetricsEnabled: realtimeVoiceMetricsEnabled(),
 	}, false);
 }

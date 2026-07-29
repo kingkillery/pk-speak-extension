@@ -89,9 +89,10 @@ upstream re-dial, so its post-drop latency is expected to be worse. Quantify it.
 
 | Backend / model / VAD profile | Turns | p50 first audio | p95 first audio | p95 upstream | p95 local buffer | Barge-in p95 / audible tail | Status |
 |---|---:|---:|---:|---:|---:|---:|---|
-| Gemini Live / configured model / configured profile | 0 | — | — | — | — | — | **UNMEASURED** |
-| OpenAI-Realtime / configured model / configured profile | 0 | — | — | — | — | — | **UNMEASURED** |
-| HF/custom compatible endpoint / configured model / configured profile | 0 | — | — | — | — | — | **UNMEASURED** |
+| Gemini Live / gemini-2.0-flash-exp / server_vad | 0 | — | — | — | — | — | **UNMEASURED** |
+| OpenAI-Realtime / gpt-4o-realtime-preview-2024-12-17 / server_vad (default) | 0 | — | — | — | — | — | **UNMEASURED** |
+| OpenAI-Realtime / gpt-4o-realtime-preview-2024-12-17 / semantic_vad (low eagerness) | 0 | — | — | — | — | — | **UNMEASURED** |
+| OpenAI-Realtime / gpt-4o-realtime-preview-2024-12-17 / semantic_vad (high eagerness) | 0 | — | — | — | — | — | **UNMEASURED** |
 
 ### Capability review: interruption and pauses
 
@@ -113,8 +114,7 @@ upstream re-dial, so its post-drop latency is expected to be worse. Quantify it.
 - **Mid-thought pauses:** this is upstream turn detection, not a client pause
   stitcher. Operators can choose OpenAI-compatible `semantic_vad` and tune
   eagerness, or use silence-duration/eagerness controls translated into each
-  backend's native configuration. Defaults remain the historical provider
-  defaults, and real pause-tolerance quality remains **UNMEASURED**.
+  defaults remain the historical provider defaults, and real live pause-tolerance quality remains **UNMEASURED** until live browser audio campaigns are completed.
 - **Model/configuration breadth:** the shared profile is backend-neutral.
   `PI_SPEAK_GEMINI_LIVE_MODEL`, `PI_SPEAK_GEMINI_LIVE_VOICE`,
   `PI_SPEAK_OPENAI_REALTIME_MODEL`, `PI_SPEAK_OPENAI_REALTIME_VOICE`, and custom

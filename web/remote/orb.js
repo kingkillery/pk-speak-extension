@@ -60,6 +60,8 @@ let liveConnected = false;
 let voiceMetricsEnabled = false;
 let voiceMetricsProvider = "";
 let voiceMetricsModel = "";
+let voiceMetricsTurnDetection = "server_vad";
+let voiceMetricsEagerness = "default";
 let voiceMetricTurnId = 0;
 let voiceMetric = null;
 const voiceMetricSamples = [];
@@ -223,13 +225,13 @@ function metricPercentile(values, percentile) {
 }
 
 function emitTurnMetric() {
-	if (!voiceMetric?.speechEndClientMs || !voiceMetric.firstPcmEnqueuedClientMs || !voiceMetric.firstSampleRenderedClientMs
-		|| !voiceMetric.lastPcmSentUpstreamMs || !voiceMetric.firstUpstreamEventMs) return;
 	const sample = {
 		kind: "turn",
 		turnId: voiceMetric.turnId,
-		provider: voiceMetric.provider,
-		model: voiceMetric.model,
+		provider: voiceMetric.provider || voiceMetricsProvider,
+		model: voiceMetric.model || voiceMetricsModel,
+		turnDetection: voiceMetricsTurnDetection,
+		eagerness: voiceMetricsEagerness,
 		vadSpeechEndClientMs: voiceMetric.speechEndClientMs,
 		lastPcmSentUpstreamMs: voiceMetric.lastPcmSentUpstreamMs,
 		firstUpstreamEventMs: voiceMetric.firstUpstreamEventMs,
@@ -302,6 +304,7 @@ async function ensureAudio() {
 	}
 	const AC = window.AudioContext || window.webkitAudioContext;
 	audioCtx = new AC({ latencyHint: "interactive" });
+	window.audioCtx = audioCtx;
 	await Promise.all([
 		audioCtx.audioWorklet.addModule("/app/live-capture-worklet.js"),
 		audioCtx.audioWorklet.addModule("/app/live-playback-worklet.js"),
@@ -464,6 +467,10 @@ async function connect() {
 			voiceMetricsProvider = String(msg.provider || msg.message || "");
 			voiceMetricsModel = String(msg.model || "");
 			voiceMetricsEnabled = msg.voiceMetricsEnabled === true;
+			window.voiceMetricsEnabled = voiceMetricsEnabled;
+			if (voiceMetricsEnabled) {
+				console.info(`[pi-speak-voice-metric] ${JSON.stringify({ kind: "handshake", voiceMetricsEnabled, provider: voiceMetricsProvider, model: voiceMetricsModel })}`);
+			}
 			setState("listening");
 			subcaption.textContent = sessionId ? `Session ${sessionId}` : "Live";
 			return;

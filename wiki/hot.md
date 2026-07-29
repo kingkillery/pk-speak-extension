@@ -19,3 +19,4 @@ updated: 2026-07-20T14:30:00-06:00
 
 ## Active Threads
 - Docs: `docs/GETTING_STARTED.md` §8, `docs/ARCHITECTURE.md` Live subsystems, `AGENTS.md` key files, `CHANGELOG.md` Unreleased.
+- Open audit: `docs/REALTIME_VOICE_PARITY_TODO.md` — the Live stack is built, but there are still no end-to-end latency numbers and no recorded spoken-request-to-OMPK-tool-call round trip. Measure (A) before changing anything (D).
