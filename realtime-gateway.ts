@@ -36,6 +36,7 @@ import {
 import { listWorkspaceDirectory, readWorkspaceFile } from "./control-server.js";
 import { reduceConversationTurn } from "./conversation-reducer.js";
 import { parseHubAgentId } from "./herdr-agent-hub-schema.js";
+import { buildHubReviewPrompt } from "./herdr-agent-hub-review.js";
 import { shapeRealtimeToolOutputForSpeech } from "./realtime-speech-brief.js";
 import { formatWebSearchForSpeech, isWebSearchConfigured, runWebSearch } from "./web-search.js";
 import { resolveLiveBackendKind } from "./live-backend.js";
@@ -1547,6 +1548,31 @@ async function dispatchRealtimeToolCall(
 						const briefing = await hub.briefing({});
 						outputText = JSON.stringify({ ok: true, briefing });
 					}
+				} else if (call.name === "review_hub") {
+					const question = typeof call.args?.question === "string" ? call.args.question.trim() : "";
+					if (!question) {
+						outputText = JSON.stringify({ ok: false, error: "Missing or empty 'question' argument." });
+					} else {
+						const hub = getRealtimeBridge(activeSession)?.agentHub ?? activeSession.server?.agentHubGateway;
+						if (!hub) {
+							outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
+						} else {
+							// Compose the review prompt server-side and launch through the SAME
+							// approval-gated path as launch_agent: the frozen approval args carry
+							// the composed prompt, so the approved continuation executes exactly
+							// what the operator saw. No approval exception for review lanes.
+							const snapshot = await hub.snapshot();
+							const prompt = buildHubReviewPrompt({ question, lanes: snapshot.agents });
+							deferToolResponse = true;
+							requestCommandApproval(
+								activeSession,
+								toolCall,
+								{ prompt, cwd: getCurrentCwd(activeSession) },
+								"launch_agent",
+								`Launch a hub review lane to answer: "${question.length > 120 ? `${question.slice(0, 117)}...` : question}".`,
+							);
+						}
+					}
 				} else if (call.name === "browse_workspace") {
 					outputText = JSON.stringify({ ok: true, workspace: listWorkspaceDirectory(call.args?.path as string | undefined) });
 				} else if (call.name === "read_workspace_file") {
@@ -1767,6 +1793,17 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 					parameters: {
 						type: "OBJECT",
 						properties: {},
+					}
+				},
+				{
+					name: "review_hub",
+					description: "Launches a background review lane that reads other agents' session transcripts to answer a deep review question about the hub (requires approval). Use for cross-agent questions that summarize_hub and read_agent_transcript can't answer, like 'why did the refactor lane fail last night?' After approval, find the new review lane with list_agent_hub_agents (its title starts with 'Hub review:') and read its verdict with read_agent_transcript.",
+					parameters: {
+						type: "OBJECT",
+						properties: {
+							question: { type: "STRING", description: "The review question to answer." }
+						},
+						required: ["question"]
 					}
 				},
 				{

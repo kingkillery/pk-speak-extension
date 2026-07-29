@@ -369,6 +369,62 @@ test("read-only tool: summarize_hub answers immediately with a briefing and no a
 	);
 });
 
+test("mutating tool: review_hub composes the review prompt server-side and defers behind launch approval", async (t) => {
+	setVertexEnv();
+	const launchCalls = [];
+	const server = {
+		agentHubGateway: {
+			snapshot: async () => ({
+				folders: [],
+				agents: [
+					{ id: "api-worker", kind: "background", status: "running", cwd: "C:\\dev\\repo", sessionFile: "C:\\sessions\\api.jsonl" },
+				],
+			}),
+		},
+		onSessionLaunch: async (payload) => {
+			launchCalls.push(payload);
+			return { ok: true, message: "launched", sessionPath: "/tmp/repo/review.jsonl" };
+		},
+	};
+	const { ws, connection } = await startFakeSession(server);
+
+	await connection.callbacks.onmessage({
+		toolCall: {
+			functionCalls: [{ id: "call-review", name: "review_hub", args: { question: "why did api-worker fail?" } }],
+		},
+	});
+
+	// Deferred exactly like launch_agent: nothing launched, no answer yet, approval requested.
+	assert.equal(launchCalls.length, 0, "must not launch before approval");
+	assert.equal(connection.session.toolResponses.length, 0, "must not answer the tool call before approval");
+	const approvalMsg = ws.jsonMessages().find((m) => m.type === "tool_approval_required");
+	assert.ok(approvalMsg, "expected a tool_approval_required message");
+	assert.match(approvalMsg.command, /why did api-worker fail\?/);
+
+	const responseCountBefore = connection.session.toolResponses.length;
+	ws.emit("message", Buffer.from(JSON.stringify({ type: "command_approve", approvalId: approvalMsg.approvalId })), false);
+	await waitFor(() => connection.session.toolResponses.length > responseCountBefore, "expected a tool response after command_approve");
+
+	assert.equal(launchCalls.length, 1, "must launch exactly once after approval");
+	const prompt = launchCalls[0].prompt;
+	assert.match(prompt, /^Hub review: why did api-worker fail\?/);
+	assert.match(prompt, /REVIEW QUESTION\nwhy did api-worker fail\?/);
+	assert.match(prompt, /- api-worker \| background \| running \| C:\\dev\\repo \| C:\\sessions\\api.jsonl/);
+	assert.match(prompt, /NEVER read a whole transcript file/);
+
+	const output = readOutput(lastToolResponse(connection));
+	assert.equal(output.ok, true);
+
+	// Empty question -> immediate error, no approval, no launch.
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-review-empty", name: "review_hub", args: { question: "   " } }] },
+	});
+	const empty = readOutput(lastToolResponse(connection));
+	assert.equal(empty.ok, false);
+	assert.match(empty.error, /'question'/);
+	assert.equal(launchCalls.length, 1, "no launch for an empty question");
+});
+
 test("mutating tool: launch_agent defers behind approval, then actually launches on command_approve", async (t) => {
 	setVertexEnv();
 	const launchCalls = [];
