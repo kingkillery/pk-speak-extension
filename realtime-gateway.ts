@@ -33,7 +33,7 @@ import {
 	type RealtimeCommandApprovalRegistry,
 	type RealtimeCommandKind,
 } from "./realtime-command-approval.js";
-import { listWorkspaceDirectory, readWorkspaceFile } from "./control-server.js";
+import { listWorkspaceDirectory, readWorkspaceFile, getWorkspaceRoot } from "./control-server.js";
 import { reduceConversationTurn } from "./conversation-reducer.js";
 import { parseHubAgentId } from "./herdr-agent-hub-schema.js";
 import { buildHubReviewPrompt } from "./herdr-agent-hub-review.js";
@@ -258,6 +258,7 @@ export const REALTIME_SYSTEM_PROMPT = [
 	"Before acting on a session, call get_session_info or list_sessions. Session lists are ordered current-first then most-recent-first; when the user is vague about which session they mean, prefer the most recent ones. Use switch_session to select one unambiguous connection-local target, then send_session_message, resume_session, or an agent lifecycle tool as requested.",
 	"When the user wants to continue work on another machine (or worries this one may go offline), use transfer_session to copy the selected session's full state to a configured remote host. Tell the user to run /sess pickup there.",
 	"Use read-only tools freely and proactively to understand real state; never guess session identity, tool output, workspace content, or camera content.",
+	"When the user references a file or folder without a full path, attempt the obvious tool call instead of asking for the path — browsing a likely path that falls outside the workspace root returns a truthful boundary error you can relay. For files outside the workspace root, offer an approval-gated execute_terminal_command (for example type or cat). Never claim you cannot access files, and never loop asking for paths you could attempt yourself.",
 	"When the user asks about something on camera or shows you something, call camera_snapshot immediately — do not claim you can see without it.",
 	"When a request is ambiguous or could mean more than one thing, ask one short clarifying question before acting.",
 	"Mutating tools require the operator's explicit approval and automatically open an approval card. Call the tool normally; do not refuse or ask for approval only in prose. Wait for the resolved tool result before claiming success.",
@@ -1632,6 +1633,10 @@ async function dispatchRealtimeToolCall(
 }
 
 export function buildRealtimeTools(nonBlockingEnabled: boolean) {
+	// Model-facing legibility: name the actual workspace root so the model can tell
+	// in-scope from out-of-scope paths, and say what to do for the latter (the
+	// approval-gated terminal path) instead of refusing generically.
+	const workspaceRoot = getWorkspaceRoot();
 	return [
 		{
 			functionDeclarations: [
@@ -1808,7 +1813,7 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 				},
 				{
 					name: "browse_workspace",
-					description: "Read-only: lists directories and files at a path within the workspace root, for inspecting the codebase.",
+					description: `Read-only: lists directories and files at a path within the workspace root (${workspaceRoot}), for inspecting the codebase. Paths outside this root are refused — for those, use execute_terminal_command instead (read-only commands may run without approval).`,
 					parameters: {
 						type: "OBJECT",
 						properties: {
@@ -1818,7 +1823,7 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 				},
 				{
 					name: "read_workspace_file",
-					description: "Read-only: reads a text file's content (capped at 512KB) within the workspace root.",
+					description: `Read-only: reads a text file's content (capped at 512KB) within the workspace root (${workspaceRoot}). Paths outside this root are refused — for those, use execute_terminal_command instead (read-only commands may run without approval).`,
 					parameters: {
 						type: "OBJECT",
 						properties: {

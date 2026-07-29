@@ -2993,7 +2993,7 @@ function getLaunchCwdFromUrl(url: URL) {
 	return (url.searchParams.get("cwd") || url.searchParams.get("workspacePath") || "").trim() || undefined;
 }
 
-function getWorkspaceRoot() {
+export function getWorkspaceRoot() {
 	const explicit = process.env.PI_SPEAK_WORKSPACE_ROOT?.trim();
 	if (explicit) {
 		// "/" (or a drive root) is an explicit, deliberate opt-in to browse the whole filesystem.

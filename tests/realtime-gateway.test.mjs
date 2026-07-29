@@ -78,6 +78,15 @@ test("buildRealtimeTools exposes read-only agent-hub and workspace tools alongsi
 		assert.ok(tool, `expected mutating tool ${mutatingName}`);
 		assert.match(tool.description, /requires operator approval/i);
 	}
+
+	// Model-facing legibility contract: the workspace tools must name the concrete
+	// root and route out-of-scope file requests at the terminal tool, so the model
+	// never falls back to a generic "I can't access files" refusal.
+	for (const workspaceName of ["browse_workspace", "read_workspace_file"]) {
+		const tool = functionDeclarations.find((t) => t.name === workspaceName);
+		assert.match(tool.description, /outside this root/i, `${workspaceName} must explain the boundary`);
+		assert.match(tool.description, /execute_terminal_command/, `${workspaceName} must route outside-root requests`);
+	}
 });
 
 test("buildRealtimeTools only sets NON_BLOCKING behavior when the caller opts in", () => {
