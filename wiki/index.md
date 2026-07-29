@@ -16,3 +16,6 @@
 
 ## Concepts
 - [[herdr-agent-hub- Module]]: concept (status: developing)
+
+## Decisions
+- [[Interrupted Assistant Audio Replay]]: decision (status: active)

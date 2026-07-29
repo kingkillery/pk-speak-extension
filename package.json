@@ -1,6 +1,6 @@
 {
   "name": "pk-speak",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "type": "module",
   "description": "Desktop setup and phone gateway CLI for conversational coding agents.",
   "keywords": [

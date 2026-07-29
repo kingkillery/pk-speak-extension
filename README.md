@@ -147,6 +147,20 @@ The Telegram surface stores its bot credential and pairing state in the local se
 
 Scan the QR from the Android phone to open the setup page. From there you can download the bundled APK, open the native `pi-speak://setup` link, and save the machine URL, fallback token, profile name, connection mode, and Codex route metadata. A direct peer verified by the host's Tailscale daemon does not need to present that token; LAN, Funnel, public/tunnel, and unknown peers do. If you want the browser app instead, open one of the printed browser URLs:
 
+Direct APK downloads are also published with each GitHub release:
+
+- [Standard Android APK](https://github.com/kingkillery/pk-speak-extension/releases/latest/download/pi-speak-standard.apk)
+- [Boox / e-ink APK](https://github.com/kingkillery/pk-speak-extension/releases/latest/download/pi-speak-boox.apk)
+
+The release links above track the latest GitHub release. A running gateway's
+`/download/pi-speak.apk` route serves the same Standard APK bundled with that
+installed `pk-speak` package.
+
+For release `v0.2.13`, SHA-256:
+
+- Standard: `7ef5c86069dc0241615c99b9bbfcb6785d09843592cd06fd86977f454930cb51`
+- Boox: `80e6fdcb187f11b0ccd750e88e616af2ca3fd82cd6c384f5ebd4389250f4c755`
+
 ```text
 http://localhost:8767/app/
 https://<tailnet-host>/app/

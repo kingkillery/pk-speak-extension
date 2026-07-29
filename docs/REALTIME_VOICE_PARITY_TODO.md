@@ -21,13 +21,13 @@ turn out to be one identifiable stage.
 ## Run metadata
 
 ```text
-Date:
-Operator:
-Backend:        gemini | openai-realtime | hf
-Surface:        /orb/ | /app/?mode=live | Android
-Audio device:   (mic / headset / speakers)
-Network path:   local | Tailscale | tunnel
-Commit:
+Date:           2026-07-29
+Operator:       OMPK automated operator
+Backend:        Gemini Live / gemini-live-2.5-flash
+Surface:        /orb/; authenticated /v1/live client; Android Standard and Boox installation checks
+Audio device:   Chromium media stream with an injected spoken TTS prompt; physical devices were keyguard-locked
+Network path:   local loopback; USB/ADB for Android installation
+Commit:         working tree under test (commit not queried)
 ```
 
 ---
@@ -174,6 +174,21 @@ Verify by voice:
 Pass: no mutation path reaches execution without an approval event in the log.
 Look hard for a bypass: this is the highest-consequence property in the whole stack.
 
+### B live verification result — 2026-07-29
+
+| Criterion | Result | Observed evidence |
+|---|---|---|
+| B1 spoken request | **PASS** | A TTS prompt was injected through the live microphone stream. The provider transcript (`Use getsessioninfo...`) dispatched `get_session_info`; raw `tool_complete` data returned selected target `pi-speak1`, session ID `1f02101a73e97a3c`, and `C:\dev\desktop-projects\pi-speak-extension`. The assistant repeated that session-specific result while the client reported `Speaking` and received 57 binary audio frames (639,588 bytes). |
+| B2 target resolution | **PARTIAL** | Exact ID resolved with `match:"session-id"`; unique name `envcloud1` resolved with `match:"name"`; fragment `lane` returned `code:"ambiguous"` with four candidates and a spoken clarification instead of choosing. No `one`/`two` alias was configured in this runtime, so the model asked for clarification and the compact-route success case remains unverified. |
+| B3 connection isolation | **PASS** | Two simultaneous `/orb/` WebSocket sessions selected different targets. Follow-up `get_session_info` calls returned `selectedForConnection:true` for `envcloud1` (`5e1715cd763b7bfd`) and `pi-speak1` (`1f02101a73e97a3c`) respectively; neither selection changed the other. |
+| B4 mutation approvals | **PARTIAL — gate passed** | Read-only `get_session_info` ran without approval. `npm install --ignore-scripts` emitted `tool_approval_required` before execution; rejection produced one rejected `tool_complete` and the assistant said it was not executed. An approved `send_session_message` emitted exactly one `tool_approval_resolved` and one `tool_complete`; the trusted bridge then aborted safely because the target identity had changed. The no-bypass and no-duplicate properties passed, but a successful mutating side effect was intentionally not forced. |
+
+The `/orb/` client used for this run now includes a compact text composer. It is
+disabled until the live `start` event, sends `{type:"text"}` without disconnect
+fallbacks, renders one immediate user bubble, and suppresses the matching provider
+echo. Live submission, input clearing, exact-once bubble rendering, and disconnected
+disablement were exercised in this run.
+
 ---
 
 ## C — Robustness gaps not covered by existing evidence
@@ -197,6 +212,47 @@ backend/API combination actually in use.
 
 ### C4 — Failure voice
 Kill the upstream mid-turn. The user should hear a failure, not silence.
+
+
+### C live/source verification result — 2026-07-29
+
+| Criterion | Result | Observed evidence |
+|---|---|---|
+| C1 device change | **GAP CONFIRMED** | Desktop clients have no `devicechange` listener or media-stream reacquisition path. A physical unplug campaign was not performed in this continuation, but current code cannot meet the rebind-or-spoken-failure requirement. |
+| C2 format renegotiation | **GAP CONFIRMED** | `audio_format` is handled by clients, including Android sample-rate reset, but the gateway emits it only during initial setup; no mid-session producer path was found or exercised. |
+| C3 long tool | **GAP CONFIRMED** | After replacing raw Windows `spawn` with the existing shell-safe `safeSpawn`, an authenticated Gemini Live (`gemini-live-2.5-flash`) client ran `npm test` through `execute_terminal_command`. `tool_start` arrived 361 ms after the text request and `tool_complete` arrived 100,383 ms later. No interim assistant transcript or binary audio arrived during that interval; the first response text started 276 ms after completion. The live backend therefore stayed silent for the full long-running call. |
+| C4 upstream failure voice | **GAP CONFIRMED** | Upstream errors/disconnects update UI/log state, but there is no client or gateway speech fallback that can vocalize the failure after the upstream voice provider is gone. |
+
+### Interrupted assistant audio replay follow-up
+
+Web, Standard Android, and Boox now retain a bounded, client-local PCM snapshot for
+the active assistant segment. An interrupt freezes that snapshot and exposes a local
+Replay control; replay never sends a WebSocket message or replays tools. Android owns
+interrupt coordination and replay availability per live session, rejects replay while
+streaming writes or queued PCM remain, and atomically releases a replay before writing
+new accepted provider PCM. Duplicate/out-of-order frames cannot steal replay ownership.
+
+Deterministic verification passed:
+
+- `node --test tests/interrupted-audio-replay.test.mjs` — 5/5.
+- `:app:testStandardDebugUnitTest --tests com.example.audio.InterruptedPcmBufferTest`.
+- `:app:compileBooxDebugKotlin`.
+- `:app:assembleStandardDebug :app:assembleBooxDebug`.
+- Final adversarial replay-lifecycle re-audit — **PASS** after queued-audio,
+  session-replacement, provider-preemption, and early-return ownership fixes.
+- Standard APK SHA-256:
+  `6d5dd58e2a6b5c1746aac686907bc5aceacc4502fa1ad2eac6c7a29effa049a8`.
+- Boox APK SHA-256:
+  `f68285506333fbcf32cd0956d37682aa14a38e1688fc31966aae79a88bc29a04`.
+- Final APK installation and cold launch succeeded on Pixel 9a `55181JEBF00791`
+  and Boox Palma `67E811DD`; APKs pulled from both devices matched the packaged
+  files byte-for-byte. `/download/pi-speak.apk` also matched the Standard APK.
+
+An audible replay tap-through on those two physical devices remains **UNVERIFIED**.
+Pixel is now unlocked, authenticated, and connected to `/v1/live` through
+`adb reverse`, but the host-played TTS prompt did not produce a live assistant
+turn, so no replay was claimed. Palma remains behind secure keyguard, which ADB
+cannot dismiss.
 
 ---
 
