@@ -2080,3 +2080,12 @@ test("non-loopback clients cannot read /connect but do mark pairing activity", a
 		assert.equal(pairing.lastRemoteClient.address, externalIp);
 	});
 });
+
+test("GET /app/barge-in-detector.js serves the app's relative ES module", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({ port, path: "/app/barge-in-detector.js" });
+		assert.equal(response.statusCode, 200);
+		assert.match(response.headers["content-type"], /application\/javascript/);
+		assert.match(response.body, /createBargeInDetector/);
+	});
+});

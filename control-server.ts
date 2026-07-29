@@ -1549,6 +1549,16 @@ export class ControlServer {
 			return true;
 		}
 
+		if (url.pathname === "/app/barge-in-detector.js") {
+			await this.serveStaticFile(
+				join(REMOTE_APP_DIR, "barge-in-detector.js"),
+				"application/javascript; charset=utf-8",
+				res,
+				"no-store",
+			);
+			return true;
+		}
+
 		if (url.pathname === "/app/live-capture-worklet.js") {
 			await this.serveStaticFile(
 				join(REMOTE_APP_DIR, "live-capture-worklet.js"),

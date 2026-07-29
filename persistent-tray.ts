@@ -456,10 +456,26 @@ function Open-ConnectWindow {
 	if ($edge) { Start-Process -FilePath $edge -ArgumentList ("--app=" + $config.connectUrl) }
 	else { Start-Process -FilePath $config.connectUrl }
 }
+function Open-FloatingOrb {
+	$orbUrl = ([Uri]$config.browserUrl).GetLeftPart([System.UriPartial]::Authority) + "/orb/?mode=live&autoconnect=1"
+	$hostScript = Join-Path $config.cwd "scripts\\orb-desktop-host.ps1"
+	if (Test-Path -LiteralPath $hostScript) {
+		Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-File",$hostScript,"-Url",$orbUrl) -WindowStyle Hidden
+		return
+	}
+	$edge = Get-EdgePath
+	if ($edge) { Start-Process -FilePath $edge -ArgumentList ("--app=" + $orbUrl) }
+	else { Start-Process -FilePath $orbUrl }
+}
 $connectItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $connectItem.Text = "Open connect window (QR + live status)"
 $connectItem.Add_Click({ Open-ConnectWindow })
 [void]$menu.Items.Add($connectItem)
+
+$orbItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$orbItem.Text = "Open floating orb companion"
+$orbItem.Add_Click({ Open-FloatingOrb })
+[void]$menu.Items.Add($orbItem)
 
 $qrItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $qrItem.Text = "Show offline setup page"
@@ -523,7 +539,7 @@ $exitItem.Add_Click({
 [void]$menu.Items.Add($exitItem)
 
 $notify.ContextMenuStrip = $menu
-$notify.Add_DoubleClick({ Open-ConnectWindow })
+$notify.Add_DoubleClick({ Open-FloatingOrb })
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000

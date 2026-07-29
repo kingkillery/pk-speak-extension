@@ -7,6 +7,25 @@ import { spawnSync } from "node:child_process";
 import { analyzeVoiceMetrics, computeSha256, percentile, extractJsonObjects, validateManifest } from "../scripts/analyze-voice-metrics.mjs";
 import { generateManifestForLog } from "../scripts/generate-campaign-manifest.mjs";
 
+function createVerifiedManifest(rawContent, backendMode = "live") {
+	return {
+		kind: "manifest",
+		campaignId: "classification-campaign",
+		timestampUtc: "2026-07-29T12:00:00Z",
+		gitCommit: "f253243",
+		backendMode,
+		browserIdentity: "Chrome 127.0.0.1",
+		resolvedBackendImplementation: "openai-realtime-live",
+		audioDeviceIdentity: "Default Microphone",
+		sampleSource: "live-browser-audio",
+		provider: "openai-realtime",
+		model: "gpt-4o",
+		turnDetection: "server_vad",
+		eagerness: "default",
+		rawLogHash: computeSha256(rawContent),
+	};
+}
+
 test("percentile calculation computes exact nearest-rank values", () => {
 	const values = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
 	assert.equal(percentile(values, 0.5), 500);
@@ -71,6 +90,74 @@ test("configuration mismatch between manifest and metric items fails closed to U
 
 	assert.equal(results[0].status.includes("UNVERIFIED"), true);
 	assert.equal(results[0].status.includes("Configuration mismatch"), true);
+});
+
+test("live zero-turn campaigns remain UNMEASURED", () => {
+	const samples = Array.from({ length: 5 }, () => ({
+		kind: "barge_in",
+		provider: "openai-realtime",
+		model: "gpt-4o",
+		turnDetection: "server_vad",
+		eagerness: "default",
+		speechOnsetToSilenceMs: 100,
+	}));
+	const rawContent = JSON.stringify(samples);
+	const [result] = analyzeVoiceMetrics(samples, rawContent, createVerifiedManifest(rawContent));
+
+	assert.equal(result.status, "**UNMEASURED**");
+});
+
+test("a measured live barge-in at or above 200 ms fails even before the sample minimum", () => {
+	const samples = [
+		...Array.from({ length: 20 }, () => ({
+			kind: "turn",
+			provider: "openai-realtime",
+			model: "gpt-4o",
+			turnDetection: "server_vad",
+			eagerness: "default",
+			timeToFirstAudioMs: 300,
+			upstreamInferenceMs: 250,
+			localBufferMs: 10,
+		})),
+		{
+			kind: "barge_in",
+			provider: "openai-realtime",
+			model: "gpt-4o",
+			turnDetection: "server_vad",
+			eagerness: "default",
+			speechOnsetToSilenceMs: 200,
+		},
+	];
+	const rawContent = JSON.stringify(samples);
+	const [result] = analyzeVoiceMetrics(samples, rawContent, createVerifiedManifest(rawContent));
+
+	assert.equal(result.status, "**FAIL**");
+});
+
+test("verified simulated telemetry is labeled synthetic rather than empirical live evidence", () => {
+	const samples = Array.from({ length: 20 }, () => ({
+		kind: "turn",
+		provider: "openai-realtime",
+		model: "gpt-4o",
+		turnDetection: "server_vad",
+		eagerness: "default",
+		timeToFirstAudioMs: 300,
+		upstreamInferenceMs: 250,
+		localBufferMs: 10,
+	}));
+	samples.push(...Array.from({ length: 5 }, () => ({
+		kind: "barge_in",
+		provider: "openai-realtime",
+		model: "gpt-4o",
+		turnDetection: "server_vad",
+		eagerness: "default",
+		speechOnsetToSilenceMs: 100,
+	})));
+	const rawContent = JSON.stringify(samples);
+	const [result] = analyzeVoiceMetrics(samples, rawContent, createVerifiedManifest(rawContent, "simulated"));
+
+	assert.equal(result.status, "**SYNTHETIC FIXTURE**");
+	assert.equal(result.profileLabel.includes("[Synthetic Fixture]"), true);
 });
 
 test("subprocess CLI --require-verified-live with exact manifest configuration binding PASSES", () => {

@@ -1,3 +1,5 @@
+import { createBargeInDetector, rmsFromInt16 } from "./barge-in-detector.js";
+
 /**
  * Choose the realtime approval control message for a pending tool.
  * Terminal command approvals use the terminal registry; every other mutation
@@ -91,6 +93,25 @@ export function encodeLiveInt16PcmFrame(sequenceId, int16Samples) {
 	view.setInt32(0, sequenceId, false);
 	new Uint8Array(frame, 4).set(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength));
 	return frame;
+}
+
+/**
+ * Start a fresh adaptive barge-in calibration for a new microphone capture.
+ * Reconnects reuse a capture; an actual stop/start must not carry room noise
+ * learned from the prior microphone or environment.
+ * @param {{ reset(): void; setGateThresholdDb(thresholdDb: number, enabled?: boolean): void }} detector
+ * @param {{ enabled?: boolean; thresholdDb?: number }} [options]
+ */
+export function prepareBargeInDetectorForCapture(detector, options = {}) {
+	if (!detector || typeof detector.reset !== "function" || typeof detector.setGateThresholdDb !== "function") {
+		throw new TypeError("A resettable barge-in detector is required.");
+	}
+	const thresholdDb = Number.isFinite(options.thresholdDb)
+		? Math.min(-3, Math.max(-66, options.thresholdDb))
+		: -50;
+	detector.reset();
+	detector.setGateThresholdDb(thresholdDb, options.enabled !== false);
+	return detector;
 }
 
 export function loadPersistedSettings({
@@ -205,6 +226,7 @@ if (typeof document !== "undefined") {
 		liveMicLevel: 0,
 		liveNoiseGateDb: -50,
 		liveNoiseGateEnabled: true,
+		liveBargeInDetector: createBargeInDetector(),
 		liveCameraStream: null,
 		liveCameraEnabled: false,
 		liveWebSearchAvailable: false,
@@ -1370,11 +1392,13 @@ if (typeof document !== "undefined") {
 	}
 
 	function applyLiveNoiseGate() {
+		const thresholdDb = Number.isFinite(state.liveNoiseGateDb) ? state.liveNoiseGateDb : -50;
+		state.liveBargeInDetector?.setGateThresholdDb(thresholdDb, !!state.liveNoiseGateEnabled);
 		if (!state.liveCaptureNode) return;
 		state.liveCaptureNode.port.postMessage({
 			kind: "gate",
 			enabled: !!state.liveNoiseGateEnabled,
-			thresholdDb: Number.isFinite(state.liveNoiseGateDb) ? state.liveNoiseGateDb : -50,
+			thresholdDb,
 		});
 	}
 
@@ -1619,7 +1643,10 @@ if (typeof document !== "undefined") {
 		}
 		if (message.type === "interrupt") {
 			stopLivePlayback();
-			state.liveState = "listening";
+			// Keep user-speaking while the interjection is still in progress.
+			if (state.liveState === "ai-speaking" || state.liveState === "processing") {
+				state.liveState = "user-speaking";
+			}
 			return;
 		}
 		if (message.type === "camera_capture") {
@@ -1836,25 +1863,27 @@ if (typeof document !== "undefined") {
 				}
 				state.liveClientSequenceId += 1;
 				socket.send(encodeLiveInt16PcmFrame(state.liveClientSequenceId, int16));
-				// Client-side barge-in: if we hear speech while AI audio is queued, clear + interrupt.
-				let energy = 0;
-				for (let index = 0; index < int16.length; index += 1) {
-					const s = int16[index] / 0x8000;
-					energy += s * s;
-				}
-				const rms = Math.sqrt(energy / int16.length);
+				// Client-side barge-in: adaptive floor + sustained voiced frames.
+				const rms = rmsFromInt16(int16);
 				state.liveMicLevel = rms;
 				const now = Date.now();
 				const aiPlaying = state.liveState === "ai-speaking" || state.livePlaybackSources.size > 0;
-				if (rms > 0.035 && aiPlaying && now - state.liveLastInterruptAt > 750) {
+				const decision = state.liveBargeInDetector.observe({
+					rms,
+					nowMs: now,
+					aiPlaying,
+					muted: false,
+				});
+				if (decision.interrupt) {
 					state.liveLastInterruptAt = now;
 					if (state.liveVoiceMetricsEnabled) state.liveBargeInSpeechOnsetMs = now;
 					stopLivePlayback();
 					state.liveClientSequenceId += 1;
 					socket.send(JSON.stringify({ type: "interrupt", clientSequenceId: state.liveClientSequenceId }));
-				} else if (rms > 0.02) {
 					state.liveState = "user-speaking";
-				} else if (state.liveState === "user-speaking") {
+				} else if (decision.userSpeaking) {
+					state.liveState = "user-speaking";
+				} else if (decision.speechEnded) {
 					if (state.liveVoiceMetricsEnabled) {
 						state.liveVoiceMetricTurnId += 1;
 						state.liveVoiceMetric = {
@@ -1879,6 +1908,10 @@ if (typeof document !== "undefined") {
 			state.liveCaptureSource = source;
 			state.liveCaptureNode = capture;
 			state.liveCaptureSink = sink;
+			prepareBargeInDetectorForCapture(state.liveBargeInDetector, {
+				enabled: state.liveNoiseGateEnabled,
+				thresholdDb: state.liveNoiseGateDb,
+			});
 			applyLiveNoiseGate();
 			setLiveMicEnabled(true);
 			state.recording = true;

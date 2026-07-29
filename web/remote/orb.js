@@ -1,5 +1,6 @@
 // @ts-check
 import { approvalControlType, normalizeApproval } from "/orb/orb-approvals.js";
+import { createBargeInDetector } from "/app/barge-in-detector.js";
 /**
  * Desktop/terminal Live orb — HF methodology audio path against pi-speak /v1/live.
  * Meant to run outside the full remote chrome (Edge --app=/orb/).
@@ -66,6 +67,7 @@ let voiceMetricTurnId = 0;
 let voiceMetric = null;
 const voiceMetricSamples = [];
 let bargeInSpeechOnsetMs = 0;
+const bargeInDetector = createBargeInDetector();
 /** @type {Record<string, ReturnType<typeof normalizeApproval>>} */
 const pendingApprovals = {};
 
@@ -216,6 +218,7 @@ function applyGate() {
 	localStorage.setItem(STORAGE.gateDb, String(thresholdDb));
 	gateValue.textContent = `${thresholdDb} dB`;
 	captureNode?.port.postMessage({ kind: "gate", enabled, thresholdDb });
+	bargeInDetector.setGateThresholdDb(thresholdDb, enabled);
 }
 
 function metricPercentile(values, percentile) {
@@ -375,14 +378,20 @@ async function startCapture() {
 			document.documentElement.style.setProperty("--audio-level", String(level));
 			meterFill.style.width = `${Math.round(level * 100)}%`;
 			if (!muted && liveConnected) {
-				if (rms > 0.03 && state === "ai-speaking") {
+				const decision = bargeInDetector.observe({
+					rms,
+					nowMs: Date.now(),
+					aiPlaying: state === "ai-speaking",
+					muted: false,
+				});
+				if (decision.interrupt) {
 					if (voiceMetricsEnabled) bargeInSpeechOnsetMs = Date.now();
 					clearPlayback();
 					sendJson({ type: "interrupt" });
 					setState("user-speaking");
-				} else if (rms > 0.02 && state !== "processing") {
+				} else if (decision.userSpeaking && state !== "processing") {
 					setState("user-speaking");
-				} else if (state === "user-speaking" && rms < 0.01) {
+				} else if (decision.speechEnded) {
 					if (voiceMetricsEnabled) {
 						voiceMetricTurnId += 1;
 						voiceMetric = { turnId: voiceMetricTurnId, speechEndClientMs: Date.now() };
@@ -500,7 +509,8 @@ async function connect() {
 		if (msg.type === "interrupt") {
 			finishTranscript("assistant");
 			clearPlayback();
-			setState("listening");
+			// User may still be mid-interjection; detector drives listening/speaking.
+			if (state === "ai-speaking" || state === "processing") setState("user-speaking");
 			return;
 		}
 		if (msg.type === "tool_start") {

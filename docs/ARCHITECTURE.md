@@ -52,7 +52,7 @@ Pi Speak is a voice- and phone-controlled gateway around coding-agent sessions. 
 
 ### `desktop-live-client.ts` and `web/remote/orb.*`
 
-- **Purpose:** Terminal-adjacent Live companion. `/voice realtime` opens Edge `--app=http://127.0.0.1:<port>/orb/` by default (not the full remote chrome).
+- **Purpose:** Terminal-adjacent Live companion. `/voice realtime` opens the user’s default Chromium-family browser in app mode at `http://127.0.0.1:<port>/orb/` (including Perplexity Comet when it is the default); Edge and a normal-browser tab are fallbacks, not the preferred host.
 - **Key exports/symbols:** `openDesktopLiveClient`, `buildDesktopLiveClientUrl(port, cwd?, surface?: "orb"|"app")`.
 - **Driven by:** Local operator on the same machine as the gateway; uses HF-style capture/playback worklets against `/v1/live`.
 
@@ -129,7 +129,7 @@ Mobile-app gateway requests use `PI_SPEAK_HTTP_TOKEN` unless the actual socket p
 
 ## 6. Android, PWA, and desktop orb clients
 
-The full web remote is hosted at `/app/`: text/voice turns, target selection, setup, reply audio, session management, events, workspace browsing, and Live mode (`?mode=live`). The **desktop orb** is hosted at `/orb/`: a minimal HF-style Live companion (orb states, mic gate, camera PIP) for terminal operators; `/voice realtime` opens it in Edge app mode by default. The native APK is downloadable at `/download/pi-speak.apk`; it stores machine profiles and connection/auth settings locally, offers native text/voice controls, Live duplex (including `camera_snapshot` via CameraX and `audio_format` sample-rate switching), and mirrors session routing, events, workspace, and Agent Hub operations. The Boox variant is an e-ink-oriented native surface with the same Live tool hooks. Unified Remote is a lightweight remote-control surface for quick machine/control actions rather than the full session and Agent Hub management experience. All clients call the same gateway; the differences are local device capabilities and UI density.
+The full web remote is hosted at `/app/`: text/voice turns, target selection, setup, reply audio, session management, events, workspace browsing, and Live mode (`?mode=live`). The **desktop orb** is hosted at `/orb/`: a minimal HF-style Live companion (orb states, mic gate, camera PIP) for terminal operators; `/voice realtime` launches the default Chromium-family browser in app mode when available (for example, Perplexity Comet), with Edge and standard-tab fallbacks. The native APK is downloadable at `/download/pi-speak.apk`; it stores machine profiles and connection/auth settings locally, offers native text/voice controls, Live duplex (including `camera_snapshot` via CameraX and `audio_format` sample-rate switching), and mirrors session routing, events, workspace, and Agent Hub operations. The Boox variant is an e-ink-oriented native surface with the same Live…
 
 ## 7. Key environment variables
 

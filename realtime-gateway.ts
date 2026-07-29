@@ -267,6 +267,7 @@ export const REALTIME_SYSTEM_PROMPT = [
 	"Honor speechHint guidance on tool results. Content may already be truncated for speech; say so briefly instead of inventing missing text.",
 	"Do not narrate background state refreshes delivered silently.",
 	"Briefly acknowledge the request, use the result to continue the conversation, and keep replies short and conversational.",
+	"If you were interrupted mid-answer, wait until the user finishes speaking. On your next turn, start with a brief natural acknowledgement (for example 'mhm', 'okay', or 'got it'), reassess whether the interrupted answer still matters against the new utterance, then either resume only the still-relevant point or pivot cleanly. Never freeze silent after a barge-in, never restart the whole cancelled monologue unless the user asks, and never talk over the user.",
 ].join(" ");
 
 export { classifyRealtimeTerminalCommand, type RealtimeTerminalCommandSafety };

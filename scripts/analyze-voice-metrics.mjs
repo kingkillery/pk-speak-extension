@@ -273,9 +273,12 @@ export function analyzeVoiceMetrics(rawPayloads, rawContent = null, sidecarManif
 		} else if (g.backendMode === "simulated") {
 			status = "**SYNTHETIC FIXTURE**";
 		} else if (g.backendMode === "live") {
-			if (validTurnsCount >= 20 && validBargeInCount >= 5) {
-				const passBargeIn = p95BargeIn !== null && p95BargeIn < 200;
-				status = passBargeIn ? "**PASS**" : "**FAIL**";
+			if (validTurnsCount === 0) {
+				status = "**UNMEASURED**";
+			} else if (p95BargeIn !== null && p95BargeIn >= 200) {
+				status = "**FAIL**";
+			} else if (validTurnsCount >= 20 && validBargeInCount >= 5) {
+				status = "**PASS**";
 			} else {
 				status = `**INCOMPLETE (${validTurnsCount} turns, ${validBargeInCount} barge-ins)**`;
 			}
