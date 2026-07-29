@@ -189,6 +189,42 @@ function shapeTranscriptDigest(obj: Record<string, unknown>): Record<string, unk
 	return next;
 }
 
+function shapeHubBriefing(obj: Record<string, unknown>): Record<string, unknown> {
+	const next = { ...obj };
+	const briefing = isPlainObject(next.briefing) ? { ...next.briefing } : null;
+	if (!briefing) return next;
+
+	const lanes = Array.isArray(briefing.lanes) ? briefing.lanes.filter(isPlainObject) : [];
+	const capped = capArray(lanes, SPEECH_LINE_CAP);
+	briefing.lanes = capped.items;
+	if (capped.truncated) briefing.lanesTruncatedForSpeech = true;
+
+	const agents = typeof briefing.agents === "number" ? briefing.agents : lanes.length;
+	const folders = typeof briefing.folders === "number" ? briefing.folders : 0;
+	const counts = isPlainObject(briefing.counts) ? briefing.counts : {};
+	const countParts = ["running", "idle", "parked", "aborted"]
+		.filter((status) => typeof counts[status] === "number" && (counts[status] as number) > 0)
+		.map((status) => `${counts[status]} ${status}`);
+	const parts = [`Hub briefing: ${agents} agent${agents === 1 ? "" : "s"}${folders > 0 ? ` in ${folders} folder${folders === 1 ? "" : "s"}` : ""}`];
+	if (countParts.length > 0) parts.push(countParts.join(", "));
+	// Lane mentions: error lanes first — those are what a standup needs to surface.
+	const mentions = [...lanes]
+		.sort((a, b) => (typeof b.recentToolErrors === "number" ? b.recentToolErrors : 0)
+			- (typeof a.recentToolErrors === "number" ? a.recentToolErrors : 0))
+		.slice(0, 5)
+		.map((lane) => {
+			const calls = typeof lane.recentToolCalls === "number" ? lane.recentToolCalls : 0;
+			const errors = typeof lane.recentToolErrors === "number" ? lane.recentToolErrors : 0;
+			const unavailable = lane.transcriptUnavailable === true ? ", transcript unavailable" : "";
+			return `${lane.id}: ${lane.status}, ${calls} recent tool calls${errors > 0 ? `, ${errors} errors` : ""}${unavailable}`;
+		});
+	if (mentions.length > 0) parts.push(mentions.join(". "));
+	if (briefing.lanesCapped === true) parts.push("remaining agents counted only");
+	next.summary = parts.join(" — ");
+	next.briefing = briefing;
+	return next;
+}
+
 function shapeSessionDashboard(obj: Record<string, unknown>): Record<string, unknown> {
 	const next = { ...obj };
 	if (Array.isArray(next.workspaces)) {
@@ -338,6 +374,9 @@ export function shapeRealtimeToolOutputForSpeech(toolName: string | undefined, o
 			break;
 		case "read_agent_transcript":
 			shaped = shapeTranscriptDigest(parsed);
+			break;
+		case "summarize_hub":
+			shaped = shapeHubBriefing(parsed);
 			break;
 		case "list_sessions":
 		case "get_session_info":

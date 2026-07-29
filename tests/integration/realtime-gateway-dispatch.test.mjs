@@ -331,6 +331,44 @@ test("read-only tool: read_agent_transcript answers immediately with a distilled
 	assert.ok(!/Unknown agent/.test(gone.error), "a transcript read failure must not be misreported as an unknown agent");
 });
 
+test("read-only tool: summarize_hub answers immediately with a briefing and no approval step", async () => {
+	setVertexEnv();
+	const briefing = {
+		generatedAt: 1785321600000,
+		folders: 1,
+		agents: 2,
+		counts: { running: 1, idle: 1 },
+		lanes: [
+			{ id: "api-worker", kind: "background", status: "running", model: "k3", lastActivityAt: "2026-07-29T10:02:00.000Z", recentToolCalls: 4, recentToolErrors: 1, sampledTail: true },
+			{ id: "docs", kind: "background", status: "idle", recentToolCalls: 0, recentToolErrors: 0, sampledTail: false },
+		],
+		lanesCapped: false,
+	};
+	const server = {
+		agentHubGateway: {
+			snapshot: async () => ({ folders: [], agents: [] }),
+			briefing: async () => briefing,
+		},
+	};
+	const { ws, connection } = await startFakeSession(server);
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-hub", name: "summarize_hub", args: {} }] },
+	});
+
+	const fr = lastToolResponse(connection);
+	assert.equal(fr.id, "call-hub");
+	const output = readOutput(fr);
+	assert.equal(output.ok, true);
+	assert.deepEqual(output.briefing.counts, { running: 1, idle: 1 });
+	assert.equal(output.briefing.lanes.length, 2);
+	assert.equal(
+		ws.jsonMessages().filter((m) => m.type === "tool_approval_required").length,
+		0,
+		"a read-only briefing tool must never require approval",
+	);
+});
+
 test("mutating tool: launch_agent defers behind approval, then actually launches on command_approve", async (t) => {
 	setVertexEnv();
 	const launchCalls = [];

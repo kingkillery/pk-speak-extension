@@ -1539,6 +1539,14 @@ async function dispatchRealtimeToolCall(
 									: JSON.stringify({ ok: false, error: `Unknown agent: ${id}` });
 						}
 					}
+				} else if (call.name === "summarize_hub") {
+					const hub = getRealtimeBridge(activeSession)?.agentHub ?? activeSession.server?.agentHubGateway;
+					if (!hub) {
+						outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
+					} else {
+						const briefing = await hub.briefing({});
+						outputText = JSON.stringify({ ok: true, briefing });
+					}
 				} else if (call.name === "browse_workspace") {
 					outputText = JSON.stringify({ ok: true, workspace: listWorkspaceDirectory(call.args?.path as string | undefined) });
 				} else if (call.name === "read_workspace_file") {
@@ -1751,6 +1759,14 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 							query: { type: "STRING", description: "Optional case-insensitive filter: only turns mentioning this text are returned." }
 						},
 						required: ["id"]
+					}
+				},
+				{
+					name: "summarize_hub",
+					description: "Read-only: a standup briefing over the whole agent hub — status counts for every agent plus recent activity (tool calls, errors, last active time, model) sampled from the most relevant lanes. Use this for 'what's happening in the hub' or 'how are my agents doing' before diving into read_agent_transcript for a specific lane.",
+					parameters: {
+						type: "OBJECT",
+						properties: {},
 					}
 				},
 				{

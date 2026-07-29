@@ -510,11 +510,12 @@ export class ControlServer {
 	// time -- the realtime gateway holds this behind an `any`-typed `server`
 	// reference, so returning `this._agentHubGateway` directly would still let
 	// a future (or buggy) realtime tool reach the mutating methods at runtime.
-	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail" | "transcript"> {
+	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail" | "transcript" | "briefing"> {
 		return {
 			snapshot: () => this._agentHubGateway.snapshot(),
 			detail: (id, tailLines) => this._agentHubGateway.detail(id, tailLines),
 			transcript: (id, opts) => this._agentHubGateway.transcript(id, opts),
+			briefing: (opts) => this._agentHubGateway.briefing(opts),
 		};
 	}
 
@@ -572,6 +573,7 @@ export class ControlServer {
 				detail: (id: Parameters<AgentHubGateway["detail"]>[0], tailLines: number) => this._agentHubGateway.detail(id, tailLines),
 				transcript: (id: Parameters<AgentHubGateway["transcript"]>[0], opts?: Parameters<AgentHubGateway["transcript"]>[1]) =>
 					this._agentHubGateway.transcript(id, opts),
+				briefing: (opts?: Parameters<AgentHubGateway["briefing"]>[0]) => this._agentHubGateway.briefing(opts),
 				chat: (id: Parameters<AgentHubGateway["chat"]>[0], text: string, idempotencyKey: string | null) =>
 					this._agentHubGateway.chat(id, text, idempotencyKey),
 				kill: (id: Parameters<AgentHubGateway["kill"]>[0], confirmToken?: string) =>

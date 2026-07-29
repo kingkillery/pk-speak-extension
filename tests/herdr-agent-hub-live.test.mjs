@@ -334,6 +334,53 @@ test("gateway detail: a single oversized record yields an empty tail flagged as 
 	});
 });
 
+test("gateway briefing: counts every agent and samples lanes by relevance", async () => {
+	const mkAgent = (id, status) => ({ id, kind: "background", status, cwd: "/repo", sessionFile: `${id}.jsonl` });
+	const agents = [mkAgent("lane-a", "idle"), mkAgent("lane-b", "running"), mkAgent("lane-c", "parked")];
+	const chunkFor = {
+		"lane-a": "{\"type\":\"session\",\"id\":\"a\"}\n",
+		"lane-b": jsonLine({ type: "session", id: "b", cwd: "/repo" })
+			+ jsonLine({ type: "model_change", model: "k3", timestamp: "2026-06-23T10:00:00.000Z" })
+			+ jsonLine({ type: "message", id: "m1", timestamp: "2026-06-23T10:01:00.000Z", message: { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "npm test" } }] } })
+			+ jsonLine({ type: "message", id: "m2", timestamp: "2026-06-23T10:02:00.000Z", message: { role: "toolResult", toolName: "bash", isError: true, content: [{ type: "text", text: "exit 1" }] } }),
+		"lane-c": null, // unreadable transcript
+	};
+	const binding = {
+		canMutate: false,
+		listAgents: async () => ({ folders: [{ id: "f", label: "F", path: "/repo", agents: [] }], agents }),
+		getAgent: async (id) => agents.find((a) => a.id === id),
+		chat: async () => { throw new Error("read-only"); },
+		kill: async () => { throw new Error("read-only"); },
+		revive: async () => { throw new Error("read-only"); },
+		readTranscript: async () => { throw new Error("full slurp must not be used by briefing()"); },
+		readTranscriptRange: async (id) => {
+			const text = chunkFor[id];
+			return text === null ? null : { text, newSize: text.length, fromByte: 0 };
+		},
+	};
+	const gateway = new AgentHubGateway(binding);
+
+	const briefing = await gateway.briefing({});
+	assert.deepEqual(briefing.counts, { idle: 1, running: 1, parked: 1 });
+	assert.equal(briefing.folders, 1);
+	assert.equal(briefing.agents, 3);
+	assert.equal(briefing.lanesCapped, false);
+	// Running lane sampled first regardless of list order.
+	assert.equal(briefing.lanes[0].id, "lane-b");
+	assert.equal(briefing.lanes[0].model, "k3");
+	assert.equal(briefing.lanes[0].lastActivityAt, "2026-06-23T10:02:00.000Z");
+	assert.equal(briefing.lanes[0].recentToolCalls, 1);
+	assert.equal(briefing.lanes[0].recentToolErrors, 1);
+	assert.equal(briefing.lanes[0].sampledTail, false);
+	const laneC = briefing.lanes.find((l) => l.id === "lane-c");
+	assert.equal(laneC.transcriptUnavailable, true);
+
+	const capped = await gateway.briefing({ maxLanes: 1 });
+	assert.equal(capped.lanes.length, 1);
+	assert.equal(capped.lanesCapped, true);
+	assert.deepEqual(capped.counts, { idle: 1, running: 1, parked: 1 }, "counts still cover unsampled agents");
+});
+
 test("snapshot: lane description comes from the background role and subagents are labeled", async () => {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-herdr-desc-"));
 	try {

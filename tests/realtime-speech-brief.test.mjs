@@ -167,6 +167,37 @@ test("read_agent_transcript clips long turns and summarizes stats", () => {
 	assert.equal(shaped.speechHint, DEFAULT_SPEECH_HINT);
 });
 
+test("summarize_hub produces a standup summary with error lanes first", () => {
+	const lanes = [
+		{ id: "quiet-lane", kind: "background", status: "idle", recentToolCalls: 1, recentToolErrors: 0, sampledTail: false },
+		{ id: "busy-lane", kind: "background", status: "running", model: "k3", recentToolCalls: 12, recentToolErrors: 3, sampledTail: true },
+		{ id: "gone-lane", kind: "background", status: "parked", recentToolCalls: 0, recentToolErrors: 0, sampledTail: false, transcriptUnavailable: true },
+	];
+	const raw = JSON.stringify({
+		ok: true,
+		briefing: {
+			generatedAt: 1785321600000,
+			folders: 2,
+			agents: 3,
+			counts: { running: 1, idle: 1, parked: 1 },
+			lanes,
+			lanesCapped: false,
+		},
+	});
+	const shaped = JSON.parse(shapeRealtimeToolOutputForSpeech("summarize_hub", raw));
+	assert.equal(shaped.ok, true);
+	assert.match(shaped.summary, /Hub briefing: 3 agents in 2 folders/);
+	assert.match(shaped.summary, /1 running, 1 idle, 1 parked/);
+	// The error lane leads the mentions, and the unavailable lane says so.
+	const busyIdx = shaped.summary.indexOf("busy-lane");
+	const quietIdx = shaped.summary.indexOf("quiet-lane");
+	assert.ok(busyIdx >= 0 && quietIdx >= 0 && busyIdx < quietIdx, "error lanes are mentioned first");
+	assert.match(shaped.summary, /busy-lane: running, 12 recent tool calls, 3 errors/);
+	assert.match(shaped.summary, /gone-lane: parked, 0 recent tool calls, transcript unavailable/);
+	assert.equal(shaped.speechHint, DEFAULT_SPEECH_HINT);
+	assert.equal(shaped.briefing.lanes.length, 3);
+});
+
 test("error objects stay truthful and get a speechHint", () => {
 	const raw = JSON.stringify({
 		ok: false,

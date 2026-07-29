@@ -3,9 +3,12 @@ import { randomUUID } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
 	assertNever,
+	statusOrder,
 	type HubAgent,
 	type HubAgentDetail,
 	type HubAgentId,
+	type HubAgentKind,
+	type HubAgentStatus,
 	type HubFolder,
 	parseHubAgentStatus,
 } from "./herdr-agent-hub-schema.js";
@@ -56,6 +59,33 @@ const STREAM_HEARTBEAT_MS = 15_000;
 
 interface PendingConfirm { readonly token: string; readonly expiresAt: number; }
 interface StreamHandle { readonly res: ServerResponse; readonly stop: () => void; }
+
+export interface HubLaneBrief {
+	readonly id: HubAgentId;
+	readonly kind: HubAgentKind;
+	readonly status: HubAgentStatus;
+	readonly model?: string;
+	/** ISO timestamp of the lane's most recent turn in the sampled tail. */
+	readonly lastActivityAt?: string;
+	/** Tool calls / tool errors observed in the sampled tail. */
+	readonly recentToolCalls: number;
+	readonly recentToolErrors: number;
+	/** True when the sample was a mid-file tail: stats describe the tail only. */
+	readonly sampledTail: boolean;
+	/** True when the transcript could not be read at all. */
+	readonly transcriptUnavailable?: boolean;
+}
+
+export interface HubBriefing {
+	readonly generatedAt: number;
+	readonly folders: number;
+	readonly agents: number;
+	/** Status counts across ALL agents, including unsampled ones. */
+	readonly counts: Partial<Record<HubAgentStatus, number>>;
+	readonly lanes: readonly HubLaneBrief[];
+	/** True when agents beyond maxLanes received counts only, no tail sample. */
+	readonly lanesCapped: boolean;
+}
 
 export class AgentHubGateway {
 	readonly #binding: AgentHubBinding;
@@ -129,6 +159,64 @@ export class AgentHubGateway {
 		if (completeEnd < chunk.newSize && !digest.truncated) digest = { ...digest, truncated: true };
 		if (opts.query) digest = filterDigestTurns(digest, opts.query);
 		return digest;
+	}
+
+	/**
+	 * Read-only standup briefing over the whole hub: status counts across every
+	 * agent, plus a bounded tail sample (recent tool calls/errors, last activity,
+	 * model) for the most relevant lanes. Every lane read goes through the bounded
+	 * range reader, so cost stays flat regardless of transcript size.
+	 */
+	async briefing(
+		opts: { maxLanes?: number; tailBytes?: number } = {},
+	): Promise<HubBriefing> {
+		const maxLanes = Math.min(Math.max(Math.trunc(opts.maxLanes ?? 12), 1), 50);
+		const tailBytes = Math.min(Math.max(Math.trunc(opts.tailBytes ?? 32 * 1024), 4096), 256 * 1024);
+		const { folders, agents } = await this.#binding.listAgents();
+
+		const counts: Partial<Record<HubAgentStatus, number>> = {};
+		for (const agent of agents) {
+			counts[agent.status] = (counts[agent.status] ?? 0) + 1;
+		}
+
+		// Most relevant first: running lanes, then idle/parked/aborted, stable by id.
+		const ranked = [...agents].sort(
+			(a, b) => statusOrder(a.status) - statusOrder(b.status) || a.id.localeCompare(b.id),
+		);
+		const sampled = ranked.slice(0, maxLanes);
+		const lanes: HubLaneBrief[] = [];
+		for (const agent of sampled) {
+			const chunk = await this.#binding.readTranscriptRange(agent.id, { maxBytes: tailBytes });
+			if (!chunk) {
+				lanes.push({
+					id: agent.id, kind: agent.kind, status: agent.status,
+					recentToolCalls: 0, recentToolErrors: 0, sampledTail: false,
+					transcriptUnavailable: true,
+				});
+				continue;
+			}
+			const digest = parseSessionTranscript(chunk.text, { maxTurns: 25 });
+			const lastTurn = digest.turns[digest.turns.length - 1];
+			lanes.push({
+				id: agent.id,
+				kind: agent.kind,
+				status: agent.status,
+				...(digest.model ? { model: digest.model } : {}),
+				...(lastTurn?.at ? { lastActivityAt: lastTurn.at } : {}),
+				recentToolCalls: digest.stats.toolCalls,
+				recentToolErrors: digest.stats.toolErrors,
+				sampledTail: chunk.fromByte > 0 || digest.truncated,
+			});
+		}
+
+		return {
+			generatedAt: Date.now(),
+			folders: folders.length,
+			agents: agents.length,
+			counts,
+			lanes,
+			lanesCapped: agents.length > sampled.length,
+		};
 	}
 
 	async chat(
