@@ -1,6 +1,7 @@
 // @ts-check
 import { approvalControlType, normalizeApproval } from "/orb/orb-approvals.js";
 import { createBargeInDetector } from "/app/barge-in-detector.js";
+import { InterruptedAudioReplay } from "/app/replay-capture.js";
 /**
  * Desktop/terminal Live orb — HF methodology audio path against pi-speak /v1/live.
  * Meant to run outside the full remote chrome (Edge --app=/orb/).
@@ -22,11 +23,15 @@ const caption = $("#caption");
 const subcaption = $("#subcaption");
 const backendLabel = $("#backend-label");
 const chat = $("#chat");
+const composer = /** @type {HTMLFormElement} */ ($("#composer"));
+const composerInput = /** @type {HTMLTextAreaElement} */ ($("#composer-input"));
+const composerSend = /** @type {HTMLButtonElement} */ ($("#composer-send"));
 const approvalsEl = $("#approvals");
 const muteBtn = /** @type {HTMLButtonElement} */ ($("#mute-btn"));
 const camBtn = /** @type {HTMLButtonElement} */ ($("#cam-btn"));
 const closeBtn = /** @type {HTMLButtonElement} */ ($("#close-btn"));
 const stopBtn = /** @type {HTMLButtonElement} */ ($("#stop-btn"));
+const replayBtn = /** @type {HTMLButtonElement} */ ($("#replay-btn"));
 const gateInput = /** @type {HTMLInputElement} */ ($("#gate-db"));
 const gateValue = $("#gate-value");
 const meterFill = $("#meter-fill");
@@ -47,6 +52,8 @@ let clientSeq = 0;
 let lastServerSeq = 0;
 const transcriptBuffers = { user: "", assistant: "" };
 const transcriptBubbles = { user: null, assistant: null };
+/** @type {Array<{text: string, echoed: string}>} */
+const pendingTextEchoes = [];
 let audioCtx = /** @type {AudioContext | null} */ (null);
 let captureNode = /** @type {AudioWorkletNode | null} */ (null);
 let playbackNode = /** @type {AudioWorkletNode | null} */ (null);
@@ -70,6 +77,8 @@ let bargeInSpeechOnsetMs = 0;
 const bargeInDetector = createBargeInDetector();
 /** @type {Record<string, ReturnType<typeof normalizeApproval>>} */
 const pendingApprovals = {};
+const interruptedReplay = new InterruptedAudioReplay();
+let replayingInterruptedAudio = false;
 
 function token() {
 	const q = new URL(location.href).searchParams.get("token");
@@ -204,6 +213,35 @@ function finishTranscript(role) {
 	transcriptBubbles[normalizedRole] = null;
 }
 
+function updateComposerAvailability() {
+	const enabled = liveConnected;
+	composerInput.disabled = !enabled;
+	composerSend.disabled = !enabled;
+}
+
+function suppressTextEcho(text) {
+	const pending = pendingTextEchoes[0];
+	if (!pending) return false;
+	const echoed = pending.echoed + text;
+	if (!pending.text.startsWith(echoed)) {
+		if (pending.echoed) appendTranscript("user", pending.echoed);
+		pendingTextEchoes.shift();
+		return false;
+	}
+	pending.echoed = echoed;
+	if (echoed.length === pending.text.length) pendingTextEchoes.shift();
+	return true;
+}
+
+function finishUserTranscript() {
+	const pending = pendingTextEchoes[0];
+	if (pending?.echoed) {
+		appendTranscript("user", pending.echoed);
+		pendingTextEchoes.shift();
+	}
+	finishTranscript("user");
+}
+
 function loadGate() {
 	const on = (localStorage.getItem(STORAGE.gateOn) || "true") !== "false";
 	const db = Number.parseFloat(localStorage.getItem(STORAGE.gateDb) || "-50");
@@ -276,6 +314,12 @@ function audioClockToEpochMs(contextTimeSeconds) {
 }
 
 function handlePlaybackMetric(event) {
+	if (event.data?.kind === "underrun" && replayingInterruptedAudio) {
+		replayingInterruptedAudio = false;
+		captureNode?.port.postMessage({ kind: "enable", value: !muted });
+		if (liveConnected) setState("listening");
+		return;
+	}
 	if (!voiceMetricsEnabled) return;
 	if (event.data?.kind === "playback_started" && voiceMetric) {
 		const rendered = audioClockToEpochMs(Number(event.data.contextTimeSeconds));
@@ -350,10 +394,43 @@ function clearPlayback() {
 	document.documentElement.style.setProperty("--ai-audio-level", "0");
 }
 
+function updateReplayButton() {
+	replayBtn.classList.toggle("hidden", !interruptedReplay.hasReplay());
+}
+
+function freezeInterruptedReplay() {
+	if (interruptedReplay.freezeInterrupted()) updateReplayButton();
+}
+
+async function replayInterruptedAudio() {
+	const replay = interruptedReplay.getReplay();
+	if (!replay) return;
+	await ensureAudio();
+	clearPlayback();
+	replayingInterruptedAudio = true;
+	captureNode?.port.postMessage({ kind: "enable", value: false });
+	playbackNode?.port.postMessage({ kind: "config", inputRate: replay.rate });
+	for (const samples of replay.chunks) {
+		playbackNode?.port.postMessage({ kind: "audio", samples }, [samples.buffer]);
+	}
+	setState("ai-speaking");
+	document.documentElement.style.setProperty("--ai-audio-level", "0.7");
+}
+
+/**
+ * @param {Record<string, unknown>} payload
+ * @returns {boolean}
+ */
 function sendJson(payload) {
-	if (!ws || ws.readyState !== WebSocket.OPEN) return;
-	clientSeq += 1;
-	ws.send(JSON.stringify({ ...payload, clientSequenceId: clientSeq }));
+	if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+	try {
+		const nextClientSeq = clientSeq + 1;
+		ws.send(JSON.stringify({ ...payload, clientSequenceId: nextClientSeq }));
+		clientSeq = nextClientSeq;
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function startCapture() {
@@ -386,6 +463,7 @@ async function startCapture() {
 				});
 				if (decision.interrupt) {
 					if (voiceMetricsEnabled) bargeInSpeechOnsetMs = Date.now();
+					freezeInterruptedReplay();
 					clearPlayback();
 					sendJson({ type: "interrupt" });
 					setState("user-speaking");
@@ -451,6 +529,7 @@ async function connect() {
 			const decoded = decodeFrame(event.data);
 			if (!decoded) return;
 			lastServerSeq = Math.max(lastServerSeq, decoded.seq);
+			interruptedReplay.capture(decoded.samples, playbackRate);
 			const copy = new Float32Array(decoded.samples.length);
 			copy.set(decoded.samples);
 			if (voiceMetricsEnabled && voiceMetric && !voiceMetric.firstPcmEnqueuedClientMs) {
@@ -472,6 +551,7 @@ async function connect() {
 		if (msg.type === "start") {
 			liveConnected = true;
 			sessionId = msg.session || sessionId;
+			updateComposerAvailability();
 			if (msg.message) backendLabel.textContent = String(msg.message);
 			voiceMetricsProvider = String(msg.provider || msg.message || "");
 			voiceMetricsModel = String(msg.model || "");
@@ -499,17 +579,20 @@ async function connect() {
 			return;
 		}
 		if (msg.type === "transcript" && msg.text) {
-			appendTranscript(msg.role, msg.text);
+			if (msg.role === "assistant") interruptedReplay.beginSegment();
+			if (msg.role !== "user" || !suppressTextEcho(msg.text)) appendTranscript(msg.role, msg.text);
 			return;
 		}
 		if (msg.type === "transcript_complete") {
-			finishTranscript(msg.role);
+			if (msg.role === "user") finishUserTranscript();
+			else finishTranscript(msg.role);
+			if (msg.role === "assistant") interruptedReplay.discardCurrent();
 			return;
 		}
 		if (msg.type === "interrupt") {
 			finishTranscript("assistant");
+			freezeInterruptedReplay();
 			clearPlayback();
-			// User may still be mid-interjection; detector drives listening/speaking.
 			if (state === "ai-speaking" || state === "processing") setState("user-speaking");
 			return;
 		}
@@ -539,6 +622,8 @@ async function connect() {
 			return;
 		}
 		if (msg.type === "error") {
+			liveConnected = false;
+			updateComposerAvailability();
 			setState("error");
 			pushBubble("system", msg.message || "error");
 			subcaption.textContent = msg.message || "error";
@@ -546,15 +631,22 @@ async function connect() {
 	});
 	ws.addEventListener("close", () => {
 		liveConnected = false;
+		updateComposerAvailability();
+		pendingTextEchoes.length = 0;
 		ws = null;
 		stopCapture();
 		clearPlayback();
+		interruptedReplay.clear();
+		updateReplayButton();
+		replayingInterruptedAudio = false;
 		setState("idle");
 		subcaption.textContent = "Disconnected";
 	});
 	ws.addEventListener("error", () => {
 		setState("error");
 		subcaption.textContent = "Socket error";
+		liveConnected = false;
+		updateComposerAvailability();
 	});
 }
 
@@ -562,8 +654,13 @@ function teardown() {
 	try { ws?.close(); } catch {}
 	ws = null;
 	liveConnected = false;
+	pendingTextEchoes.length = 0;
+	updateComposerAvailability();
 	stopCapture();
 	clearPlayback();
+	interruptedReplay.clear();
+	updateReplayButton();
+	replayingInterruptedAudio = false;
 	if (cameraStream) {
 		for (const t of cameraStream.getTracks()) t.stop();
 		cameraStream = null;
@@ -624,12 +721,19 @@ orb.addEventListener("click", async () => {
 		if (state === "idle" || state === "error") await connect();
 		else teardown();
 	} catch (err) {
+		liveConnected = false;
+		updateComposerAvailability();
 		setState("error");
 		subcaption.textContent = String(err?.message || err);
 	}
 });
 
 stopBtn.addEventListener("click", () => teardown());
+replayBtn.addEventListener("click", () => {
+	void replayInterruptedAudio().catch((err) => {
+		subcaption.textContent = String(err?.message || err);
+	});
+});
 closeBtn.addEventListener("click", () => {
 	teardown();
 	window.close();
@@ -663,9 +767,33 @@ gateInput.addEventListener("input", () => {
 	localStorage.setItem(STORAGE.gateOn, "true");
 	applyGate();
 });
+composer.addEventListener("submit", (event) => {
+	event.preventDefault();
+	const text = composerInput.value.trim();
+	if (!text || !liveConnected || !sendJson({ type: "text", text })) return;
+	pendingTextEchoes.push({ text, echoed: "" });
+	pushBubble("user", text);
+	composerInput.value = "";
+	composerInput.focus();
+	setState("processing");
+});
+composerInput.addEventListener("keydown", (event) => {
+	if (
+		event.key !== "Enter"
+		|| event.shiftKey
+		|| event.isComposing
+		|| event.ctrlKey
+		|| event.altKey
+		|| event.metaKey
+	) return;
+	event.preventDefault();
+	composer.requestSubmit();
+});
 
 loadGate();
 setState("idle");
+updateComposerAvailability();
+updateReplayButton();
 requestAnimationFrame(() => document.body.classList.remove("booting"));
 
 const launchParams = new URL(location.href).searchParams;

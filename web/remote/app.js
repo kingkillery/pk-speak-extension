@@ -1,4 +1,5 @@
 import { createBargeInDetector, rmsFromInt16 } from "./barge-in-detector.js";
+import { InterruptedAudioReplay } from "./replay-capture.js";
 
 /**
  * Choose the realtime approval control message for a pending tool.
@@ -216,6 +217,8 @@ if (typeof document !== "undefined") {
 		livePlaybackSources: new Set(),
 		livePlaybackGeneration: 0,
 		liveLastInterruptAt: 0,
+		liveInterruptedReplay: new InterruptedAudioReplay(),
+		liveReplayInProgress: false,
 		liveVoiceMetricsEnabled: false,
 		liveVoiceMetricsProvider: "",
 		liveVoiceMetricsModel: "",
@@ -251,6 +254,7 @@ if (typeof document !== "undefined") {
 		reply: document.getElementById("reply-output"),
 		audio: document.getElementById("reply-audio"),
 		playReply: document.getElementById("play-reply-button"),
+		replayLive: document.getElementById("replay-live-button"),
 
 		textInput: document.getElementById("text-input"),
 		sendText: document.getElementById("send-text-button"),
@@ -1333,6 +1337,12 @@ if (typeof document !== "undefined") {
 	}
 
 	function handleLivePlaybackMetric(event) {
+		if (event.data?.kind === "underrun" && state.liveReplayInProgress) {
+			state.liveReplayInProgress = false;
+			setLiveMicEnabled(state.recording);
+			if (state.liveConnected) state.liveState = "listening";
+			return;
+		}
 		if (!state.liveVoiceMetricsEnabled) return;
 		if (event.data?.kind === "playback_started" && state.liveVoiceMetric) {
 			const rendered = liveAudioClockToEpochMs(Number(event.data.contextTimeSeconds));
@@ -1421,18 +1431,42 @@ if (typeof document !== "undefined") {
 		if (state.liveState === "ai-speaking") state.liveState = "listening";
 	}
 
+	function updateLiveReplayButton() {
+		els.replayLive?.classList.toggle("hidden", !state.liveInterruptedReplay.hasReplay());
+	}
+
+	function freezeLiveInterruptedReplay() {
+		if (state.liveInterruptedReplay.freezeInterrupted()) updateLiveReplayButton();
+	}
+
+	async function replayInterruptedLiveAudio() {
+		const replay = state.liveInterruptedReplay.getReplay();
+		if (!replay) return;
+		stopLivePlayback();
+		const context = ensureLiveAudioContext();
+		if (context.state === "suspended") await context.resume().catch(() => {});
+		await ensureLiveWorklets(context);
+		state.liveReplayInProgress = true;
+		setLiveMicEnabled(false);
+		state.livePlaybackNode?.port.postMessage({ kind: "config", inputRate: replay.rate });
+		for (const samples of replay.chunks) {
+			state.livePlaybackNode?.port.postMessage({ kind: "audio", samples }, [samples.buffer]);
+		}
+		state.liveState = "ai-speaking";
+	}
+
 	async function playLiveAudioFrame(data) {
 		const generation = state.livePlaybackGeneration;
 		const bytes = data instanceof Blob ? await data.arrayBuffer() : data;
 		const decoded = decodeLivePcmFrame(bytes);
 		if (!decoded || decoded.samples.length === 0) return;
 		state.liveLastServerSequenceId = Math.max(state.liveLastServerSequenceId, decoded.sequenceId);
+		state.liveInterruptedReplay.capture(decoded.samples, state.livePlaybackSampleRate || 24_000);
 		if (generation !== state.livePlaybackGeneration) return;
 		const context = ensureLiveAudioContext();
 		if (context.state === "suspended") await context.resume().catch(() => {});
 		await ensureLiveWorklets(context);
 		if (generation !== state.livePlaybackGeneration) return;
-
 		if (state.livePlaybackNode) {
 			// Prefer the HF ring-buffer worklet (click-free clear + upsample).
 			const copy = new Float32Array(decoded.samples.length);
@@ -1487,6 +1521,9 @@ if (typeof document !== "undefined") {
 	function closeLiveSocket() {
 		stopLiveCapture({ releaseStream: true });
 		stopLivePlayback();
+		state.liveInterruptedReplay.clear();
+		updateLiveReplayButton();
+		state.liveReplayInProgress = false;
 		if (state.livePlaybackNode) {
 			try { state.livePlaybackNode.disconnect(); } catch {}
 			state.livePlaybackNode = null;
@@ -1626,8 +1663,12 @@ if (typeof document !== "undefined") {
 			return;
 		}
 		if (message.type === "transcript" && message.text) {
-			if (message.role === "user") appendOrUpdateLiveUser(message.text);
-			else appendOrUpdateLiveReply(message.text);
+			if (message.role === "user") {
+				appendOrUpdateLiveUser(message.text);
+			} else {
+				state.liveInterruptedReplay.beginSegment();
+				appendOrUpdateLiveReply(message.text);
+			}
 			return;
 		}
 		if (message.type === "transcript_complete") {
@@ -1637,11 +1678,13 @@ if (typeof document !== "undefined") {
 			} else {
 				state.liveReplyBuffer = "";
 				state.liveAgentMessage = null;
+				state.liveInterruptedReplay.discardCurrent();
 				scheduleLiveTurnSettled();
 			}
 			return;
 		}
 		if (message.type === "interrupt") {
+			freezeLiveInterruptedReplay();
 			stopLivePlayback();
 			// Keep user-speaking while the interjection is still in progress.
 			if (state.liveState === "ai-speaking" || state.liveState === "processing") {
@@ -1877,6 +1920,7 @@ if (typeof document !== "undefined") {
 				if (decision.interrupt) {
 					state.liveLastInterruptAt = now;
 					if (state.liveVoiceMetricsEnabled) state.liveBargeInSpeechOnsetMs = now;
+					freezeLiveInterruptedReplay();
 					stopLivePlayback();
 					state.liveClientSequenceId += 1;
 					socket.send(JSON.stringify({ type: "interrupt", clientSequenceId: state.liveClientSequenceId }));
@@ -2208,6 +2252,9 @@ if (typeof document !== "undefined") {
 
 	els.refresh?.addEventListener("click", refreshStatus);
 	els.playReply?.addEventListener("click", playReplyAudio);
+	els.replayLive?.addEventListener("click", () => {
+		void replayInterruptedLiveAudio().catch((error) => setStatus(String(error.message || error), "error"));
+	});
 	els.record?.addEventListener("click", toggleRecording);
 	els.sendText?.addEventListener("click", submitText);
 	els.clearText?.addEventListener("click", () => {
@@ -2455,6 +2502,7 @@ if (typeof document !== "undefined") {
 	loadSettings();
 	syncLockedUi();
 	updateRecordingUi();
+	updateLiveReplayButton();
 	syncDockInset();
 	if (typeof ResizeObserver !== "undefined" && els.dock) {
 		const ro = new ResizeObserver(() => syncDockInset());

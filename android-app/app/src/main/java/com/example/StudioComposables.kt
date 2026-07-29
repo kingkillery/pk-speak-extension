@@ -97,6 +97,8 @@ fun StudioCockpitLayout(
     onStartLiveSession: () -> Unit,
     onStopLiveSession: () -> Unit,
     onRecordTrigger: () -> Unit,
+    onInterruptLiveAudio: () -> Unit,
+    onReplayInterruptedAudio: () -> Unit,
     onStopAndSend: () -> Unit,
     onSendText: () -> Unit,
 ) {
@@ -133,6 +135,8 @@ fun StudioCockpitLayout(
             onStartLiveSession = onStartLiveSession,
             onStopLiveSession = onStopLiveSession,
             onRecordTrigger = onRecordTrigger,
+            onInterruptLiveAudio = onInterruptLiveAudio,
+            onReplayInterruptedAudio = onReplayInterruptedAudio,
             onStopAndSend = onStopAndSend,
             onSendText = onSendText,
         )
@@ -507,6 +511,8 @@ private fun StudioComposer(
     onStartLiveSession: () -> Unit,
     onStopLiveSession: () -> Unit,
     onRecordTrigger: () -> Unit,
+    onInterruptLiveAudio: () -> Unit,
+    onReplayInterruptedAudio: () -> Unit,
     onStopAndSend: () -> Unit,
     onSendText: () -> Unit,
 ) {
@@ -590,6 +596,8 @@ private fun StudioComposer(
                     onStartLiveSession = onStartLiveSession,
                     onStopLiveSession = onStopLiveSession,
                     onRecordTrigger = onRecordTrigger,
+                    onInterruptLiveAudio = onInterruptLiveAudio,
+                    onReplayInterruptedAudio = onReplayInterruptedAudio,
                     onStopAndSend = onStopAndSend,
                     onSendText = onSendText,
                 )
@@ -612,16 +620,16 @@ private fun StudioComposerActions(
     onStopLiveSession: () -> Unit,
     onRecordTrigger: () -> Unit,
     onStopAndSend: () -> Unit,
+    onInterruptLiveAudio: () -> Unit,
+    onReplayInterruptedAudio: () -> Unit,
     onSendText: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         if (state.isRealtimeActive) {
-            StudioPillButton("Interrupt", Color.White, Accent) {
-                liveSessionRef.value?.sendInterrupt()
-                livePlayerRef.value?.stop()
-                livePlayerRef.value?.start()
+            StudioPillButton("Interrupt", Color.White, Accent, onInterruptLiveAudio)
+            if (state.hasInterruptedLiveAudio) {
+                StudioPillButton("Replay", Ink, SelectedFill, onReplayInterruptedAudio)
             }
-            StudioPillButton("Live On", Color.White, Success, onStopLiveSession)
         } else {
             StudioPillButton("Live Off", Ink, Canvas) {
                 if (!permissionState.status.isGranted) permissionState.launchPermissionRequest() else onStartLiveSession()
@@ -704,6 +712,7 @@ private fun StudioPillButton(text: String, textColor: Color, backgroundColor: Co
             .clip(CircleShape)
             .background(backgroundColor)
             .border(BorderStroke(1.dp, Line), CircleShape)
+            .semantics { contentDescription = text }
             .clickable(role = Role.Button) { onClick() },
         contentAlignment = Alignment.Center,
     ) {

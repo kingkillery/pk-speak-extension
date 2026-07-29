@@ -53,9 +53,10 @@ body.booting * { transition: none !important; }
 	grid-template-areas:
 		"top top"
 		"hero chat"
+		"hero composer"
 		"dock dock";
 	grid-template-columns: minmax(224px, 0.82fr) minmax(300px, 1.18fr);
-	grid-template-rows: auto minmax(0, 1fr) auto;
+	grid-template-rows: auto minmax(0, 1fr) auto auto;
 	gap: 12px;
 	width: min(100%, 840px);
 	height: min(780px, calc(100dvh - 40px));
@@ -180,7 +181,8 @@ body.booting * { transition: none !important; }
 .icon-btn:focus-visible,
 .btn:focus-visible,
 .orb:focus-visible,
-input:focus-visible {
+input:focus-visible,
+textarea:focus-visible {
 	outline: 2px solid var(--success);
 	outline-offset: 2px;
 }
@@ -341,10 +343,58 @@ input:focus-visible {
 	to { opacity: 1; transform: none; }
 }
 
+.composer {
+	grid-area: composer;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 8px;
+	align-items: end;
+	min-width: 0;
+	padding: 8px;
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	background: rgba(9, 10, 13, 0.32);
+}
+
+.composer-label {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
+
+.composer textarea {
+	width: 100%;
+	min-width: 0;
+	min-height: 36px;
+	max-height: 108px;
+	padding: 8px 10px;
+	resize: vertical;
+	border: 1px solid var(--line);
+	border-radius: 9px;
+	background: var(--panel-deep);
+	color: var(--text);
+	font: 12px/1.35 var(--font);
+}
+
+.composer textarea::placeholder { color: var(--text-faint); }
+
+.composer textarea:disabled {
+	cursor: not-allowed;
+	opacity: 0.52;
+}
+
+.composer-send { min-width: 64px; }
+
 .dock {
 	grid-area: dock;
 	display: grid;
-	grid-template-columns: minmax(150px, 1fr) 118px auto;
+	grid-template-columns: minmax(150px, 1fr) 118px auto auto;
 	gap: 10px;
 	align-items: end;
 	padding: 2px 4px 0;
@@ -400,7 +450,7 @@ input:focus-visible {
 	z-index: 3;
 	left: 30px;
 	right: 30px;
-	bottom: 76px;
+	bottom: 132px;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -548,6 +598,7 @@ body.speech-mode .chat,
 body.speech-mode .approvals,
 body.speech-mode #mute-btn,
 body.speech-mode #cam-btn,
+body.speech-mode .composer,
 body.speech-mode #cam-pip {
 	display: none !important;
 }
@@ -572,9 +623,10 @@ body.speech-mode .identity .sub { display: none; }
 			"top"
 			"hero"
 			"chat"
+			"composer"
 			"dock";
 		grid-template-columns: minmax(0, 1fr);
-		grid-template-rows: auto auto minmax(150px, 1fr) auto;
+		grid-template-rows: auto auto minmax(150px, 1fr) auto auto;
 		width: 100%;
 		height: 100dvh;
 		min-height: 0;
@@ -602,7 +654,7 @@ body.speech-mode .identity .sub { display: none; }
 	.approvals {
 		left: 22px;
 		right: 22px;
-		bottom: 72px;
+		bottom: 128px;
 	}
 
 	.cam-pip {
@@ -621,11 +673,17 @@ body.speech-mode .identity .sub { display: none; }
 	}
 
 	.dock {
-		grid-template-columns: minmax(0, 1fr) 74px auto;
+		grid-template-columns: minmax(0, 1fr) 74px auto auto;
 		gap: 7px;
 	}
 
 	.meter { display: none; }
+
+	.composer {
+		grid-template-columns: minmax(0, 1fr) auto;
+		gap: 6px;
+		padding: 6px;
+	}
 }
 
 @media (max-height: 620px) and (min-width: 681px) {
@@ -654,6 +712,7 @@ body.speech-mode .identity .sub { display: none; }
 	.chat,
 	.bubble,
 	.speech-panel,
+	.composer,
 	.approval-card {
 		border: 1px solid CanvasText;
 		background: Canvas;
@@ -661,5 +720,11 @@ body.speech-mode .identity .sub { display: none; }
 	}
 
 	.icon-btn,
+	.composer textarea,
 	.btn { border: 1px solid ButtonText; }
+
+	.composer textarea {
+		background: Canvas;
+		color: CanvasText;
+	}
 }

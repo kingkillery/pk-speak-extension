@@ -1559,6 +1559,16 @@ export class ControlServer {
 			return true;
 		}
 
+		if (url.pathname === "/app/replay-capture.js" || url.pathname === "/orb/replay-capture.js") {
+			await this.serveStaticFile(
+				join(REMOTE_APP_DIR, "replay-capture.js"),
+				"application/javascript; charset=utf-8",
+				res,
+				"no-store",
+			);
+			return true;
+		}
+
 		if (url.pathname === "/app/live-capture-worklet.js") {
 			await this.serveStaticFile(
 				join(REMOTE_APP_DIR, "live-capture-worklet.js"),
