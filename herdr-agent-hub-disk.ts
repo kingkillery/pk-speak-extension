@@ -33,21 +33,81 @@ export function createDiskFallbackBinding(
 				const readLen = stat.size - fromByte;
 				const buf = Buffer.allocUnsafe(readLen);
 				const fd = openSync(agent.sessionFile, "r");
+				let bytesRead: number;
 				try {
-					readSync(fd, buf, 0, readLen, fromByte);
+					// Decode only bytes actually read: a truncate/rotation between stat
+					// and read leaves the allocUnsafe tail as stale memory.
+					bytesRead = readSync(fd, buf, 0, readLen, fromByte);
 				} finally {
 					closeSync(fd);
 				}
-				const raw = buf.toString("utf8");
-				const lastNl = raw.lastIndexOf("\n");
-				const complete = lastNl >= 0 ? raw.slice(0, lastNl + 1) : "";
-				return { text: complete, newSize: fromByte + Buffer.byteLength(complete) };
+				const bytes = buf.subarray(0, bytesRead);
+				// Byte-level trailing trim: a split multibyte char at the cut would decode
+				// to U+FFFD and corrupt byte accounting; keep everything in bytes.
+				const lastNl = bytes.lastIndexOf(0x0a);
+				const complete = lastNl >= 0 ? bytes.subarray(0, lastNl + 1) : bytes.subarray(0, 0);
+				return { text: complete.toString("utf8"), newSize: fromByte + complete.length };
+			} catch {
+				return null;
+			}
+		},
+		async readTranscriptRange(id, opts = {}) {
+			const { agents } = buildSnapshotFromDashboard(dashboardFn());
+			const agent = agents.find((candidate) => candidate.id === id);
+			if (!agent?.sessionFile) return null;
+			try {
+				const stat = statSync(agent.sessionFile);
+				const maxBytes = Math.min(
+					Math.max(Math.trunc(opts.maxBytes ?? DEFAULT_RANGE_READ_BYTES), 1024),
+					MAX_RANGE_READ_BYTES,
+				);
+				const requestedFrom = typeof opts.fromByte === "number" && Number.isFinite(opts.fromByte)
+					? Math.min(Math.max(Math.trunc(opts.fromByte), 0), stat.size)
+					: Math.max(0, stat.size - maxBytes);
+				const readLen = Math.min(maxBytes, stat.size - requestedFrom);
+				if (readLen <= 0) return { text: "", newSize: stat.size, fromByte: stat.size };
+				const buf = Buffer.allocUnsafe(readLen);
+				const fd = openSync(agent.sessionFile, "r");
+				let bytesRead: number;
+				let startsAtLineBoundary = false;
+				try {
+					// Decode only bytes actually read: a truncate/rotation between stat
+					// and read leaves the allocUnsafe tail as stale memory.
+					bytesRead = readSync(fd, buf, 0, readLen, requestedFrom);
+					if (requestedFrom > 0 && bytesRead > 0) {
+						// A start exactly at a line boundary (previous byte is "\n", which
+						// also covers CRLF) means the first line is complete, not partial.
+						const prev = Buffer.allocUnsafe(1);
+						startsAtLineBoundary = readSync(fd, prev, 0, 1, requestedFrom - 1) === 1 && prev[0] === 0x0a;
+					}
+				} finally {
+					closeSync(fd);
+				}
+				const bytes = buf.subarray(0, bytesRead);
+				let fromByte = requestedFrom;
+				let start = 0;
+				// A genuinely mid-line start lands inside a jsonl record; drop the partial
+				// leading line so the parser never sees truncated JSON. Newline detection
+				// stays in bytes — a split multibyte char decodes to U+FFFD and would make
+				// string-index offsets diverge from file byte offsets.
+				if (fromByte > 0 && !startsAtLineBoundary) {
+					const firstNl = bytes.indexOf(0x0a);
+					if (firstNl < 0) return { text: "", newSize: stat.size, fromByte: stat.size };
+					start = firstNl + 1;
+					fromByte += start;
+				}
+				const lastNl = bytes.lastIndexOf(0x0a);
+				const complete = lastNl >= start ? bytes.subarray(start, lastNl + 1) : bytes.subarray(start, start);
+				return { text: complete.toString("utf8"), newSize: stat.size, fromByte };
 			} catch {
 				return null;
 			}
 		},
 	};
 }
+
+const DEFAULT_RANGE_READ_BYTES = 256 * 1024;
+const MAX_RANGE_READ_BYTES = 1024 * 1024;
 
 function buildSnapshotFromDashboard(
 	dashboard: OhMyPiAgentHubDashboard,

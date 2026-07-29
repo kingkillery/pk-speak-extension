@@ -152,6 +152,43 @@ function shapeAgentDetail(obj: Record<string, unknown>): Record<string, unknown>
 	return next;
 }
 
+function shapeTranscriptDigest(obj: Record<string, unknown>): Record<string, unknown> {
+	const next = { ...obj };
+	const transcript = isPlainObject(next.transcript) ? { ...next.transcript } : null;
+	if (!transcript) return next;
+
+	if (Array.isArray(transcript.turns)) {
+		const capped = capArray(transcript.turns, SPEECH_LINE_CAP);
+		transcript.turns = capped.items.map((turn) => {
+			if (!isPlainObject(turn)) return turn;
+			const t = { ...turn };
+			if (typeof t.text === "string") t.text = clipSpeechText(t.text, 240).text;
+			if (Array.isArray(t.toolCalls)) {
+				const cappedCalls = capArray(t.toolCalls, 5);
+				t.toolCalls = cappedCalls.items.map((call) =>
+					isPlainObject(call) && typeof call.summary === "string"
+						? { ...call, summary: clipSpeechText(call.summary, 120).text }
+						: call);
+			}
+			return t;
+		});
+		if (capped.truncated) transcript.turnsTruncatedForSpeech = true;
+	}
+
+	const stats = isPlainObject(transcript.stats) ? transcript.stats : {};
+	const who = typeof transcript.title === "string"
+		? transcript.title
+		: typeof transcript.sessionId === "string" ? transcript.sessionId : "agent";
+	const parts = [`Transcript review for ${who}`];
+	if (typeof stats.messages === "number") parts.push(`${stats.messages} messages`);
+	if (typeof stats.toolCalls === "number") parts.push(`${stats.toolCalls} tool calls`);
+	if (typeof stats.toolErrors === "number" && stats.toolErrors > 0) parts.push(`${stats.toolErrors} tool errors`);
+	if (transcript.truncated === true) parts.push("older turns omitted");
+	next.summary = parts.join(" — ");
+	next.transcript = transcript;
+	return next;
+}
+
 function shapeSessionDashboard(obj: Record<string, unknown>): Record<string, unknown> {
 	const next = { ...obj };
 	if (Array.isArray(next.workspaces)) {
@@ -298,6 +335,9 @@ export function shapeRealtimeToolOutputForSpeech(toolName: string | undefined, o
 			break;
 		case "get_agent_hub_agent":
 			shaped = shapeAgentDetail(parsed);
+			break;
+		case "read_agent_transcript":
+			shaped = shapeTranscriptDigest(parsed);
 			break;
 		case "list_sessions":
 		case "get_session_info":

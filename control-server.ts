@@ -505,15 +505,16 @@ export class ControlServer {
 	}
 
 	// Read-only view for the conversational realtime gateway: a genuinely
-	// narrow runtime object exposing only snapshot/detail, not chat/kill/
+	// narrow runtime object exposing only snapshot/detail/transcript, not chat/kill/
 	// revive/stream. The Pick<> return type alone only narrows at compile
 	// time -- the realtime gateway holds this behind an `any`-typed `server`
 	// reference, so returning `this._agentHubGateway` directly would still let
 	// a future (or buggy) realtime tool reach the mutating methods at runtime.
-	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail"> {
+	get agentHubGateway(): Pick<AgentHubGateway, "snapshot" | "detail" | "transcript"> {
 		return {
 			snapshot: () => this._agentHubGateway.snapshot(),
 			detail: (id, tailLines) => this._agentHubGateway.detail(id, tailLines),
+			transcript: (id, opts) => this._agentHubGateway.transcript(id, opts),
 		};
 	}
 
@@ -569,6 +570,8 @@ export class ControlServer {
 			agentHub: {
 				snapshot: () => this._agentHubGateway.snapshot(),
 				detail: (id: Parameters<AgentHubGateway["detail"]>[0], tailLines: number) => this._agentHubGateway.detail(id, tailLines),
+				transcript: (id: Parameters<AgentHubGateway["transcript"]>[0], opts?: Parameters<AgentHubGateway["transcript"]>[1]) =>
+					this._agentHubGateway.transcript(id, opts),
 				chat: (id: Parameters<AgentHubGateway["chat"]>[0], text: string, idempotencyKey: string | null) =>
 					this._agentHubGateway.chat(id, text, idempotencyKey),
 				kill: (id: Parameters<AgentHubGateway["kill"]>[0], confirmToken?: string) =>

@@ -586,8 +586,15 @@ test("google STT hanging recognize aborted mid-flight closes, evicts, and recrea
 				const controller = new AbortController();
 				const pending = stt.transcribeAudioBuffer(Buffer.from("hang"), "audio/wav", controller.signal);
 
-				await new Promise((resolve) => setTimeout(resolve, 20));
-				assert.equal(recognizeStarted, true);
+				// Condition-based wait, not a fixed sleep: under full-suite load a 20ms
+				// deadline can lapse before the mocked client chain reaches recognize(),
+				// which made this test intermittently red on both the base tree and with
+				// unrelated changes. Poll for the actual observable effect instead.
+				const recognizeDeadline = Date.now() + 2_000;
+				while (!recognizeStarted) {
+					if (Date.now() >= recognizeDeadline) assert.fail("expected recognize() to start");
+					await new Promise((resolve) => setTimeout(resolve, 5));
+				}
 				controller.abort();
 
 				await assert.rejects(pending, /Transcription aborted/);

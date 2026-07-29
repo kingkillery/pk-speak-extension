@@ -40,6 +40,7 @@ export function createLiveAgentHubBinding(deps: LiveAgentHubDeps): AgentHubBindi
 		listAgents: disk.listAgents,
 		getAgent: disk.getAgent,
 		readTranscript: disk.readTranscript,
+		readTranscriptRange: disk.readTranscriptRange,
 		async chat(id, text) {
 			const agent = await disk.getAgent(id);
 			if (!agent) return;

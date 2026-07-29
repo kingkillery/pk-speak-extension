@@ -137,6 +137,36 @@ test("get_agent_hub_agent clips long transcript tails", () => {
 	assert.match(shaped.summary, /running/);
 });
 
+test("read_agent_transcript clips long turns and summarizes stats", () => {
+	const turns = Array.from({ length: 60 }, (_, i) => ({
+		at: "2026-07-29T10:00:00.000Z",
+		role: "assistant",
+		text: `turn ${i} ` + "detail ".repeat(80),
+		toolCalls: [{ name: "bash", summary: "npm test " + "x".repeat(300) }],
+	}));
+	const raw = JSON.stringify({
+		ok: true,
+		transcript: {
+			sessionId: "api-session",
+			title: "Parser work",
+			turns,
+			stats: { messages: 120, toolCalls: 34, toolErrors: 2, filesTouched: [] },
+			truncated: true,
+		},
+	});
+	const shaped = JSON.parse(shapeRealtimeToolOutputForSpeech("read_agent_transcript", raw));
+	assert.equal(shaped.ok, true);
+	assert.equal(shaped.transcript.turns.length, SPEECH_LINE_CAP);
+	assert.equal(shaped.transcript.turnsTruncatedForSpeech, true);
+	assert.ok(shaped.transcript.turns[0].text.length <= 300, "turn text is clipped for speech");
+	assert.ok(shaped.transcript.turns[0].toolCalls[0].summary.length <= 200, "tool summaries are clipped for speech");
+	assert.match(shaped.summary, /Parser work/);
+	assert.match(shaped.summary, /120 messages/);
+	assert.match(shaped.summary, /2 tool errors/);
+	assert.match(shaped.summary, /older turns omitted/);
+	assert.equal(shaped.speechHint, DEFAULT_SPEECH_HINT);
+});
+
 test("error objects stay truthful and get a speechHint", () => {
 	const raw = JSON.stringify({
 		ok: false,

@@ -1515,6 +1515,30 @@ async function dispatchRealtimeToolCall(
 							outputText = detail ? JSON.stringify({ ok: true, agent: detail }) : JSON.stringify({ ok: false, error: `Unknown agent: ${id}` });
 						}
 					}
+				} else if (call.name === "read_agent_transcript") {
+					const rawId = call.args?.id as string | undefined;
+					const id = parseHubAgentId(rawId);
+					if (!id) {
+						outputText = JSON.stringify({ ok: false, error: `Missing or invalid 'id' argument: ${rawId ?? ""}` });
+					} else {
+						const hub = getRealtimeBridge(activeSession)?.agentHub ?? activeSession.server?.agentHubGateway;
+						if (!hub) {
+							outputText = JSON.stringify({ ok: false, error: "Agent hub is not available." });
+						} else {
+							const tailTurns = typeof call.args?.tailTurns === "number"
+								? Math.min(Math.max(Math.trunc(call.args.tailTurns), 1), 200)
+								: 20;
+							const query = typeof call.args?.query === "string" && call.args.query.trim()
+								? call.args.query
+								: undefined;
+							const digest = await hub.transcript(id, { maxTurns: tailTurns, query });
+							outputText = digest
+								? JSON.stringify({ ok: true, transcript: digest })
+								: digest === null
+									? JSON.stringify({ ok: false, error: `Transcript is unavailable for agent: ${id} (deleted, locked, or unreadable)` })
+									: JSON.stringify({ ok: false, error: `Unknown agent: ${id}` });
+						}
+					}
 				} else if (call.name === "browse_workspace") {
 					outputText = JSON.stringify({ ok: true, workspace: listWorkspaceDirectory(call.args?.path as string | undefined) });
 				} else if (call.name === "read_workspace_file") {
@@ -1712,6 +1736,19 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 						properties: {
 							id: { type: "STRING", description: "The agent id, as returned by list_agent_hub_agents." },
 							tailLines: { type: "NUMBER", description: "How many trailing transcript lines to include (default 40, max 500)." }
+						},
+						required: ["id"]
+					}
+				},
+				{
+					name: "read_agent_transcript",
+					description: "Read-only: reviews what one background agent did — a distilled digest of its session transcript with recent turns (visible text and tool calls, never raw logs or hidden thinking), plus stats like files touched and tool errors. Supports an optional query to filter turns. Prefer this over get_agent_hub_agent for review questions.",
+					parameters: {
+						type: "OBJECT",
+						properties: {
+							id: { type: "STRING", description: "The agent id, as returned by list_agent_hub_agents." },
+							tailTurns: { type: "NUMBER", description: "How many recent turns to include (default 20, max 200)." },
+							query: { type: "STRING", description: "Optional case-insensitive filter: only turns mentioning this text are returned." }
 						},
 						required: ["id"]
 					}

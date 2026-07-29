@@ -261,6 +261,76 @@ test("read-only tool: list_agent_hub_agents answers immediately with no approval
 	assert.equal(approvalMessages.length, 0, "a read-only tool must never require approval");
 });
 
+test("read-only tool: read_agent_transcript answers immediately with a distilled digest and no approval step", async () => {
+	setVertexEnv();
+	const digest = {
+		sessionId: "api-session",
+		cwd: "/repo",
+		turns: [
+			{ at: "2026-07-29T10:00:00.000Z", role: "assistant", toolCalls: [{ name: "read", summary: "/repo/index.ts" }], hasThinking: true },
+			{ at: "2026-07-29T10:01:00.000Z", role: "toolResult", toolName: "read", isError: false, text: "file contents" },
+		],
+		stats: { messages: 2, toolCalls: 1, toolErrors: 0, filesTouched: ["/repo/index.ts"] },
+		truncated: false,
+	};
+	const transcriptCalls = [];
+	const server = {
+		agentHubGateway: {
+			snapshot: async () => ({ folders: [], agents: [] }),
+			transcript: async (id, opts) => {
+				transcriptCalls.push({ id, opts });
+				if (id === "api-worker") return digest;
+				if (id === "api-worker-deleted") return null; // known agent, unreadable transcript
+				return undefined;
+			},
+		},
+	};
+	const { ws, connection } = await startFakeSession(server);
+
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-tr", name: "read_agent_transcript", args: { id: "api-worker", tailTurns: 50, query: "parser" } }] },
+	});
+
+	const fr = lastToolResponse(connection);
+	assert.equal(fr.id, "call-tr");
+	const output = readOutput(fr);
+	assert.equal(output.ok, true);
+	assert.deepEqual(output.transcript.turns, digest.turns);
+	assert.deepEqual(transcriptCalls, [{ id: "api-worker", opts: { maxTurns: 50, query: "parser" } }]);
+	assert.equal(
+		ws.jsonMessages().filter((m) => m.type === "tool_approval_required").length,
+		0,
+		"a read-only review tool must never require approval",
+	);
+
+	// Unknown agent -> truthful error, still no approval.
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-tr-404", name: "read_agent_transcript", args: { id: "api-worker-missing" } }] },
+	});
+	const missing = readOutput(lastToolResponse(connection));
+	assert.equal(missing.ok, false);
+	assert.match(missing.error, /Unknown agent/);
+	assert.deepEqual(transcriptCalls.at(-1).opts, { maxTurns: 20, query: undefined }, "tailTurns defaults to 20");
+
+	// Garbage id -> rejected by the parse boundary before the hub is touched.
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-tr-bad", name: "read_agent_transcript", args: { id: "../escape" } }] },
+	});
+	const bad = readOutput(lastToolResponse(connection));
+	assert.equal(bad.ok, false);
+	assert.match(bad.error, /invalid 'id'/);
+	assert.equal(transcriptCalls.length, 2, "invalid ids must not reach the hub");
+
+	// Known agent whose transcript is unreadable -> truthful unavailable error, never "Unknown agent".
+	await connection.callbacks.onmessage({
+		toolCall: { functionCalls: [{ id: "call-tr-gone", name: "read_agent_transcript", args: { id: "api-worker-deleted" } }] },
+	});
+	const gone = readOutput(lastToolResponse(connection));
+	assert.equal(gone.ok, false);
+	assert.match(gone.error, /unavailable/);
+	assert.ok(!/Unknown agent/.test(gone.error), "a transcript read failure must not be misreported as an unknown agent");
+});
+
 test("mutating tool: launch_agent defers behind approval, then actually launches on command_approve", async (t) => {
 	setVertexEnv();
 	const launchCalls = [];

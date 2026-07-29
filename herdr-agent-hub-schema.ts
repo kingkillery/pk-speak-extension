@@ -35,6 +35,10 @@ export interface HubAgent {
 export interface HubAgentDetail extends HubAgent {
 	readonly transcriptTail: readonly string[];
 	readonly transcriptSize: number;
+	/** True when the bounded read window clipped the tail (fewer lines than requested). */
+	readonly transcriptTailTruncated?: boolean;
+	/** True when the transcript could not be read at all (deleted/locked/IO failure). */
+	readonly transcriptUnavailable?: boolean;
 }
 
 export interface HubChatRequest {

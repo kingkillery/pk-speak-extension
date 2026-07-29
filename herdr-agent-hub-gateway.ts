@@ -9,6 +9,25 @@ import {
 	type HubFolder,
 	parseHubAgentStatus,
 } from "./herdr-agent-hub-schema.js";
+import {
+	filterDigestTurns,
+	parseSessionTranscript,
+	type TranscriptDigest,
+} from "./herdr-agent-hub-transcript.js";
+
+export interface TranscriptRangeRead {
+	/** Start from this byte offset instead of tailing the file. Clamped to [0, size]. */
+	readonly fromByte?: number;
+	/** Cap on bytes read. Defaults and upper bound are implementation-defined but bounded. */
+	readonly maxBytes?: number;
+}
+
+export interface TranscriptChunk {
+	readonly text: string;
+	readonly newSize: number;
+	/** Byte offset the chunk text actually starts at (after partial-line trimming). */
+	readonly fromByte: number;
+}
 
 export interface AgentHubBinding {
 	listAgents(): Promise<{ folders: readonly HubFolder[]; agents: readonly HubAgent[] }>;
@@ -17,6 +36,12 @@ export interface AgentHubBinding {
 	kill(id: HubAgentId): Promise<void>;
 	revive(id: HubAgentId): Promise<void>;
 	readTranscript(id: HubAgentId, fromByte: number): Promise<{ text: string; newSize: number } | null>;
+	/**
+	 * Bounded transcript read: never buffers more than maxBytes, and drops partial
+	 * leading/trailing lines. Unlike readTranscript(fromByte=0) it is safe on
+	 * multi-hundred-MB transcripts. Default (no fromByte) tails the file.
+	 */
+	readTranscriptRange(id: HubAgentId, opts?: TranscriptRangeRead): Promise<TranscriptChunk | null>;
 	readonly canMutate: boolean;
 }
 
@@ -49,9 +74,61 @@ export class AgentHubGateway {
 	async detail(id: HubAgentId, tailLines: number): Promise<HubAgentDetail | undefined> {
 		const agent = await this.#binding.getAgent(id);
 		if (!agent) return undefined;
-		const chunk = await this.#binding.readTranscript(id, 0);
-		const lines = chunk ? chunk.text.split(/\r?\n/).filter(Boolean).slice(-tailLines) : [];
-		return { ...agent, transcriptTail: lines, transcriptSize: chunk?.newSize ?? 0 };
+		// Bounded tail read: a full-file readTranscript(0) would buffer the entire
+		// (potentially multi-hundred-MB) transcript just to keep a few lines.
+		const chunk = await this.#binding.readTranscriptRange(id, {
+			maxBytes: Math.min(Math.max(tailLines, 1) * 8192, 4 * 1024 * 1024),
+		});
+		if (!chunk) {
+			// The agent exists but its transcript is unreadable — say so rather than
+			// presenting a successful detail with an empty tail and size zero.
+			return { ...agent, transcriptTail: [], transcriptSize: 0, transcriptUnavailable: true };
+		}
+		const lines = chunk.text.split(/\r?\n/).filter(Boolean).slice(-tailLines);
+		return {
+			...agent,
+			transcriptTail: lines,
+			transcriptSize: chunk.newSize,
+			// The byte window clipped the tail (e.g. one record larger than the window),
+			// so fewer lines than requested is a bounded-read artifact, not file end.
+			...(chunk.fromByte > 0 && lines.length < tailLines ? { transcriptTailTruncated: true } : {}),
+		};
+	}
+
+	/**
+	 * Read-only distilled transcript digest for hub review. Tail-reads a bounded
+	 * byte range, parses it into speech-friendly turns/stats, and back-fills lane
+	 * metadata the tail can't see (the session header is record 0). Never exposes
+	 * thinking content or raw jsonl.
+	 *
+	 * Result discrimination: `undefined` = no such agent; `null` = agent exists but
+	 * its transcript is unreadable (deleted/locked/IO failure). Callers must not
+	 * collapse the two into one error.
+	 */
+	async transcript(
+		id: HubAgentId,
+		opts: { maxBytes?: number; maxTurns?: number; query?: string } = {},
+	): Promise<TranscriptDigest | null | undefined> {
+		const agent = await this.#binding.getAgent(id);
+		if (!agent) return undefined;
+		const chunk = await this.#binding.readTranscriptRange(id, { maxBytes: opts.maxBytes });
+		if (!chunk) return null;
+		let digest = parseSessionTranscript(chunk.text, { maxTurns: opts.maxTurns });
+		if (!digest.sessionId || !digest.cwd) {
+			digest = {
+				...digest,
+				...(digest.sessionId ? {} : { sessionId: agent.id }),
+				...(digest.cwd || !agent.cwd ? {} : { cwd: agent.cwd }),
+			};
+		}
+		// A mid-file tail drops record 0 even when zero turns were dropped by maxTurns.
+		if (chunk.fromByte > 0 && !digest.truncated) digest = { ...digest, truncated: true };
+		// A trailing partial line (a record still being written) is dropped by the
+		// reader; the digest must say it is not complete rather than look finished.
+		const completeEnd = chunk.fromByte + Buffer.byteLength(chunk.text, "utf8");
+		if (completeEnd < chunk.newSize && !digest.truncated) digest = { ...digest, truncated: true };
+		if (opts.query) digest = filterDigestTurns(digest, opts.query);
+		return digest;
 	}
 
 	async chat(
