@@ -10,18 +10,20 @@ import { dirname, join } from "node:path";
  *   /upload-chat push mac2       -> same, explicit
  *   /upload-chat pull mac2       -> bring mac2's repo state BACK here (staged, non-destructive)
  *   /upload-chat status mac2     -> dry-run: what would transfer
+ *   /upload-chat worktree mac2 --name task-name -> create a separate remote workspace from exact local state
  *
  * Direction never lies: "upload" always means push. The host is an ssh alias
  * (`~/.ssh/config`), a `PI_SPEAK_SYNC_HOSTS` alias ("mac2=k@100.109.244.1 ..."),
  * or a raw `user@host` target.
  */
 
-export type UploadChatAction = "push" | "pull" | "status";
+export type UploadChatAction = "push" | "pull" | "status" | "worktree";
 
 export type UploadChatArgs = {
 	action: UploadChatAction;
 	host: string;
 	cwd?: string;
+	syncArgs: string[];
 };
 
 export function parseUploadChatArgs(raw: string): { ok: true; args: UploadChatArgs } | { ok: false; error: string } {
@@ -29,9 +31,10 @@ export function parseUploadChatArgs(raw: string): { ok: true; args: UploadChatAr
 	let action: UploadChatAction = "push";
 	let cwd: string | undefined;
 	const positional: string[] = [];
+	const syncArgs: string[] = [];
 	for (let i = 0; i < parts.length; i += 1) {
 		const part = parts[i];
-		if (part === "push" || part === "pull" || part === "status") {
+		if (part === "push" || part === "pull" || part === "status" || part === "worktree") {
 			action = part;
 			continue;
 		}
@@ -40,16 +43,25 @@ export function parseUploadChatArgs(raw: string): { ok: true; args: UploadChatAr
 			i += 1;
 			continue;
 		}
+		if (part === "--name" || part === "--path") {
+			const value = parts[i + 1];
+			if (!value) {
+				return { ok: false, error: `${part} requires a value` };
+			}
+			syncArgs.push(part, value);
+			i += 1;
+			continue;
+		}
 		positional.push(part);
 	}
 	const host = positional[0];
 	if (!host) {
-		return { ok: false, error: "Usage: /upload-chat [push|pull|status] <host> [--cwd <path>] — e.g. /upload-chat mac2 (push = upload TO the host, pull = bring its state back)" };
+		return { ok: false, error: "Usage: /upload-chat [push|pull|status|worktree] <host> [--name <workspace-name>|--path <remote-dir>] [--cwd <path>]" };
 	}
 	if (positional.length > 1) {
 		return { ok: false, error: `Unexpected extra arguments: ${positional.slice(1).join(" ")}` };
 	}
-	return { ok: true, args: { action, host, ...(cwd ? { cwd } : {}) } };
+	return { ok: true, args: { action, host, syncArgs, ...(cwd ? { cwd } : {}) } };
 }
 
 /** Resolve "name=user@host" pairs from PI_SPEAK_SYNC_HOSTS; unknown names pass through (ssh aliases still work). */
@@ -86,16 +98,17 @@ export type UploadChatRunResult = {
 	output: string;
 };
 
-/** Run `bun scripts/codespace-sync.ts <action> <target>` in the repo root, capturing merged output. */
+/** Run `bun scripts/codespace-sync.ts <action> <target> [...syncArgs]` in the repo root. */
 export function runCodespaceSync(
 	script: string,
 	repoRoot: string,
 	action: UploadChatAction,
 	target: string,
+	syncArgs: string[] = [],
 	timeoutMs = 15 * 60 * 1000,
 ): Promise<UploadChatRunResult> {
 	const { promise, resolve } = Promise.withResolvers<UploadChatRunResult>();
-	const child = spawn("bun", [script, action, target], { cwd: repoRoot, windowsHide: true });
+	const child = spawn("bun", [script, action, target, ...syncArgs], { cwd: repoRoot, windowsHide: true });
 	const chunks: Buffer[] = [];
 	const timer = setTimeout(() => {
 		child.kill();

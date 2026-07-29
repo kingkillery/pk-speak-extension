@@ -8,7 +8,7 @@ import { parseUploadChatArgs, resolveSyncHost, resolveSyncScript, summarizeSyncO
 test("parseUploadChatArgs defaults to push so 'upload' never lies about direction", () => {
 	const bare = parseUploadChatArgs("mac2");
 	assert.equal(bare.ok, true);
-	assert.deepEqual(bare.args, { action: "push", host: "mac2" });
+	assert.deepEqual(bare.args, { action: "push", host: "mac2", syncArgs: [] });
 
 	const pull = parseUploadChatArgs("pull mac2");
 	assert.equal(pull.args.action, "pull");
@@ -18,7 +18,12 @@ test("parseUploadChatArgs defaults to push so 'upload' never lies about directio
 	assert.equal(status.args.action, "status");
 	assert.equal(status.args.host, "k@100.109.244.1");
 	assert.equal(status.args.cwd, "C:/dev/fork");
+	const worktree = parseUploadChatArgs("worktree gcloud-vm --name review-api");
+	assert.equal(worktree.args.action, "worktree");
+	assert.equal(worktree.args.host, "gcloud-vm");
+	assert.deepEqual(worktree.args.syncArgs, ["--name", "review-api"]);
 });
+
 
 test("parseUploadChatArgs rejects missing host and extra positionals", () => {
 	assert.equal(parseUploadChatArgs("").ok, false);
@@ -26,6 +31,7 @@ test("parseUploadChatArgs rejects missing host and extra positionals", () => {
 	const extra = parseUploadChatArgs("push mac2 mac");
 	assert.equal(extra.ok, false);
 	assert.match(extra.error, /extra arguments/i);
+	assert.equal(parseUploadChatArgs("worktree mac2 --name").ok, false);
 });
 
 test("resolveSyncHost maps PI_SPEAK_SYNC_HOSTS aliases and passes raw targets through", () => {
