@@ -243,3 +243,66 @@ test("reconnect policy keeps Gemini resumption exclusive to gemini kind", () => 
 	assert.equal(kind, "openai-realtime");
 	assert.equal(liveBackendSupportsResumption(kind), false);
 });
+
+test("adapter sends explicit model and semantic turn-detection configuration", async () => {
+	const mock = await startHandshakeServer();
+	let session;
+	try {
+		session = await connectOpenAiRealtimeLive(
+			{
+				connectUrl: mock.url,
+				model: "vendor/realtime-model",
+				turnDetection: { kind: "semantic_vad", eagerness: "low" },
+			},
+			{},
+			{ onOutbound: () => {} },
+		);
+		await waitFor(() => mock.messages.some((message) => message.type === "session.update"));
+		const update = mock.messages.find((message) => message.type === "session.update");
+		assert.equal(update.session.model, "vendor/realtime-model");
+		assert.deepEqual(update.session.audio.input.turn_detection, {
+			type: "semantic_vad",
+			eagerness: "low",
+		});
+	} finally {
+		session?.close();
+		for (const socket of mock.server.clients) socket.terminate();
+		await new Promise((resolve) => mock.server.close(resolve));
+	}
+});
+
+test("server speech barge-in cancels and truncates heard assistant audio without clearing user input", async () => {
+	const mock = await startHandshakeServer();
+	const outbound = [];
+	let session;
+	try {
+		session = await connectOpenAiRealtimeLive(
+			{ connectUrl: mock.url },
+			{},
+			{ onOutbound: (event) => outbound.push(event) },
+		);
+		await waitFor(() => mock.sockets.length === 1);
+		const socket = mock.sockets[0];
+		socket.send(JSON.stringify({ type: "response.created", response: { id: "resp_1" } }));
+		socket.send(JSON.stringify({
+			type: "response.output_audio.delta",
+			item_id: "item_1",
+			delta: Buffer.alloc(4_800).toString("base64"),
+		}));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		socket.send(JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+
+		await waitFor(() => mock.messages.some((message) => message.type === "conversation.item.truncate"));
+		assert.ok(mock.messages.some((message) => message.type === "response.cancel"));
+		const truncate = mock.messages.find((message) => message.type === "conversation.item.truncate");
+		assert.equal(truncate.item_id, "item_1");
+		assert.equal(truncate.content_index, 0);
+		assert.ok(truncate.audio_end_ms >= 0 && truncate.audio_end_ms <= 100);
+		assert.equal(mock.messages.some((message) => message.type === "input_audio_buffer.clear"), false);
+		assert.ok(outbound.some((event) => event.kind === "interrupt"));
+	} finally {
+		session?.close();
+		for (const socket of mock.server.clients) socket.terminate();
+		await new Promise((resolve) => mock.server.close(resolve));
+	}
+});

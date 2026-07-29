@@ -8,9 +8,10 @@
  *     { kind: "audio", samples: Float32Array }   (transferable preferred)
  *     { kind: "clear" }                          wipe queue (barge-in)
  *   worklet -> main:
+ *     { kind: "playback_started", contextTimeSeconds } first sample's audio-clock time
+ *     { kind: "cleared", contextTimeSeconds }   queue clear/fade applied in audio thread
  *     { kind: "stats", queuedMs, played }
  *     { kind: "underrun" }
- *
  * Linear-interp upsample from inputRate (typically 24 kHz Gemini Live PCM)
  * to the AudioContext rate. Short fades suppress clicks on start/stop/clear.
  */
@@ -33,6 +34,8 @@ class PiSpeakLivePlaybackProcessor extends AudioWorkletProcessor {
 		this._fadeIn = 0;
 		this._fadeOut = 0;
 		this._lastSample = 0;
+		this._startPending = false;
+		this._clearPending = false;
 
 		this.port.onmessage = (e) => {
 			const data = e.data;
@@ -51,6 +54,7 @@ class PiSpeakLivePlaybackProcessor extends AudioWorkletProcessor {
 							this._playing = true;
 							this._fadeIn = FADE_FRAMES;
 							this._fadeOut = 0;
+							this._startPending = true;
 						}
 					}
 					break;
@@ -59,9 +63,16 @@ class PiSpeakLivePlaybackProcessor extends AudioWorkletProcessor {
 					this._readIdx = 0;
 					this._fracPos = 0;
 					this._fadeOut = FADE_FRAMES;
+					this._startPending = false;
+					this._clearPending = true;
 					break;
 			}
 		};
+	}
+
+	_contextTimeSeconds(frameOffset = 0) {
+		const frame = typeof currentFrame === "number" ? currentFrame : this._totalPlayed;
+		return (frame + frameOffset) / sampleRate;
 	}
 
 	_queuedSamples() {
@@ -120,6 +131,13 @@ class PiSpeakLivePlaybackProcessor extends AudioWorkletProcessor {
 						this.port.postMessage({ kind: "underrun" });
 					}
 				} else {
+					if (this._startPending) {
+						this._startPending = false;
+						this.port.postMessage({
+							kind: "playback_started",
+							contextTimeSeconds: this._contextTimeSeconds(),
+						});
+					}
 					sample = v;
 					this._lastSample = v;
 					this._advance();
@@ -144,7 +162,16 @@ class PiSpeakLivePlaybackProcessor extends AudioWorkletProcessor {
 			}
 
 			out[i] = sample;
+
 			if (stereo) stereo[i] = sample;
+		}
+
+		if (this._clearPending && (!this._playing || this._fadeOut === 0)) {
+			this._clearPending = false;
+			this.port.postMessage({
+				kind: "cleared",
+				contextTimeSeconds: this._contextTimeSeconds(out.length),
+			});
 		}
 
 		this._framesSinceStats += out.length;

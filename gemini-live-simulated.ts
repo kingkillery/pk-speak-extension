@@ -175,6 +175,28 @@ function createSpeechAudio(text: string, chunkMs: number): Buffer[] {
 	return chunks;
 }
 
+/**
+ * Crude speech detector for barge-in: RMS of int16 PCM above a small floor.
+ * ~0.01 full-scale comfortably separates the simulator's 0.25-amplitude test
+ * tone (and any real speech) from digital silence and gated frames.
+ */
+function hasSpeechEnergy(base64Pcm: string): boolean {
+	let pcm: Buffer;
+	try {
+		pcm = Buffer.from(base64Pcm, "base64");
+	} catch {
+		return false;
+	}
+	const sampleCount = Math.floor(pcm.length / 2);
+	if (sampleCount === 0) return false;
+	let energy = 0;
+	for (let sample = 0; sample < sampleCount; sample += 1) {
+		const value = pcm.readInt16LE(sample * 2) / 0x8000;
+		energy += value * value;
+	}
+	return Math.sqrt(energy / sampleCount) > 0.01;
+}
+
 class SimulatedSession implements SimulatedLiveSession {
 	private readonly allTimers = new Set<NodeJS.Timeout>();
 	private readonly consumedTurns = new Set<number>();
@@ -213,6 +235,14 @@ class SimulatedSession implements SimulatedLiveSession {
 		if (this.closed) return;
 		if (input.activityStart !== undefined) this.interruptGeneration();
 		if (input.media || input.audio) {
+			// Mirror Gemini's default START_OF_ACTIVITY_INTERRUPTS: user speech
+			// arriving while a reply is streaming barges in on it. Real VAD keys
+			// on detected speech, not bytes — approximate that with an RMS floor
+			// so the continuous silent mic stream from live clients (or frames a
+			// noise gate zeroed) never self-cancels a streaming reply. Tool
+			// waits are protected inside interruptGeneration.
+			const data = input.media?.data ?? input.audio?.data;
+			if (data && hasSpeechEnergy(data)) this.interruptGeneration();
 			this.audioReceived = true;
 			this.resetAudioSilenceTimer();
 		}

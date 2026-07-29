@@ -110,6 +110,43 @@ test("text turn streams an echo transcript and sequenced 24 kHz PCM frames", asy
 	}
 });
 
+test("opt-in metrics expose backend-tagged upstream timing for each speech turn", async () => {
+	process.env.PI_SPEAK_REALTIME_METRICS = "1";
+	try {
+		const ws = await startSimulatedSession({});
+		const start = ws.jsonMessages().find((message) => message.type === "start");
+		assert.equal(start.provider, "gemini");
+		assert.equal(start.model, "simulated-live-1");
+		assert.equal(start.voiceMetricsEnabled, true);
+		const pcmSentAfterMs = Date.now();
+		const audioFrame = Buffer.alloc(4 + 640);
+		audioFrame.writeInt32BE(2, 0);
+		ws.emit("message", audioFrame, true);
+		const speechEndClientMs = Date.now() - 10;
+		ws.emit("message", Buffer.from(JSON.stringify({
+			type: "voice_metric",
+			event: "speech_end",
+			turnId: 1,
+			clientTimeMs: speechEndClientMs,
+			clientSequenceId: 3,
+		})), false);
+		await waitFor(
+			() => ws.jsonMessages().some((message) => message.type === "voice_metric"),
+			"expected upstream timing metric",
+		);
+		const metric = ws.jsonMessages().find((message) => message.type === "voice_metric");
+		assert.equal(metric.event, "upstream_timing");
+		assert.equal(metric.turnId, 1);
+		assert.equal(metric.clientTimeMs, speechEndClientMs);
+		assert.equal(metric.provider, "gemini");
+		assert.equal(metric.model, "simulated-live-1");
+		assert.ok(metric.lastPcmSentUpstreamMs >= pcmSentAfterMs);
+		assert.ok(metric.firstUpstreamEventMs >= metric.lastPcmSentUpstreamMs);
+	} finally {
+		delete process.env.PI_SPEAK_REALTIME_METRICS;
+	}
+});
+
 test("scenario tool call defers behind the real approval gate and completes on command_approve", async () => {
 	const scenarioDir = mkdtempSync(join(tmpdir(), "pi-speak-sim-scenario-"));
 	const scenarioPath = join(scenarioDir, "scenario.json");

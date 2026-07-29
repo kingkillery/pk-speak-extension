@@ -219,3 +219,63 @@ test("close cancels pending reply emissions and closes once", async () => {
 	assert.equal(closeCount, 1);
 	assert.equal(messages.length, 0);
 });
+
+test("non-silent audio media barges into a streaming reply", async () => {
+	const messages = [];
+	let session;
+	let sentSpeech = false;
+	const client = simulated.createSimulatedLiveClient(FAST_ENV);
+	session = await client.live.connect({
+		model: simulated.SIMULATED_LIVE_MODEL,
+		callbacks: {
+			onmessage: (message) => {
+				messages.push(message);
+				if (!sentSpeech && message.serverContent?.modelTurn?.parts?.[0]?.inlineData) {
+					sentSpeech = true;
+					const pcm = Buffer.alloc(320 * 2);
+					for (let offset = 0; offset < pcm.length; offset += 2) pcm.writeInt16LE(8_000, offset);
+					session.sendRealtimeInput({
+						media: { mimeType: "audio/pcm;rate=16000", data: pcm.toString("base64") },
+					});
+				}
+			},
+		},
+	});
+	await eventually(() => messages.some((message) => message.sessionResumptionUpdate));
+	messages.length = 0;
+	session.sendClientContent({ turns: [{ role: "user", parts: [{ text: "interrupt on speech" }] }], turnComplete: true });
+	await eventually(() => messages.some((message) => message.serverContent?.interrupted), "speech media did not interrupt");
+	assert.equal(messages.some((message) => message.serverContent?.generationComplete), false);
+	assert.equal(messages.filter((message) => message.serverContent?.modelTurn?.parts?.[0]?.inlineData).length, 1);
+	session.close();
+});
+
+test("all-zero audio media does not interrupt a streaming reply", async () => {
+	const messages = [];
+	let session;
+	let sentSilence = false;
+	const client = simulated.createSimulatedLiveClient(FAST_ENV);
+	session = await client.live.connect({
+		model: simulated.SIMULATED_LIVE_MODEL,
+		callbacks: {
+			onmessage: (message) => {
+				messages.push(message);
+				if (!sentSilence && message.serverContent?.modelTurn?.parts?.[0]?.inlineData) {
+					sentSilence = true;
+					session.sendRealtimeInput({
+						media: {
+							mimeType: "audio/pcm;rate=16000",
+							data: Buffer.alloc(320 * 2).toString("base64"),
+						},
+					});
+				}
+			},
+		},
+	});
+	await eventually(() => messages.some((message) => message.sessionResumptionUpdate));
+	messages.length = 0;
+	session.sendClientContent({ turns: [{ role: "user", parts: [{ text: "ignore silence" }] }], turnComplete: true });
+	await eventually(() => messages.some((message) => message.serverContent?.generationComplete), "silence stopped generation");
+	assert.equal(messages.some((message) => message.serverContent?.interrupted), false);
+	session.close();
+});

@@ -22,6 +22,9 @@ Added:
   - Desktop/terminal **orb companion** at `/orb/` (Edge `--app` by default via `openDesktopLiveClient`) so voice lives outside the full browser remote when you're in the terminal
   - OpenAI-Realtime / HF S2S upstream adapter (`openai-realtime-live.ts`) selected with `PI_SPEAK_LIVE_BACKEND=openai-realtime|hf` + `PI_SPEAK_OPENAI_REALTIME_URL` / `SPEECH_TO_SPEECH_URL`; shared `dispatchRealtimeToolCall` keeps coding-agent tools on both backends
   - Android Live parity: `camera_capture` → CameraX one-shot JPEG, `audio_format` sample-rate switching, `sendCameraFrame` on both standard and Boox flavors
+  - Provider-neutral turn detection: OpenAI-compatible semantic/server VAD and Gemini automatic-activity settings now share environment-driven eagerness, silence, prefix, model, and voice configuration instead of hard-coding one provider profile.
+  - Opt-in realtime feel instrumentation (`PI_SPEAK_REALTIME_METRICS=1`) records backend/model-tagged five-point turn timing with rolling p50/p95 and audio-clock-accurate barge-in silence latency on both web Live surfaces.
+  - Interruption correctness: OpenAI-compatible replies cancel and truncate unheard assistant audio without clearing the user's opening words; Gemini tap-to-interrupt suppresses stale upstream audio until its canonical VAD interruption/turn boundary; the simulator now distinguishes speech-energy barge-in from silent mic frames.
 
 Changed:
 

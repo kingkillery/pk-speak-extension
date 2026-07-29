@@ -98,10 +98,16 @@ test("playback worklet accepts audio and clears on barge-in", () => {
 	const out = [new Float32Array(128)];
 	processor.process(null, [out]);
 	assert.ok(out[0].some((v) => v !== 0), "expected non-silent playback output");
+	const started = messages.find((message) => message?.kind === "playback_started");
+	assert.ok(started, "expected exact first-render signal");
+	assert.ok(Number.isFinite(started.contextTimeSeconds));
 	processor.port.onmessage({ data: { kind: "clear" } });
 	// After clear + fade, later frames trend toward silence.
 	for (let i = 0; i < 20; i++) processor.process(null, [out]);
 	const absMax = Math.max(...out[0].map((v) => Math.abs(v)));
 	assert.ok(absMax < 0.05, `expected near-silent after clear, got ${absMax}`);
+	const cleared = messages.find((message) => message?.kind === "cleared");
+	assert.ok(cleared, "expected audio-thread clear completion signal");
+	assert.ok(Number.isFinite(cleared.contextTimeSeconds));
 	void messages;
 });

@@ -57,6 +57,13 @@ let cameraOn = false;
 let playbackRate = 24000;
 let workletsReady = false;
 let liveConnected = false;
+let voiceMetricsEnabled = false;
+let voiceMetricsProvider = "";
+let voiceMetricsModel = "";
+let voiceMetricTurnId = 0;
+let voiceMetric = null;
+const voiceMetricSamples = [];
+let bargeInSpeechOnsetMs = 0;
 /** @type {Record<string, ReturnType<typeof normalizeApproval>>} */
 const pendingApprovals = {};
 
@@ -209,6 +216,85 @@ function applyGate() {
 	captureNode?.port.postMessage({ kind: "gate", enabled, thresholdDb });
 }
 
+function metricPercentile(values, percentile) {
+	if (!values.length) return null;
+	const sorted = [...values].sort((a, b) => a - b);
+	return sorted[Math.min(sorted.length - 1, Math.ceil(percentile * sorted.length) - 1)];
+}
+
+function emitTurnMetric() {
+	if (!voiceMetric?.speechEndClientMs || !voiceMetric.firstPcmEnqueuedClientMs || !voiceMetric.firstSampleRenderedClientMs
+		|| !voiceMetric.lastPcmSentUpstreamMs || !voiceMetric.firstUpstreamEventMs) return;
+	const sample = {
+		kind: "turn",
+		turnId: voiceMetric.turnId,
+		provider: voiceMetric.provider,
+		model: voiceMetric.model,
+		vadSpeechEndClientMs: voiceMetric.speechEndClientMs,
+		lastPcmSentUpstreamMs: voiceMetric.lastPcmSentUpstreamMs,
+		firstUpstreamEventMs: voiceMetric.firstUpstreamEventMs,
+		firstPcmEnqueuedClientMs: voiceMetric.firstPcmEnqueuedClientMs,
+		firstSampleRenderedClientMs: voiceMetric.firstSampleRenderedClientMs,
+		renderTimestampSource: voiceMetric.renderTimestampSource,
+		timeToFirstAudioMs: voiceMetric.firstSampleRenderedClientMs - voiceMetric.speechEndClientMs,
+		upstreamInferenceMs: voiceMetric.firstUpstreamEventMs - voiceMetric.lastPcmSentUpstreamMs,
+		localBufferMs: voiceMetric.firstSampleRenderedClientMs - voiceMetric.firstPcmEnqueuedClientMs,
+	};
+	voiceMetricSamples.push(sample);
+	const totals = voiceMetricSamples.map((entry) => entry.timeToFirstAudioMs);
+	sample.summary = {
+		turns: totals.length,
+		p50TimeToFirstAudioMs: metricPercentile(totals, 0.5),
+		p95TimeToFirstAudioMs: metricPercentile(totals, 0.95),
+	};
+	console.info(`[pi-speak-voice-metric] ${JSON.stringify(sample)}`);
+	voiceMetric = null;
+}
+
+function audioClockToEpochMs(contextTimeSeconds) {
+	if (
+		audioCtx
+		&& Number.isFinite(contextTimeSeconds)
+		&& typeof audioCtx.getOutputTimestamp === "function"
+		&& Number.isFinite(performance.timeOrigin)
+	) {
+		const output = audioCtx.getOutputTimestamp();
+		if (Number.isFinite(output?.contextTime) && Number.isFinite(output?.performanceTime)) {
+			return {
+				timeMs: performance.timeOrigin + output.performanceTime
+					+ (contextTimeSeconds - output.contextTime) * 1000,
+				source: "audio-clock",
+			};
+		}
+	}
+	return { timeMs: Date.now(), source: "main-thread-fallback" };
+}
+
+function handlePlaybackMetric(event) {
+	if (!voiceMetricsEnabled) return;
+	if (event.data?.kind === "playback_started" && voiceMetric) {
+		const rendered = audioClockToEpochMs(Number(event.data.contextTimeSeconds));
+		voiceMetric.firstSampleRenderedClientMs = rendered.timeMs;
+		voiceMetric.renderTimestampSource = rendered.source;
+		emitTurnMetric();
+	} else if (event.data?.kind === "cleared" && bargeInSpeechOnsetMs) {
+		const silenced = audioClockToEpochMs(Number(event.data.contextTimeSeconds));
+		const playbackSilencedClientMs = silenced.timeMs;
+		const speechOnsetToSilenceMs = playbackSilencedClientMs - bargeInSpeechOnsetMs;
+		console.info(`[pi-speak-voice-metric] ${JSON.stringify({
+			kind: "barge_in",
+			provider: voiceMetricsProvider,
+			model: voiceMetricsModel,
+			speechOnsetClientMs: bargeInSpeechOnsetMs,
+			playbackSilencedClientMs,
+			renderTimestampSource: silenced.source,
+			speechOnsetToSilenceMs,
+			pass: speechOnsetToSilenceMs < 200,
+		})}`);
+		bargeInSpeechOnsetMs = 0;
+	}
+}
+
 async function ensureAudio() {
 	if (audioCtx && audioCtx.state !== "closed") {
 		if (audioCtx.state === "suspended") await audioCtx.resume();
@@ -226,6 +312,7 @@ async function ensureAudio() {
 		outputChannelCount: [1],
 	});
 	playbackNode.port.postMessage({ kind: "config", inputRate: playbackRate });
+	playbackNode.port.onmessage = handlePlaybackMetric;
 	playbackNode.connect(audioCtx.destination);
 	workletsReady = true;
 	return audioCtx;
@@ -286,12 +373,23 @@ async function startCapture() {
 			meterFill.style.width = `${Math.round(level * 100)}%`;
 			if (!muted && liveConnected) {
 				if (rms > 0.03 && state === "ai-speaking") {
+					if (voiceMetricsEnabled) bargeInSpeechOnsetMs = Date.now();
 					clearPlayback();
 					sendJson({ type: "interrupt" });
 					setState("user-speaking");
 				} else if (rms > 0.02 && state !== "processing") {
 					setState("user-speaking");
 				} else if (state === "user-speaking" && rms < 0.01) {
+					if (voiceMetricsEnabled) {
+						voiceMetricTurnId += 1;
+						voiceMetric = { turnId: voiceMetricTurnId, speechEndClientMs: Date.now() };
+						sendJson({
+							type: "voice_metric",
+							event: "speech_end",
+							turnId: voiceMetricTurnId,
+							clientTimeMs: voiceMetric.speechEndClientMs,
+						});
+					}
 					setState("listening");
 				}
 			}
@@ -343,6 +441,9 @@ async function connect() {
 			lastServerSeq = Math.max(lastServerSeq, decoded.seq);
 			const copy = new Float32Array(decoded.samples.length);
 			copy.set(decoded.samples);
+			if (voiceMetricsEnabled && voiceMetric && !voiceMetric.firstPcmEnqueuedClientMs) {
+				voiceMetric.firstPcmEnqueuedClientMs = Date.now();
+			}
 			playbackNode?.port.postMessage({ kind: "audio", samples: copy }, [copy.buffer]);
 			setState("ai-speaking");
 			document.documentElement.style.setProperty("--ai-audio-level", "0.7");
@@ -360,8 +461,25 @@ async function connect() {
 			liveConnected = true;
 			sessionId = msg.session || sessionId;
 			if (msg.message) backendLabel.textContent = String(msg.message);
+			voiceMetricsProvider = String(msg.provider || msg.message || "");
+			voiceMetricsModel = String(msg.model || "");
+			voiceMetricsEnabled = msg.voiceMetricsEnabled === true;
 			setState("listening");
 			subcaption.textContent = sessionId ? `Session ${sessionId}` : "Live";
+			return;
+		}
+		if (msg.type === "voice_metric" && msg.event === "upstream_timing") {
+			if (voiceMetricsEnabled && voiceMetric?.turnId === msg.turnId) {
+				voiceMetricsProvider = String(msg.provider || voiceMetricsProvider);
+				voiceMetricsModel = String(msg.model || voiceMetricsModel);
+				Object.assign(voiceMetric, {
+					lastPcmSentUpstreamMs: msg.lastPcmSentUpstreamMs,
+					firstUpstreamEventMs: msg.firstUpstreamEventMs,
+					provider: msg.provider,
+					model: msg.model,
+				});
+				emitTurnMetric();
+			}
 			return;
 		}
 		if (msg.type === "transcript" && msg.text) {

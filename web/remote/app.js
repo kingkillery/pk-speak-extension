@@ -195,6 +195,13 @@ if (typeof document !== "undefined") {
 		livePlaybackSources: new Set(),
 		livePlaybackGeneration: 0,
 		liveLastInterruptAt: 0,
+		liveVoiceMetricsEnabled: false,
+		liveVoiceMetricsProvider: "",
+		liveVoiceMetricsModel: "",
+		liveVoiceMetricTurnId: 0,
+		liveVoiceMetric: null,
+		liveVoiceMetricSamples: [],
+		liveBargeInSpeechOnsetMs: 0,
 		liveMicLevel: 0,
 		liveNoiseGateDb: -50,
 		liveNoiseGateEnabled: true,
@@ -1245,6 +1252,86 @@ if (typeof document !== "undefined") {
 		});
 	}
 
+	function liveMetricPercentile(values, percentile) {
+		if (!values.length) return null;
+		const sorted = [...values].sort((a, b) => a - b);
+		return sorted[Math.min(sorted.length - 1, Math.ceil(percentile * sorted.length) - 1)];
+	}
+
+	function emitLiveTurnMetric() {
+		const metric = state.liveVoiceMetric;
+		if (!metric?.speechEndClientMs || !metric.firstPcmEnqueuedClientMs || !metric.firstSampleRenderedClientMs
+			|| !metric.lastPcmSentUpstreamMs || !metric.firstUpstreamEventMs) return;
+		const sample = {
+			kind: "turn",
+			turnId: metric.turnId,
+			provider: metric.provider,
+			model: metric.model,
+			vadSpeechEndClientMs: metric.speechEndClientMs,
+			lastPcmSentUpstreamMs: metric.lastPcmSentUpstreamMs,
+			firstUpstreamEventMs: metric.firstUpstreamEventMs,
+			firstPcmEnqueuedClientMs: metric.firstPcmEnqueuedClientMs,
+			firstSampleRenderedClientMs: metric.firstSampleRenderedClientMs,
+			renderTimestampSource: metric.renderTimestampSource,
+			timeToFirstAudioMs: metric.firstSampleRenderedClientMs - metric.speechEndClientMs,
+			upstreamInferenceMs: metric.firstUpstreamEventMs - metric.lastPcmSentUpstreamMs,
+			localBufferMs: metric.firstSampleRenderedClientMs - metric.firstPcmEnqueuedClientMs,
+		};
+		state.liveVoiceMetricSamples.push(sample);
+		const totals = state.liveVoiceMetricSamples.map((entry) => entry.timeToFirstAudioMs);
+		sample.summary = {
+			turns: totals.length,
+			p50TimeToFirstAudioMs: liveMetricPercentile(totals, 0.5),
+			p95TimeToFirstAudioMs: liveMetricPercentile(totals, 0.95),
+		};
+		console.info(`[pi-speak-voice-metric] ${JSON.stringify(sample)}`);
+		state.liveVoiceMetric = null;
+	}
+
+	function liveAudioClockToEpochMs(contextTimeSeconds) {
+		const context = state.liveAudioContext;
+		if (
+			context
+			&& Number.isFinite(contextTimeSeconds)
+			&& typeof context.getOutputTimestamp === "function"
+			&& Number.isFinite(performance.timeOrigin)
+		) {
+			const output = context.getOutputTimestamp();
+			if (Number.isFinite(output?.contextTime) && Number.isFinite(output?.performanceTime)) {
+				return {
+					timeMs: performance.timeOrigin + output.performanceTime
+						+ (contextTimeSeconds - output.contextTime) * 1000,
+					source: "audio-clock",
+				};
+			}
+		}
+		return { timeMs: Date.now(), source: "main-thread-fallback" };
+	}
+
+	function handleLivePlaybackMetric(event) {
+		if (!state.liveVoiceMetricsEnabled) return;
+		if (event.data?.kind === "playback_started" && state.liveVoiceMetric) {
+			const rendered = liveAudioClockToEpochMs(Number(event.data.contextTimeSeconds));
+			state.liveVoiceMetric.firstSampleRenderedClientMs = rendered.timeMs;
+			state.liveVoiceMetric.renderTimestampSource = rendered.source;
+			emitLiveTurnMetric();
+		} else if (event.data?.kind === "cleared" && state.liveBargeInSpeechOnsetMs) {
+			const silenced = liveAudioClockToEpochMs(Number(event.data.contextTimeSeconds));
+			const silenceMs = silenced.timeMs - state.liveBargeInSpeechOnsetMs;
+			console.info(`[pi-speak-voice-metric] ${JSON.stringify({
+				kind: "barge_in",
+				provider: state.liveVoiceMetricsProvider,
+				model: state.liveVoiceMetricsModel,
+				speechOnsetClientMs: state.liveBargeInSpeechOnsetMs,
+				playbackSilencedClientMs: silenced.timeMs,
+				renderTimestampSource: silenced.source,
+				speechOnsetToSilenceMs: silenceMs,
+				pass: silenceMs < 200,
+			})}`);
+			state.liveBargeInSpeechOnsetMs = 0;
+		}
+	}
+
 	function ensureLiveAudioContext() {
 		if (state.liveAudioContext && state.liveAudioContext.state !== "closed") return state.liveAudioContext;
 		const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -1273,6 +1360,7 @@ if (typeof document !== "undefined") {
 			playback.port.postMessage({ kind: "config", inputRate: state.livePlaybackSampleRate || 24_000 });
 			playback.connect(context.destination);
 			state.livePlaybackNode = playback;
+			playback.port.onmessage = handleLivePlaybackMetric;
 			state.livePlaybackReady = true;
 		}
 	}
@@ -1321,6 +1409,9 @@ if (typeof document !== "undefined") {
 			// Prefer the HF ring-buffer worklet (click-free clear + upsample).
 			const copy = new Float32Array(decoded.samples.length);
 			copy.set(decoded.samples);
+			if (state.liveVoiceMetricsEnabled && state.liveVoiceMetric && !state.liveVoiceMetric.firstPcmEnqueuedClientMs) {
+				state.liveVoiceMetric.firstPcmEnqueuedClientMs = Date.now();
+			}
 			state.livePlaybackNode.port.postMessage({ kind: "audio", samples: copy }, [copy.buffer]);
 			state.liveState = "ai-speaking";
 			return;
@@ -1486,7 +1577,24 @@ if (typeof document !== "undefined") {
 			state.liveState = "listening";
 			window.clearTimeout(state.liveStableTimer);
 			state.liveStableTimer = window.setTimeout(() => { state.liveReconnectAttempts = 0; }, 30_000);
+			state.liveVoiceMetricsProvider = String(message.provider || message.message || "");
+			state.liveVoiceMetricsModel = String(message.model || "");
+			state.liveVoiceMetricsEnabled = message.voiceMetricsEnabled === true;
 			setStatus(state.recording ? "Live conversation connected — mic is on." : "Live session connected. Tap to turn the mic on.");
+			return;
+		}
+		if (message.type === "voice_metric" && message.event === "upstream_timing") {
+			if (state.liveVoiceMetricsEnabled && state.liveVoiceMetric?.turnId === message.turnId) {
+				state.liveVoiceMetricsProvider = String(message.provider || state.liveVoiceMetricsProvider);
+				state.liveVoiceMetricsModel = String(message.model || state.liveVoiceMetricsModel);
+				Object.assign(state.liveVoiceMetric, {
+					lastPcmSentUpstreamMs: message.lastPcmSentUpstreamMs,
+					firstUpstreamEventMs: message.firstUpstreamEventMs,
+					provider: message.provider,
+					model: message.model,
+				});
+				emitLiveTurnMetric();
+			}
 			return;
 		}
 		if (message.type === "transcript" && message.text) {
@@ -1736,12 +1844,28 @@ if (typeof document !== "undefined") {
 				const aiPlaying = state.liveState === "ai-speaking" || state.livePlaybackSources.size > 0;
 				if (rms > 0.035 && aiPlaying && now - state.liveLastInterruptAt > 750) {
 					state.liveLastInterruptAt = now;
+					if (state.liveVoiceMetricsEnabled) state.liveBargeInSpeechOnsetMs = now;
 					stopLivePlayback();
 					state.liveClientSequenceId += 1;
 					socket.send(JSON.stringify({ type: "interrupt", clientSequenceId: state.liveClientSequenceId }));
 				} else if (rms > 0.02) {
 					state.liveState = "user-speaking";
 				} else if (state.liveState === "user-speaking") {
+					if (state.liveVoiceMetricsEnabled) {
+						state.liveVoiceMetricTurnId += 1;
+						state.liveVoiceMetric = {
+							turnId: state.liveVoiceMetricTurnId,
+							speechEndClientMs: now,
+						};
+						state.liveClientSequenceId += 1;
+						socket.send(JSON.stringify({
+							type: "voice_metric",
+							event: "speech_end",
+							turnId: state.liveVoiceMetricTurnId,
+							clientTimeMs: now,
+							clientSequenceId: state.liveClientSequenceId,
+						}));
+					}
 					state.liveState = "listening";
 				}
 			};
