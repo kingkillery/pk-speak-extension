@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveWindowsNpmShim } from "./agent-discovery.js";
+import { safeSpawn } from "./spawn-shim.js";
 
 export type RealtimeTerminalCommandSafety =
 	| { action: "allow"; reason: string }
@@ -275,9 +275,8 @@ export async function executeRealtimeTerminalCommandPlan(plan: RealtimeTerminalC
 	}
 
 	return await new Promise<{ ok: boolean; stdout: string; stderr: string; code: number }>((resolve) => {
-		const child = spawn(plan.executable!, plan.args || [], {
+		const child = safeSpawn(plan.executable!, plan.args || [], {
 			cwd,
-			shell: false,
 			windowsHide: true,
 		});
 		let stdout = "";
