@@ -145,7 +145,21 @@ The Telegram surface stores its bot credential and pairing state in the local se
 3. detected local LAN IPv4 address
 4. configured fallback
 
-Scan the QR from the Android phone to open the setup page. From there you can download the bundled APK, open the native `pi-speak://setup` link, and save the machine URL, token, profile name, connection mode, and Codex route metadata. If you want the browser app instead, open one of the printed browser URLs:
+Scan the QR from the Android phone to open the setup page. From there you can download the bundled APK, open the native `pi-speak://setup` link, and save the machine URL, fallback token, profile name, connection mode, and Codex route metadata. A direct peer verified by the host's Tailscale daemon does not need to present that token; LAN, Funnel, public/tunnel, and unknown peers do. If you want the browser app instead, open one of the printed browser URLs:
+
+Direct APK downloads are also published with each GitHub release:
+
+- [Standard Android APK](https://github.com/kingkillery/pk-speak-extension/releases/latest/download/pi-speak-standard.apk)
+- [Boox / e-ink APK](https://github.com/kingkillery/pk-speak-extension/releases/latest/download/pi-speak-boox.apk)
+
+The release links above track the latest GitHub release. A running gateway's
+`/download/pi-speak.apk` route serves the same Standard APK bundled with that
+installed `pk-speak` package.
+
+For release `v0.2.13`, SHA-256:
+
+- Standard: `7ef5c86069dc0241615c99b9bbfcb6785d09843592cd06fd86977f454930cb51`
+- Boox: `80e6fdcb187f11b0ccd750e88e616af2ca3fd82cd6c384f5ebd4389250f4c755`
 
 ```text
 http://localhost:8767/app/
@@ -312,7 +326,7 @@ One easy toggle for the whole local voice layer, with a persistent status-bar in
 /voice status     # show each switch: TTS, STT, realtime readiness
 ```
 
-`combo` is the turn-based speak/transcribe loop — it is **not** a realtime emotive voice agent. `realtime` is the full-duplex Live path (HF speech-to-speech S2S by default when an S2S URL — `SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`, or `PI_SPEAK_OPENAI_REALTIME_URL` — or `PI_SPEAK_LIVE_BACKEND=hf|openai-realtime|s2s` is configured, with the URL defaulting to the local server at `ws://localhost:8765/v1/realtime`; Gemini Live when nothing S2S-related is set, or always with explicit `PI_SPEAK_LIVE_BACKEND=gemini`). Selecting it stands the local TTS/wake loop down so the two audio paths never fight, checks credentials, ensures the gateway serves `/v1/live`, and for local operators opens the **desktop orb** at `/orb/` (Edge app mode) rather than the full remote chrome. Phones and the PWA use `/app/?mode=live` or the Android Live button against the same socket. The chosen mode persists across sessions.
+`combo` is the turn-based speak/transcribe loop — it is **not** a realtime emotive voice agent. `realtime` is the full-duplex Live path (HF speech-to-speech S2S by default when an S2S URL — `PI_SPEAK_HF_REALTIME_URL`, `HF_REALTIME_URL`, `SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`, or `PI_SPEAK_OPENAI_REALTIME_URL` — or `PI_SPEAK_LIVE_BACKEND=hf|openai-realtime|s2s` is configured, with the URL defaulting to the local server at `ws://localhost:8765/v1/realtime`; Gemini Live when nothing S2S-related is set, or always with explicit `PI_SPEAK_LIVE_BACKEND=gemini`). Selecting it stands the local TTS/wake loop down so the two audio paths never fight, checks credentials, ensures the gateway serves `/v1/live`, and for local operators opens the **desktop orb** at `/orb/` (Edge app mode) rather than the full remote chrome. Phones and the PWA use `/app/?mode=live` or the Android Live button against the same socket. The chosen mode persists across sessions.
 
 ### `/speak`
 

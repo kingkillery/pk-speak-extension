@@ -5,6 +5,7 @@ import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
 import dgram from "node:dgram";
+import { WebSocket } from "ws";
 
 process.env.PI_SPEAK_HTTP_AUDIO_TTL_MS = "50";
 process.env.PI_SPEAK_HTTP_AUDIO_CLEANUP_MS = "25";
@@ -103,6 +104,8 @@ async function withServer(overrides = {}, fn) {
 		sendHerdrPane: overrides.sendHerdrPane,
 		sendHerdrAgent: overrides.sendHerdrAgent,
 		tailSessionEvents: overrides.tailSessionEvents,
+		onRealtimeConnection: overrides.onRealtimeConnection,
+		isTrustedTailnetPeer: overrides.isTrustedTailnetPeer,
 	});
 	const runtime = await server.start();
 	try {
@@ -304,6 +307,73 @@ test("non-local status requires auth while localhost bypass still works", async 
 		});
 		assert.equal(localResponse.statusCode, 200);
 		assert.equal(localResponse.json().ok, true);
+	});
+});
+
+test("daemon-verified same-tailnet peers need no separate HTTP or realtime token", async () => {
+	let verificationCalls = 0;
+	let realtimeConnected = false;
+	await withServer({
+		isTrustedTailnetPeer: async (address, port) => {
+			verificationCalls += 1;
+			assert.equal(address, "127.0.0.1");
+			assert.ok(Number.isInteger(port));
+			return true;
+		},
+		onRealtimeConnection: () => {
+			realtimeConnected = true;
+		},
+	}, async (port) => {
+		const health = await request({ port, path: "/health", headers: { Host: "tailnet.example" } });
+		assert.equal(health.statusCode, 200);
+		assert.equal(health.json().authRequired, false);
+		assert.equal(health.json().tailnetPeerVerified, true);
+
+		const discovery = await request({ port, path: "/.well-known/pi-speak", headers: { Host: "tailnet.example" } });
+		assert.equal(discovery.statusCode, 200);
+		assert.equal(discovery.json().authRequired, false);
+		assert.equal(discovery.json().pairing.required, false);
+		assert.equal(discovery.json().security.tailnetPeerVerified, true);
+
+		const status = await request({ port, path: "/v1/status", headers: { Host: "tailnet.example" } });
+		assert.equal(status.statusCode, 200);
+
+		const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/live`, {
+			headers: { Host: "tailnet.example" },
+		});
+		const opened = await new Promise((resolve) => {
+			ws.once("open", () => resolve(true));
+			ws.once("error", () => resolve(false));
+		});
+		assert.equal(opened, true);
+		assert.equal(realtimeConnected, true);
+		const closed = new Promise((resolve) => ws.once("close", resolve));
+		ws.close();
+		await closed;
+	});
+	assert.ok(verificationCalls >= 4);
+});
+
+test("loopback-only Tailscale Serve identity is trusted while requests without identity stay token-gated", async () => {
+	await withServer({
+		isTrustedTailnetPeer: async () => false,
+	}, async (port) => {
+		const served = await request({
+			port,
+			path: "/v1/status",
+			headers: {
+				Host: "gateway.example-tailnet.ts.net",
+				"Tailscale-User-Login": "operator@example.test",
+			},
+		});
+		assert.equal(served.statusCode, 200);
+
+		const noIdentity = await request({
+			port,
+			path: "/v1/status",
+			headers: { Host: "gateway.example-tailnet.ts.net" },
+		});
+		assert.equal(noIdentity.statusCode, 401);
 	});
 });
 
@@ -2008,5 +2078,14 @@ test("non-loopback clients cannot read /connect but do mark pairing activity", a
 		assert.ok(pairing.lastRemoteClient, "expected lastRemoteClient to be recorded");
 		assert.ok(pairing.lastRemoteClient.at >= before);
 		assert.equal(pairing.lastRemoteClient.address, externalIp);
+	});
+});
+
+test("GET /app/barge-in-detector.js serves the app's relative ES module", async () => {
+	await withServer({}, async (port) => {
+		const response = await request({ port, path: "/app/barge-in-detector.js" });
+		assert.equal(response.statusCode, 200);
+		assert.match(response.headers["content-type"], /application\/javascript/);
+		assert.match(response.body, /createBargeInDetector/);
 	});
 });

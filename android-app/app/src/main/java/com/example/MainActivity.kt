@@ -67,6 +67,8 @@ import com.example.api.GatewayRouteUpdate
 import com.example.api.VoiceAgentClient
 import com.example.api.RemoteSlashCommand
 import com.example.audio.StreamingPcmPlayer
+import com.example.audio.InterruptedPcmFreezeDisposition
+import com.example.audio.LiveAudioInterruptCoordinator
 import com.example.audio.StreamingPcmRecorder
 import com.example.audio.AudioHelper
 import com.example.audio.TtsHelper
@@ -757,6 +759,7 @@ class StudioRuntimeState(
     var pairingGeneration by mutableIntStateOf(0)
     var isRealtimeActive by mutableStateOf(false)
     var isRealtimeConnected by mutableStateOf(false)
+    var hasInterruptedLiveAudio by mutableStateOf(false)
     val pendingTerminalApprovals = mutableStateListOf<TerminalApprovalPrompt>()
 }
 
@@ -862,18 +865,28 @@ fun StudioTabContent(
     val liveSessionRef = remember { mutableStateOf<RealtimeVoiceSession?>(null) }
     val liveRecorderRef = remember { mutableStateOf<StreamingPcmRecorder?>(null) }
     val livePlayerRef = remember { mutableStateOf<StreamingPcmPlayer?>(null) }
+    val replayingInterruptedAudio = remember {
+        java.util.concurrent.atomic.AtomicReference<StreamingPcmPlayer?>(null)
+    }
+    val liveInterruptCoordinatorRef = remember {
+        java.util.concurrent.atomic.AtomicReference<LiveAudioInterruptCoordinator?>(null)
+    }
 
     DisposableEffect(Unit) {
         onDispose {
             val disposedSession = liveSessionRef.value
+            val disposedPlayer = livePlayerRef.value
             liveSessionRef.value = null
             liveRecorderRef.value?.stop()
             liveRecorderRef.value = null
-            livePlayerRef.value?.stop()
+            disposedPlayer?.close()
             livePlayerRef.value = null
+            replayingInterruptedAudio.compareAndSet(disposedPlayer, null)
+            liveInterruptCoordinatorRef.getAndSet(null)?.reset()
             disposedSession?.disconnect()
             state.isRealtimeActive = false
             state.isRealtimeConnected = false
+            state.hasInterruptedLiveAudio = false
         }
     }
 
@@ -971,19 +984,84 @@ fun StudioTabContent(
     }
 
     fun stopLiveSession() {
+        val stoppedPlayer = livePlayerRef.value
         liveRecorderRef.value?.stop()
         liveSessionRef.value?.disconnect()
-        livePlayerRef.value?.stop()
+        stoppedPlayer?.close()
         liveSessionRef.value = null
         liveRecorderRef.value = null
         livePlayerRef.value = null
+        replayingInterruptedAudio.compareAndSet(stoppedPlayer, null)
+        liveInterruptCoordinatorRef.getAndSet(null)?.reset()
         state.isRealtimeActive = false
         state.isRealtimeConnected = false
         state.pendingTerminalApprovals.clear()
+        state.hasInterruptedLiveAudio = false
+    }
+
+    fun freezeLiveAudioForInterrupt(
+        session: RealtimeVoiceSession,
+        player: StreamingPcmPlayer,
+        coordinator: LiveAudioInterruptCoordinator,
+    ): InterruptedPcmFreezeDisposition {
+        val disposition = player.freezeInterruptedAudio()
+        if (disposition == InterruptedPcmFreezeDisposition.CAPTURED) {
+            scope.launch {
+                if (
+                    liveSessionRef.value === session &&
+                    livePlayerRef.value === player &&
+                    liveInterruptCoordinatorRef.get() === coordinator
+                ) {
+                    state.hasInterruptedLiveAudio = true
+                }
+            }
+        }
+        return disposition
+    }
+
+    fun interruptLiveAudio() {
+        val session = liveSessionRef.value ?: return
+        val player = livePlayerRef.value ?: return
+        val coordinator = liveInterruptCoordinatorRef.get() ?: return
+        val disposition = freezeLiveAudioForInterrupt(session, player, coordinator)
+        if (
+            liveSessionRef.value === session &&
+            livePlayerRef.value === player &&
+            liveInterruptCoordinatorRef.get() === coordinator &&
+            coordinator.shouldSendLocalInterrupt(disposition)
+        ) {
+            session.sendInterrupt()
+        }
+        player.stop()
+        player.start()
+    }
+
+    fun replayInterruptedAudio() {
+        val session = liveSessionRef.value ?: return
+        val player = livePlayerRef.value ?: return
+        val coordinator = liveInterruptCoordinatorRef.get() ?: return
+        if (!replayingInterruptedAudio.compareAndSet(null, player)) return
+        scope.launch {
+            try {
+                val replayed = withContext(Dispatchers.IO) { player.replayInterruptedAudio() }
+                if (
+                    !replayed &&
+                    liveSessionRef.value === session &&
+                    livePlayerRef.value === player &&
+                    liveInterruptCoordinatorRef.get() === coordinator &&
+                    !player.hasRetainedInterruptedAudio()
+                ) {
+                    state.hasInterruptedLiveAudio = false
+                }
+            } finally {
+                replayingInterruptedAudio.compareAndSet(player, null)
+            }
+        }
     }
 
     fun startLiveSession() {
         val sharedPrefs = context.getSharedPreferences("pi_speak_prefs", android.content.Context.MODE_PRIVATE)
+        val interruptCoordinator = LiveAudioInterruptCoordinator()
         val player = StreamingPcmPlayer()
         val recorder = StreamingPcmRecorder(context)
         lateinit var session: RealtimeVoiceSession
@@ -996,17 +1074,22 @@ fun StudioTabContent(
                     player.start()
                     try {
                         recorder.start { seqId, pcm ->
-                            if (liveSessionRef.value === session) {
+                            val replaying = replayingInterruptedAudio.get() != null
+                            val isCurrentSession = liveSessionRef.value === session
+                            if (!replaying && isCurrentSession) {
                                 session.sendAudioChunk(seqId, pcm)
                             }
                             // Client-side VAD barge-in: interrupt assistant speech when the
                             // user starts talking over it (configurable in Settings).
-                            if (player.isPlaying && sharedPrefs.getBoolean("vad_enabled", true)) {
+                            if (
+                                !replaying &&
+                                isCurrentSession &&
+                                player.isPlaying &&
+                                sharedPrefs.getBoolean("vad_enabled", true)
+                            ) {
                                 val threshold = sharedPrefs.getFloat("vad_threshold", 1500f).toInt()
                                 if (pcmPeakAmplitude(pcm) > threshold) {
-                                    session.sendInterrupt()
-                                    player.stop()
-                                    player.start()
+                                    interruptLiveAudio()
                                 }
                             }
                         }
@@ -1027,11 +1110,18 @@ fun StudioTabContent(
                 }
 
                 override fun onAudioChunk(seqId: Int, pcm: ByteArray) {
-                    if (liveSessionRef.value === session) player.write(seqId, pcm)
+                    if (liveSessionRef.value !== session) return
+                    if (interruptCoordinator.beginAssistantTurn()) {
+                        player.beginAssistantAudioSegment()
+                    }
+                    player.write(seqId, pcm)
                 }
 
                 override fun onTranscript(text: String, role: String) {
-                    if (role == "user") return
+                    if (liveSessionRef.value !== session || role == "user") return
+                    if (interruptCoordinator.beginAssistantTurn()) {
+                        player.beginAssistantAudioSegment()
+                    }
                     assistantTranscript.append(text)
                     val transcript = assistantTranscript.toString()
                     scope.launch {
@@ -1039,11 +1129,19 @@ fun StudioTabContent(
                     }
                 }
                 override fun onTranscriptComplete(role: String) {
-                    if (role != "user") assistantTranscript.clear()
+                    if (liveSessionRef.value !== session || role == "user") return
+                    assistantTranscript.clear()
+                    val completedAudio = player.completeAssistantAudioSegment()
+                    interruptCoordinator.completeAssistantTurn()
+                    scope.launch(Dispatchers.IO) {
+                        player.discardCompletedAudioSegmentAfterPlayback(completedAudio)
+                    }
                 }
 
                 override fun onInterrupt() {
                     if (liveSessionRef.value !== session) return
+                    freezeLiveAudioForInterrupt(session, player, interruptCoordinator)
+                    interruptCoordinator.receiveInterrupt()
                     player.stop()
                     player.start()
                 }
@@ -1144,12 +1242,16 @@ fun StudioTabContent(
                         if (liveSessionRef.value !== session) return@launch
                         val authFailure = httpCode == 401
                         recorder.stop()
-                        player.stop()
+                        player.close()
+                        replayingInterruptedAudio.compareAndSet(player, null)
+                        liveInterruptCoordinatorRef.compareAndSet(interruptCoordinator, null)
+                        interruptCoordinator.reset()
                         session.disconnect()
                         liveSessionRef.value = null
                         liveRecorderRef.value = null
                         livePlayerRef.value = null
                         state.isRealtimeConnected = false
+                        state.hasInterruptedLiveAudio = false
                         if (authFailure) {
                             state.latestReply = "Gateway pairing is required."
                             state.realtimeAuthFailure = true
@@ -1176,14 +1278,18 @@ fun StudioTabContent(
                         if (liveSessionRef.value !== session) return@launch
                         if (state.isRealtimeActive) {
                             appendChat("system", "[live] Disconnected.")
-                            recorder.stop()
-                            player.stop()
                         }
+                        recorder.stop()
+                        player.close()
+                        replayingInterruptedAudio.compareAndSet(player, null)
+                        liveInterruptCoordinatorRef.compareAndSet(interruptCoordinator, null)
+                        interruptCoordinator.reset()
                         liveSessionRef.value = null
                         liveRecorderRef.value = null
                         livePlayerRef.value = null
                         state.isRealtimeActive = false
                         state.isRealtimeConnected = false
+                        state.hasInterruptedLiveAudio = false
                     }
                 }
             }
@@ -1191,6 +1297,7 @@ fun StudioTabContent(
         liveSessionRef.value = session
         liveRecorderRef.value = recorder
         livePlayerRef.value = player
+        liveInterruptCoordinatorRef.set(interruptCoordinator)
         state.isRealtimeActive = true
         session.connect()
     }
@@ -1201,13 +1308,19 @@ fun StudioTabContent(
         observedPairingGeneration = state.pairingGeneration
         val shouldRestartLive = state.isRealtimeActive || state.realtimeAuthFailure
         val oldSession = liveSessionRef.value
+        val oldPlayer = livePlayerRef.value
+        liveInterruptCoordinatorRef.getAndSet(null)?.reset()
         liveSessionRef.value = null
         liveRecorderRef.value?.stop()
         liveRecorderRef.value = null
-        livePlayerRef.value?.stop()
+        if (oldPlayer != null) {
+            replayingInterruptedAudio.compareAndSet(oldPlayer, null)
+            oldPlayer.close()
+        }
         livePlayerRef.value = null
         oldSession?.disconnect()
         state.isRealtimeConnected = false
+        state.hasInterruptedLiveAudio = false
         if (shouldRestartLive) {
             state.isRealtimeActive = false
             startLiveSession()
@@ -1501,6 +1614,8 @@ fun StudioTabContent(
         onStopCurrentTurn = { stopCurrentTurn() },
         onStartLiveSession = { startLiveSession() },
         onStopLiveSession = { stopLiveSession() },
+        onInterruptLiveAudio = { interruptLiveAudio() },
+        onReplayInterruptedAudio = { replayInterruptedAudio() },
         onRecordTrigger = { recordTriggerAction() },
         onStopAndSend = { stopAndSendAction() },
         onSendText = sendTextAction,

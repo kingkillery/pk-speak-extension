@@ -31,6 +31,11 @@
 		</main>
 
 		<aside class="chat" id="chat" aria-live="polite"></aside>
+		<form class="composer" id="composer" aria-label="Send a message">
+			<label class="composer-label" for="composer-input">Message</label>
+			<textarea id="composer-input" name="message" rows="1" placeholder="Type a message" disabled></textarea>
+			<button type="submit" class="btn composer-send" id="composer-send" disabled>Send</button>
+		</form>
 		<div id="approvals" class="approvals" aria-live="polite"></div>
 
 		<!-- Speech-mode panel: shown only when ?mode=speech. Distinct from the
@@ -54,6 +59,7 @@
 				<input id="gate-db" type="range" min="-66" max="-3" step="1" value="-50">
 			</div>
 			<div class="meter"><div class="meter-fill" id="meter-fill"></div></div>
+			<button type="button" class="btn hidden" id="replay-btn" aria-label="Replay interrupted assistant audio">Replay</button>
 			<button type="button" class="btn" id="stop-btn" disabled>End</button>
 		</footer>
 

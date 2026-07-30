@@ -1,3 +1,17 @@
+## [2026-07-29] save | Interrupted Assistant Audio Replay
+- Type: decision
+- Location: wiki/decisions/Interrupted Assistant Audio Replay.md
+- Action: created
+- Sources: web/remote/replay-capture.js, android-app/app/src/main/java/com/example/audio/StreamingPcmPlayer.kt
+
+## [2026-07-29] update | Realtime B/C verification, replay, and orb composer
+- Updated `docs/REALTIME_VOICE_PARITY_TODO.md` with consolidated B1–B4 evidence and C1–C4 live/source results.
+- B1 received 57 assistant-audio frames (639,588 bytes) after a spoken session-context tool call; B3 isolated `envcloud1` and `pi-speak1` across two simultaneous live connections; B4 reject/approve telemetry preserved the approval boundary and exact-once dispatch.
+- Added the `/orb/` text composer and client-local interrupted-audio replay across Web, Standard Android, and Boox.
+- Hardened Android replay for queued `AudioTrack` tails, provider-PCM preemption, transient busy results, per-session interrupt coordination, and replacement/early-return ownership races; final adversarial review passed.
+- Fixed Windows realtime `npm` execution by reusing the shell-safe `safeSpawn`, then completed C3 against Gemini Live: a real `npm test` tool call ran for 100,383 ms without interim transcript or audio, confirming the long-turn progress gap.
+- Targeted Web/Android/terminal tests and both debug assemblies passed. Final Standard and Boox APKs installed and launched on Pixel 9a and Boox Palma and matched their built artifacts byte-for-byte; audible device replay remains unverified because both devices entered secure keyguard.
+
 ## 2026-07-20 - synthesis: realtime Live HF parity + desktop orb
 
 - Added `syntheses/realtime-live-hf-parity-2026-07-20.md`: HF-style capture/playback worklets, `/orb/` terminal companion (outside full browser remote), OpenAI-Realtime/HF S2S upstream adapter (`PI_SPEAK_LIVE_BACKEND`), `web_search`/`camera_snapshot` tools, Android CameraX + audio_format parity.

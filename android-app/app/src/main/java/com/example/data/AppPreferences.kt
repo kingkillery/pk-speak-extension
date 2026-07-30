@@ -2,10 +2,11 @@ package com.example.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.squareup.moshi.JsonClass
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
-import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 
+@JsonClass(generateAdapter = true)
 data class RecordedSession(
     val id: String,
     val timestamp: Long,
@@ -17,6 +18,7 @@ data class RecordedSession(
     val voiceAgent: String = "Local Codex"
 )
 
+@JsonClass(generateAdapter = true)
 data class ChatMessage(
     val id: String,
     val role: String,
@@ -36,7 +38,7 @@ class AppPreferences(context: Context) {
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences("pi_speak_prefs", Context.MODE_PRIVATE)
-    private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
+    private val moshi = Moshi.Builder().build()
     private val sessionListAdapterType = Types.newParameterizedType(List::class.java, RecordedSession::class.java)
     private val sessionListAdapter = moshi.adapter<List<RecordedSession>>(sessionListAdapterType)
     private val chatMessageListAdapterType = Types.newParameterizedType(List::class.java, ChatMessage::class.java)

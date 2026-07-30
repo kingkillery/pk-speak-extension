@@ -94,13 +94,16 @@ From Pi, run:
 
 The command starts the HTTP gateway if needed and prints a QR code. Scan it with the Android phone to open the setup flow and pair the native app. The native app provides a session dashboard, routing controls, and the Agent Hub for discovering and operating oh-my-pk agent lanes; it also supports phone microphone turns, spoken replies, workspace browsing, and session events.
 
-For a phone on the same network, the LAN URL is fine for initial testing. Tailscale is better when the phone and computer are not on the same LAN, when you need a stable address while networks change, or when browser microphone access requires HTTPS. Expose the local gateway through Tailscale Serve:
+For a phone on the same network, the LAN URL is fine for initial testing. Tailscale is better when the phone and computer are not on the same LAN, when you need a stable address while networks change, or when browser microphone access requires HTTPS. A native client connecting directly to the host's `100.64.0.0/10` or Tailscale IPv6 address needs no separate Pi Speak token: the gateway asks the host's `tailscaled` daemon to verify the socket peer. Daemon lookup failures fail closed.
+
+For tokenless HTTPS through Tailscale Serve, bind Pi Speak to loopback before starting/restarting the gateway, then expose it:
 
 ```powershell
+$env:PI_SPEAK_HTTP_HOST = "127.0.0.1"
 tailscale serve --bg http://127.0.0.1:8767
 ```
 
-Then use the printed Tailscale HTTPS URL. Keep the remote token private; remote clients authenticate with it.
+Then use the printed Tailscale HTTPS URL. A loopback-bound gateway trusts the identity header that Serve strips and injects for tailnet users. Tailscale Funnel is public and is never treated as tailnet identity. LAN, tunnel, public, shared-node direct traffic, and any peer the local daemon cannot verify still require the Pi Speak token, so keep it private as the fallback credential.
 
 ## 7. Named sessions and voice routing
 
@@ -161,21 +164,23 @@ $env:PI_SPEAK_GEMINI_BACKEND = "simulated"
 
 ### Default OpenAI-Realtime / HF S2S backend
 
-The HF speech-to-speech server (https://github.com/huggingface/speech-to-speech) is the default S2S upstream. Setting any S2S URL selects it automatically — no `PI_SPEAK_LIVE_BACKEND` needed — and with the backend selected but no URL set, the connect URL defaults to the local server at `ws://localhost:8765/v1/realtime` (run `speech-to-speech` locally and `/voice realtime` just works). Gemini Live remains the fallback when nothing S2S-related is configured.
+The HF speech-to-speech server (https://github.com/huggingface/speech-to-speech) is the default S2S upstream. Setting any S2S URL (`PI_SPEAK_HF_REALTIME_URL`, `HF_REALTIME_URL`, `PI_SPEAK_OPENAI_REALTIME_URL`, `SPEECH_TO_SPEECH_URL`, or `PI_SPEAK_S2S_URL`) selects it automatically — no `PI_SPEAK_LIVE_BACKEND` needed — and with the backend selected but no URL set, the connect URL defaults to the local server at `ws://localhost:8765/v1/realtime` (run `speech-to-speech` locally and `/voice realtime` just works). Gemini Live remains the fallback when nothing S2S-related is configured; explicit `PI_SPEAK_LIVE_BACKEND=gemini` always wins.
 
 ```powershell
-$env:PI_SPEAK_LIVE_BACKEND = "openai-realtime"   # or hf / s2s; optional when a URL below is set
-$env:PI_SPEAK_OPENAI_REALTIME_URL = "wss://<host>/v1/realtime?session_token=..."  # optional; defaults to ws://localhost:8765/v1/realtime
+$env:PI_SPEAK_HF_REALTIME_URL = "wss://<host>/v1/realtime?session_token=..."  # optional; defaults to ws://localhost:8765/v1/realtime
+$env:HF_TOKEN = "<host-only token>" # only when the selected endpoint requires bearer auth
+# A configured compatible endpoint is selected automatically. Set this only to override:
+# $env:PI_SPEAK_LIVE_BACKEND = "gemini" # or openai-realtime / hf / s2s
 $env:PI_SPEAK_OPENAI_REALTIME_MODEL = "gpt-realtime" # required by official api.openai.com URLs; appended as ?model=
 # Client PCM is resampled from 16 kHz to the official 24 kHz input rate by default.
 # Set PI_SPEAK_OPENAI_REALTIME_INPUT_RATE only for a compatible custom/HF endpoint.
 # PI_SPEAK_OPENAI_REALTIME_TRANSCRIPTION_MODEL defaults to gpt-4o-mini-transcribe on api.openai.com;
 # set it explicitly for a compatible custom endpoint, or to off to disable.
-# aliases: SPEECH_TO_SPEECH_URL, PI_SPEAK_S2S_URL
-# optional: PI_SPEAK_OPENAI_REALTIME_KEY, PI_SPEAK_OPENAI_REALTIME_VOICE
+# aliases: HF_REALTIME_URL, PI_SPEAK_OPENAI_REALTIME_URL, SPEECH_TO_SPEECH_URL, PI_SPEAK_S2S_URL
+# optional: PI_SPEAK_HF_TOKEN, PI_SPEAK_OPENAI_REALTIME_KEY, PI_SPEAK_OPENAI_REALTIME_VOICE
 ```
 
-Clients still connect to **this** gateway's `/v1/live`; the gateway adapts upstream.
+Clients still connect only to **this** gateway's `/v1/live`; the gateway adapts upstream and keeps provider credentials, MCP connections, and coding-agent tools on the host. Hugging Face's Responses API can use remote MCP tools, but it is a text/event API rather than a universal PCM voice protocol; use a deployed OpenAI-Realtime-compatible S2S endpoint for the duplex voice leg.
 
 ### Live tools
 

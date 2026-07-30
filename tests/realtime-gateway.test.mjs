@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocket } from "ws";
 import { ControlServer } from "../dist/control-server.js";
 import { classifyRealtimeTerminalCommand, buildRealtimeTools, isNavigationalLaunch, REALTIME_SYSTEM_PROMPT } from "../dist/realtime-gateway.js";
@@ -184,6 +187,25 @@ test("realtime terminal command registry creates argv plans without a shell", ()
 	const unknownPlan = buildRealtimeTerminalCommandPlan("python write.py");
 	assert.equal(unknownPlan.action, "requires_confirmation");
 	assert.equal(unknownPlan.executableKnown, false);
+});
+
+test("realtime terminal executor runs npm without a shell-launch failure", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-speak-realtime-npm-"));
+	try {
+		await writeFile(
+			join(cwd, "package.json"),
+			JSON.stringify({
+				private: true,
+				scripts: { test: "node --version" },
+			}),
+		);
+		const plan = buildRealtimeTerminalCommandPlan("npm test");
+		const result = await executeRealtimeTerminalCommandPlan(plan, cwd);
+		assert.equal(result.ok, true, result.stderr);
+		assert.match(result.stdout, /v\d+\.\d+\.\d+/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
 });
 
 test("realtime terminal command registry executes Get-Content internally", async () => {

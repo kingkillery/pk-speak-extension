@@ -27,6 +27,7 @@ import { isWebSearchConfigured, runWebSearch } from "./web-search.js";
 import { resolveLiveBackendKind } from "./live-backend.js";
 import { canonicalRealtimeSessionPath } from "./realtime-session-target.js";
 import { discoverTailnetGateways } from "./gateway-discovery.js";
+import { verifyTailscalePeer, type TailscalePeerVerifier } from "./tailscale-peer-auth.js";
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
 
@@ -296,6 +297,7 @@ export type ControlServerOptions = {
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 	agentHub?: AgentHubBinding;
 	onRealtimeConnection?: (ws: WebSocket) => void;
+	isTrustedTailnetPeer?: TailscalePeerVerifier;
 	onBrainstorm?: (
 		buffer: Buffer,
 		mimeType: string | undefined,
@@ -349,13 +351,6 @@ const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMI
 const RATE_LIMIT_CONTROL = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_CONTROL || "20", 10);
 const RATE_LIMIT_VOICE = Number.parseInt(process.env.PI_SPEAK_HTTP_RATE_LIMIT_VOICE || "6", 10);
 const ALLOW_QUERY_TOKEN_FOR_AUDIO = isTruthy(process.env.PI_SPEAK_HTTP_ALLOW_QUERY_TOKEN_FOR_AUDIO || "false");
-const TRUST_TAILSCALE_LOCAL = isTruthy(process.env.PI_SPEAK_TRUST_TAILSCALE_LOCAL || "false");
-const TRUSTED_TAILSCALE_IPS = new Set(
-	(process.env.PI_SPEAK_TRUSTED_TAILSCALE_IPS || "")
-		.split(",")
-		.map((value) => value.trim())
-		.filter(Boolean),
-);
 const REMOTE_APP_DIR = resolveRemoteAppDir();
 const ANDROID_APK_PATH = resolveAndroidApkPath();
 const ALLOWED_VOICE_CONTENT_TYPES = [
@@ -441,6 +436,7 @@ export class ControlServer {
 	private readonly sendHerdrPane: NonNullable<ControlServerOptions["sendHerdrPane"]>;
 	private readonly sendHerdrAgent: NonNullable<ControlServerOptions["sendHerdrAgent"]>;
 	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
+	private readonly isTrustedTailnetPeer: TailscalePeerVerifier;
 	private readonly onBrainstorm?: ControlServerOptions["onBrainstorm"];
 	private wss?: WebSocketServer;
 	private readonly realtimeClients = new Set<WebSocket>();
@@ -502,6 +498,7 @@ export class ControlServer {
 		this.sendHerdrAgent = options.sendHerdrAgent || ((payload) => sendHerdrAgent(payload));
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
+		this.isTrustedTailnetPeer = options.isTrustedTailnetPeer ?? verifyTailscalePeer;
 		this._agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
 		this.agentHubCanMutate = options.agentHub?.canMutate === true;
 		this.onBrainstorm = options.onBrainstorm;
@@ -647,19 +644,26 @@ export class ControlServer {
 		});
 
 		this.server.on("upgrade", (req, socket, head) => {
-			const url = new URL(req.url || "", `http://${req.headers.host || "127.0.0.1"}`);
-			if (url.pathname === "/v1/live") {
-				if (!this.isAuthorized(req, url, true)) {
+			void (async () => {
+				const url = new URL(req.url || "", `http://${req.headers.host || "127.0.0.1"}`);
+				if (url.pathname === "/v1/live") {
+					if (!(await this.isAuthorized(req, url, true))) {
+						socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+						socket.destroy();
+						return;
+					}
+					this.wss!.handleUpgrade(req, socket, head, (ws) => {
+						this.wss!.emit("connection", ws, req);
+					});
+				} else {
+					socket.destroy();
+				}
+			})().catch(() => {
+				if (!socket.destroyed) {
 					socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
 					socket.destroy();
-					return;
 				}
-				this.wss!.handleUpgrade(req, socket, head, (ws) => {
-					this.wss!.emit("connection", ws, req);
-				});
-			} else {
-				socket.destroy();
-			}
+			});
 		});
 
 		const maxAttempts = 1 + this.portRetries;
@@ -764,7 +768,7 @@ export class ControlServer {
 
 		const localRequest = isLocalRequest(req, url);
 		if (req.method === "GET" && url.pathname.startsWith("/v1/audio/")) {
-			if (!this.isAuthorized(req, url, ALLOW_QUERY_TOKEN_FOR_AUDIO)) {
+			if (!(await this.isAuthorized(req, url, ALLOW_QUERY_TOKEN_FOR_AUDIO))) {
 				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 				return;
 			}
@@ -775,7 +779,7 @@ export class ControlServer {
 		}
 
 		const allowQueryToken = req.method === "GET" && url.pathname === "/v1/events";
-		if (!this.isAuthorized(req, url, allowQueryToken)) {
+		if (!(await this.isAuthorized(req, url, allowQueryToken))) {
 			this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 			return;
 		}
@@ -1337,7 +1341,7 @@ export class ControlServer {
 				this.writeJson(res, 501, { ok: false, error: "Event stream is not available on this gateway." });
 				return;
 			}
-			if (!this.isAuthorized(req, url, true)) {
+			if (!(await this.isAuthorized(req, url, true))) {
 				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 				return;
 			}
@@ -1436,17 +1440,20 @@ export class ControlServer {
 
 	private async handlePublicRoute(req: IncomingMessage, url: URL, res: ServerResponse) {
 		if (url.pathname === "/health") {
+			const tailnetTrusted = await this.isTrustedTailnetRequest(req);
 			this.writeJson(res, 200, {
 				ok: true,
 				app: "pi-speak",
 				role: this.state.role ?? "gateway",
-				authRequired: !!this.state.authToken,
+				authRequired: !!this.state.authToken && !tailnetTrusted,
+				tailnetPeerVerified: tailnetTrusted,
 			});
 			return true;
 		}
 
 		if (url.pathname === "/.well-known/pi-speak" || url.pathname === "/v1/discovery") {
-			this.writeJson(res, 200, this.buildDiscoveryDescriptor(req, url));
+			const tailnetTrusted = await this.isTrustedTailnetRequest(req);
+			this.writeJson(res, 200, this.buildDiscoveryDescriptor(req, url, tailnetTrusted));
 			return true;
 		}
 
@@ -1537,6 +1544,26 @@ export class ControlServer {
 		if (url.pathname === "/app/app.js") {
 			await this.serveStaticFile(
 				join(REMOTE_APP_DIR, "app.js"),
+				"application/javascript; charset=utf-8",
+				res,
+				"no-store",
+			);
+			return true;
+		}
+
+		if (url.pathname === "/app/barge-in-detector.js") {
+			await this.serveStaticFile(
+				join(REMOTE_APP_DIR, "barge-in-detector.js"),
+				"application/javascript; charset=utf-8",
+				res,
+				"no-store",
+			);
+			return true;
+		}
+
+		if (url.pathname === "/app/replay-capture.js" || url.pathname === "/orb/replay-capture.js") {
+			await this.serveStaticFile(
+				join(REMOTE_APP_DIR, "replay-capture.js"),
 				"application/javascript; charset=utf-8",
 				res,
 				"no-store",
@@ -1684,9 +1711,10 @@ export class ControlServer {
 		});
 	}
 
-	private buildDiscoveryDescriptor(req: IncomingMessage, url: URL) {
+	private buildDiscoveryDescriptor(req: IncomingMessage, url: URL, tailnetTrusted = false) {
 		const status = this.getStatus();
 		const baseUrl = getRequestBaseUrl(req, url);
+		const authRequired = !!this.state.authToken && !tailnetTrusted;
 		return {
 			schema: "pi-speak.discovery.v1",
 			app: "pi-speak",
@@ -1694,11 +1722,11 @@ export class ControlServer {
 			version: process.env.npm_package_version || "0.0.0",
 			serverId: getStableServerId(),
 			name: `Pi Speak on ${hostname() || "machine"}`,
-			authRequired: !!this.state.authToken,
-			pairingRequired: true,
+			authRequired,
+			pairingRequired: authRequired,
 			pairingMethods: ["setup-qr"],
 			pairing: {
-				required: true,
+				required: authRequired,
 				methods: ["setup-qr", "native-deep-link"],
 				setupPath: "/setup",
 				deepLinkScheme: "pi-speak://setup",
@@ -1708,6 +1736,8 @@ export class ControlServer {
 			security: {
 				publicDiscoveryIncludesToken: false,
 				tokenDelivery: "setup-qr-only",
+				tailnetPeerVerified: tailnetTrusted,
+				tailnetVerification: "tailscaled-whois-or-serve-identity",
 			},
 			baseUrls: [...new Set([baseUrl, ...getReachableBaseUrls(this.state.port ?? DEFAULT_PORT)])],
 			endpoints: {
@@ -2130,7 +2160,7 @@ export class ControlServer {
 		};
 	}
 
-	private isAuthorized(req: IncomingMessage, url: URL, allowQueryToken: boolean) {
+	private async isAuthorized(req: IncomingMessage, url: URL, allowQueryToken: boolean) {
 		const token = this.state.authToken || "";
 		if (!token) return true;
 		if (isLocalRequest(req, url)) return true;
@@ -2144,9 +2174,32 @@ export class ControlServer {
 		const authHeader = getPrimaryHeaderValue(req.headers.authorization) || "";
 		const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
 		if (bearerToken && isValid(bearerToken)) return true;
-		if (!allowQueryToken) return false;
-		const queryToken = url.searchParams.get("token") || "";
-		return !!queryToken && isValid(queryToken);
+		if (allowQueryToken) {
+			const queryToken = url.searchParams.get("token") || "";
+			if (queryToken && isValid(queryToken)) return true;
+		}
+		return this.isTrustedTailnetRequest(req);
+	}
+
+	private async isTrustedTailnetRequest(req: IncomingMessage) {
+		const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress || "");
+		if (!remoteAddress) return false;
+		const serveLogin = (getPrimaryHeaderValue(req.headers["tailscale-user-login"]) || "").trim();
+		const requestHost = getPrimaryHeaderValue(req.headers.host) || "";
+		if (
+			serveLogin
+			&& serveLogin.length <= 512
+			&& isLoopback(remoteAddress)
+			&& isLoopbackHost(this.state.host || "")
+			&& isTailscaleDnsHost(requestHost)
+		) {
+			return true;
+		}
+		try {
+			return await this.isTrustedTailnetPeer(remoteAddress, req.socket.remotePort);
+		} catch {
+			return false;
+		}
 	}
 
 	private checkRateLimit(req: IncomingMessage, url: URL, localRequest: boolean) {
@@ -2688,14 +2741,21 @@ function isLocalRequest(req: IncomingMessage, url: URL) {
 	const hostname = url.hostname;
 	// Pure loopback — require both remote address and Host to be loopback
 	if (isLoopback(remoteAddress) && isLoopbackHost(hostname)) return true;
-	// Tailscale mesh — only if explicitly enabled and IP is in allowlist
-	if (TRUST_TAILSCALE_LOCAL && TRUSTED_TAILSCALE_IPS.has(remoteAddress)) return true;
 	return false;
 }
 
 function isLoopbackHost(hostname: string) {
 	const normalized = (hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
 	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function isTailscaleDnsHost(host: string) {
+	try {
+		const hostname = new URL(`http://${host}`).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+		return hostname.endsWith(".ts.net");
+	} catch {
+		return false;
+	}
 }
 
 function renderConnectHtml({

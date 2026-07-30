@@ -14,9 +14,9 @@ import {
 import { CodexAgentProvider } from "../dist/codex-agent-provider.js";
 import { PiAgentProvider } from "../dist/pi-agent-provider.js";
 
-test("agent provider config defaults to pi and honors codex overrides", () => {
+test("agent provider config defaults to OMPK and honors codex overrides", () => {
 	assert.deepEqual(resolveAgentProviderConfig({}), {
-		provider: "pi",
+		provider: "oh-my-pk",
 		codexBin: "codex",
 		claudeBin: "claude",
 		piBin: "pi",

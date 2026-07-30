@@ -22,7 +22,8 @@ export type RealtimeControlType =
 	| "camera_capture"
 	| "camera_frame"
 	| "live_state"
-	| "audio_format";
+	| "audio_format"
+	| "voice_metric";
 
 export interface RealtimeControlMessage {
 	type: RealtimeControlType;
@@ -51,6 +52,15 @@ export interface RealtimeControlMessage {
 	/** Output PCM sample rate announced once per session. */
 	rate?: number;
 	timeLeft?: string;
+	/** Opt-in realtime latency instrumentation fields. */
+	voiceMetricsEnabled?: boolean;
+	event?: "speech_end" | "upstream_timing";
+	turnId?: number;
+	clientTimeMs?: number;
+	lastPcmSentUpstreamMs?: number;
+	firstUpstreamEventMs?: number;
+	provider?: string;
+	model?: string;
 }
 
 export type RealtimeMessage = Buffer | string;

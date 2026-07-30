@@ -52,7 +52,7 @@ Pi Speak is a voice- and phone-controlled gateway around coding-agent sessions. 
 
 ### `desktop-live-client.ts` and `web/remote/orb.*`
 
-- **Purpose:** Terminal-adjacent Live companion. `/voice realtime` opens Edge `--app=http://127.0.0.1:<port>/orb/` by default (not the full remote chrome).
+- **Purpose:** Terminal-adjacent Live companion. `/voice realtime` opens the user’s default Chromium-family browser in app mode at `http://127.0.0.1:<port>/orb/` (including Perplexity Comet when it is the default); Edge and a normal-browser tab are fallbacks, not the preferred host.
 - **Key exports/symbols:** `openDesktopLiveClient`, `buildDesktopLiveClientUrl(port, cwd?, surface?: "orb"|"app")`.
 - **Driven by:** Local operator on the same machine as the gateway; uses HF-style capture/playback worklets against `/v1/live`.
 
@@ -102,7 +102,7 @@ type AgentProviderName =
   | "gemini" | "gemini-live" | "elevenlabs" | "9router";
 ```
 
-`AGENT_PROVIDER` selects the server-side backend (defaulting to `pi` when unset). `pi`, `codex`, `claude`, and `oh-my-pk` are routing/coding-agent providers: they run an external or embedded coding agent and can target workspaces and, where supported, resumable sessions. `gemini`, `gemini-live`, `elevenlabs`, and `9router` are voice-native or direct model providers in the registry; Gemini Live is the bidirectional audio path, while Gemini is the text/model path. Provider capabilities differ: for example Gemini and Gemini Live do not provide session routing, and 9router disables routing, steering, and resumable sessions.
+`AGENT_PROVIDER` selects the server-side backend (defaulting to `oh-my-pk` when unset). `pi`, `codex`, `claude`, and `oh-my-pk` are routing/coding-agent providers: they run an external or embedded coding agent and can target workspaces and, where supported, resumable sessions. `gemini`, `gemini-live`, `elevenlabs`, and `9router` are voice-native or direct model providers in the registry; Gemini Live is the bidirectional audio path, while Gemini is the text/model path. Provider capabilities differ: for example Gemini and Gemini Live do not provide session routing, and 9router disables routing, steering, and resumable sessions.
 
 `9router/ag/gemini-3-5-flash-high` is a text model option, not a separate `AgentProviderName`. It appears in `GEMINI_TEXT_MODEL_OPTIONS` and can therefore be selected as the model used by the `gemini` text provider.
 
@@ -125,29 +125,37 @@ The gateway is HTTP-based; clients use the following high-frequency routes:
 | `/v1/workspace` | Browse the configured workspace root (with file reads exposed by the workspace file variant). |
 | `/v1/events` | Tail the server-sent event stream for session and administrative updates. |
 
-Mobile-app gateway requests are authenticated with `PI_SPEAK_HTTP_TOKEN` where required. Browser, desktop orb, and Android use that HTTP surface. Telegram uses bot polling and its own `/link` pairing through `phone-bridge.ts`; the standalone daemon may host both transports while keeping their credentials and client protocols separate.
+Mobile-app gateway requests use `PI_SPEAK_HTTP_TOKEN` unless the actual socket peer is verified by the host's Tailscale WhoIs/LocalAPI identity path, or a loopback-bound Tailscale Serve proxy supplies its sanitized user identity header. Funnel, LAN, public/tunnel, shared-node direct, and failed/unknown identity paths remain token-gated. Browser, desktop orb, and Android use that HTTP surface. Telegram uses bot polling and its own `/link` pairing through `phone-bridge.ts`; the standalone daemon may host both transports while keeping their credentials and client protocols separate.
 
 ## 6. Android, PWA, and desktop orb clients
 
-The full web remote is hosted at `/app/`: text/voice turns, target selection, setup, reply audio, session management, events, workspace browsing, and Live mode (`?mode=live`). The **desktop orb** is hosted at `/orb/`: a minimal HF-style Live companion (orb states, mic gate, camera PIP) for terminal operators; `/voice realtime` opens it in Edge app mode by default. The native APK is downloadable at `/download/pi-speak.apk`; it stores machine profiles and connection/auth settings locally, offers native text/voice controls, Live duplex (including `camera_snapshot` via CameraX and `audio_format` sample-rate switching), and mirrors session routing, events, workspace, and Agent Hub operations. The Boox variant is an e-ink-oriented native surface with the same Live tool hooks. Unified Remote is a lightweight remote-control surface for quick machine/control actions rather than the full session and Agent Hub management experience. All clients call the same gateway; the differences are local device capabilities and UI density.
+The full web remote is hosted at `/app/`: text/voice turns, target selection, setup, reply audio, session management, events, workspace browsing, and Live mode (`?mode=live`). The **desktop orb** is hosted at `/orb/`: a minimal HF-style Live companion (orb states, mic gate, camera PIP) for terminal operators; `/voice realtime` launches the default Chromium-family browser in app mode when available (for example, Perplexity Comet), with Edge and standard-tab fallbacks. The native APK is downloadable at `/download/pi-speak.apk`; it stores machine profiles and connection/auth settings locally, offers native text/voice controls, Live duplex (including `camera_snapshot` via CameraX and `audio_format` sample-rate switching), and mirrors session routing, events, workspace, and Agent Hub operations. The Boox variant is an e-ink-oriented native surface with the same Live…
 
 ## 7. Key environment variables
 
 | Name | Purpose | Values / format | Required by |
 |---|---|---|---|
-| `AGENT_PROVIDER` | Select the active agent backend. | `pi`, `codex`, `claude`, `oh-my-pk`, `gemini`, `gemini-live`, `elevenlabs`, `9router`; defaults to `pi`. | Provider config/factory, `index.ts`, gateway |
+| `AGENT_PROVIDER` | Select the active agent backend. | `pi`, `codex`, `claude`, `oh-my-pk`, `gemini`, `gemini-live`, `elevenlabs`, `9router`; defaults to `oh-my-pk`. | Provider config/factory, `index.ts`, gateway |
 | `PI_SPEAK_TTS_PROVIDER` | Explicitly select speech synthesis instead of auto-resolution. | `legacy`, `gemini`, `elevenlabs`, `openai`, or `edge`. | `tts.ts` |
 | `PI_SPEAK_GEMINI_BACKEND` | Choose Gemini API backend. | `developer-api`/`developer`/`api`, `vertex`/`vertexai`/`gcloud`, or `simulated`/`sim`. | `gemini-live-turn.ts` |
 | `PI_SPEAK_GEMINI_TEXT_MODEL` | Override the Gemini text model. | Model ID, including `9router/ag/gemini-3-5-flash-high`. | Gemini text turns |
 | `PI_SPEAK_GEMINI_LIVE_MODEL` | Override the Gemini Live model. | Live model ID, such as `gemini-3.1-flash-live-preview`. | Gemini Live turns |
-| `PI_SPEAK_LIVE_BACKEND` | Select Live upstream adapter. | `openai-realtime`/`hf`/`s2s` (HF speech-to-speech; auto-selected when an S2S URL is set), `gemini` (fallback when nothing S2S-related is configured). | `live-backend.ts`, `realtime-gateway.ts` |
+| `PI_SPEAK_LIVE_BACKEND` | Override Live upstream adapter. | `gemini`, `openai-realtime`, `hf`, `s2s`; a configured compatible realtime URL is selected automatically, otherwise Gemini is used. | `live-backend.ts`, `realtime-gateway.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_MODEL` | Select the official OpenAI Realtime model; appended to `api.openai.com` URLs. | Defaults to `gpt-realtime`. | `openai-realtime-live.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_INPUT_RATE` | Override upstream PCM input rate for compatible custom/HF endpoints. | Defaults to `24000`; gateway client PCM is resampled. | `openai-realtime-live.ts` |
 | `PI_SPEAK_OPENAI_REALTIME_TRANSCRIPTION_MODEL` | Enable input transcription on OpenAI-compatible endpoints. | Official default `gpt-4o-mini-transcribe`; set `off` to disable. | `openai-realtime-live.ts` |
-| `PI_SPEAK_OPENAI_REALTIME_URL` | OpenAI-Realtime / HF S2S WebSocket URL; setting it (or an alias) makes the S2S backend the default. | `wss://…/v1/realtime…` (aliases: `SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`); unset falls back to the HF speech-to-speech default `ws://localhost:8765/v1/realtime`. | `openai-realtime-live.ts` |
+| `PI_SPEAK_HF_REALTIME_URL` | Preferred HF-compatible S2S WebSocket URL; setting it (or an alias) makes the S2S backend the default. | `wss://…/v1/realtime…` (aliases: `HF_REALTIME_URL`, `PI_SPEAK_OPENAI_REALTIME_URL`, `SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`); unset falls back to the HF speech-to-speech default `ws://localhost:8765/v1/realtime` when the S2S backend is selected. | `openai-realtime-live.ts` |
+| `PI_SPEAK_OPENAI_REALTIME_VOICE` | Select the output voice on OpenAI-Realtime-compatible endpoints. | Provider-supported voice name; defaults to `alloy`. | `openai-realtime-live.ts` |
+| `PI_SPEAK_GEMINI_LIVE_VOICE` | Select a Gemini Live prebuilt output voice. | Provider-supported prebuilt voice name; omitted by default. | `realtime-gateway.ts` |
+| `PI_SPEAK_REALTIME_TURN_DETECTION` | Choose the turn-boundary strategy without coupling clients to one model vendor. | `server_vad` (default), `semantic_vad`/`semantic` (OpenAI-compatible endpoints), or `none`/`manual` (OpenAI only; Gemini retains automatic VAD because clients do not send manual activity markers). | `realtime-turn-detection.ts` |
+| `PI_SPEAK_REALTIME_VAD_EAGERNESS` | Tune whether short pauses remain part of the same thought. | `low`, `medium`, `high`, `auto`; OpenAI semantic VAD receives the value directly, Gemini maps `low`/`high` to end-of-speech sensitivity. | Both Live backends |
+| `PI_SPEAK_REALTIME_VAD_SILENCE_MS` | Set the silence interval before end-of-turn. | Integer milliseconds, clamped to `0..10000`; supported by OpenAI `server_vad` and Gemini automatic activity detection. | Both Live backends |
+| `PI_SPEAK_REALTIME_VAD_PREFIX_MS` | Preserve speech just before VAD onset. | Integer milliseconds, clamped to `0..5000`; supported by OpenAI `server_vad` and Gemini automatic activity detection. | Both Live backends |
+| `PI_SPEAK_REALTIME_VAD_THRESHOLD` | Tune OpenAI-compatible server-VAD activation. | Number clamped to `0..1`; ignored by Gemini. | OpenAI-Realtime / HF |
+| `PI_SPEAK_REALTIME_METRICS` | Enable per-turn A1/A2 voice-feel instrumentation in `/app/` and `/orb/`. | `1`; emits `[pi-speak-voice-metric]` structured JSON lines with backend/model tags, five turn timestamps, rolling p50/p95, and speech-onset-to-silence barge-in latency. | Realtime gateway and web clients |
 | `SERPER_API_KEY` | Enable Live `web_search` tool. | Serper.dev key (alias `PI_SPEAK_SERPER_API_KEY`). | `web-search.ts`, `/v1/search` |
 | `GOOGLE_CLOUD_PROJECT` | Vertex AI project identifier. | GCP project ID. | Gemini Vertex client |
-| `PI_SPEAK_HTTP_TOKEN` | Authenticate HTTP gateway requests. | Shared bearer/token string. | `control-server.ts`, clients |
+| `PI_SPEAK_HTTP_TOKEN` | Authenticate HTTP gateway requests outside a host-verified same-tailnet path. | Shared bearer/token string; still required for LAN, Funnel, public/tunnel, and unknown peers. | `control-server.ts`, clients |
 | `PI_SPEAK_BASE_URL` | Advertise or use the gateway base URL for remote clients. | Reachable HTTP(S) base URL. | Pairing/setup and clients |
 | `PI_SPEAK_WORKSPACE_ROOT` | Constrain workspace browsing and file reads. | Directory path; defaults to the agent working directory. | `control-server.ts` workspace API |
 | `PI_SPEAK_WAKE_SENSITIVITY` | Set wake-word matching tolerance. | `low`, `medium`, or `high`. | `listener.py` / wake routing |

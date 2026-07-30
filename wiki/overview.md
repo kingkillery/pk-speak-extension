@@ -68,6 +68,7 @@ A cross-platform voice + remote-control extension for `pi-coding-agent` with thr
 - See `wiki/sessions/2026-07-02-pr13-android-gateway-parity.md` for the run summary, skipped findings, and local changed-file list.
 
 ## Recent Durable Updates
+- 2026-07-29: Created decision [[Interrupted Assistant Audio Replay]]
 - 2026-07-13: Created concept [[herdr-agent-hub- Module]]
 - 2026-07-20: Added [[Realtime Platform Update — 2026-07-20]], documenting the committed conversational realtime platform baseline through `8c0c38c`.
 - 2026-07-20: Added [[Realtime Live HF Parity + Desktop Orb — 2026-07-20]] for HF worklets, desktop orb, OpenAI-Realtime adapter, and Android Live camera tools.

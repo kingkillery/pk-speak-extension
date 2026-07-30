@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -96,13 +97,17 @@ fun StudioCockpitLayout(
     onStartLiveSession: () -> Unit,
     onStopLiveSession: () -> Unit,
     onRecordTrigger: () -> Unit,
+    onInterruptLiveAudio: () -> Unit,
+    onReplayInterruptedAudio: () -> Unit,
     onStopAndSend: () -> Unit,
     onSendText: () -> Unit,
 ) {
     // Edge-to-edge chat column (Claude Code mobile style): the conversation is
     // the screen, with only a compact composer docked below it.
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         StudioConversationPanel(
@@ -130,6 +135,8 @@ fun StudioCockpitLayout(
             onStartLiveSession = onStartLiveSession,
             onStopLiveSession = onStopLiveSession,
             onRecordTrigger = onRecordTrigger,
+            onInterruptLiveAudio = onInterruptLiveAudio,
+            onReplayInterruptedAudio = onReplayInterruptedAudio,
             onStopAndSend = onStopAndSend,
             onSendText = onSendText,
         )
@@ -504,6 +511,8 @@ private fun StudioComposer(
     onStartLiveSession: () -> Unit,
     onStopLiveSession: () -> Unit,
     onRecordTrigger: () -> Unit,
+    onInterruptLiveAudio: () -> Unit,
+    onReplayInterruptedAudio: () -> Unit,
     onStopAndSend: () -> Unit,
     onSendText: () -> Unit,
 ) {
@@ -587,6 +596,8 @@ private fun StudioComposer(
                     onStartLiveSession = onStartLiveSession,
                     onStopLiveSession = onStopLiveSession,
                     onRecordTrigger = onRecordTrigger,
+                    onInterruptLiveAudio = onInterruptLiveAudio,
+                    onReplayInterruptedAudio = onReplayInterruptedAudio,
                     onStopAndSend = onStopAndSend,
                     onSendText = onSendText,
                 )
@@ -609,16 +620,16 @@ private fun StudioComposerActions(
     onStopLiveSession: () -> Unit,
     onRecordTrigger: () -> Unit,
     onStopAndSend: () -> Unit,
+    onInterruptLiveAudio: () -> Unit,
+    onReplayInterruptedAudio: () -> Unit,
     onSendText: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         if (state.isRealtimeActive) {
-            StudioPillButton("Interrupt", Color.White, Accent) {
-                liveSessionRef.value?.sendInterrupt()
-                livePlayerRef.value?.stop()
-                livePlayerRef.value?.start()
+            StudioPillButton("Interrupt", Color.White, Accent, onInterruptLiveAudio)
+            if (state.hasInterruptedLiveAudio) {
+                StudioPillButton("Replay", Ink, SelectedFill, onReplayInterruptedAudio)
             }
-            StudioPillButton("Live On", Color.White, Success, onStopLiveSession)
         } else {
             StudioPillButton("Live Off", Ink, Canvas) {
                 if (!permissionState.status.isGranted) permissionState.launchPermissionRequest() else onStartLiveSession()
@@ -701,6 +712,7 @@ private fun StudioPillButton(text: String, textColor: Color, backgroundColor: Co
             .clip(CircleShape)
             .background(backgroundColor)
             .border(BorderStroke(1.dp, Line), CircleShape)
+            .semantics { contentDescription = text }
             .clickable(role = Role.Button) { onClick() },
         contentAlignment = Alignment.Center,
     ) {

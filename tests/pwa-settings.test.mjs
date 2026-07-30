@@ -7,12 +7,14 @@ import {
 	encodeLivePcmFrame,
 	isLoopbackHostname,
 	loadPersistedSettings,
+	prepareBargeInDetectorForCapture,
 	persistSettingsSnapshot,
 	STORAGE_AUDIO,
 	STORAGE_AUTOPLAY,
 	STORAGE_REMEMBER,
 	STORAGE_TOKEN,
 } from "../web/remote/app.js";
+import { createBargeInDetector } from "../web/remote/barge-in-detector.js";
 
 test("buildRealtimeWebSocketUrl maps http origins to websocket live route", () => {
 	assert.equal(
@@ -103,4 +105,28 @@ test("live approvals select terminal versus command control messages", () => {
 	assert.equal(approvalControlType({ name: "launch_agent", reason: "launch_agent" }, true), "command_approve");
 	assert.equal(approvalControlType({ name: "archive_session", reason: "archive_session" }, false), "command_reject");
 	assert.equal(approvalControlType({ name: "chat_agent" }, true), "command_approve");
+});
+
+test("new microphone capture resets ambient learning and reapplies the live gate", () => {
+	const detector = createBargeInDetector({
+		calibrationFrames: 2,
+		absoluteFloor: 0.01,
+		absoluteInterruptFloor: 0.015,
+		speechMargin: 0.01,
+		interruptMargin: 0.01,
+		voicedFramesRequired: 2,
+	});
+	detector.observe({ rms: 0.01, nowMs: 0, aiPlaying: false });
+	detector.observe({ rms: 0.01, nowMs: 40, aiPlaying: false });
+	assert.equal(detector.getState().framesSeen, 2);
+
+	prepareBargeInDetectorForCapture(detector, { enabled: true, thresholdDb: -40 });
+	assert.equal(detector.getState().framesSeen, 0);
+	assert.ok(Math.abs(detector.getState().gateThresholdLin - 0.01) < 0.000001);
+
+	// A louder new room is calibration only; it cannot inherit the quiet room's
+	// threshold and immediately barge in.
+	assert.equal(detector.observe({ rms: 0.08, nowMs: 80, aiPlaying: true }).interrupt, false);
+	assert.equal(detector.observe({ rms: 0.08, nowMs: 120, aiPlaying: true }).interrupt, false);
+	assert.ok(detector.getState().noiseFloor >= 0.079);
 });

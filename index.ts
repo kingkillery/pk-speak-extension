@@ -4128,9 +4128,9 @@ export default function speakExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("upload-chat", {
-		description: "Sync repo state (and chat bundle) to/from a remote host: /upload-chat [push|pull|status] <host>",
+		description: "Sync repo state to/from a remote host or create a separate remote worktree: /upload-chat [push|pull|status|worktree] <host>",
 		getArgumentCompletions: (prefix) => {
-			const options = ["push", "pull", "status", ...getTransferHosts()];
+			const options = ["push", "pull", "status", "worktree", ...getTransferHosts()];
 			return options.filter((option) => option.startsWith(prefix)).map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
@@ -4147,9 +4147,15 @@ export default function speakExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`No scripts/codespace-sync.ts found from ${startCwd} up to the repo root. This repo does not support codespace sync.`, "error");
 				return;
 			}
-			const direction = action === "push" ? `uploading ${located.repoRoot} TO ${target}` : action === "pull" ? `bringing ${target}'s state back into ${located.repoRoot}` : `checking what would transfer to ${target}`;
+			const direction = action === "push"
+				? `uploading ${located.repoRoot} TO ${target}`
+				: action === "pull"
+					? `bringing ${target}'s state back into ${located.repoRoot}`
+					: action === "worktree"
+						? `creating a separate remote worktree on ${target}`
+						: `checking what would transfer to ${target}`;
 			ctx.ui.notify(`codespace-sync ${action}: ${direction}…`, "info");
-			const result = await runCodespaceSync(located.script, located.repoRoot, action, target);
+			const result = await runCodespaceSync(located.script, located.repoRoot, action, target, parsed.args.syncArgs);
 			appendSessionEvent("sess.codespace-sync", "command", {
 				action,
 				host,

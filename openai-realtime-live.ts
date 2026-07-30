@@ -12,6 +12,7 @@ import type {
 	LiveBackendSession,
 	LiveImageInput,
 } from "./live-backend.js";
+import { buildOpenAiTurnDetection, type RealtimeTurnDetectionProfile } from "./realtime-turn-detection.js";
 
 /**
  * Default connect URL of the HF speech-to-speech server
@@ -39,6 +40,10 @@ export type OpenAiRealtimeLiveConfig = {
 	inputSampleRate?: number;
 	/** null disables transcription; undefined enables the official default only on api.openai.com. */
 	inputTranscriptionModel?: string | null;
+	/** Explicit model request; included in session.update only when set. */
+	model?: string;
+	/** Turn-detection profile; default preserves the bare server_vad behavior. */
+	turnDetection?: RealtimeTurnDetectionProfile;
 	connectTimeoutMs?: number;
 };
 
@@ -48,6 +53,8 @@ function trimSlash(url: string): string {
 
 export function resolveOpenAiRealtimeConnectUrl(env: NodeJS.ProcessEnv = process.env): string {
 	const direct =
+		env.PI_SPEAK_HF_REALTIME_URL?.trim() ||
+		env.HF_REALTIME_URL?.trim() ||
 		env.PI_SPEAK_OPENAI_REALTIME_URL?.trim() ||
 		env.PI_SPEAK_S2S_URL?.trim() ||
 		env.SPEECH_TO_SPEECH_URL?.trim() ||
@@ -74,6 +81,24 @@ export function resolveOpenAiRealtimeConnectUrl(env: NodeJS.ProcessEnv = process
 /** True only when an S2S URL is explicitly set; the localhost default does not count. */
 export function isOpenAiRealtimeLiveConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
 	return hasConfiguredS2sUrl(env);
+}
+
+export function resolveOpenAiRealtimeApiKey(
+	env: NodeJS.ProcessEnv = process.env,
+	connectUrl = resolveOpenAiRealtimeConnectUrl(env),
+): string | undefined {
+	const hfEndpoint = env.PI_SPEAK_HF_REALTIME_URL?.trim() || env.HF_REALTIME_URL?.trim();
+	if (hfEndpoint) {
+		return env.PI_SPEAK_HF_TOKEN?.trim() || env.HF_TOKEN?.trim() || undefined;
+	}
+	try {
+		if (new URL(connectUrl).hostname.toLowerCase() === "api.openai.com") {
+			return env.PI_SPEAK_OPENAI_REALTIME_KEY?.trim() || env.OPENAI_API_KEY?.trim() || undefined;
+		}
+	} catch {}
+	// A custom OpenAI-compatible endpoint may use a dedicated bearer token, but
+	// must never receive a global OpenAI or Hugging Face provider credential.
+	return env.PI_SPEAK_OPENAI_REALTIME_KEY?.trim() || undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -181,6 +206,14 @@ export async function connectOpenAiRealtimeLive(
 	let readySent = false;
 	let assistantTranscriptOpen = false;
 	let activeResponseId = "";
+	// Last assistant audio item, for conversation.item.truncate on barge-in.
+	// Wall-clock since the first delta approximates what the client has played
+	// (generation outpaces playback); min() with sent-ms keeps the estimate
+	// within the item's real duration so the server never rejects it.
+	let audioItemId = "";
+	let audioItemMsSent = 0;
+	let audioItemFirstDeltaAt = 0;
+	let audioItemTruncated = false;
 	const send = (payload: Record<string, unknown>) => {
 		// readyState 1 === OPEN for both DOM and ws package enums.
 		if (closed || ws.readyState !== 1) return false;
@@ -189,17 +222,19 @@ export async function connectOpenAiRealtimeLive(
 	};
 	const sessionUpdate = () => {
 		const tools = mapRealtimeToolsToOpenAi(options.tools);
+		const turnDetection = buildOpenAiTurnDetection(config.turnDetection ?? { kind: "server_vad" });
 		send({
 			type: "session.update",
 			session: {
 				type: "realtime",
+				...(config.model ? { model: config.model } : {}),
 				instructions: options.systemInstruction || config.instructions || "",
 				output_modalities: ["audio"],
 				audio: {
 					input: {
 						format: { type: "audio/pcm", rate: inputRate },
 						...(inputTranscriptionModel ? { transcription: { model: inputTranscriptionModel } } : {}),
-						turn_detection: { type: "server_vad" },
+						turn_detection: turnDetection,
 					},
 					output: {
 						format: { type: "audio/pcm", rate: outputRate },
@@ -209,6 +244,23 @@ export async function connectOpenAiRealtimeLive(
 				tools,
 				tool_choice: tools.length ? "auto" : "none",
 			},
+		});
+	};
+
+	// Trim the conversation's view of the last assistant reply down to what the
+	// user actually heard. Without this an interrupted assistant "remembers"
+	// saying everything it generated, and follow-ups refer to content that was
+	// never spoken.
+	const truncatePlayedAudio = () => {
+		if (!audioItemId || audioItemTruncated) return;
+		const elapsedMs = Math.max(0, Date.now() - audioItemFirstDeltaAt);
+		const audioEndMs = Math.max(0, Math.min(Math.round(audioItemMsSent), elapsedMs));
+		audioItemTruncated = true;
+		send({
+			type: "conversation.item.truncate",
+			item_id: audioItemId,
+			content_index: 0,
+			audio_end_ms: audioEndMs,
 		});
 	};
 
@@ -237,8 +289,10 @@ export async function connectOpenAiRealtimeLive(
 		}
 
 		if (type === "input_audio_buffer.speech_started") {
-			// Server VAD barge-in: cancel in-flight response and tell client to clear.
+			// Server VAD barge-in: cancel the in-flight response, trim the
+			// conversation to what was heard, and tell the client to clear.
 			if (activeResponseId) send({ type: "response.cancel" });
+			truncatePlayedAudio();
 			handlers.onOutbound({ kind: "interrupt" });
 			return;
 		}
@@ -246,6 +300,9 @@ export async function connectOpenAiRealtimeLive(
 		if (type === "response.created") {
 			const response = asRecord(msg.response);
 			activeResponseId = asString(response?.id);
+			audioItemId = "";
+			audioItemMsSent = 0;
+			audioItemTruncated = false;
 			return;
 		}
 
@@ -266,9 +323,18 @@ export async function connectOpenAiRealtimeLive(
 		if (type === "response.output_audio.delta" || type === "response.audio.delta") {
 			const delta = asString(msg.delta);
 			if (!delta) return;
+			const pcm = base64ToBuffer(delta);
+			const itemId = asString(msg.item_id);
+			if (itemId && itemId !== audioItemId) {
+				audioItemId = itemId;
+				audioItemMsSent = 0;
+				audioItemFirstDeltaAt = Date.now();
+				audioItemTruncated = false;
+			}
+			if (audioItemId) audioItemMsSent += (pcm.length / 2 / outputRate) * 1000;
 			handlers.onOutbound({
 				kind: "audio",
-				pcm: base64ToBuffer(delta),
+				pcm,
 				sampleRate: outputRate,
 			});
 			return;
@@ -388,8 +454,11 @@ export async function connectOpenAiRealtimeLive(
 			return delivered;
 		},
 		interrupt() {
-			send({ type: "response.cancel" });
-			send({ type: "input_audio_buffer.clear" });
+			// Client-initiated barge-in. Never clear the input buffer here: with a
+			// voice-triggered interrupt the user's opening words are already in the
+			// buffer, and clearing them would eat the start of the interjection.
+			if (activeResponseId) send({ type: "response.cancel" });
+			truncatePlayedAudio();
 			handlers.onOutbound({ kind: "interrupt" });
 		},
 		sendToolResult(callId: string, name: string, output: string) {

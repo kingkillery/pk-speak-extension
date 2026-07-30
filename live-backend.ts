@@ -3,7 +3,8 @@
  *
  * Client methodology follows Hugging Face realtime voice (WebSocket PCM,
  * worklet capture/playback, barge-in clear). Upstream backends stay pluggable:
- * Gemini Live today, OpenAI-Realtime-compatible (HF speech-to-speech) later.
+ * an explicitly configured OpenAI-Realtime-compatible endpoint (including HF
+ * speech-to-speech deployments) is preferred, with Gemini Live as fallback.
  *
  * The gateway owns one adapter per client WS. Clients never talk to provider
  * APIs directly — they speak the pi-speak `/v1/live` wire protocol.
@@ -69,6 +70,8 @@ export type LiveBackendFactory = {
 /** True when an S2S / OpenAI-Realtime WebSocket URL is explicitly configured. */
 export function hasConfiguredS2sUrl(env: NodeJS.ProcessEnv = process.env): boolean {
 	return Boolean(
+		env.PI_SPEAK_HF_REALTIME_URL?.trim() ||
+		env.HF_REALTIME_URL?.trim() ||
 		env.PI_SPEAK_OPENAI_REALTIME_URL?.trim() ||
 		env.PI_SPEAK_S2S_URL?.trim() ||
 		env.SPEECH_TO_SPEECH_URL?.trim(),

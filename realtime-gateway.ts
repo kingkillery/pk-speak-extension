@@ -43,8 +43,10 @@ import type { LiveBackendSession } from "./live-backend.js";
 import {
 	connectOpenAiRealtimeLive,
 	isOpenAiRealtimeLiveConfigured,
+	resolveOpenAiRealtimeApiKey,
 	resolveOpenAiRealtimeConnectUrl,
 } from "./openai-realtime-live.js";
+import { buildGeminiRealtimeInputConfig, resolveRealtimeTurnDetection } from "./realtime-turn-detection.js";
 import {
 	buildRealtimeSessionCandidates,
 	resolveRealtimeSessionTarget,
@@ -150,6 +152,17 @@ interface ActiveSession {
 	/** Latest session-resumption handle from sessionResumptionUpdate. */
 	resumptionHandle?: string;
 	outputAudioRate: number;
+	/** Drop upstream assistant audio until the next turn boundary (Gemini tap-to-interrupt). */
+	suppressAssistantAudio?: boolean;
+	/** Wall-clock time immediately after the most recent client PCM forward. */
+	lastPcmSentUpstreamMs?: number;
+	/** Current opt-in latency measurement turn, created by client speech-end. */
+	voiceMetricTurn?: {
+		turnId: number;
+		speechEndClientMs: number;
+		lastPcmSentUpstreamMs: number;
+		firstUpstreamEventMs?: number;
+	};
 	upstreamGeneration: number;
 	/** FunctionResponses queued while the session is mid-reconnect. */
 	pendingToolResponses: Record<string, unknown>[];
@@ -254,9 +267,38 @@ export const REALTIME_SYSTEM_PROMPT = [
 	"Honor speechHint guidance on tool results. Content may already be truncated for speech; say so briefly instead of inventing missing text.",
 	"Do not narrate background state refreshes delivered silently.",
 	"Briefly acknowledge the request, use the result to continue the conversation, and keep replies short and conversational.",
+	"If you were interrupted mid-answer, wait until the user finishes speaking. On your next turn, start with a brief natural acknowledgement (for example 'mhm', 'okay', or 'got it'), reassess whether the interrupted answer still matters against the new utterance, then either resume only the still-relevant point or pivot cleanly. Never freeze silent after a barge-in, never restart the whole cancelled monologue unless the user asks, and never talk over the user.",
 ].join(" ");
 
 export { classifyRealtimeTerminalCommand, type RealtimeTerminalCommandSafety };
+
+function realtimeVoiceMetricsEnabled(): boolean {
+	return process.env.PI_SPEAK_REALTIME_METRICS === "1";
+}
+
+function recordFirstUpstreamEvent(activeSession: ActiveSession): void {
+	if (!realtimeVoiceMetricsEnabled()) return;
+	const turn = activeSession.voiceMetricTurn;
+	if (!turn || turn.firstUpstreamEventMs !== undefined) return;
+	turn.firstUpstreamEventMs = Date.now();
+	const metric = {
+		type: "voice_metric",
+		event: "upstream_timing",
+		turnId: turn.turnId,
+		clientTimeMs: turn.speechEndClientMs,
+		lastPcmSentUpstreamMs: turn.lastPcmSentUpstreamMs,
+		firstUpstreamEventMs: turn.firstUpstreamEventMs,
+		provider: activeSession.liveBackendKind,
+		model: activeSession.model,
+	};
+	sendToClient(activeSession, metric, false);
+	console.info(`[pi-speak-voice-metric] ${JSON.stringify({
+		kind: "turn_server",
+		sessionId: activeSession.sessionId,
+		...metric,
+		upstreamInferenceMs: turn.firstUpstreamEventMs - turn.lastPcmSentUpstreamMs,
+	})}`);
+}
 
 function sendLiveStartWhenReady(activeSession: ActiveSession) {
 	if (!activeSession.upstreamSetupComplete || !activeSession.clientHandlersReady || activeSession.startSent) return;
@@ -264,11 +306,17 @@ function sendLiveStartWhenReady(activeSession: ActiveSession) {
 	// HF methodology: announce output PCM rate once so the playback worklet can
 	// configure itself. Gemini Live native audio is 24 kHz mono PCM16.
 	sendToClient(activeSession, { type: "audio_format", rate: activeSession.outputAudioRate }, false);
+	const turnConfig = resolveRealtimeTurnDetection();
 	sendToClient(activeSession, {
 		type: "start",
 		session: activeSession.sessionId,
 		reconnectToken: activeSession.reconnectToken,
 		message: activeSession.liveBackendKind,
+		provider: activeSession.liveBackendKind,
+		model: activeSession.model,
+		turnDetection: turnConfig.kind,
+		eagerness: turnConfig.eagerness || "default",
+		voiceMetricsEnabled: realtimeVoiceMetricsEnabled(),
 	}, false);
 }
 
@@ -1001,6 +1049,9 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 							}
 						});
 					}
+					if (activeSession.liveBackendSession || activeSession.session) {
+						activeSession.lastPcmSentUpstreamMs = Date.now();
+					}
 				}
 			} else {
 				// Text message is JSON stringified control event
@@ -1039,17 +1090,36 @@ function setupSocketHandlers(activeSession: ActiveSession) {
 					resolveCommandApproval(activeSession, ctrl.approvalId, ctrl.type === "command_approve").catch((err) => {
 						sendToClient(activeSession, { type: "error", message: `Command approval failed: ${err instanceof Error ? err.message : String(err)}` }, false);
 					});
+				} else if (ctrl.type === "voice_metric" && ctrl.event === "speech_end") {
+					if (realtimeVoiceMetricsEnabled() && Number.isInteger(ctrl.turnId) && Number.isFinite(ctrl.clientTimeMs)) {
+						// WebSocket ordering guarantees every preceding binary PCM
+						// frame was forwarded before this speech-end marker. Snapshot
+						// the timestamp captured at the actual upstream send.
+						activeSession.voiceMetricTurn = {
+							turnId: ctrl.turnId!,
+							speechEndClientMs: ctrl.clientTimeMs!,
+							lastPcmSentUpstreamMs: activeSession.lastPcmSentUpstreamMs ?? Date.now(),
+						};
+					}
 				} else if (ctrl.type === "interrupt") {
 					// Barge-in / Interrupt from client
 					if (activeSession.liveBackendSession) {
 						// The adapter emits the canonical interrupt event after cancelling upstream.
 						activeSession.liveBackendSession.interrupt();
 					} else if (activeSession.session) {
-						activeSession.session.sendRealtimeInput({ activityStart: {} });
+						// Gemini Live has no client-side cancel, and manual activity
+						// signals (activityStart) are only legal when automatic VAD is
+						// disabled — which pi-speak never does. Suppress the stale
+						// turn's audio at the gateway instead: the client ring buffer
+						// stays empty even as the cancelled generation keeps streaming,
+						// and Gemini's own VAD raises `interrupted` the moment real
+						// speech follows, which lifts the suppression for the reply.
+						activeSession.suppressAssistantAudio = true;
 						sendToClient(activeSession, { type: "interrupt" }, false);
 					}
 				} else if (ctrl.type === "text" && ctrl.text) {
 					// Text turn from client
+					activeSession.suppressAssistantAudio = false;
 					if (activeSession.liveBackendSession) {
 						activeSession.liveBackendSession.sendText(ctrl.text);
 					} else if (activeSession.session) {
@@ -1784,8 +1854,10 @@ async function startNewSession(
 			const backendSession = await connectOpenAiRealtimeLive(
 				{
 					connectUrl,
-					apiKey: process.env.PI_SPEAK_OPENAI_REALTIME_KEY || process.env.OPENAI_API_KEY || undefined,
+					apiKey: resolveOpenAiRealtimeApiKey(process.env, connectUrl),
 					voice: process.env.PI_SPEAK_OPENAI_REALTIME_VOICE || undefined,
+					model: process.env.PI_SPEAK_OPENAI_REALTIME_MODEL?.trim() || undefined,
+					turnDetection: resolveRealtimeTurnDetection(),
 					inputSampleRate: Number.parseInt(process.env.PI_SPEAK_OPENAI_REALTIME_INPUT_RATE || "24000", 10),
 					inputTranscriptionModel: resolveOpenAiInputTranscriptionModel(),
 					instructions: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || REALTIME_SYSTEM_PROMPT,
@@ -1798,6 +1870,7 @@ async function startNewSession(
 					onOutbound: (event) => {
 						if (upstreamGeneration !== activeSession.upstreamGeneration) return;
 						if (event.kind === "audio") {
+							recordFirstUpstreamEvent(activeSession);
 							if (event.sampleRate !== activeSession.outputAudioRate) {
 								activeSession.outputAudioRate = event.sampleRate;
 								sendToClient(activeSession, { type: "audio_format", rate: event.sampleRate }, false);
@@ -1862,7 +1935,7 @@ async function startNewSession(
 				const message = error instanceof Error ? error.message : String(error);
 				if (usingDefaultS2sUrl) {
 					throw new Error(
-						`${message} (default HF speech-to-speech URL ${connectUrl}; start the local speech-to-speech server or set SPEECH_TO_SPEECH_URL / PI_SPEAK_OPENAI_REALTIME_URL)`,
+						`${message} (default HF speech-to-speech URL ${connectUrl}; start the local speech-to-speech server or set PI_SPEAK_HF_REALTIME_URL / SPEECH_TO_SPEECH_URL)`,
 					);
 				}
 				throw error instanceof Error ? error : new Error(message);
@@ -1910,6 +1983,11 @@ async function startNewSession(
 			return;
 		}
 
+		// Pause tolerance / end-of-speech patience for upstream VAD, plus an
+		// optional prebuilt voice. Both omitted entirely when unset so the
+		// historical connect config is preserved byte-for-byte.
+		const geminiTurnConfig = buildGeminiRealtimeInputConfig(resolveRealtimeTurnDetection());
+		const geminiVoice = process.env.PI_SPEAK_GEMINI_LIVE_VOICE?.trim();
 		const geminiSession = await clientConfig!.ai.live.connect({
 			model,
 			config: {
@@ -1918,6 +1996,8 @@ async function startNewSession(
 				inputAudioTranscription: {},
 				systemInstruction: process.env.PI_SPEAK_GEMINI_SYSTEM_PROMPT || REALTIME_SYSTEM_PROMPT,
 				tools: tools as any,
+				...(geminiTurnConfig ? { realtimeInputConfig: geminiTurnConfig as any } : {}),
+				...(geminiVoice ? { speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: geminiVoice } } } } : {}),
 				// Keep long coding sessions alive: compress context before the ~128k
 				// audio-token cap, and enable resumption handles so we can reconnect
 				// across the ~10-min WS limit / goAway without losing the conversation.
@@ -1933,16 +2013,26 @@ async function startNewSession(
 				},
 				onmessage: async (message: LiveServerMessage) => {
 					if (upstreamGeneration !== activeSession.upstreamGeneration) return;
+					if (
+						message.serverContent?.modelTurn
+						|| message.serverContent?.outputTranscription?.text
+						|| message.toolCall?.functionCalls?.length
+					) {
+						recordFirstUpstreamEvent(activeSession);
+					}
 					if (message.setupComplete) {
 						activeSession.upstreamSetupComplete = true;
 						sendLiveStartWhenReady(activeSession);
 					}
 
-					// 1. Forward raw audio chunk
-					for (const part of message.serverContent?.modelTurn?.parts || []) {
-						if (part.inlineData?.data) {
-							const audioBuf = Buffer.from(part.inlineData.data, "base64");
-							sendToClient(activeSession, audioBuf, true);
+					// 1. Forward raw audio chunk (unless a client barge-in suppressed
+					// the remainder of this model turn).
+					if (!activeSession.suppressAssistantAudio) {
+						for (const part of message.serverContent?.modelTurn?.parts || []) {
+							if (part.inlineData?.data) {
+								const audioBuf = Buffer.from(part.inlineData.data, "base64");
+								sendToClient(activeSession, audioBuf, true);
+							}
 						}
 					}
 
@@ -1969,9 +2059,14 @@ async function startNewSession(
 
 					// 3. Handle model interruption/barge-in signal from server
 					if (message.serverContent?.interrupted) {
+						activeSession.suppressAssistantAudio = false;
 						sendToClient(activeSession, {
 							type: "interrupt"
 						}, false);
+					}
+					if (message.serverContent?.turnComplete) {
+						// Turn boundary: any tap-to-interrupt suppression has drained.
+						activeSession.suppressAssistantAudio = false;
 					}
 
 					// 3b. Cache resumption handle for reconnection across the WS limit.
@@ -2127,7 +2222,15 @@ function resumeSession(ws: WebSocket, reconnectMsg: RealtimeControlMessage) {
 	// Flush pending/buffered server messages that client has not yet received
 	const lastClientReceived = reconnectMsg.serverSequenceId || 0;
 	flushPendingServerMessages(activeSession, lastClientReceived);
-	sendToClient(activeSession, { type: "start", session: sessionId, reconnectToken: activeSession.reconnectToken }, false);
+	sendToClient(activeSession, {
+		type: "start",
+		session: sessionId,
+		reconnectToken: activeSession.reconnectToken,
+		message: activeSession.liveBackendKind,
+		provider: activeSession.liveBackendKind,
+		model: activeSession.model,
+		voiceMetricsEnabled: realtimeVoiceMetricsEnabled(),
+	}, false);
 }
 
 export async function handleRealtimeGateway(this: any, ws: WebSocket) {

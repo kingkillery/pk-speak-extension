@@ -1,4 +1,4 @@
-const CACHE_NAME = "pi-speak-remote-v5";
+const CACHE_NAME = "pi-speak-remote-v6";
 const APP_SHELL = [
 	"/app/",
 	"/app/app.webmanifest",

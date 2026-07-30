@@ -74,6 +74,8 @@ import com.example.api.GatewaySessionEntry
 import com.example.api.GatewaySessionException
 import com.example.api.VoiceAgentClient
 import com.example.audio.AudioHelper
+import com.example.audio.InterruptedPcmFreezeDisposition
+import com.example.audio.LiveAudioInterruptCoordinator
 import com.example.audio.StreamingPcmPlayer
 import com.example.audio.StreamingPcmRecorder
 import com.example.audio.TtsHelper
@@ -717,6 +719,13 @@ private fun BooxCockpit(
     val liveSessionRef = remember { mutableStateOf<RealtimeVoiceSession?>(null) }
     val liveRecorderRef = remember { mutableStateOf<StreamingPcmRecorder?>(null) }
     val livePlayerRef = remember { mutableStateOf<StreamingPcmPlayer?>(null) }
+    var hasInterruptedLiveAudio by remember { mutableStateOf(false) }
+    val replayingInterruptedAudio = remember {
+        java.util.concurrent.atomic.AtomicReference<StreamingPcmPlayer?>(null)
+    }
+    val liveInterruptCoordinatorRef = remember {
+        java.util.concurrent.atomic.AtomicReference<LiveAudioInterruptCoordinator?>(null)
+    }
     var approvalDialogState by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     val liveTranscriptBufferRef = remember { mutableStateOf<RealtimeTranscriptBuffer?>(null) }
     val approvalRejectionGuard = remember { TerminalApprovalRejectionGuard() }
@@ -724,11 +733,52 @@ private fun BooxCockpit(
     // Ensure resources are released if the cockpit leaves the composition.
     DisposableEffect(Unit) {
         onDispose {
+            val disposedPlayer = livePlayerRef.value
             liveRecorderRef.value?.stop()
             liveSessionRef.value?.disconnect()
-            livePlayerRef.value?.stop()
+            disposedPlayer?.close()
+            replayingInterruptedAudio.compareAndSet(disposedPlayer, null)
+            liveInterruptCoordinatorRef.getAndSet(null)?.reset()
             liveTranscriptBufferRef.value?.close()
+            hasInterruptedLiveAudio = false
         }
+    }
+
+    fun freezeLiveAudioForInterrupt(
+        session: RealtimeVoiceSession,
+        player: StreamingPcmPlayer,
+        coordinator: LiveAudioInterruptCoordinator,
+    ): InterruptedPcmFreezeDisposition {
+        val disposition = player.freezeInterruptedAudio()
+        if (disposition == InterruptedPcmFreezeDisposition.CAPTURED) {
+            scope.launch {
+                if (
+                    liveSessionRef.value === session &&
+                    livePlayerRef.value === player &&
+                    liveInterruptCoordinatorRef.get() === coordinator
+                ) {
+                    hasInterruptedLiveAudio = true
+                }
+            }
+        }
+        return disposition
+    }
+
+    fun interruptLiveAudio() {
+        val session = liveSessionRef.value ?: return
+        val player = livePlayerRef.value ?: return
+        val coordinator = liveInterruptCoordinatorRef.get() ?: return
+        val disposition = freezeLiveAudioForInterrupt(session, player, coordinator)
+        if (
+            liveSessionRef.value === session &&
+            livePlayerRef.value === player &&
+            liveInterruptCoordinatorRef.get() === coordinator &&
+            coordinator.shouldSendLocalInterrupt(disposition)
+        ) {
+            session.sendInterrupt()
+        }
+        player.stop()
+        player.start()
     }
     fun rejectApproval(approvalId: String) {
         if (approvalRejectionGuard.rejectOnce(approvalId) { liveSessionRef.value?.rejectTerminal(it) ?: false }) {
@@ -978,14 +1028,17 @@ private fun BooxCockpit(
                 isActive = liveSessionActive,
                 onClick = {
                     if (liveSessionActive) {
-                        // Toggle OFF — tear down the live session cleanly.
+                        val stoppedPlayer = livePlayerRef.value
                         liveRecorderRef.value?.stop()
                         liveSessionRef.value?.disconnect()
-                        livePlayerRef.value?.stop()
+                        stoppedPlayer?.close()
+                        replayingInterruptedAudio.compareAndSet(stoppedPlayer, null)
+                        liveInterruptCoordinatorRef.getAndSet(null)?.reset()
                         liveSessionRef.value = null
                         liveRecorderRef.value = null
                         livePlayerRef.value = null
                         liveSessionActive = false
+                        hasInterruptedLiveAudio = false
                         liveTranscriptBufferRef.value?.close()
                     } else {
                         // Toggle ON — check mic permission then start.
@@ -997,61 +1050,112 @@ private fun BooxCockpit(
                                 "Microphone permission is required for Live mode. Tap LIVE again after granting it.")
                             onRequestMic()
                         } else {
+                            val interruptCoordinator = LiveAudioInterruptCoordinator()
                             val player = StreamingPcmPlayer()
                             val recorder = StreamingPcmRecorder(context)
                             val transcriptBuffer = RealtimeTranscriptBuffer()
+                            val livePreferences = context.getSharedPreferences(
+                                "pi_speak_prefs",
+                                android.content.Context.MODE_PRIVATE,
+                            )
                             liveTranscriptBufferRef.value = transcriptBuffer
-                            val session = RealtimeVoiceSession(
+                            lateinit var session: RealtimeVoiceSession
+                            session = RealtimeVoiceSession(
                                 prefs = prefs,
                                 listener = object : RealtimeVoiceSessionListener {
                                     override fun onConnected(sessionId: String) {
+                                        if (liveSessionRef.value !== session) return
                                         // Prepare playback and start streaming mic audio.
                                         player.start()
                                         recorder.start { seqId, pcm ->
-                                            liveSessionRef.value?.sendAudioChunk(seqId, pcm)
+                                            val replaying = replayingInterruptedAudio.get() != null
+                                            val isCurrentSession = liveSessionRef.value === session
+                                            if (!replaying && isCurrentSession) {
+                                                session.sendAudioChunk(seqId, pcm)
+                                            }
+                                            if (
+                                                !replaying &&
+                                                isCurrentSession &&
+                                                player.isPlaying &&
+                                                livePreferences.getBoolean("vad_enabled", true) &&
+                                                pcmPeakAmplitude(pcm) >
+                                                    livePreferences.getFloat("vad_threshold", 1500f).toInt()
+                                            ) {
+                                                interruptLiveAudio()
+                                            }
                                         }
                                         scope.launch {
-                                            appendChat(state, prefs, "system",
-                                                "[live] Connected: $sessionId")
+                                            if (liveSessionRef.value !== session) return@launch
+                                            appendChat(
+                                                state,
+                                                prefs,
+                                                "system",
+                                                "[live] Connected: $sessionId",
+                                            )
                                         }
                                     }
 
                                     override fun onAudioChunk(seqId: Int, pcm: ByteArray) {
-                                        // Deliver server audio directly to the player (background thread, no lock needed).
+                                        if (liveSessionRef.value !== session) return
+                                        if (interruptCoordinator.beginAssistantTurn()) {
+                                            player.beginAssistantAudioSegment()
+                                        }
                                         player.write(seqId, pcm)
                                     }
 
                                     override fun onTranscript(text: String, role: String) {
-                                        if (role != "user") transcriptBuffer.append(text)
+                                        if (liveSessionRef.value !== session || role == "user") return
+                                        if (interruptCoordinator.beginAssistantTurn()) {
+                                            player.beginAssistantAudioSegment()
+                                        }
+                                        transcriptBuffer.append(text)
                                     }
 
                                     override fun onTranscriptComplete(role: String) {
-                                        if (role == "user") return
+                                        if (liveSessionRef.value !== session || role == "user") return
                                         val completedText = transcriptBuffer.drain()
+                                        val completedAudio = player.completeAssistantAudioSegment()
+                                        interruptCoordinator.completeAssistantTurn()
+                                        scope.launch(Dispatchers.IO) {
+                                            player.discardCompletedAudioSegmentAfterPlayback(completedAudio)
+                                        }
                                         if (completedText.isNotBlank()) {
                                             scope.launch {
+                                                if (liveSessionRef.value !== session) return@launch
                                                 appendChat(state, prefs, "assistant", completedText)
                                             }
                                         }
                                     }
 
                                     override fun onInterrupt() {
-                                        // Interrupted output is partial; do not persist it as a complete reply.
-                                        transcriptBuffer.discardCurrentTurn()
+                                        if (liveSessionRef.value !== session) return
+                                        freezeLiveAudioForInterrupt(
+                                            session,
+                                            player,
+                                            interruptCoordinator,
+                                        )
+                                        interruptCoordinator.receiveInterrupt()
                                         player.stop()
                                         player.start()
+                                        transcriptBuffer.discardCurrentTurn()
                                     }
 
                                     override fun onToolStart(name: String) {
                                         scope.launch {
+                                            if (liveSessionRef.value !== session) return@launch
                                             appendChat(state, prefs, "system", "[tool] $name")
                                         }
                                     }
 
                                     override fun onToolComplete(name: String, output: String) {
                                         scope.launch {
-                                            appendChat(state, prefs, "system",
-                                                "[tool done] $name: ${output.take(200)}")
+                                            if (liveSessionRef.value !== session) return@launch
+                                            appendChat(
+                                                state,
+                                                prefs,
+                                                "system",
+                                                "[tool done] $name: ${output.take(200)}",
+                                            )
                                         }
                                     }
 
@@ -1063,12 +1167,14 @@ private fun BooxCockpit(
                                         timeoutMs: Int,
                                     ) {
                                         scope.launch {
+                                            if (liveSessionRef.value !== session) return@launch
                                             approvalDialogState = Triple(approvalId, command, reason)
                                         }
                                     }
 
                                     override fun onApprovalResolved(approvalId: String) {
                                         scope.launch {
+                                            if (liveSessionRef.value !== session) return@launch
                                             approvalRejectionGuard.clear(approvalId)
                                             if (approvalDialogState?.first == approvalId) {
                                                 approvalDialogState = null
@@ -1078,6 +1184,7 @@ private fun BooxCockpit(
 
                                     override fun onCameraCapture(callId: String, reason: String) {
                                         scope.launch {
+                                            if (liveSessionRef.value !== session) return@launch
                                             appendChat(state, prefs, "system", "[camera] ${reason.ifBlank { "Capturing frame…" }}")
                                             if (!com.example.audio.CameraSnapshot.hasPermission(context)) {
                                                 try {
@@ -1086,7 +1193,7 @@ private fun BooxCockpit(
                                                         0xCA,
                                                     )
                                                 } catch (_: Exception) { }
-                                                liveSessionRef.value?.sendCameraFrame(callId, "image/jpeg", "", "Camera permission required for Live snapshot")
+                                                session.sendCameraFrame(callId, "image/jpeg", "", "Camera permission required for Live snapshot")
                                                 appendChat(state, prefs, "system", "[camera] Grant CAMERA permission and ask again")
                                                 return@launch
                                             }
@@ -1099,16 +1206,17 @@ private fun BooxCockpit(
                                                 }
                                             } else null
                                             if (frame == null) {
-                                                liveSessionRef.value?.sendCameraFrame(callId, "image/jpeg", "", "Camera capture failed or permission denied")
+                                                session.sendCameraFrame(callId, "image/jpeg", "", "Camera capture failed or permission denied")
                                                 appendChat(state, prefs, "system", "[camera] Capture failed")
                                             } else {
-                                                liveSessionRef.value?.sendCameraFrame(callId, frame.mimeType, frame.base64, reason)
+                                                session.sendCameraFrame(callId, frame.mimeType, frame.base64, reason)
                                                 appendChat(state, prefs, "system", "[camera] Frame sent")
                                             }
                                         }
                                     }
 
                                     override fun onAudioFormat(rate: Int) {
+                                        if (liveSessionRef.value !== session) return
                                         player.setSampleRate(rate)
                                         if (player.isPlaying) {
                                             player.stop()
@@ -1118,30 +1226,40 @@ private fun BooxCockpit(
 
                                     override fun onError(message: String, httpCode: Int?) {
                                         scope.launch {
+                                            if (liveSessionRef.value !== session) return@launch
                                             appendChat(state, prefs, "system",
                                                 "[live error] $message")
                                             recorder.stop()
-                                            player.stop()
+                                            player.close()
+                                            replayingInterruptedAudio.compareAndSet(player, null)
+                                            liveInterruptCoordinatorRef.compareAndSet(interruptCoordinator, null)
+                                            interruptCoordinator.reset()
                                             liveSessionRef.value = null
                                             liveRecorderRef.value = null
                                             livePlayerRef.value = null
                                             liveSessionActive = false
+                                            hasInterruptedLiveAudio = false
                                             transcriptBuffer.close()
                                         }
                                     }
 
                                     override fun onDisconnected() {
                                         scope.launch {
+                                            if (liveSessionRef.value !== session) return@launch
                                             if (liveSessionActive) {
                                                 appendChat(state, prefs, "system",
                                                     "[live] Disconnected.")
-                                                recorder.stop()
-                                                player.stop()
                                             }
+                                            recorder.stop()
+                                            player.close()
+                                            replayingInterruptedAudio.compareAndSet(player, null)
+                                            liveInterruptCoordinatorRef.compareAndSet(interruptCoordinator, null)
+                                            interruptCoordinator.reset()
                                             liveSessionRef.value = null
                                             liveRecorderRef.value = null
                                             livePlayerRef.value = null
                                             liveSessionActive = false
+                                            hasInterruptedLiveAudio = false
                                             transcriptBuffer.close()
                                         }
                                     }
@@ -1150,6 +1268,7 @@ private fun BooxCockpit(
                             liveSessionRef.value = session
                             liveRecorderRef.value = recorder
                             livePlayerRef.value = player
+                            liveInterruptCoordinatorRef.set(interruptCoordinator)
                             liveSessionActive = true
                             session.connect()
                         }
@@ -1158,14 +1277,42 @@ private fun BooxCockpit(
                 modifier = Modifier.weight(0.75f),
             )
 
+            if (hasInterruptedLiveAudio) {
+                ReplayButton(
+                    onClick = {
+                        val session = liveSessionRef.value ?: return@ReplayButton
+                        val player = livePlayerRef.value ?: return@ReplayButton
+                        val coordinator = liveInterruptCoordinatorRef.get() ?: return@ReplayButton
+                        if (!replayingInterruptedAudio.compareAndSet(null, player)) return@ReplayButton
+                        scope.launch {
+                            try {
+                                val replayed = withContext(Dispatchers.IO) {
+                                    player.replayInterruptedAudio()
+                                }
+                                if (
+                                    !replayed &&
+                                    liveSessionRef.value === session &&
+                                    livePlayerRef.value === player &&
+                                    liveInterruptCoordinatorRef.get() === coordinator &&
+                                    !player.hasRetainedInterruptedAudio()
+                                ) {
+                                    hasInterruptedLiveAudio = false
+                                }
+                            } finally {
+                                replayingInterruptedAudio.compareAndSet(player, null)
+                            }
+                        }
+                    },
+                    modifier = Modifier.weight(0.75f),
+                )
+            }
+
             // STOP: cancels an in-flight HTTP turn OR interrupts Gemini mid-speech in live mode.
             StopButton(
                 enabled = state.isProcessing || liveSessionActive,
                 onClick = {
                     if (liveSessionActive) {
-                        liveSessionRef.value?.sendInterrupt()
-                        livePlayerRef.value?.stop()
-                        livePlayerRef.value?.start()
+                        interruptLiveAudio()
                     } else {
                         stopCurrentTurn(state, scope, client, audioHelper, ttsHelper, prefs)
                     }
@@ -1431,6 +1578,23 @@ private fun StopButton(
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
         )
+    }
+}
+
+@Composable
+private fun ReplayButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 56.dp),
+        border = BorderStroke(2.dp, Ink),
+        shape = RoundedCornerShape(4.dp),
+        colors = ButtonDefaults.outlinedButtonColors(containerColor = Paper, contentColor = Ink),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+    ) {
+        Text("Replay", fontSize = 13.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -2338,6 +2502,17 @@ private fun ToggleRow(label: String, value: Boolean, onChange: (Boolean) -> Unit
         Spacer(modifier = Modifier.width(8.dp))
         Text(text = label, color = Ink, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
     }
+}
+
+private fun pcmPeakAmplitude(pcm: ByteArray): Int {
+    var peak = 0
+    var index = 0
+    while (index + 1 < pcm.size) {
+        val sample = (pcm[index].toInt() and 0xff) or (pcm[index + 1].toInt() shl 8)
+        peak = maxOf(peak, kotlin.math.abs(sample.toShort().toInt()))
+        index += 2
+    }
+    return peak
 }
 
 // ─── Version stamp pulled from BuildConfig.IS_EINK so the eink flavor stamps itself ─

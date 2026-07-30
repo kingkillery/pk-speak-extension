@@ -1,3 +1,6 @@
+import { createBargeInDetector, rmsFromInt16 } from "./barge-in-detector.js";
+import { InterruptedAudioReplay } from "./replay-capture.js";
+
 /**
  * Choose the realtime approval control message for a pending tool.
  * Terminal command approvals use the terminal registry; every other mutation
@@ -91,6 +94,25 @@ export function encodeLiveInt16PcmFrame(sequenceId, int16Samples) {
 	view.setInt32(0, sequenceId, false);
 	new Uint8Array(frame, 4).set(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength));
 	return frame;
+}
+
+/**
+ * Start a fresh adaptive barge-in calibration for a new microphone capture.
+ * Reconnects reuse a capture; an actual stop/start must not carry room noise
+ * learned from the prior microphone or environment.
+ * @param {{ reset(): void; setGateThresholdDb(thresholdDb: number, enabled?: boolean): void }} detector
+ * @param {{ enabled?: boolean; thresholdDb?: number }} [options]
+ */
+export function prepareBargeInDetectorForCapture(detector, options = {}) {
+	if (!detector || typeof detector.reset !== "function" || typeof detector.setGateThresholdDb !== "function") {
+		throw new TypeError("A resettable barge-in detector is required.");
+	}
+	const thresholdDb = Number.isFinite(options.thresholdDb)
+		? Math.min(-3, Math.max(-66, options.thresholdDb))
+		: -50;
+	detector.reset();
+	detector.setGateThresholdDb(thresholdDb, options.enabled !== false);
+	return detector;
 }
 
 export function loadPersistedSettings({
@@ -195,9 +217,19 @@ if (typeof document !== "undefined") {
 		livePlaybackSources: new Set(),
 		livePlaybackGeneration: 0,
 		liveLastInterruptAt: 0,
+		liveInterruptedReplay: new InterruptedAudioReplay(),
+		liveReplayInProgress: false,
+		liveVoiceMetricsEnabled: false,
+		liveVoiceMetricsProvider: "",
+		liveVoiceMetricsModel: "",
+		liveVoiceMetricTurnId: 0,
+		liveVoiceMetric: null,
+		liveVoiceMetricSamples: [],
+		liveBargeInSpeechOnsetMs: 0,
 		liveMicLevel: 0,
 		liveNoiseGateDb: -50,
 		liveNoiseGateEnabled: true,
+		liveBargeInDetector: createBargeInDetector(),
 		liveCameraStream: null,
 		liveCameraEnabled: false,
 		liveWebSearchAvailable: false,
@@ -222,6 +254,7 @@ if (typeof document !== "undefined") {
 		reply: document.getElementById("reply-output"),
 		audio: document.getElementById("reply-audio"),
 		playReply: document.getElementById("play-reply-button"),
+		replayLive: document.getElementById("replay-live-button"),
 
 		textInput: document.getElementById("text-input"),
 		sendText: document.getElementById("send-text-button"),
@@ -1245,6 +1278,96 @@ if (typeof document !== "undefined") {
 		});
 	}
 
+	function liveMetricPercentile(values, percentile) {
+		if (!values.length) return null;
+		const sorted = [...values].sort((a, b) => a - b);
+		return sorted[Math.min(sorted.length - 1, Math.ceil(percentile * sorted.length) - 1)];
+	}
+
+	function emitLiveTurnMetric() {
+		const metric = state.liveVoiceMetric;
+		if (!metric?.speechEndClientMs || !metric.firstPcmEnqueuedClientMs || !metric.firstSampleRenderedClientMs
+			|| !metric.lastPcmSentUpstreamMs || !metric.firstUpstreamEventMs) return;
+		const sample = {
+			kind: "turn",
+			turnId: metric.turnId,
+			provider: metric.provider || state.liveVoiceMetricsProvider,
+			model: metric.model || state.liveVoiceMetricsModel,
+			turnDetection: state.liveVoiceMetricsTurnDetection || "server_vad",
+			eagerness: state.liveVoiceMetricsEagerness || "default",
+			vadSpeechEndClientMs: metric.speechEndClientMs,
+			lastPcmSentUpstreamMs: metric.lastPcmSentUpstreamMs,
+			firstUpstreamEventMs: metric.firstUpstreamEventMs,
+			firstPcmEnqueuedClientMs: metric.firstPcmEnqueuedClientMs,
+			firstSampleRenderedClientMs: metric.firstSampleRenderedClientMs,
+			renderTimestampSource: metric.renderTimestampSource,
+			timeToFirstAudioMs: metric.firstSampleRenderedClientMs - metric.speechEndClientMs,
+			upstreamInferenceMs: metric.firstUpstreamEventMs - metric.lastPcmSentUpstreamMs,
+			localBufferMs: metric.firstSampleRenderedClientMs - metric.firstPcmEnqueuedClientMs,
+		};
+		state.liveVoiceMetricSamples.push(sample);
+		const totals = state.liveVoiceMetricSamples.map((entry) => entry.timeToFirstAudioMs);
+		sample.summary = {
+			turns: totals.length,
+			p50TimeToFirstAudioMs: liveMetricPercentile(totals, 0.5),
+			p95TimeToFirstAudioMs: liveMetricPercentile(totals, 0.95),
+		};
+		console.info(`[pi-speak-voice-metric] ${JSON.stringify(sample)}`);
+		state.liveVoiceMetric = null;
+	}
+
+	function liveAudioClockToEpochMs(contextTimeSeconds) {
+		const context = state.liveAudioContext;
+		if (
+			context
+			&& Number.isFinite(contextTimeSeconds)
+			&& typeof context.getOutputTimestamp === "function"
+			&& Number.isFinite(performance.timeOrigin)
+		) {
+			const output = context.getOutputTimestamp();
+			if (Number.isFinite(output?.contextTime) && Number.isFinite(output?.performanceTime)) {
+				return {
+					timeMs: performance.timeOrigin + output.performanceTime
+						+ (contextTimeSeconds - output.contextTime) * 1000,
+					source: "audio-clock",
+				};
+			}
+		}
+		return { timeMs: Date.now(), source: "main-thread-fallback" };
+	}
+
+	function handleLivePlaybackMetric(event) {
+		if (event.data?.kind === "underrun" && state.liveReplayInProgress) {
+			state.liveReplayInProgress = false;
+			setLiveMicEnabled(state.recording);
+			if (state.liveConnected) state.liveState = "listening";
+			return;
+		}
+		if (!state.liveVoiceMetricsEnabled) return;
+		if (event.data?.kind === "playback_started" && state.liveVoiceMetric) {
+			const rendered = liveAudioClockToEpochMs(Number(event.data.contextTimeSeconds));
+			state.liveVoiceMetric.firstSampleRenderedClientMs = rendered.timeMs;
+			state.liveVoiceMetric.renderTimestampSource = rendered.source;
+			emitLiveTurnMetric();
+		} else if (event.data?.kind === "cleared" && state.liveBargeInSpeechOnsetMs) {
+			const silenced = liveAudioClockToEpochMs(Number(event.data.contextTimeSeconds));
+			const silenceMs = silenced.timeMs - state.liveBargeInSpeechOnsetMs;
+			console.info(`[pi-speak-voice-metric] ${JSON.stringify({
+				kind: "barge_in",
+				provider: state.liveVoiceMetricsProvider,
+				model: state.liveVoiceMetricsModel,
+				turnDetection: state.liveVoiceMetricsTurnDetection || "server_vad",
+				eagerness: state.liveVoiceMetricsEagerness || "default",
+				speechOnsetClientMs: state.liveBargeInSpeechOnsetMs,
+				playbackSilencedClientMs: silenced.timeMs,
+				renderTimestampSource: silenced.source,
+				speechOnsetToSilenceMs: silenceMs,
+				pass: silenceMs < 200,
+			})}`);
+			state.liveBargeInSpeechOnsetMs = 0;
+		}
+	}
+
 	function ensureLiveAudioContext() {
 		if (state.liveAudioContext && state.liveAudioContext.state !== "closed") return state.liveAudioContext;
 		const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -1273,16 +1396,19 @@ if (typeof document !== "undefined") {
 			playback.port.postMessage({ kind: "config", inputRate: state.livePlaybackSampleRate || 24_000 });
 			playback.connect(context.destination);
 			state.livePlaybackNode = playback;
+			playback.port.onmessage = handleLivePlaybackMetric;
 			state.livePlaybackReady = true;
 		}
 	}
 
 	function applyLiveNoiseGate() {
+		const thresholdDb = Number.isFinite(state.liveNoiseGateDb) ? state.liveNoiseGateDb : -50;
+		state.liveBargeInDetector?.setGateThresholdDb(thresholdDb, !!state.liveNoiseGateEnabled);
 		if (!state.liveCaptureNode) return;
 		state.liveCaptureNode.port.postMessage({
 			kind: "gate",
 			enabled: !!state.liveNoiseGateEnabled,
-			thresholdDb: Number.isFinite(state.liveNoiseGateDb) ? state.liveNoiseGateDb : -50,
+			thresholdDb,
 		});
 	}
 
@@ -1305,22 +1431,49 @@ if (typeof document !== "undefined") {
 		if (state.liveState === "ai-speaking") state.liveState = "listening";
 	}
 
+	function updateLiveReplayButton() {
+		els.replayLive?.classList.toggle("hidden", !state.liveInterruptedReplay.hasReplay());
+	}
+
+	function freezeLiveInterruptedReplay() {
+		if (state.liveInterruptedReplay.freezeInterrupted()) updateLiveReplayButton();
+	}
+
+	async function replayInterruptedLiveAudio() {
+		const replay = state.liveInterruptedReplay.getReplay();
+		if (!replay) return;
+		stopLivePlayback();
+		const context = ensureLiveAudioContext();
+		if (context.state === "suspended") await context.resume().catch(() => {});
+		await ensureLiveWorklets(context);
+		state.liveReplayInProgress = true;
+		setLiveMicEnabled(false);
+		state.livePlaybackNode?.port.postMessage({ kind: "config", inputRate: replay.rate });
+		for (const samples of replay.chunks) {
+			state.livePlaybackNode?.port.postMessage({ kind: "audio", samples }, [samples.buffer]);
+		}
+		state.liveState = "ai-speaking";
+	}
+
 	async function playLiveAudioFrame(data) {
 		const generation = state.livePlaybackGeneration;
 		const bytes = data instanceof Blob ? await data.arrayBuffer() : data;
 		const decoded = decodeLivePcmFrame(bytes);
 		if (!decoded || decoded.samples.length === 0) return;
 		state.liveLastServerSequenceId = Math.max(state.liveLastServerSequenceId, decoded.sequenceId);
+		state.liveInterruptedReplay.capture(decoded.samples, state.livePlaybackSampleRate || 24_000);
 		if (generation !== state.livePlaybackGeneration) return;
 		const context = ensureLiveAudioContext();
 		if (context.state === "suspended") await context.resume().catch(() => {});
 		await ensureLiveWorklets(context);
 		if (generation !== state.livePlaybackGeneration) return;
-
 		if (state.livePlaybackNode) {
 			// Prefer the HF ring-buffer worklet (click-free clear + upsample).
 			const copy = new Float32Array(decoded.samples.length);
 			copy.set(decoded.samples);
+			if (state.liveVoiceMetricsEnabled && state.liveVoiceMetric && !state.liveVoiceMetric.firstPcmEnqueuedClientMs) {
+				state.liveVoiceMetric.firstPcmEnqueuedClientMs = Date.now();
+			}
 			state.livePlaybackNode.port.postMessage({ kind: "audio", samples: copy }, [copy.buffer]);
 			state.liveState = "ai-speaking";
 			return;
@@ -1368,6 +1521,9 @@ if (typeof document !== "undefined") {
 	function closeLiveSocket() {
 		stopLiveCapture({ releaseStream: true });
 		stopLivePlayback();
+		state.liveInterruptedReplay.clear();
+		updateLiveReplayButton();
+		state.liveReplayInProgress = false;
 		if (state.livePlaybackNode) {
 			try { state.livePlaybackNode.disconnect(); } catch {}
 			state.livePlaybackNode = null;
@@ -1486,12 +1642,33 @@ if (typeof document !== "undefined") {
 			state.liveState = "listening";
 			window.clearTimeout(state.liveStableTimer);
 			state.liveStableTimer = window.setTimeout(() => { state.liveReconnectAttempts = 0; }, 30_000);
+			state.liveVoiceMetricsProvider = String(message.provider || message.message || "");
+			state.liveVoiceMetricsModel = String(message.model || "");
+			state.liveVoiceMetricsEnabled = message.voiceMetricsEnabled === true;
 			setStatus(state.recording ? "Live conversation connected — mic is on." : "Live session connected. Tap to turn the mic on.");
 			return;
 		}
+		if (message.type === "voice_metric" && message.event === "upstream_timing") {
+			if (state.liveVoiceMetricsEnabled && state.liveVoiceMetric?.turnId === message.turnId) {
+				state.liveVoiceMetricsProvider = String(message.provider || state.liveVoiceMetricsProvider);
+				state.liveVoiceMetricsModel = String(message.model || state.liveVoiceMetricsModel);
+				Object.assign(state.liveVoiceMetric, {
+					lastPcmSentUpstreamMs: message.lastPcmSentUpstreamMs,
+					firstUpstreamEventMs: message.firstUpstreamEventMs,
+					provider: message.provider,
+					model: message.model,
+				});
+				emitLiveTurnMetric();
+			}
+			return;
+		}
 		if (message.type === "transcript" && message.text) {
-			if (message.role === "user") appendOrUpdateLiveUser(message.text);
-			else appendOrUpdateLiveReply(message.text);
+			if (message.role === "user") {
+				appendOrUpdateLiveUser(message.text);
+			} else {
+				state.liveInterruptedReplay.beginSegment();
+				appendOrUpdateLiveReply(message.text);
+			}
 			return;
 		}
 		if (message.type === "transcript_complete") {
@@ -1501,13 +1678,18 @@ if (typeof document !== "undefined") {
 			} else {
 				state.liveReplyBuffer = "";
 				state.liveAgentMessage = null;
+				state.liveInterruptedReplay.discardCurrent();
 				scheduleLiveTurnSettled();
 			}
 			return;
 		}
 		if (message.type === "interrupt") {
+			freezeLiveInterruptedReplay();
 			stopLivePlayback();
-			state.liveState = "listening";
+			// Keep user-speaking while the interjection is still in progress.
+			if (state.liveState === "ai-speaking" || state.liveState === "processing") {
+				state.liveState = "user-speaking";
+			}
 			return;
 		}
 		if (message.type === "camera_capture") {
@@ -1724,24 +1906,43 @@ if (typeof document !== "undefined") {
 				}
 				state.liveClientSequenceId += 1;
 				socket.send(encodeLiveInt16PcmFrame(state.liveClientSequenceId, int16));
-				// Client-side barge-in: if we hear speech while AI audio is queued, clear + interrupt.
-				let energy = 0;
-				for (let index = 0; index < int16.length; index += 1) {
-					const s = int16[index] / 0x8000;
-					energy += s * s;
-				}
-				const rms = Math.sqrt(energy / int16.length);
+				// Client-side barge-in: adaptive floor + sustained voiced frames.
+				const rms = rmsFromInt16(int16);
 				state.liveMicLevel = rms;
 				const now = Date.now();
 				const aiPlaying = state.liveState === "ai-speaking" || state.livePlaybackSources.size > 0;
-				if (rms > 0.035 && aiPlaying && now - state.liveLastInterruptAt > 750) {
+				const decision = state.liveBargeInDetector.observe({
+					rms,
+					nowMs: now,
+					aiPlaying,
+					muted: false,
+				});
+				if (decision.interrupt) {
 					state.liveLastInterruptAt = now;
+					if (state.liveVoiceMetricsEnabled) state.liveBargeInSpeechOnsetMs = now;
+					freezeLiveInterruptedReplay();
 					stopLivePlayback();
 					state.liveClientSequenceId += 1;
 					socket.send(JSON.stringify({ type: "interrupt", clientSequenceId: state.liveClientSequenceId }));
-				} else if (rms > 0.02) {
 					state.liveState = "user-speaking";
-				} else if (state.liveState === "user-speaking") {
+				} else if (decision.userSpeaking) {
+					state.liveState = "user-speaking";
+				} else if (decision.speechEnded) {
+					if (state.liveVoiceMetricsEnabled) {
+						state.liveVoiceMetricTurnId += 1;
+						state.liveVoiceMetric = {
+							turnId: state.liveVoiceMetricTurnId,
+							speechEndClientMs: now,
+						};
+						state.liveClientSequenceId += 1;
+						socket.send(JSON.stringify({
+							type: "voice_metric",
+							event: "speech_end",
+							turnId: state.liveVoiceMetricTurnId,
+							clientTimeMs: now,
+							clientSequenceId: state.liveClientSequenceId,
+						}));
+					}
 					state.liveState = "listening";
 				}
 			};
@@ -1751,6 +1952,10 @@ if (typeof document !== "undefined") {
 			state.liveCaptureSource = source;
 			state.liveCaptureNode = capture;
 			state.liveCaptureSink = sink;
+			prepareBargeInDetectorForCapture(state.liveBargeInDetector, {
+				enabled: state.liveNoiseGateEnabled,
+				thresholdDb: state.liveNoiseGateDb,
+			});
 			applyLiveNoiseGate();
 			setLiveMicEnabled(true);
 			state.recording = true;
@@ -2047,6 +2252,9 @@ if (typeof document !== "undefined") {
 
 	els.refresh?.addEventListener("click", refreshStatus);
 	els.playReply?.addEventListener("click", playReplyAudio);
+	els.replayLive?.addEventListener("click", () => {
+		void replayInterruptedLiveAudio().catch((error) => setStatus(String(error.message || error), "error"));
+	});
 	els.record?.addEventListener("click", toggleRecording);
 	els.sendText?.addEventListener("click", submitText);
 	els.clearText?.addEventListener("click", () => {
@@ -2294,6 +2502,7 @@ if (typeof document !== "undefined") {
 	loadSettings();
 	syncLockedUi();
 	updateRecordingUi();
+	updateLiveReplayButton();
 	syncDockInset();
 	if (typeof ResizeObserver !== "undefined" && els.dock) {
 		const ro = new ResizeObserver(() => syncDockInset());

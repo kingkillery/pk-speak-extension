@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -34,6 +34,42 @@ test("omp provider passes the prompt to the CLI as a literal argv element via th
 		const text = await collectAgentResponse(provider, evil);
 		const argv = JSON.parse(text);
 		assert.equal(argv[argv.length - 1], evil);
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
+test("omp providers serialize CLI work and reject turns beyond the bounded queue", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-omp-queue-"));
+	const fakeOmpBin = join(tmp, "fake-omp.js");
+	const logPath = join(tmp, "turns.log");
+	writeFileSync(
+		fakeOmpBin,
+		"#!/usr/bin/env node\nconst fs = require('node:fs');\nconst prompt = process.argv.at(-1);\nconst log = process.env.OMP_QUEUE_LOG;\nfs.appendFileSync(log, `start:${prompt}\\n`);\nsetTimeout(() => { fs.appendFileSync(log, `end:${prompt}\\n`); process.stdout.write(prompt); }, 75);\n",
+	);
+	chmodSync(fakeOmpBin, 0o755);
+	try {
+		const provider = createOmpAgentProvider(fakeOmpBin, tmp, {
+			...process.env,
+			AGENT_TURN_TIMEOUT_MS: "10000",
+			OMP_QUEUE_LOG: logPath,
+		});
+		const results = await Promise.allSettled(
+			["one", "two", "three", "four"].map((prompt) => collectAgentResponse(provider, prompt)),
+		);
+		assert.equal(results.filter((result) => result.status === "fulfilled").length, 3);
+		assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+		assert.match(results.find((result) => result.status === "rejected").reason.message, /busy/);
+
+		let active = 0;
+		let maxActive = 0;
+		for (const line of readFileSync(logPath, "utf8").trim().split("\n")) {
+			if (line.startsWith("start:")) active += 1;
+			if (line.startsWith("end:")) active -= 1;
+			maxActive = Math.max(maxActive, active);
+		}
+		assert.equal(maxActive, 1);
+		assert.equal(active, 0);
 	} finally {
 		rmSync(tmp, { recursive: true, force: true });
 	}

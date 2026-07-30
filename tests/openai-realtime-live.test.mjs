@@ -9,6 +9,7 @@ import {
 	DEFAULT_SPEECH_TO_SPEECH_URL,
 	isOpenAiRealtimeLiveConfigured,
 	mapRealtimeToolsToOpenAi,
+	resolveOpenAiRealtimeApiKey,
 	resolveOpenAiRealtimeConnectUrl,
 	resamplePcm16Mono,
 } from "../dist/openai-realtime-live.js";
@@ -28,8 +29,10 @@ async function startHandshakeServer() {
 	await once(server, "listening");
 	const sockets = [];
 	const messages = [];
-	server.on("connection", (socket) => {
+	const requests = [];
+	server.on("connection", (socket, request) => {
 		sockets.push(socket);
+		requests.push(request);
 		socket.send(JSON.stringify({ type: "session.created", session: { id: "sess_test" } }));
 		socket.on("message", (raw) => {
 			let message;
@@ -42,7 +45,7 @@ async function startHandshakeServer() {
 	});
 	const address = server.address();
 	assert.ok(address && typeof address === "object");
-	return { server, sockets, messages, url: `ws://127.0.0.1:${address.port}/v1/realtime` };
+	return { server, sockets, messages, requests, url: `ws://127.0.0.1:${address.port}/v1/realtime` };
 }
 
 test("resolveOpenAiRealtimeConnectUrl accepts full realtime URLs and bare hosts", () => {
@@ -60,6 +63,54 @@ test("resolveOpenAiRealtimeConnectUrl accepts full realtime URLs and bare hosts"
 		resolveOpenAiRealtimeConnectUrl({ PI_SPEAK_S2S_URL: "s2s.example:8080" }),
 		"wss://s2s.example:8080/v1/realtime",
 	);
+	assert.equal(
+		resolveOpenAiRealtimeConnectUrl({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime" }),
+		"wss://hf.example/v1/realtime",
+	);
+});
+test("realtime credentials remain host-only and are bound to the selected endpoint", () => {
+	assert.equal(resolveOpenAiRealtimeApiKey({
+		PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime",
+		OPENAI_API_KEY: "openai-key",
+		HF_TOKEN: "hf-token",
+	}), "hf-token");
+	assert.equal(resolveOpenAiRealtimeApiKey({
+		PI_SPEAK_OPENAI_REALTIME_URL: "wss://api.openai.com/v1/realtime",
+		OPENAI_API_KEY: "openai-key",
+		HF_TOKEN: "hf-token",
+	}), "openai-key");
+	assert.equal(resolveOpenAiRealtimeApiKey({
+		PI_SPEAK_OPENAI_REALTIME_URL: "wss://custom.example/v1/realtime",
+		OPENAI_API_KEY: "openai-key",
+		HF_TOKEN: "hf-token",
+	}), undefined);
+	assert.equal(resolveOpenAiRealtimeApiKey({
+		PI_SPEAK_OPENAI_REALTIME_URL: "wss://custom.example/v1/realtime",
+		PI_SPEAK_OPENAI_REALTIME_KEY: "endpoint-key",
+	}), "endpoint-key");
+});
+test("adapter sends only the bearer credential bound to the selected endpoint", async () => {
+	const mock = await startHandshakeServer();
+	const env = {
+		PI_SPEAK_HF_REALTIME_URL: mock.url,
+		OPENAI_API_KEY: "openai-key",
+		HF_TOKEN: "hf-token",
+	};
+	let session;
+	try {
+		const connectUrl = resolveOpenAiRealtimeConnectUrl(env);
+		session = await connectOpenAiRealtimeLive(
+			{ connectUrl, apiKey: resolveOpenAiRealtimeApiKey(env, connectUrl) },
+			{},
+			{ onOutbound: () => {} },
+		);
+		await waitFor(() => mock.requests.length === 1);
+		assert.equal(mock.requests[0].headers.authorization, "Bearer hf-token");
+	} finally {
+		session?.close();
+		for (const socket of mock.server.clients) socket.terminate();
+		await new Promise((resolve) => mock.server.close(resolve));
+	}
 });
 test("official OpenAI URL carries a model and 16 kHz client PCM is resampled", () => {
 	assert.equal(
@@ -182,9 +233,15 @@ test("resolveLiveBackendKind defaults to HF speech-to-speech when an S2S URL is 
 	assert.equal(resolveLiveBackendKind({ SPEECH_TO_SPEECH_URL: "ws://localhost:8765" }), "openai-realtime");
 	assert.equal(resolveLiveBackendKind({ PI_SPEAK_S2S_URL: "s2s.example" }), "openai-realtime");
 	assert.equal(resolveLiveBackendKind({ PI_SPEAK_OPENAI_REALTIME_URL: "wss://x/v1/realtime" }), "openai-realtime");
+	assert.equal(resolveLiveBackendKind({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime" }), "openai-realtime");
+	assert.equal(resolveLiveBackendKind({ HF_REALTIME_URL: "wss://hf.example/v1/realtime" }), "openai-realtime");
 	// Explicit gemini always wins, even with an S2S URL configured.
 	assert.equal(
 		resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "gemini", SPEECH_TO_SPEECH_URL: "ws://localhost:8765" }),
+		"gemini",
+	);
+	assert.equal(
+		resolveLiveBackendKind({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime", PI_SPEAK_LIVE_BACKEND: "gemini" }),
 		"gemini",
 	);
 	// An unrecognized backend value must not suppress URL-based S2S selection.
@@ -205,4 +262,67 @@ test("reconnect policy keeps Gemini resumption exclusive to gemini kind", () => 
 	const kind = resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "hf" });
 	assert.equal(kind, "openai-realtime");
 	assert.equal(liveBackendSupportsResumption(kind), false);
+});
+
+test("adapter sends explicit model and semantic turn-detection configuration", async () => {
+	const mock = await startHandshakeServer();
+	let session;
+	try {
+		session = await connectOpenAiRealtimeLive(
+			{
+				connectUrl: mock.url,
+				model: "vendor/realtime-model",
+				turnDetection: { kind: "semantic_vad", eagerness: "low" },
+			},
+			{},
+			{ onOutbound: () => {} },
+		);
+		await waitFor(() => mock.messages.some((message) => message.type === "session.update"));
+		const update = mock.messages.find((message) => message.type === "session.update");
+		assert.equal(update.session.model, "vendor/realtime-model");
+		assert.deepEqual(update.session.audio.input.turn_detection, {
+			type: "semantic_vad",
+			eagerness: "low",
+		});
+	} finally {
+		session?.close();
+		for (const socket of mock.server.clients) socket.terminate();
+		await new Promise((resolve) => mock.server.close(resolve));
+	}
+});
+
+test("server speech barge-in cancels and truncates heard assistant audio without clearing user input", async () => {
+	const mock = await startHandshakeServer();
+	const outbound = [];
+	let session;
+	try {
+		session = await connectOpenAiRealtimeLive(
+			{ connectUrl: mock.url },
+			{},
+			{ onOutbound: (event) => outbound.push(event) },
+		);
+		await waitFor(() => mock.sockets.length === 1);
+		const socket = mock.sockets[0];
+		socket.send(JSON.stringify({ type: "response.created", response: { id: "resp_1" } }));
+		socket.send(JSON.stringify({
+			type: "response.output_audio.delta",
+			item_id: "item_1",
+			delta: Buffer.alloc(4_800).toString("base64"),
+		}));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		socket.send(JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+
+		await waitFor(() => mock.messages.some((message) => message.type === "conversation.item.truncate"));
+		assert.ok(mock.messages.some((message) => message.type === "response.cancel"));
+		const truncate = mock.messages.find((message) => message.type === "conversation.item.truncate");
+		assert.equal(truncate.item_id, "item_1");
+		assert.equal(truncate.content_index, 0);
+		assert.ok(truncate.audio_end_ms >= 0 && truncate.audio_end_ms <= 100);
+		assert.equal(mock.messages.some((message) => message.type === "input_audio_buffer.clear"), false);
+		assert.ok(outbound.some((event) => event.kind === "interrupt"));
+	} finally {
+		session?.close();
+		for (const socket of mock.server.clients) socket.terminate();
+		await new Promise((resolve) => mock.server.close(resolve));
+	}
 });
