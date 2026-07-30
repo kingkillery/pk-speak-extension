@@ -1765,8 +1765,15 @@ export function buildRealtimeTools(nonBlockingEnabled: boolean) {
 
 // RFC 6455 caps close reasons at 123 UTF-8 bytes; the ws package throws on longer values.
 function toWsCloseReason(message: string): string {
-	let reason = message;
-	while (Buffer.byteLength(reason, "utf8") > 123) reason = reason.slice(0, -1);
+	if (Buffer.byteLength(message, "utf8") <= 123) return message;
+	let reason = "";
+	let bytes = 0;
+	for (const char of message) {
+		const charBytes = Buffer.byteLength(char, "utf8");
+		if (bytes + charBytes > 123) break;
+		reason += char;
+		bytes += charBytes;
+	}
 	return reason;
 }
 
@@ -2143,7 +2150,7 @@ async function startNewSession(
 		if (activeSession.configurationError) {
 			activeSessions.delete(sessionId);
 			try { geminiSession.close(); } catch {}
-			ws.close(1008, activeSession.configurationError);
+			ws.close(1008, toWsCloseReason(activeSession.configurationError));
 			return;
 		}
 
@@ -2152,7 +2159,8 @@ async function startNewSession(
 	} catch (error: any) {
 		activeSessions.delete(sessionId);
 		const upstreamLabel = liveBackendKind === "openai-realtime" ? "speech-to-speech upstream" : "Gemini Live";
-		const message = `Failed to connect to ${upstreamLabel}: ${error.message}`;
+		const detail = error instanceof Error ? error.message : String(error ?? "");
+		const message = `Failed to connect to ${upstreamLabel}: ${detail}`;
 		// Full detail travels as a JSON error event; the close reason stays bounded.
 		if (ws.readyState === WebSocket.OPEN) {
 			try { ws.send(JSON.stringify({ type: "error", message })); } catch {}
