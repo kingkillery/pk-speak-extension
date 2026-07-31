@@ -4,6 +4,7 @@
  */
 
 import { WebSocket as WsSocket } from "ws";
+import { hasConfiguredS2sUrl } from "./live-backend.js";
 import type {
 	LiveAudioInput,
 	LiveBackendConnectOptions,
@@ -12,6 +13,12 @@ import type {
 	LiveImageInput,
 } from "./live-backend.js";
 import { buildOpenAiTurnDetection, type RealtimeTurnDetectionProfile } from "./realtime-turn-detection.js";
+
+/**
+ * Default connect URL of the HF speech-to-speech server
+ * (`speech-to-speech` CLI serves ws://localhost:8765/v1/realtime).
+ */
+export const DEFAULT_SPEECH_TO_SPEECH_URL = "ws://localhost:8765/v1/realtime";
 
 // tsconfig includes DOM, so the bare `WebSocket` name is the browser type
 // (1-arg ctor). The `ws` package accepts Node client options as a 2nd arg —
@@ -52,7 +59,7 @@ export function resolveOpenAiRealtimeConnectUrl(env: NodeJS.ProcessEnv = process
 		env.PI_SPEAK_S2S_URL?.trim() ||
 		env.SPEECH_TO_SPEECH_URL?.trim() ||
 		"";
-	if (!direct) return "";
+	if (!direct) return DEFAULT_SPEECH_TO_SPEECH_URL;
 	let resolved: string;
 	if (/\/v1\/realtime(\?|$)/i.test(direct)) {
 		resolved = direct;
@@ -71,8 +78,9 @@ export function resolveOpenAiRealtimeConnectUrl(env: NodeJS.ProcessEnv = process
 	return resolved;
 }
 
+/** True only when an S2S URL is explicitly set; the localhost default does not count. */
 export function isOpenAiRealtimeLiveConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
-	return resolveOpenAiRealtimeConnectUrl(env).length > 0;
+	return hasConfiguredS2sUrl(env);
 }
 
 export function resolveOpenAiRealtimeApiKey(

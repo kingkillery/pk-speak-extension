@@ -6,6 +6,7 @@ import { once } from "node:events";
 import assert from "node:assert/strict";
 import {
 	connectOpenAiRealtimeLive,
+	DEFAULT_SPEECH_TO_SPEECH_URL,
 	isOpenAiRealtimeLiveConfigured,
 	mapRealtimeToolsToOpenAi,
 	resolveOpenAiRealtimeApiKey,
@@ -48,7 +49,8 @@ async function startHandshakeServer() {
 }
 
 test("resolveOpenAiRealtimeConnectUrl accepts full realtime URLs and bare hosts", () => {
-	assert.equal(resolveOpenAiRealtimeConnectUrl({}), "");
+	assert.equal(resolveOpenAiRealtimeConnectUrl({}), DEFAULT_SPEECH_TO_SPEECH_URL);
+	assert.equal(DEFAULT_SPEECH_TO_SPEECH_URL, "ws://localhost:8765/v1/realtime");
 	assert.equal(
 		resolveOpenAiRealtimeConnectUrl({ PI_SPEAK_OPENAI_REALTIME_URL: "wss://example.test/v1/realtime?session_token=abc" }),
 		"wss://example.test/v1/realtime?session_token=abc",
@@ -119,7 +121,7 @@ test("official OpenAI URL carries a model and 16 kHz client PCM is resampled", (
 	assert.equal(resamplePcm16Mono(pcm16k, 16_000, 24_000).length, 480 * 2);
 });
 
-test("isOpenAiRealtimeLiveConfigured tracks URL presence", () => {
+test("isOpenAiRealtimeLiveConfigured tracks explicit URL presence only", () => {
 	assert.equal(isOpenAiRealtimeLiveConfigured({}), false);
 	assert.equal(isOpenAiRealtimeLiveConfigured({ SPEECH_TO_SPEECH_URL: "wss://x/v1/realtime" }), true);
 });
@@ -225,11 +227,29 @@ test("OpenAI adapter closes a socket when connect times out", async () => {
 	}
 });
 
-test("resolveLiveBackendKind uses a configured compatible endpoint and otherwise falls back to Gemini", () => {
+test("resolveLiveBackendKind defaults to HF speech-to-speech when an S2S URL is set", () => {
 	assert.equal(resolveLiveBackendKind({}), "gemini");
 	assert.equal(resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "openai-realtime" }), "openai-realtime");
+	assert.equal(resolveLiveBackendKind({ SPEECH_TO_SPEECH_URL: "ws://localhost:8765" }), "openai-realtime");
+	assert.equal(resolveLiveBackendKind({ PI_SPEAK_S2S_URL: "s2s.example" }), "openai-realtime");
+	assert.equal(resolveLiveBackendKind({ PI_SPEAK_OPENAI_REALTIME_URL: "wss://x/v1/realtime" }), "openai-realtime");
 	assert.equal(resolveLiveBackendKind({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime" }), "openai-realtime");
-	assert.equal(resolveLiveBackendKind({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime", PI_SPEAK_LIVE_BACKEND: "gemini" }), "gemini");
+	assert.equal(resolveLiveBackendKind({ HF_REALTIME_URL: "wss://hf.example/v1/realtime" }), "openai-realtime");
+	// Explicit gemini always wins, even with an S2S URL configured.
+	assert.equal(
+		resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "gemini", SPEECH_TO_SPEECH_URL: "ws://localhost:8765" }),
+		"gemini",
+	);
+	assert.equal(
+		resolveLiveBackendKind({ PI_SPEAK_HF_REALTIME_URL: "wss://hf.example/v1/realtime", PI_SPEAK_LIVE_BACKEND: "gemini" }),
+		"gemini",
+	);
+	// An unrecognized backend value must not suppress URL-based S2S selection.
+	assert.equal(
+		resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "typo", SPEECH_TO_SPEECH_URL: "ws://localhost:8765" }),
+		"openai-realtime",
+	);
+	assert.equal(resolveLiveBackendKind({ PI_SPEAK_LIVE_BACKEND: "typo" }), "gemini");
 });
 
 

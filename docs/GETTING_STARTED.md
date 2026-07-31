@@ -119,7 +119,7 @@ Create and select named sessions, then inspect the compact voice lanes:
 
 ## 8. Live voice quick-start
 
-Live mode is full-duplex conversation over `/v1/live`. The default upstream is **Gemini Live**; an OpenAI-Realtime / HF speech-to-speech backend is optional.
+Live mode is full-duplex conversation over `/v1/live`. The default upstream is the **HF speech-to-speech** server (OpenAI-Realtime wire) whenever an S2S URL (`SPEECH_TO_SPEECH_URL`, `PI_SPEAK_S2S_URL`, or `PI_SPEAK_OPENAI_REALTIME_URL`) or `PI_SPEAK_LIVE_BACKEND=hf|openai-realtime|s2s` is configured — with the URL defaulting to the local server at `ws://localhost:8765/v1/realtime`. **Gemini Live** is the fallback when nothing S2S-related is set; explicit `PI_SPEAK_LIVE_BACKEND=gemini` always selects Gemini.
 
 ### Terminal (desktop orb)
 
@@ -132,7 +132,7 @@ That starts the gateway if needed and opens the **orb companion** at `http://127
 - Full remote (sessions, hub, workspace): `http://127.0.0.1:<port>/app/?mode=live`
 - Orb only: `http://127.0.0.1:<port>/orb/?mode=live&autoconnect=1`
 
-### Gemini credentials (default backend)
+### Gemini credentials (fallback backend)
 
 Developer API:
 
@@ -162,10 +162,12 @@ Keyless CI / local simulation:
 $env:PI_SPEAK_GEMINI_BACKEND = "simulated"
 ```
 
-### Hugging Face-compatible realtime voice backend
+### Default OpenAI-Realtime / HF S2S backend
+
+The HF speech-to-speech server (https://github.com/huggingface/speech-to-speech) is the default S2S upstream. Setting any S2S URL (`PI_SPEAK_HF_REALTIME_URL`, `HF_REALTIME_URL`, `PI_SPEAK_OPENAI_REALTIME_URL`, `SPEECH_TO_SPEECH_URL`, or `PI_SPEAK_S2S_URL`) selects it automatically — no `PI_SPEAK_LIVE_BACKEND` needed — and with the backend selected but no URL set, the connect URL defaults to the local server at `ws://localhost:8765/v1/realtime` (run `speech-to-speech` locally and `/voice realtime` just works). Gemini Live remains the fallback when nothing S2S-related is configured; explicit `PI_SPEAK_LIVE_BACKEND=gemini` always wins.
 
 ```powershell
-$env:PI_SPEAK_HF_REALTIME_URL = "wss://<host>/v1/realtime?session_token=..."
+$env:PI_SPEAK_HF_REALTIME_URL = "wss://<host>/v1/realtime?session_token=..."  # optional; defaults to ws://localhost:8765/v1/realtime
 $env:HF_TOKEN = "<host-only token>" # only when the selected endpoint requires bearer auth
 # A configured compatible endpoint is selected automatically. Set this only to override:
 # $env:PI_SPEAK_LIVE_BACKEND = "gemini" # or openai-realtime / hf / s2s

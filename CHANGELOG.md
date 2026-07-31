@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-No changes yet.
+Changed:
+
+- HF speech-to-speech (https://github.com/huggingface/speech-to-speech) is now the **default** Live S2S upstream: `resolveLiveBackendKind` selects `openai-realtime` whenever an S2S URL (`PI_SPEAK_HF_REALTIME_URL` / `HF_REALTIME_URL` / `PI_SPEAK_OPENAI_REALTIME_URL` / `SPEECH_TO_SPEECH_URL` / `PI_SPEAK_S2S_URL`) is configured — even alongside an unrecognized `PI_SPEAK_LIVE_BACKEND` value; the connect URL itself now defaults to the local HF server (`ws://localhost:8765/v1/realtime`, exported as `DEFAULT_SPEECH_TO_SPEECH_URL`) so `PI_SPEAK_LIVE_BACKEND=hf` alone works against a locally running `speech-to-speech` server. Gemini Live remains the fallback when nothing S2S-related is configured, and an explicit `PI_SPEAK_LIVE_BACKEND=gemini` always wins. `GET /v1/live/config` now reports the resolved `backend`, a failed connect on the default URL explains how to start the local server or point at a remote one, and Live WebSocket close reasons are bounded to the RFC 6455 123-byte cap (full detail travels as a JSON `error` event).
 
 ## 0.2.13 - 2026-07-29
 
