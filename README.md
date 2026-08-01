@@ -788,7 +788,7 @@ Auth and transport:
 
 - All `/v1/*` routes require the install token. The remote reads it from `%LOCALAPPDATA%\pi-speak\http-token` (same file the tray uses) and sends it as `X-Pi-Speak-Token`. If the file cannot be read from the Unified Remote sandbox, paste the token into `CONFIG.token` at the top of `remote.lua` (`/remote token` prints it).
 - Mutating routes are called with `POST`; status routes stay `GET`.
-- The **Sessions** tab drives `/v1/sessions/live`: refresh lists Herdr agent sessions, tapping a session focuses it, and prompt / resume send the current revision plus an `X-Pi-Speak-Idempotency-Key` so phone retries cannot double-submit.
+- The **Sessions** tab drives `/v1/sessions/live`: refresh lists Herdr agent sessions (`*` = focused, `>` = selected), tapping selects, and the Focus / Prompt / Resume buttons act on the selection, sending the current revision plus an `X-Pi-Speak-Idempotency-Key` so phone retries cannot double-submit.
 
 ## Environment Variables
 

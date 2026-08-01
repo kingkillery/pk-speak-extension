@@ -92,8 +92,8 @@ local function load_token()
 		end
 	end
 
-	cached_token = "";
-	return cached_token;
+	-- Do not cache the empty result: the token file may appear after first use.
+	return "";
 end
 
 local function get_body(resp)
@@ -121,7 +121,7 @@ local function get_status_code(resp)
 	return 0;
 end
 
-local function request_json(method, path, body)
+local function request_json(method, path, body, extra_headers)
 	local token = load_token();
 	if token == "" then
 		return nil, "No auth token. Expected %LOCALAPPDATA%\\pi-speak\\http-token or CONFIG.token.";
@@ -131,6 +131,11 @@ local function request_json(method, path, body)
 		["X-Pi-Speak-Token"] = token,
 		["Content-Type"] = "application/json"
 	};
+	if extra_headers then
+		for key, value in pairs(extra_headers) do
+			headers[key] = value;
+		end
+	end
 
 	local options = {
 		url = CONFIG.base_url .. path,
@@ -246,15 +251,17 @@ local function call_endpoint(method, path, on_success, body)
 	return payload;
 end
 
+math.randomseed(os.time() + math.floor(os.clock() * 1000));
+local idempotency_counter = 0;
 local function new_idempotency_key()
-	math.randomseed(os.time() * 1000 + math.floor(os.clock() * 1000));
-	return string.format("ur-%d-%06x", os.time(), math.random(0, 0xffffff));
+	idempotency_counter = idempotency_counter + 1;
+	return string.format("ur-%d-%04x-%06x", os.time(), idempotency_counter % 0x10000, math.random(0, 0xffffff));
 end
 
 local function update_session_list()
 	local children = {};
 	for _, session in ipairs(live_sessions) do
-		local marker = session.focused and "* " or "";
+		local marker = session.focused and "* " or (session.id == selected_session_id and "> " or "");
 		local label = marker .. "[" .. tostring(session.provider or "?") .. "] " ..
 			tostring(session.displayName or session.id) ..
 			" (" .. tostring(session.status or "?") .. ")";
@@ -308,7 +315,7 @@ local function session_action(session, action, extra_body)
 		set_status("Select a session first.");
 		return nil;
 	end
-	if action ~= "focus" and not (session.capabilities and session.capabilities[action]) then
+	if not (session.capabilities and session.capabilities[action]) then
 		set_status("Session does not support " .. action .. ".");
 		return nil;
 	end
@@ -316,35 +323,13 @@ local function session_action(session, action, extra_body)
 	local body = extra_body or {};
 	body.expectedRevision = session.revision;
 
-	local path = "/v1/sessions/live/" .. http.urlencode(session.id) .. "/" .. action;
-	local headers_key = new_idempotency_key();
-	-- request_json sets auth/json headers; idempotency key is required for mutations,
-	-- so issue this call with an explicit header set.
-	local token = load_token();
-	local options = {
-		url = CONFIG.base_url .. path,
-		headers = {
-			["X-Pi-Speak-Token"] = token,
-			["Content-Type"] = "application/json",
-			["X-Pi-Speak-Idempotency-Key"] = headers_key
-		},
-		body = data.tojson(body)
-	};
-	local ok, resp = pcall(function ()
-		return http.post(options);
-	end);
-	if not ok then
-		set_status("Session " .. action .. " failed: " .. tostring(resp));
-		return nil;
-	end
-
-	local text = get_body(resp);
-	local parsed_ok, payload = pcall(function ()
-		return data.fromjson(text);
-	end);
-	if not parsed_ok or type(payload) ~= "table" or payload.ok == false then
-		local message = type(payload) == "table" and tostring(payload.error or "request failed") or "invalid response";
-		set_status("Session " .. action .. " failed: " .. message);
+	-- Session ids are s_<24 hex> (sessionIdForAgent); no URL encoding needed.
+	local path = "/v1/sessions/live/" .. session.id .. "/" .. action;
+	local payload, err = request_json("POST", path, body, {
+		["X-Pi-Speak-Idempotency-Key"] = new_idempotency_key()
+	});
+	if not payload then
+		set_status("Session " .. action .. " failed: " .. err);
 		return nil;
 	end
 
@@ -459,7 +444,8 @@ actions.select_session = function (index)
 		return;
 	end
 	selected_session_id = session.id;
-	session_action(session, "focus");
+	update_session_list();
+	set_status("Selected " .. tostring(session.displayName or session.id) .. ". Use Focus, Prompt, or Resume.");
 end
 
 actions.session_focus = function ()
