@@ -1,5 +1,5 @@
 meta.name: Pi Speak
 meta.author: Codex
-meta.description: Control the Pi Speak extension over its local HTTP API.
+meta.description: Control Pi Speak and Herdr live sessions over the authenticated local HTTP API.
 meta.platform: windows
-meta.tags: pi-speak,voice,http,telegram,custom
+meta.tags: pi-speak,herdr,voice,http,telegram,sessions,custom

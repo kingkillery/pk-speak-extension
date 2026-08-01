@@ -24,6 +24,23 @@
 				<button text="Refresh" ontap="refresh" />
 			</row>
 		</tab>
+		<tab text="Sessions">
+			<row weight="wrap">
+				<button text="Refresh" ontap="sessions_refresh" />
+				<button text="Focus" ontap="session_focus" />
+				<button text="Resume" ontap="session_resume" />
+			</row>
+			<row>
+				<list id="sessionlist" ontap="select_session" />
+			</row>
+			<row weight="wrap">
+				<text id="sessionprompt" hint="Prompt for the selected session..." onchange="set_session_prompt" multiLine="true" />
+			</row>
+			<row weight="wrap">
+				<button text="Send Prompt" ontap="session_prompt" />
+				<button text="Clear" ontap="clear_session_prompt" />
+			</row>
+		</tab>
 		<tab text="Control">
 			<row>
 				<button text="Mono On" ontap="mono_on" />

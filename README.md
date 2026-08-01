@@ -188,6 +188,8 @@ By default the Workspace tab is rooted at the agent working directory (so the fi
 
 For real phone use, prefer an HTTPS URL through Tailscale Serve or a tunnel. If the phone is paired over Bluetooth networking/PAN instead, use `/remote setup bluetooth`; the Android app treats that as a Bluetooth local-link profile and does not require Tailscale.
 
+The browser **PK Sessions** page at `/hub/` is the live Herdr workspace: it lists Herdr-owned agent sessions, shows a bounded recent-output tail with live state updates, and provides semantic **Send Prompt**, **Focus**, and **Resume** actions. Mutations require an idempotency key and the current Herdr revision, so a phone retry after a network drop cannot submit the same prompt twice.
+
 The native Android app matches the web remote's control surface: session dashboard with rename / wake-alias / archive / remove, an OPS pane with the routing target picker (`/v1/route`), `PK1`/`PK2` route slots (`/v1/sessions/slots`), discovered agents (`/v1/agents`), a live session-event feed (`/v1/events`), and a workspace file browser with a read-only viewer (`/v1/workspace/file`).
 
 The Agent Hub tab's **Tasks** pane is a portal onto the same oh-my-pk background lanes, but hierarchical and actionable instead of flat and read-only: it lists each lane's subagents (`GET /v1/herdr/agents`), lets you send a message straight into a lane (`POST /v1/herdr/agent/:id/chat`) with a live transcript stream (`GET /v1/herdr/stream/:id`), archive a lane with a two-step confirm (`POST /v1/herdr/agent/:id/kill`), and launch a brand-new task anywhere with a free-form prompt/model/provider (`POST /v1/sessions/launch`) instead of only the fixed "Launch Hub" / "Launch Colab" presets. The e-ink (Boox) build exposes the same launcher and per-lane chat/archive controls, minus the live transcript stream (EPD panels ghost badly under frequent partial redraws, so lane detail there refreshes on the same periodic poll as the rest of the Hub peek).
@@ -695,16 +697,16 @@ GET  /v1/audio/:id
 
 ### Auth
 
-Local bypass applies only to true localhost requests:
-
-- `localhost`
-- `127.0.0.1`
-- `::1`
-
-Remote clients must send one of:
+Protected routes require one of:
 
 - `Authorization: Bearer <token>`
 - `X-Pi-Speak-Token: <token>`
+
+This includes localhost. A loopback socket is not sufficient proof of locality because Tailscale Serve, Funnel, and other reverse proxies also reach backends over loopback. The desktop server and tray therefore open `/connect?token=...` themselves.
+
+A direct peer on the same tailnet needs no separate Pi Speak token. The gateway accepts the connection only after `tailscale whois --json` verifies that the socket address belongs to that peer. Shared external nodes, Funnel ingress, ordinary LAN addresses, and failed daemon lookups remain token-gated. This applies to both HTTP and `/v1/live` WebSocket connections.
+
+Tailscale Serve terminates the peer connection before proxying to loopback, so the backend cannot independently attest the proxy. Serve identity-header trust is off by default. Set `PI_SPEAK_TRUST_TAILSCALE_SERVE_PROXY=1` only when the gateway port is reachable exclusively through Tailscale Serve and Funnel is disabled; Funnel-marked requests are always token-gated.
 
 Query-string token auth is reserved for:
 
@@ -774,12 +776,19 @@ What it is good at:
 - switching providers
 - requesting the Telegram pair code
 - sending short text turns
+- listing Herdr live sessions and sending focus / prompt / resume actions
 
 What it is not good at:
 
 - full remote voice capture
 - browser-style audio playback
 - low-latency conversational audio
+
+Auth and transport:
+
+- All `/v1/*` routes require the install token. The remote reads it from `%LOCALAPPDATA%\pi-speak\http-token` (same file the tray uses) and sends it as `X-Pi-Speak-Token`. If the file cannot be read from the Unified Remote sandbox, paste the token into `CONFIG.token` at the top of `remote.lua` (`/remote token` prints it).
+- Mutating routes are called with `POST`; status routes stay `GET`.
+- The **Sessions** tab drives `/v1/sessions/live`: refresh lists Herdr agent sessions, tapping a session focuses it, and prompt / resume send the current revision plus an `X-Pi-Speak-Idempotency-Key` so phone retries cannot double-submit.
 
 ## Environment Variables
 
@@ -947,6 +956,7 @@ PI_SPEAK_HTTP_TOKEN=...
 PI_SPEAK_HTTP_AUDIO_TTL_MS=600000
 PI_SPEAK_HTTP_AUDIO_CLEANUP_MS=30000
 PI_SPEAK_HTTP_ALLOWED_ORIGINS=https://your-tailnet-host,https://your-tunnel-host
+PI_SPEAK_TRUST_TAILSCALE_SERVE_PROXY=0
 PI_SPEAK_HTTP_TIMEOUT_MS=180000
 PI_SPEAK_HTTP_TEXT_BODY_LIMIT_BYTES=65536
 PI_SPEAK_HTTP_VOICE_BODY_LIMIT_BYTES=26214400
@@ -1023,7 +1033,9 @@ npm test
 Current automated coverage includes:
 
 - non-local auth enforcement
-- localhost auth bypass
+- localhost proxy and Funnel auth enforcement
+- daemon-verified same-tailnet HTTP and WebSocket access
+- shared-node rejection
 - body-size rejection
 - voice content-type rejection
 - rate limiting
