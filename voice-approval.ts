@@ -79,8 +79,12 @@ export function createApprovalRegistry(now: () => number = Date.now) {
 					clear();
 				}
 			}, timeoutMs);
-			// Don't keep the event loop alive just for the timeout.
-			(timer as { unref?: () => void }).unref?.();
+			// NOTE: intentionally ref'd. A pending approval means an operator
+			// decision is genuinely awaited; unref() let the event loop drain
+			// when this was the only pending handle, so the onTimeout resolve
+			// never fired and the request hung forever (confirmed by the
+			// voice-approval tests). Declining on timeout is a real safety
+			// guard that must run.
 		});
 	};
 
