@@ -75,6 +75,55 @@ test("omp providers serialize CLI work and reject turns beyond the bounded queue
 	}
 });
 
+test("omp timeout retains its serialization slot until the child close event", async () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-omp-timeout-close-"));
+	const fakeOmpBin = join(tmp, "fake-omp.js");
+	const logPath = join(tmp, "turns.log");
+	writeFileSync(
+		fakeOmpBin,
+		[
+			"#!/usr/bin/env node",
+			"const fs = require('node:fs');",
+			"const { spawn } = require('node:child_process');",
+			"const prompt = process.argv.at(-1);",
+			"const log = process.env.OMP_QUEUE_LOG;",
+			"fs.appendFileSync(log, `start:${prompt}\\n`);",
+			"if (prompt === 'one') {",
+			"  const marker = \"const fs = require('node:fs'); setTimeout(() => fs.appendFileSync(process.env.OMP_QUEUE_LOG, 'close-ready:one\\\\n'), 650);\";",
+			"  const descendant = spawn(process.execPath, ['-e', marker], { detached: true, stdio: ['ignore', process.stdout, process.stderr] });",
+			"  descendant.unref();",
+			"  process.exit(0);",
+			"}",
+			"process.stdout.write(prompt);",
+		].join("\n"),
+	);
+	chmodSync(fakeOmpBin, 0o755);
+	try {
+		const provider = createOmpAgentProvider(fakeOmpBin, tmp, {
+			...process.env,
+			AGENT_TURN_TIMEOUT_MS: "250",
+			OMP_QUEUE_LOG: logPath,
+		});
+		const results = await Promise.allSettled([
+			collectAgentResponse(provider, "one"),
+			collectAgentResponse(provider, "two"),
+		]);
+		await new Promise((resolve) => setTimeout(resolve, 750));
+
+		assert.equal(results[0].status, "rejected");
+		assert.match(results[0].reason.message, /timed out/);
+		assert.equal(results[1].status, "fulfilled");
+		assert.equal(results[1].value, "two");
+		assert.deepEqual(readFileSync(logPath, "utf8").trim().split("\n"), [
+			"start:one",
+			"close-ready:one",
+			"start:two",
+		]);
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
 test("omp resume provider rejects on a failing CLI — feeds runCodingAgentTurn's onPrimaryFailure (H3)", async () => {
 	// A bogus omp binary makes runCli reject (spawn error or non-zero exit), which
 	// propagates out of collectAgentResponse. This is the real reject->throw chain

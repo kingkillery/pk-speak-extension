@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { ControlServer, type ControlActionResult, type ControlServerStatus, type RemoteSlashCommand, type SessionResumePayload } from "./control-server.js";
-import { applyPiSpeakSetupConfig, loadPiSpeakSetupConfig, resolveTelegramBotToken, savePiSpeakSetupConfig } from "./setup-config.js";
+import { applyPiSpeakSetupConfig, getPiSpeakConfigDir, loadPiSpeakSetupConfig, resolveTelegramBotToken, savePiSpeakSetupConfig } from "./setup-config.js";
 import { TelegramPhoneBridge, type PhoneBridgeState } from "./phone-bridge.js";
 import { collectAgentResponse, resolveAgentProviderConfig, type AgentProvider } from "./agent-provider.js";
 import { createInitialAgentProviders, createOmpResumeProvider, createTurnAgentProvider } from "./agent-provider-factory.js";
@@ -32,6 +32,7 @@ import { enrichDashboardWithWorkspaces, normalizeArchivePath, type SessionDashbo
 import { loadPersistedSessionRouting, persistSessionRouting } from "./session-routing-store.js";
 import { OmpSelectionStore } from "./omp-selection.js";
 import { spawnDetached } from "./spawn-shim.js";
+import { HubTaskService, JsonHubTaskRepository } from "./herdr-task-service.js";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath, sep as pathSep } from "node:path";
@@ -1032,6 +1033,16 @@ function archiveOrRecoverSession(sessionPath: string, action: "archive" | "recov
 }
 
 provider = createAgentProvider();
+const hubTaskService = new HubTaskService(
+	new JsonHubTaskRepository(
+		process.env.PI_SPEAK_HERDR_TASK_STORE?.trim()
+			|| join(getPiSpeakConfigDir(), "herdr", "hub-tasks.json"),
+	),
+	[{
+		id: process.env.PI_SPEAK_WORKSPACE_ID?.trim() || "default",
+		executorRoot: getDefaultAgentCwd(),
+	}],
+);
 
 const remoteTurnManager = new RemoteTurnManager({});
 
@@ -1155,6 +1166,7 @@ ${text}
 		submitChatTurn: (text, target, cwd) =>
 			remoteTurnManager.enqueue("http-text", () => runTextTurn(text, false, cwd, undefined, target)),
 	}),
+	hubTaskService,
 	onSessionResume: resumeStoredSession,
 	onSessionArchive: (payload) =>
 		archiveOrRecoverSession(payload.sessionPath ?? "", payload.action === "recover" ? "recover" : "archive"),
@@ -1263,6 +1275,7 @@ function shutdown() {
 		.then(() => shutdownLocalSttWorker())
 		.catch(() => {})
 		.then(() => server.stop())
+		.then(() => hubTaskService.close())
 		.catch(() => {})
 		.finally(() => process.exit(0));
 }

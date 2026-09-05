@@ -15,16 +15,21 @@
 	transition: none !important;
 }
 
+[hidden] {
+	display: none !important;
+}
+
 html {
 	background: #fff;
 	color: #000;
-	font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-	font-size: 20px;
+	font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+	font-size: 18px;
 	line-height: 1.35;
+	font-variant-ligatures: none;
 }
 
 body {
-	padding: 12px 12px 24px;
+	padding: 10px 12px 28px;
 	max-width: 640px;
 	margin: 0 auto;
 }
@@ -33,13 +38,24 @@ body {
 	display: flex;
 	justify-content: space-between;
 	align-items: center;
-	border-bottom: 3px solid #000;
-	padding-bottom: 8px;
-	margin-bottom: 12px;
+	border-bottom: 2px solid #000;
+	padding-bottom: 10px;
+	margin-bottom: 14px;
 }
 
-#top h1 {
-	font-size: 24px;
+.identity {
+	display: grid;
+	gap: 1px;
+}
+
+.identity h1 {
+	font-size: 25px;
+	letter-spacing: 3px;
+}
+
+.identity p {
+	font-size: 12px;
+	font-weight: 700;
 	letter-spacing: 2px;
 }
 
@@ -59,6 +75,7 @@ button {
 	color: #000;
 	border: 2px solid #000;
 	font: inherit;
+	font-size: 15px;
 	font-weight: 700;
 	min-height: 48px;
 	min-width: 48px;
@@ -77,24 +94,27 @@ button[disabled] {
 }
 
 #banner {
-	border: 3px double #000;
+	border: 2px solid #000;
+	border-left-width: 8px;
 	padding: 10px 12px;
 	margin-bottom: 12px;
 	font-weight: 700;
 }
 
 h2 {
-	font-size: 17px;
-	letter-spacing: 2px;
-	margin: 14px 0 8px;
+	font-size: 15px;
+	letter-spacing: 1px;
+	margin: 16px 0 9px;
 }
 
 /* --- Cards --- */
 
 .card {
-	border: 2px solid #000;
-	padding: 10px 12px;
-	margin-bottom: 10px;
+	border: 0;
+	border-left: 5px solid #000;
+	border-bottom: 1px solid #000;
+	padding: 12px 10px;
+	margin-bottom: 4px;
 	width: 100%;
 	text-align: left;
 	display: block;
@@ -109,25 +129,26 @@ h2 {
 
 .card .name {
 	font-weight: 700;
-	font-size: 21px;
+	font-size: 19px;
 	word-break: break-word;
 }
 
 .card .status {
 	white-space: nowrap;
 	font-weight: 700;
-	font-size: 17px;
+	font-size: 14px;
 }
 
 .card .desc {
 	margin-top: 4px;
 	word-break: break-word;
+	font-size: 15px;
 }
 
 .card .meta {
 	margin-top: 4px;
-	font-size: 16px;
-	color: #333;
+	font-size: 13px;
+	color: #000;
 }
 
 .card.sub {
@@ -137,7 +158,7 @@ h2 {
 }
 
 .card.attention {
-	border: 4px double #000;
+	border: 3px double #000;
 }
 
 .card.attention .reason {
@@ -146,11 +167,11 @@ h2 {
 }
 
 .folderHead {
-	font-size: 16px;
+	font-size: 13px;
 	font-weight: 700;
 	letter-spacing: 1px;
-	border-bottom: 2px solid #000;
-	margin: 16px 0 8px;
+	border-bottom: 1px solid #000;
+	margin: 18px 0 4px;
 	padding-bottom: 2px;
 	text-transform: uppercase;
 	word-break: break-word;
@@ -192,39 +213,102 @@ h2 {
 }
 
 #detailName {
-	font-size: 24px;
+	font-size: 22px;
 	letter-spacing: 0;
 	text-transform: none;
 	word-break: break-word;
 }
 
 #detailDescription {
-	margin: 6px 0;
+	margin: 5px 0;
 	font-weight: 700;
+	font-size: 15px;
 }
 
 #detailMeta {
-	font-size: 16px;
-	color: #333;
-	margin-bottom: 10px;
+	font-size: 13px;
+	color: #000;
+	margin-bottom: 14px;
+}
+
+.outputPanel {
+	border: 2px solid #000;
+	margin-bottom: 14px;
+}
+
+.outputPanel h3 {
+	padding: 6px 9px;
+	border-bottom: 2px solid #000;
+	font-size: 13px;
+	letter-spacing: 1px;
 }
 
 #detailTranscript {
-	border: 2px solid #000;
-	padding: 10px;
-	font-family: ui-monospace, Consolas, monospace;
+	border: 0;
+	padding: 10px 9px;
+	font-family: inherit;
 	font-size: 14px;
 	line-height: 1.3;
 	white-space: pre-wrap;
 	word-break: break-word;
 	max-height: 50vh;
 	overflow-y: auto;
+	margin-bottom: 0;
+}
+
+.promptForm {
+	display: grid;
+	gap: 7px;
 	margin-bottom: 12px;
+}
+
+.promptForm > label {
+	font-size: 13px;
+	font-weight: 700;
+	letter-spacing: 1px;
+}
+
+.promptLine {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr);
+	align-items: start;
+	border: 2px solid #000;
+}
+
+.promptLine > span {
+	padding: 11px 0 0 10px;
+	font-weight: 900;
+}
+
+.promptLine textarea {
+	width: 100%;
+	min-height: 94px;
+	padding: 10px;
+	border: 0;
+	border-radius: 0;
+	background: #fff;
+	color: #000;
+	font: inherit;
+	font-size: 16px;
+	line-height: 1.35;
+	resize: vertical;
+}
+
+.promptLine textarea:focus {
+	outline: 3px solid #000;
+	outline-offset: -3px;
+}
+
+.promptForm > button {
+	width: 100%;
+	min-height: 56px;
+	background: #000;
+	color: #fff;
 }
 
 #detailActions {
 	display: grid;
-	grid-template-columns: 1fr;
+	grid-template-columns: 1fr 1fr;
 	gap: 10px;
 }
 
@@ -235,4 +319,23 @@ h2 {
 #killBtn.arm {
 	background: #000;
 	color: #fff;
+}
+
+@media (max-width: 390px) {
+	body { padding-inline: 8px; }
+
+	#topRight { gap: 7px; }
+
+	#clock { display: none; }
+
+	.card .cardTop {
+		align-items: flex-start;
+		flex-direction: column;
+	}
+
+	#detailActions { grid-template-columns: 1fr; }
+}
+
+@media (prefers-contrast: more) {
+	button[disabled] { color: #000; }
 }

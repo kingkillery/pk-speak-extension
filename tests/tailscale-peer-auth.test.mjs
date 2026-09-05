@@ -48,6 +48,10 @@ test("accepts only a matching daemon identity and rejects Funnel ingress", () =>
 		isVerifiedTailscaleWhois(whoisJson("100.72.61.52", { ShareeNode: true }), "100.72.61.52"),
 		false,
 	);
+	assert.equal(
+		isVerifiedTailscaleWhois(whoisJson("100.72.61.52", { Hostinfo: { ShareeNode: true } }), "100.72.61.52"),
+		false,
+	);
 });
 
 test("verifier passes the transport endpoint to WhoIs and caches the daemon result", async () => {

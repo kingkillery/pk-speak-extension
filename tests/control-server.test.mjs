@@ -11,6 +11,7 @@ process.env.PI_SPEAK_HTTP_AUDIO_TTL_MS = "50";
 process.env.PI_SPEAK_HTTP_AUDIO_CLEANUP_MS = "25";
 
 const { ControlServer } = await import("../dist/control-server.js");
+const { HubTaskService, JsonHubTaskRepository } = await import("../dist/herdr-task-service.js");
 
 function request({ port, path = "/", method = "GET", headers = {}, body, host = "127.0.0.1" }) {
 	return new Promise((resolve, reject) => {
@@ -103,9 +104,12 @@ async function withServer(overrides = {}, fn) {
 		readHerdrPane: overrides.readHerdrPane,
 		sendHerdrPane: overrides.sendHerdrPane,
 		sendHerdrAgent: overrides.sendHerdrAgent,
+		sessionWorkspace: overrides.sessionWorkspace,
 		tailSessionEvents: overrides.tailSessionEvents,
 		onRealtimeConnection: overrides.onRealtimeConnection,
 		isTrustedTailnetPeer: overrides.isTrustedTailnetPeer,
+		trustTailscaleServeProxy: overrides.trustTailscaleServeProxy,
+		hubTaskService: overrides.hubTaskService,
 	});
 	const runtime = await server.start();
 	try {
@@ -291,7 +295,7 @@ test("turn cancellation route invokes the cancel handler", async () => {
 	});
 });
 
-test("non-local status requires auth while localhost bypass still works", async () => {
+test("protected status requires auth even when a proxy connects over loopback", async () => {
 	await withServer({}, async (port) => {
 		const remoteResponse = await request({
 			port,
@@ -305,8 +309,15 @@ test("non-local status requires auth while localhost bypass still works", async 
 			path: "/v1/status",
 			headers: { Host: "localhost" },
 		});
-		assert.equal(localResponse.statusCode, 200);
-		assert.equal(localResponse.json().ok, true);
+		assert.equal(localResponse.statusCode, 401);
+
+		const authorizedLocalResponse = await request({
+			port,
+			path: "/v1/status",
+			headers: { Host: "localhost", "X-Pi-Speak-Token": "secret-token" },
+		});
+		assert.equal(authorizedLocalResponse.statusCode, 200);
+		assert.equal(authorizedLocalResponse.json().ok, true);
 	});
 });
 
@@ -354,9 +365,24 @@ test("daemon-verified same-tailnet peers need no separate HTTP or realtime token
 	assert.ok(verificationCalls >= 4);
 });
 
-test("loopback-only Tailscale Serve identity is trusted while requests without identity stay token-gated", async () => {
+test("Tailscale Serve identity trust is explicit and Funnel always stays token-gated", async () => {
 	await withServer({
 		isTrustedTailnetPeer: async () => false,
+	}, async (port) => {
+		const forged = await request({
+			port,
+			path: "/v1/status",
+			headers: {
+				Host: "gateway.example-tailnet.ts.net",
+				"Tailscale-User-Login": "operator@example.test",
+			},
+		});
+		assert.equal(forged.statusCode, 401);
+	});
+
+	await withServer({
+		isTrustedTailnetPeer: async () => false,
+		trustTailscaleServeProxy: true,
 	}, async (port) => {
 		const served = await request({
 			port,
@@ -374,6 +400,17 @@ test("loopback-only Tailscale Serve identity is trusted while requests without i
 			headers: { Host: "gateway.example-tailnet.ts.net" },
 		});
 		assert.equal(noIdentity.statusCode, 401);
+
+		const funnel = await request({
+			port,
+			path: "/v1/status",
+			headers: {
+				Host: "localhost",
+				"Tailscale-User-Login": "operator@example.test",
+				"Tailscale-Funnel-Request": "?1",
+			},
+		});
+		assert.equal(funnel.statusCode, 401);
 	});
 });
 
@@ -1521,7 +1558,9 @@ test("discovery descriptor advertises Herdr control endpoints", async () => {
 		assert.equal(descriptor.endpoints.herdrPaneRead, "/v1/herdr/pane/read");
 		assert.equal(descriptor.endpoints.herdrPaneSend, "/v1/herdr/pane/send");
 		assert.equal(descriptor.endpoints.herdrAgentSend, "/v1/herdr/agent/send");
+		assert.equal(descriptor.endpoints.sessionWorkspace, "/v1/sessions/live");
 		assert.ok(descriptor.capabilities.includes("herdr-control"));
+		assert.ok(descriptor.capabilities.includes("herdr-session-workspace"));
 	});
 });
 
@@ -1604,6 +1643,80 @@ test("Herdr send endpoints forward pane and agent payloads", async () => {
 	assert.deepEqual(seen, [
 		{ kind: "pane", payload: { paneId: "w1:p2", text: "npm test", submit: true } },
 		{ kind: "agent", payload: { agentId: "w1:p2", text: "continue" } },
+	]);
+});
+
+test("live session workspace routes use the injected service and existing auth", async () => {
+	const session = { id: "s_0123456789abcdef01234567", displayName: "worker", provider: "claude", status: "idle", revision: 7 };
+	const calls = [];
+	const sessionWorkspace = {
+		snapshot: async () => ({ source: "herdr", generatedAtMs: 1, available: true, executable: "herdr", sessions: [session] }),
+		detail: async (id, lines) => {
+			calls.push(["detail", id, lines]);
+			return { ok: true, detail: { session, tail: { text: "tail", lines: ["tail"], truncated: false } } };
+		},
+		prompt: async (id, text, expectedRevision, idempotencyKey) => {
+			calls.push(["prompt", id, text, expectedRevision, idempotencyKey]);
+			return { ok: true, action: "prompt", session, commandId: "prompt_1" };
+		},
+		focus: async (id, expectedRevision, idempotencyKey) => {
+			calls.push(["focus", id, expectedRevision, idempotencyKey]);
+			return { ok: false, status: 412, code: "revision_mismatch", error: "stale" };
+		},
+		resume: async (id, expectedRevision, idempotencyKey) => {
+			calls.push(["resume", id, expectedRevision, idempotencyKey]);
+			return { ok: true, action: "resume", session, commandId: "resume_1", alreadyActive: true };
+		},
+		stream: async () => {},
+	};
+	await withServer({ sessionWorkspace }, async (port) => {
+		const unauthorized = await request({ port, path: "/v1/sessions/live" });
+		assert.equal(unauthorized.statusCode, 401);
+
+		const headers = { Authorization: "Bearer secret-token", "Content-Type": "application/json" };
+		const list = await request({ port, path: "/v1/sessions/live", headers });
+		assert.equal(list.statusCode, 200);
+		assert.equal(list.json().workspace.sessions[0].id, session.id);
+
+		const detail = await request({ port, path: `/v1/sessions/live/${session.id}?lines=25`, headers });
+		assert.equal(detail.statusCode, 200);
+		assert.equal(detail.json().detail.tail.lines[0], "tail");
+
+		const prompt = await request({
+			port,
+			path: `/v1/sessions/live/${session.id}/prompt`,
+			method: "POST",
+			headers: { ...headers, "X-Pi-Speak-Idempotency-Key": "prompt-1" },
+			body: JSON.stringify({ text: "continue", expectedRevision: 7 }),
+		});
+		assert.equal(prompt.statusCode, 200);
+		assert.equal(prompt.json().commandId, "prompt_1");
+
+		const focus = await request({
+			port,
+			path: `/v1/sessions/live/${session.id}/focus`,
+			method: "POST",
+			headers: { ...headers, "X-Pi-Speak-Idempotency-Key": "focus-1" },
+			body: JSON.stringify({ expectedRevision: 6 }),
+		});
+		assert.equal(focus.statusCode, 412);
+		assert.equal(focus.json().code, "revision_mismatch");
+
+		const resume = await request({
+			port,
+			path: `/v1/sessions/live/${session.id}/resume`,
+			method: "POST",
+			headers: { ...headers, "X-Pi-Speak-Idempotency-Key": "resume-1" },
+			body: JSON.stringify({ expectedRevision: 7 }),
+		});
+		assert.equal(resume.statusCode, 200);
+		assert.equal(resume.json().alreadyActive, true);
+	});
+	assert.deepEqual(calls, [
+		["detail", session.id, 25],
+		["prompt", session.id, "continue", 7, "prompt-1"],
+		["focus", session.id, 6, "focus-1"],
+		["resume", session.id, 7, "resume-1"],
 	]);
 });
 
@@ -1833,10 +1946,10 @@ test("collab link endpoint reports the active link written to collab.json", asyn
 			join(configDir, "collab.json"),
 			JSON.stringify({
 				active: true,
-				webLink: "https://x/#w",
-				webViewLink: "https://x/#v",
-				link: "https://x/#w",
-				viewLink: "https://x/#v",
+				webLink: "https://oh-my-pk.pkking.computer/#w",
+				webViewLink: "https://oh-my-pk.pkking.computer/#v",
+				link: "https://oh-my-pk.pkking.computer/#w",
+				viewLink: "https://oh-my-pk.pkking.computer/#v",
 				view: false,
 				startedAt: "2026-06-27T00:00:00.000Z",
 			}),
@@ -1849,13 +1962,50 @@ test("collab link endpoint reports the active link written to collab.json", asyn
 				headers: authHeaders,
 			});
 			assert.equal(response.statusCode, 200);
+			assert.equal(response.headers["cache-control"], "no-store");
 			const payload = response.json();
 			assert.equal(payload.ok, true);
 			assert.equal(payload.collab.active, true);
-			assert.equal(payload.collab.webLink, "https://x/#w");
-			assert.equal(payload.collab.webViewLink, "https://x/#v");
+			assert.equal(payload.collab.webLink, "https://oh-my-pk.pkking.computer/#w");
+			assert.equal(payload.collab.webViewLink, "https://oh-my-pk.pkking.computer/#v");
 			assert.equal(payload.collab.view, false);
 			assert.equal(payload.collab.startedAt, "2026-06-27T00:00:00.000Z");
+		}));
+	} finally {
+		rmSync(configDir, { recursive: true, force: true });
+	}
+});
+
+test("collab link endpoint rejects links outside the approved HTTPS origin", async () => {
+	const authHeaders = { Authorization: "Bearer secret-token" };
+	const configDir = mkdtempSync(join(tmpdir(), "pi-speak-collab-rejected-"));
+	try {
+		writeFileSync(
+			join(configDir, "collab.json"),
+			JSON.stringify({
+				active: true,
+				webLink: "file:///C:/Windows/System32/calc.exe",
+				webViewLink: "https://evil.example/#v",
+				link: "https://user@oh-my-pk.pkking.computer/#w",
+				viewLink: "\\\\attacker\\share",
+			}),
+			"utf8",
+		);
+		await withTemporaryEnv("PI_SPEAK_CONFIG_DIR", configDir, async () => withServer({}, async (port) => {
+			const response = await request({
+				port,
+				path: "/v1/collab-link",
+				headers: authHeaders,
+			});
+			assert.equal(response.statusCode, 200);
+			assert.equal(response.headers["cache-control"], "no-store");
+			const payload = response.json();
+			assert.equal(payload.ok, true);
+			assert.equal(payload.collab.active, false);
+			assert.equal(payload.collab.webLink, undefined);
+			assert.equal(payload.collab.webViewLink, undefined);
+			assert.equal(payload.collab.link, undefined);
+			assert.equal(payload.collab.viewLink, undefined);
 		}));
 	} finally {
 		rmSync(configDir, { recursive: true, force: true });
@@ -1996,7 +2146,7 @@ test("omp select-session returns 501 (not a fake 200) when callback is missing",
 			port,
 			path: "/v1/omp/select-session",
 			method: "POST",
-			headers: { Authorization: "******", "Content-Type": "application/json" },
+			headers: { Authorization: "Bearer secret-token", "Content-Type": "application/json" },
 			body: JSON.stringify({ sessionPath: "/x.jsonl" }),
 		});
 		assert.equal(response.statusCode, 501, "must not claim success when no handler stored the selection");
@@ -2010,7 +2160,7 @@ test("omp selected-session returns 501 when callback is missing", async () => {
 			port,
 			path: "/v1/omp/selected-session",
 			method: "GET",
-			headers: { Authorization: "******" },
+			headers: { Authorization: "Bearer secret-token" },
 		});
 		assert.equal(response.statusCode, 501);
 		assert.equal((await response.json()).ok, false);
@@ -2026,9 +2176,11 @@ function firstExternalIpv4() {
 	return null;
 }
 
-test("GET /connect serves the pairing page on loopback without a token", async () => {
+test("GET /connect requires its token even on loopback", async () => {
 	await withServer({}, async (port) => {
-		const response = await request({ port, path: "/connect" });
+		const rejected = await request({ port, path: "/connect" });
+		assert.equal(rejected.statusCode, 401);
+		const response = await request({ port, path: "/connect?token=secret-token" });
 		assert.equal(response.statusCode, 200);
 		assert.match(response.headers["content-type"], /text\/html/);
 		assert.ok(response.body.includes("Connect your phone"));
@@ -2044,7 +2196,7 @@ test("GET /v1/pairing/status stays null for loopback-only traffic", async () => 
 		// Loopback authed traffic must NOT count as a phone connection.
 		const status = await request({ port, path: "/v1/status", headers: { "X-Pi-Speak-Token": "secret-token" } });
 		assert.equal(status.statusCode, 200);
-		const pairing = await request({ port, path: "/v1/pairing/status" });
+		const pairing = await request({ port, path: "/v1/pairing/status", headers: { "X-Pi-Speak-Token": "secret-token" } });
 		assert.equal(pairing.statusCode, 200);
 		const payload = pairing.json();
 		assert.equal(payload.ok, true);
@@ -2067,14 +2219,14 @@ test("non-loopback clients cannot read /connect but do mark pairing activity", a
 		// Pairing status polls from remote must not self-record...
 		const poll = await request({ port, host: externalIp, path: "/v1/pairing/status", headers: { "X-Pi-Speak-Token": "secret-token" } });
 		assert.equal(poll.statusCode, 200);
-		let pairing = (await request({ port, path: "/v1/pairing/status" })).json();
+		let pairing = (await request({ port, path: "/v1/pairing/status", headers: { "X-Pi-Speak-Token": "secret-token" } })).json();
 		assert.equal(pairing.lastRemoteClient, null);
 
 		// ...but a real authed call (what the app does at setup) must.
 		const before = Date.now();
 		const status = await request({ port, host: externalIp, path: "/v1/status", headers: { "X-Pi-Speak-Token": "secret-token" } });
 		assert.equal(status.statusCode, 200);
-		pairing = (await request({ port, path: "/v1/pairing/status" })).json();
+		pairing = (await request({ port, path: "/v1/pairing/status", headers: { "X-Pi-Speak-Token": "secret-token" } })).json();
 		assert.ok(pairing.lastRemoteClient, "expected lastRemoteClient to be recorded");
 		assert.ok(pairing.lastRemoteClient.at >= before);
 		assert.equal(pairing.lastRemoteClient.address, externalIp);
@@ -2088,4 +2240,62 @@ test("GET /app/barge-in-detector.js serves the app's relative ES module", async 
 		assert.match(response.headers["content-type"], /application\/javascript/);
 		assert.match(response.body, /createBargeInDetector/);
 	});
+});
+
+test("Herdr task API exposes identity and idempotent durable task creation", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-speak-herdr-task-api-"));
+	const service = new HubTaskService(
+		new JsonHubTaskRepository(join(root, "hub-tasks.json")),
+		[{ id: "repo", executorRoot: root }],
+	);
+	try {
+		await withServer({ hubTaskService: service }, async (port) => {
+			const headers = { "X-Pi-Speak-Token": "secret-token" };
+			const serviceResponse = await request({ port, path: "/v1/herdr/service", headers });
+			assert.equal(serviceResponse.statusCode, 200);
+			const serviceBody = serviceResponse.json();
+			assert.match(serviceBody.service.serviceId, /^service_/);
+			assert.match(serviceBody.service.executorId, /^executor_/);
+			assert.equal(serviceBody.service.revision, 0);
+
+			const taskRequest = JSON.stringify({
+				title: "Persist Hub tasks",
+				prompt: "Implement the first durable Herdr task slice.",
+				workspaceId: "repo",
+				expectedRevision: 0,
+			});
+			const createHeaders = {
+				...headers,
+				"Content-Type": "application/json",
+				"X-Pi-Speak-Idempotency-Key": "api-create-1",
+			};
+			const created = await request({
+				port,
+				path: "/v1/herdr/tasks",
+				method: "POST",
+				headers: createHeaders,
+				body: taskRequest,
+			});
+			assert.equal(created.statusCode, 201);
+			assert.equal(created.json().created, true);
+
+			const replay = await request({
+				port,
+				path: "/v1/herdr/tasks",
+				method: "POST",
+				headers: createHeaders,
+				body: taskRequest,
+			});
+			assert.equal(replay.statusCode, 200);
+			assert.equal(replay.json().created, false);
+
+			const tasks = await request({ port, path: "/v1/herdr/tasks", headers });
+			assert.equal(tasks.statusCode, 200);
+			assert.equal(tasks.json().tasks.length, 1);
+			assert.equal(tasks.json().revision, 1);
+		});
+	} finally {
+		service.close();
+		rmSync(root, { recursive: true, force: true });
+	}
 });

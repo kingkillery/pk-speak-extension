@@ -29,6 +29,16 @@ export const STORAGE_LIVE_MODE = "piSpeakRemoteLiveMode";
 export const STORAGE_LIVE_GATE = "piSpeakRemoteLiveNoiseGate";
 export const STORAGE_LIVE_GATE_DB = "piSpeakRemoteLiveNoiseGateDb";
 
+const AUTO_CONNECT_RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000];
+
+export function autoConnectRetryDelay(attempt = 0) {
+	const index = Math.max(0, Math.min(
+		AUTO_CONNECT_RETRY_DELAYS_MS.length - 1,
+		Number.isFinite(attempt) ? Math.floor(attempt) : 0,
+	));
+	return AUTO_CONNECT_RETRY_DELAYS_MS[index];
+}
+
 
 export function buildRealtimeWebSocketUrl(origin, token = "") {
 	const url = new URL("/v1/live", origin);
@@ -40,6 +50,102 @@ export function buildRealtimeWebSocketUrl(origin, token = "") {
 export function isLoopbackHostname(hostname) {
 	const normalized = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
 	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+export function conciseRemoteError(value) {
+	let message = value instanceof Error ? value.message : typeof value === "string" ? value : "";
+	if (!message && value && typeof value === "object") {
+		const nested = value.error && typeof value.error === "object" ? value.error.message : value.error;
+		message = typeof nested === "string" ? nested : typeof value.message === "string" ? value.message : "";
+	}
+	const trimmed = String(message || "Request failed.").trim();
+	let parsed = null;
+	if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+		parsed = (() => {
+			try { return JSON.parse(trimmed); } catch { return null; }
+		})();
+	}
+	if (parsed) {
+		const nested = parsed.error && typeof parsed.error === "object" ? parsed.error.message : parsed.error;
+		message = typeof nested === "string" ? nested : typeof parsed.message === "string" ? parsed.message : "Request failed.";
+	} else {
+		message = trimmed;
+	}
+	if (/publisher model|models\/.+not found|model.+not found|NOT_FOUND/i.test(message)) {
+		return "Gemini model is unavailable. Check the gateway model setting and try again.";
+	}
+	if (/microphone.+(not support|unavailable)|microphone access requires/i.test(message)) {
+		return "Microphone is unavailable here. Use HTTPS or the Android app.";
+	}
+	if (/failed to fetch|networkerror|network request failed/i.test(message)) {
+		return "Gateway connection failed. Check Tailscale or Wi-Fi.";
+	}
+	const compact = String(message)
+		.replace(/https?:\/\/\S+/gi, "")
+		.replace(/\s+/g, " ")
+		.replace(/^Error:\s*/i, "")
+		.trim();
+	if (!compact || compact === "[object Object]" || /^[{[]/.test(compact)) return "Request failed. Check the gateway logs.";
+	return compact.length > 160 ? `${compact.slice(0, 157).trimEnd()}…` : compact;
+}
+
+export function sessionProviderLabel(entry = {}) {
+	const provider = typeof entry.provider === "string" ? entry.provider.trim() : "";
+	const source = typeof entry.source === "string" ? entry.source.trim() : "";
+	const normalizedProvider = provider.toLowerCase();
+	const normalizedSource = source.toLowerCase();
+	if (
+		normalizedProvider === "oh-my-pk"
+		|| normalizedProvider === "oh-my-pi"
+		|| normalizedSource === "oh-my-pk"
+		|| normalizedSource === "oh-my-pi"
+		|| String(entry.kind || "").toLowerCase() === "background"
+	) return "OMPK";
+	if (normalizedProvider === "codex") return "Codex";
+	if (normalizedProvider === "claude") return "Claude";
+	if (normalizedProvider === "pi") return "Pi";
+	return provider || source;
+}
+
+const ROUTE_PROVIDER_PRIORITY = new Map([
+	["OMPK", 0],
+	["Codex", 1],
+	["Claude", 2],
+	["Quad", 3],
+	["Pi", 4],
+]);
+
+export function routeTargetProviderLabel(target) {
+	const raw = String(target || "").trim();
+	const separator = raw.indexOf(":");
+	const provider = (separator >= 0 ? raw.slice(0, separator) : raw).trim();
+	const normalized = provider.toLowerCase();
+	if (["oh-my-pk", "oh-my-pi", "ompk", "omp"].includes(normalized)) return "OMPK";
+	if (normalized === "quad") return "Quad";
+	return sessionProviderLabel({ provider }) || "Agent";
+}
+
+export function routeTargetOptionLabel(target) {
+	const raw = String(target || "").trim();
+	if (!raw) return "OMPK: Current session";
+	const separator = raw.indexOf(":");
+	if (separator < 0) return raw;
+	const details = raw.slice(separator + 1).trim();
+	const provider = routeTargetProviderLabel(raw);
+	return details ? `${provider}: ${details}` : provider;
+}
+
+export function sortRouteTargets(targets = []) {
+	return [...new Set(targets.map((target) => String(target || "").trim()).filter(Boolean))]
+		.sort((left, right) => {
+			const leftProvider = routeTargetProviderLabel(left);
+			const rightProvider = routeTargetProviderLabel(right);
+			const providerOrder = (ROUTE_PROVIDER_PRIORITY.get(leftProvider) ?? 99)
+				- (ROUTE_PROVIDER_PRIORITY.get(rightProvider) ?? 99);
+			if (providerOrder !== 0) return providerOrder;
+			const providerNameOrder = leftProvider.localeCompare(rightProvider);
+			return providerNameOrder || left.localeCompare(right, undefined, { numeric: true });
+		});
 }
 
 export function encodeLivePcmFrame(sequenceId, samples, inputSampleRate, outputSampleRate = 16_000) {
@@ -165,6 +271,10 @@ if (typeof document !== "undefined") {
 		autoplay: true,
 		rememberToken: false,
 		mediaRecorder: null,
+		nativeAudioPort: null,
+		nativeAudioRequests: new Map(),
+		nativeAudioRequestId: 0,
+		nativeRecording: false,
 		stream: null,
 		chunks: [],
 		recording: false,
@@ -175,6 +285,9 @@ if (typeof document !== "undefined") {
 		timerId: null,
 		deferredPrompt: null,
 		lastStatus: null,
+		statusRefreshAttempts: 0,
+		statusRefreshTimer: null,
+		statusRefreshPromise: null,
 		activeTab: "chat",
 		selectedSessionPath: "",
 		eventSource: null,
@@ -347,8 +460,10 @@ if (typeof document !== "undefined") {
 	}
 
 	function setStatus(text, tone) {
+		const statusText = tone === "error" ? conciseRemoteError(text) : text;
 		if (els.statusNote) {
-			els.statusNote.textContent = text;
+			els.statusNote.textContent = statusText;
+			els.statusNote.dataset.tone = tone === "error" ? "error" : "default";
 			els.statusNote.style.color = tone === "error" ? "var(--danger)" : "var(--ink)";
 		}
 		if (els.statusDot) {
@@ -482,7 +597,10 @@ if (typeof document !== "undefined") {
 		if (els.sessionsPanel) els.sessionsPanel.classList.toggle("open", tab === "sessions");
 		if (els.tabBar) {
 			for (const btn of els.tabBar.querySelectorAll(".tab")) {
-				btn.classList.toggle("active", btn.dataset.tab === tab);
+				const selected = btn.dataset.tab === tab;
+				btn.classList.toggle("active", selected);
+				btn.setAttribute("aria-selected", String(selected));
+				btn.tabIndex = selected ? 0 : -1;
 			}
 		}
 		if (tab === "sessions") {
@@ -529,10 +647,20 @@ if (typeof document !== "undefined") {
 			const nameText = document.createElement("span");
 			nameText.className = "session-name";
 			nameText.textContent = entry.name || "(unnamed)";
+			const heading = document.createElement("span");
+			heading.className = "session-heading";
+			heading.appendChild(nameText);
+			const providerLabel = sessionProviderLabel(entry);
+			if (providerLabel) {
+				const provider = document.createElement("span");
+				provider.className = "status-badge provider-badge";
+				provider.textContent = providerLabel;
+				heading.appendChild(provider);
+			}
 			const cwd = document.createElement("span");
 			cwd.className = "session-cwd";
 			cwd.textContent = `Working directory: ${entry.workingDirectory || entry.cwd || "unknown"}`;
-			name.appendChild(nameText);
+			name.appendChild(heading);
 			name.appendChild(cwd);
 			const badges = document.createElement("div");
 			badges.style.display = "flex";
@@ -975,26 +1103,22 @@ if (typeof document !== "undefined") {
 	function syncRouteUi(status) {
 		if (!els.targetSelect) return;
 		const remote = status && status.remote ? status.remote : {};
-		const targets = Array.isArray(remote.availableTargets) ? remote.availableTargets : [];
 		const selected = remote.defaultTarget || "";
-		const currentSession = remote.currentSession || "Current session";
-		const routeLabel = selected || `Current session`;
+		const targets = sortRouteTargets([
+			...(Array.isArray(remote.availableTargets) ? remote.availableTargets : []),
+			...(selected ? [selected] : []),
+		]);
+		const routeLabel = selected ? routeTargetOptionLabel(selected) : "OMPK current session";
 
 		els.targetSelect.innerHTML = "";
 		const current = document.createElement("option");
 		current.value = "";
-		current.textContent = currentSession;
+		current.textContent = routeTargetOptionLabel("");
 		els.targetSelect.appendChild(current);
 		for (const target of targets) {
 			const option = document.createElement("option");
 			option.value = target;
-			option.textContent = target;
-			els.targetSelect.appendChild(option);
-		}
-		if (selected && !targets.includes(selected)) {
-			const option = document.createElement("option");
-			option.value = selected;
-			option.textContent = selected;
+			option.textContent = routeTargetOptionLabel(target);
 			els.targetSelect.appendChild(option);
 		}
 		els.targetSelect.value = selected || "";
@@ -1123,7 +1247,11 @@ if (typeof document !== "undefined") {
 			throw new Error("Unauthorized. Save the remote token in Settings.");
 		}
 		if (!response.ok) {
-			throw new Error(payload && (payload.error || payload.message) ? payload.error || payload.message : `Request failed (${response.status})`);
+			const payloadError = payload && payload.error;
+			const detail = payloadError && typeof payloadError === "object"
+				? payloadError.message
+				: payloadError || (payload && payload.message);
+			throw new Error(typeof detail === "string" ? detail : `Request failed (${response.status})`);
 		}
 		if (els.auth) els.auth.textContent = state.token ? "Token loaded" : "Local access";
 		return payload;
@@ -1142,20 +1270,50 @@ if (typeof document !== "undefined") {
 		return `Remote ${remote.enabled ? "running" : "stopped"} on port ${remote.port || 8767}. Agent: ${agent.provider || "unknown"} - speak ${speakLabel} - mono ${monoLabel} - phone ${phoneLabel}.`;
 	}
 
+	function clearStatusRefreshTimer() {
+		if (!state.statusRefreshTimer) return;
+		window.clearTimeout(state.statusRefreshTimer);
+		state.statusRefreshTimer = null;
+	}
+
+	function scheduleStatusRefresh() {
+		if (state.statusRefreshTimer) return;
+		const delay = autoConnectRetryDelay(state.statusRefreshAttempts);
+		state.statusRefreshAttempts += 1;
+		state.statusRefreshTimer = window.setTimeout(() => {
+			state.statusRefreshTimer = null;
+			void refreshStatus();
+		}, delay);
+	}
+
 	async function refreshStatus() {
+		if (state.statusRefreshPromise) return state.statusRefreshPromise;
+		clearStatusRefreshTimer();
+		const pending = (async () => {
+			try {
+				const payload = await apiFetch("/v1/status");
+				state.lastStatus = payload ? payload.status : null;
+				state.statusRefreshAttempts = 0;
+				syncRouteUi(state.lastStatus);
+				syncSettingsUi();
+				getSetupHint(state.lastStatus);
+				setStatus(state.liveMode && state.liveConnected
+					? state.recording ? "Live conversation connected — mic is on." : "Live session connected. Tap to turn the mic on."
+					: summarizeStatus(state.lastStatus));
+				syncLockedUi();
+				return true;
+			} catch (error) {
+				setStatus(String(error.message || error), "error");
+				syncLockedUi();
+				scheduleStatusRefresh();
+				return false;
+			}
+		})();
+		state.statusRefreshPromise = pending;
 		try {
-			const payload = await apiFetch("/v1/status");
-			state.lastStatus = payload ? payload.status : null;
-			syncRouteUi(state.lastStatus);
-			syncSettingsUi();
-			getSetupHint(state.lastStatus);
-			setStatus(state.liveMode && state.liveConnected
-				? state.recording ? "Live conversation connected — mic is on." : "Live session connected. Tap to turn the mic on."
-				: summarizeStatus(state.lastStatus));
-			syncLockedUi();
-		} catch (error) {
-			setStatus(String(error.message || error), "error");
-			syncLockedUi();
+			return await pending;
+		} finally {
+			if (state.statusRefreshPromise === pending) state.statusRefreshPromise = null;
 		}
 	}
 
@@ -2026,14 +2184,14 @@ if (typeof document !== "undefined") {
 		if (!active) {
 			if (els.record) els.record.classList.remove("recording");
 			if (els.recordLabel) els.recordLabel.textContent = state.liveMode ? "Start live" : "Tap to talk";
-			if (els.recordLabelMain) els.recordLabelMain.textContent = state.liveMode ? "Gemini Live" : "Speak to local agent";
-			if (els.recordSubtitle) els.recordSubtitle.textContent = state.liveMode ? "Mic is off" : "Text replies are enabled";
+			if (els.recordLabelMain) els.recordLabelMain.textContent = state.liveMode ? "Gemini Live" : "Reply audio";
+			if (els.recordSubtitle) els.recordSubtitle.textContent = state.liveMode ? "Mic is off" : state.wantAudio ? "On" : "Off";
 			if (els.timer) els.timer.textContent = "Ready";
 			return;
 		}
 		if (els.record) els.record.classList.add("recording");
 		if (els.recordLabel) els.recordLabel.textContent = state.liveMode ? "Mute" : "Tap to send";
-		if (els.recordLabelMain) els.recordLabelMain.textContent = state.liveMode ? "Gemini Live" : "Release after speaking";
+		if (els.recordLabelMain) els.recordLabelMain.textContent = state.liveMode ? "Gemini Live" : "Voice input";
 		if (els.recordSubtitle) els.recordSubtitle.textContent = state.liveMode ? "Mic is on" : "Recording";
 		if (els.timer) els.timer.textContent = formatElapsed(Date.now() - state.recordStartedAt);
 	}
@@ -2051,6 +2209,7 @@ if (typeof document !== "undefined") {
 		setStatus("Sending text turn...");
 		setRecordingStateBusy(true);
 		appendMessage("user", text);
+		els.textInput.value = "";
 		try {
 			const body = { text, audio: state.wantAudio };
 			if (state.liveMode) body.mode = "live";
@@ -2071,7 +2230,6 @@ if (typeof document !== "undefined") {
 					onReady: () => resolve(),
 				});
 			});
-			els.textInput.value = "";
 			setStatus(turnStatusMessage(payload));
 			await refreshStatus();
 		} catch (error) {
@@ -2106,6 +2264,55 @@ if (typeof document !== "undefined") {
 		return "";
 	}
 
+	function settleNativeAudioRequest(payload) {
+		if (!payload || typeof payload.id !== "string") return;
+		const pending = state.nativeAudioRequests.get(payload.id);
+		if (!pending) return;
+		state.nativeAudioRequests.delete(payload.id);
+		window.clearTimeout(pending.timeoutId);
+		if (payload.ok) pending.resolve(payload);
+		else pending.reject(new Error(typeof payload.error === "string" ? payload.error : "Microphone request failed."));
+	}
+
+	window.addEventListener("message", (event) => {
+		if (event.data !== "ompk-native-audio" || !event.ports?.[0]) return;
+		if (event.origin && event.origin !== window.location.origin) return;
+		if (event.source && event.source !== window) return;
+		state.nativeAudioPort?.close();
+		const port = event.ports[0];
+		state.nativeAudioPort = port;
+		port.addEventListener("message", (messageEvent) => {
+			let payload = null;
+			try { payload = JSON.parse(String(messageEvent.data || "")); } catch { return; }
+			settleNativeAudioRequest(payload);
+		});
+		port.start();
+	});
+
+	function requestNativeAudio(type, timeoutMs = 30_000) {
+		const port = state.nativeAudioPort;
+		if (!port) return Promise.reject(new Error("Android microphone bridge is not ready."));
+		const id = `audio-${++state.nativeAudioRequestId}`;
+		return new Promise((resolve, reject) => {
+			const timeoutId = window.setTimeout(() => {
+				state.nativeAudioRequests.delete(id);
+				reject(new Error("Microphone request timed out."));
+			}, timeoutMs);
+			state.nativeAudioRequests.set(id, { resolve, reject, timeoutId });
+			port.postMessage(JSON.stringify({ id, type }));
+		});
+	}
+
+	function nativeAudioBlob(payload) {
+		if (!payload || typeof payload.data !== "string" || !payload.data) {
+			throw new Error("Android returned an empty microphone recording.");
+		}
+		const binary = window.atob(payload.data);
+		const bytes = new Uint8Array(binary.length);
+		for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+		return new Blob([bytes], { type: payload.mimeType || "audio/mp4" });
+	}
+
 	async function ensureRecorder() {
 		if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
 			throw new Error("This browser does not support microphone recording.");
@@ -2134,9 +2341,14 @@ if (typeof document !== "undefined") {
 
 	async function startRecording() {
 		try {
-			const recorder = await ensureRecorder();
-			state.chunks = [];
-			recorder.start();
+			if (state.nativeAudioPort) {
+				await requestNativeAudio("start");
+				state.nativeRecording = true;
+			} else {
+				const recorder = await ensureRecorder();
+				state.chunks = [];
+				recorder.start();
+			}
 			state.recording = true;
 			state.recordStartedAt = Date.now();
 			ensureTimerState();
@@ -2148,8 +2360,7 @@ if (typeof document !== "undefined") {
 	}
 
 	async function stopRecordingAndSend() {
-		if (!state.mediaRecorder || state.mediaRecorder.state === "inactive") return;
-		const recorder = state.mediaRecorder;
+		if (!state.nativeRecording && (!state.mediaRecorder || state.mediaRecorder.state === "inactive")) return;
 		state.recording = false;
 		window.clearInterval(state.timerId);
 		state.timerId = null;
@@ -2157,14 +2368,21 @@ if (typeof document !== "undefined") {
 		setRecordingStateBusy(true);
 		state.turnStartedAt = Date.now();
 		const currentTurn = ++state.nextTurnId;
-		const blob = await new Promise((resolve) => {
-			recorder.addEventListener("stop", () => {
-				resolve(new Blob(state.chunks, { type: recorder.mimeType || "application/octet-stream" }));
-			}, { once: true });
-			recorder.stop();
-		});
 
 		try {
+			let blob;
+			if (state.nativeRecording) {
+				state.nativeRecording = false;
+				blob = nativeAudioBlob(await requestNativeAudio("stop"));
+			} else {
+				const recorder = state.mediaRecorder;
+				blob = await new Promise((resolve) => {
+					recorder.addEventListener("stop", () => {
+						resolve(new Blob(state.chunks, { type: recorder.mimeType || "application/octet-stream" }));
+					}, { once: true });
+					recorder.stop();
+				});
+			}
 			const params = new URLSearchParams({ audio: state.wantAudio ? "1" : "0" });
 			if (state.liveMode) params.set("mode", "live");
 			const target = activeTarget();
@@ -2431,8 +2649,35 @@ if (typeof document !== "undefined") {
 	if (els.tabBar) {
 		for (const btn of els.tabBar.querySelectorAll(".tab")) {
 			btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+			btn.addEventListener("keydown", (event) => {
+				if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+				event.preventDefault();
+				const nextTab = btn.dataset.tab === "chat" ? "sessions" : "chat";
+				switchTab(nextTab);
+				els.tabBar.querySelector(`.tab[data-tab="${nextTab}"]`)?.focus();
+			});
 		}
 	}
+
+	document.addEventListener("keydown", (event) => {
+		if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+		const target = event.target;
+		const editing = target instanceof HTMLElement && (
+			target.isContentEditable || target.matches("input, textarea, select")
+		);
+		if (!editing && event.key === "/") {
+			event.preventDefault();
+			switchTab("chat");
+			els.textInput?.focus();
+			return;
+		}
+		if (!editing && (event.key === "1" || event.key === "2")) {
+			const nextTab = event.key === "1" ? "chat" : "sessions";
+			event.preventDefault();
+			switchTab(nextTab);
+			els.tabBar?.querySelector(`.tab[data-tab="${nextTab}"]`)?.focus();
+		}
+	});
 
 	/* Cancel turn */
 	els.cancelTurn?.addEventListener("click", async () => {
@@ -2512,5 +2757,12 @@ if (typeof document !== "undefined") {
 	bindInstallPrompt();
 	void refreshStatus();
 	if (state.liveMode && new URL(window.location.href).searchParams.get("autoconnect") === "1") ensureLiveSocket();
-	window.addEventListener("beforeunload", closeLiveSocket, { once: true });
+	document.addEventListener("visibilitychange", () => {
+		if (document.visibilityState === "visible") void refreshStatus();
+	});
+	window.addEventListener("online", () => void refreshStatus());
+	window.addEventListener("beforeunload", () => {
+		clearStatusRefreshTimer();
+		closeLiveSocket();
+	}, { once: true });
 }

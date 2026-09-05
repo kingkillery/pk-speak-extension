@@ -4,15 +4,18 @@
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 	<meta name="theme-color" content="#ffffff" />
-	<title>PK Hub</title>
+	<title>OMPK E-Ink Remote</title>
 	<link rel="stylesheet" href="/hub/hub.css" />
 </head>
 <body>
 	<header id="top">
-		<h1>PK&nbsp;HUB</h1>
+		<div class="identity">
+			<h1>OMPK</h1>
+			<p>REMOTE / E-INK</p>
+		</div>
 		<div id="topRight">
 			<span id="clock" aria-hidden="true"></span>
-			<button id="refreshBtn" type="button" aria-label="Refresh now">REFRESH</button>
+			<button id="refreshBtn" type="button" aria-label="Refresh now">SYNC</button>
 		</div>
 	</header>
 
@@ -20,12 +23,12 @@
 
 	<main id="listView">
 		<section id="attention" hidden>
-			<h2>NEEDS DECISION</h2>
+			<h2>[ NEEDS DECISION ]</h2>
 			<div id="attentionCards"></div>
 		</section>
 
 		<section id="agents">
-			<h2 id="agentsHeading">AGENTS</h2>
+			<h2 id="agentsHeading">[ SESSIONS ]</h2>
 			<div id="agentCards"></div>
 		</section>
 
@@ -37,15 +40,25 @@
 	</main>
 
 	<main id="detailView" hidden>
-		<button id="backBtn" type="button">&#9664;&nbsp;BACK</button>
+		<button id="backBtn" type="button">&#9664;&nbsp;SESSIONS</button>
 		<h2 id="detailName"></h2>
 		<p id="detailDescription"></p>
 		<p id="detailMeta"></p>
-		<pre id="detailTranscript" aria-label="Transcript tail"></pre>
+		<section class="outputPanel" aria-labelledby="outputLabel">
+			<h3 id="outputLabel">RECENT OUTPUT</h3>
+			<pre id="detailTranscript" aria-label="Recent output" tabindex="0"></pre>
+		</section>
+		<form id="promptForm" class="promptForm">
+			<label for="promptInput">PROMPT</label>
+			<div class="promptLine">
+				<span aria-hidden="true">&#10095;</span>
+				<textarea id="promptInput" rows="3" placeholder="Tell this session what to do next"></textarea>
+			</div>
+			<button id="promptBtn" type="submit">RUN PROMPT</button>
+		</form>
 		<div id="detailActions">
-			<button id="chatBtn" type="button">SEND&nbsp;MESSAGE</button>
-			<button id="reviveBtn" type="button">REVIVE</button>
-			<button id="killBtn" type="button">ARCHIVE</button>
+			<button id="focusBtn" type="button">FOCUS</button>
+			<button id="resumeBtn" type="button">RESUME</button>
 		</div>
 	</main>
 

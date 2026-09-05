@@ -135,11 +135,7 @@ export function mergeOhMyPiAgentHubSessions(
 	options: BuildOhMyPiAgentHubDashboardOptions = {},
 ): SessionDashboard {
 	const agentHub = buildOhMyPiAgentHubDashboard(options);
-	const existingPaths = new Set(
-		dashboard.sessions.map((entry) => entry.sessionPath ?? entry.path).filter((path): path is string => !!path),
-	);
-	const additions = agentHub.sessions.filter((entry) => !existingPaths.has(entry.sessionPath));
-	return additions.length === 0 ? dashboard : { ...dashboard, sessions: [...dashboard.sessions, ...additions] };
+	return mergeAgentHubSessions(dashboard, agentHub.sessions);
 }
 
 // Hot-path merge used by the gateway dashboard: reuses the stale-while-revalidate
@@ -149,11 +145,45 @@ export function mergeOhMyPiAgentHubSessionsCached(
 	ttlMs = DEFAULT_AGENT_HUB_TTL_MS,
 ): SessionDashboard {
 	const agentHub = buildOhMyPiAgentHubDashboardCached(ttlMs);
-	const existingPaths = new Set(
-		dashboard.sessions.map((entry) => entry.sessionPath ?? entry.path).filter((path): path is string => !!path),
-	);
-	const additions = agentHub.sessions.filter((entry) => !existingPaths.has(entry.sessionPath));
-	return additions.length === 0 ? dashboard : { ...dashboard, sessions: [...dashboard.sessions, ...additions] };
+	return mergeAgentHubSessions(dashboard, agentHub.sessions);
+}
+
+function mergeAgentHubSessions(
+	dashboard: SessionDashboard,
+	agentHubSessions: OhMyPiBackgroundSessionEntry[],
+): SessionDashboard {
+	const hubByPath = new Map(agentHubSessions.map((entry) => [entry.sessionPath, entry]));
+	let enrichedExisting = false;
+	const sessions = dashboard.sessions.map((entry) => {
+		const sessionPath = entry.sessionPath ?? entry.path;
+		const hubEntry = sessionPath ? hubByPath.get(sessionPath) : undefined;
+		if (!hubEntry) return entry;
+		hubByPath.delete(hubEntry.sessionPath);
+		enrichedExisting = true;
+		return {
+			...hubEntry,
+			...entry,
+			path: entry.path ?? hubEntry.path,
+			sessionPath: entry.sessionPath ?? hubEntry.sessionPath,
+			provider: entry.provider ?? hubEntry.provider,
+			source: entry.source ?? hubEntry.source,
+			kind: entry.kind ?? hubEntry.kind,
+			model: entry.model ?? hubEntry.model,
+			role: entry.role ?? hubEntry.role,
+			sessionId: entry.sessionId ?? hubEntry.sessionId,
+			resumable: entry.resumable ?? hubEntry.resumable,
+			resumeCommand: entry.resumeCommand ?? hubEntry.resumeCommand,
+			workingDirectory: entry.workingDirectory ?? hubEntry.workingDirectory,
+			cwd: entry.cwd ?? hubEntry.cwd,
+			createdAt: entry.createdAt ?? hubEntry.createdAt,
+			lastActivity: entry.lastActivity ?? hubEntry.lastActivity,
+			subagents: entry.subagents ?? hubEntry.subagents,
+		};
+	});
+	const additions = [...hubByPath.values()];
+	return !enrichedExisting && additions.length === 0
+		? dashboard
+		: { ...dashboard, sessions: [...sessions, ...additions] };
 }
 
 function splitConfiguredRoots(value: string | undefined): string[] {

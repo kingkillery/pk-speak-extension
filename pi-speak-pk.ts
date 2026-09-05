@@ -12,11 +12,13 @@ import {
 	savePiSpeakSetupConfig,
 	type PiSpeakSetupConfig,
 } from "./setup-config.js";
+import { resolveAgentProviderConfig } from "./agent-provider.js";
 import { describeSpeakPlaybackGate, normalizeSpeakPlaybackGate, resolveSpeakPlaybackGate } from "./speak-gate.js";
 
 type Args = Record<string, string | boolean>;
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const DEFAULT_AGENT_PROVIDER = resolveAgentProviderConfig().provider;
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
@@ -56,8 +58,8 @@ async function runSetup(args: Args) {
 		config.agentProvider = await choice(rl, {
 			label: "Coding agent backend",
 			current: config.agentProvider,
-			defaultValue: valueArg(args.provider) || valueArg(args.agent) || "codex",
-			choices: ["codex", "claude", "pi"],
+			defaultValue: valueArg(args.provider) || valueArg(args.agent) || DEFAULT_AGENT_PROVIDER,
+			choices: ["oh-my-pk", "codex", "claude", "pi"],
 			yes,
 			nonInteractive,
 		});
@@ -192,7 +194,7 @@ async function runSetup(args: Args) {
 function printConfigSummary(config: PiSpeakSetupConfig, heading: string) {
 	console.log("");
 	console.log(heading);
-	console.log(`Agent: ${config.agentProvider || "codex"}`);
+	console.log(`Agent: ${config.agentProvider || DEFAULT_AGENT_PROVIDER}`);
 	console.log(`Voice router: ${config.executionRouterMode || "auto"}`);
 	console.log(`TTS: ${config.ttsProvider || "auto"}`);
 	console.log(`Playback gate: ${describeSpeakPlaybackGate(normalizeSpeakPlaybackGate(config.speakPlaybackGate) || "orb")}`);
@@ -219,7 +221,7 @@ function printDoctor() {
 	console.log("Pi Speak doctor");
 	console.log(`Config: ${existsSync(configPath) ? configPath : "not found"}`);
 	console.log(`Package root: ${ROOT}`);
-	console.log(`Agent: ${config.agentProvider || process.env.AGENT_PROVIDER || "codex"}`);
+	console.log(`Agent: ${config.agentProvider || DEFAULT_AGENT_PROVIDER}`);
 	console.log(`TTS: ${config.ttsProvider || process.env.PI_SPEAK_TTS_PROVIDER || "auto"}`);
 	console.log(`Playback gate: ${describeSpeakPlaybackGate(resolveSpeakPlaybackGate({ env: process.env, config }))}`);
 	console.log(`Gateway port: ${config.httpPort || process.env.PI_SPEAK_HTTP_PORT || "8767"}`);
@@ -235,7 +237,7 @@ function printHelp() {
 		"Options:",
 		"  -y, --yes                 Use recommended defaults without prompts",
 		"  --non-interactive         Do not prompt; use args/defaults",
-		"  --provider <codex|claude|pi>",
+		"  --provider <oh-my-pk|codex|claude|pi>",
 		"  --router <auto|codex|claude|pi>",
 		"  --tts <edge|gemini|elevenlabs|openai|sag|auto>",
 		"  --stt <auto|local|openai|elevenlabs|google>",

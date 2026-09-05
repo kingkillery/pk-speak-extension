@@ -292,6 +292,9 @@ function buildAgentEnv(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
 	return merged;
 }
 
+const CLI_TERMINATION_GRACE_MS = 2_000;
+const CLI_FORCE_KILL_WAIT_MS = 2_000;
+
 function runCli(command: string, args: string[], options: { cwd: string; name: string; stdin?: string; env?: NodeJS.ProcessEnv }): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const child = safeSpawn(command, args, {
@@ -303,15 +306,34 @@ function runCli(command: string, args: string[], options: { cwd: string; name: s
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
+		let timedOut = false;
+		let forceKillTimeout: NodeJS.Timeout | undefined;
+		let terminationDeadline: NodeJS.Timeout | undefined;
 		const timeoutMs = Number.parseInt(options.env?.AGENT_TURN_TIMEOUT_MS || process.env.AGENT_TURN_TIMEOUT_MS || "45000", 10);
+		const timeoutError = new Error(`${options.name} timed out after ${timeoutMs}ms`);
+		const clearRunTimers = () => {
+			clearTimeout(timeout);
+			if (forceKillTimeout) clearTimeout(forceKillTimeout);
+			if (terminationDeadline) clearTimeout(terminationDeadline);
+		};
 		const timeout = setTimeout(() => {
 			if (settled) return;
-			settled = true;
+			timedOut = true;
 			killProcessTree(child.pid);
-			reject(new Error(`${options.name} timed out after ${timeoutMs}ms`));
+			forceKillTimeout = setTimeout(() => {
+				if (settled) return;
+				killProcessTree(child.pid, true);
+			}, CLI_TERMINATION_GRACE_MS);
+			terminationDeadline = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				clearRunTimers();
+				reject(timeoutError);
+			}, CLI_TERMINATION_GRACE_MS + CLI_FORCE_KILL_WAIT_MS);
 		}, timeoutMs);
 		if (!child.stdout || !child.stderr) {
-			clearTimeout(timeout);
+			settled = true;
+			clearRunTimers();
 			reject(new Error(`${options.name} did not expose output streams`));
 			return;
 		}
@@ -324,15 +346,19 @@ function runCli(command: string, args: string[], options: { cwd: string; name: s
 			stderr += chunk;
 		});
 		child.on("error", (error) => {
-			if (settled) return;
+			if (settled || timedOut) return;
 			settled = true;
-			clearTimeout(timeout);
+			clearRunTimers();
 			reject(error);
 		});
 		child.on("close", (code) => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timeout);
+			clearRunTimers();
+			if (timedOut) {
+				reject(timeoutError);
+				return;
+			}
 			if (code === 0) {
 				resolve(stdout);
 				return;
@@ -345,13 +371,15 @@ function runCli(command: string, args: string[], options: { cwd: string; name: s
 	});
 }
 
-function killProcessTree(pid?: number) {
+function killProcessTree(pid?: number, force = false) {
 	if (!pid) return;
 	if (process.platform === "win32") {
-		spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+		const args = ["/PID", String(pid), "/T"];
+		if (force) args.push("/F");
+		spawn("taskkill.exe", args, { windowsHide: true, stdio: "ignore" });
 		return;
 	}
 	try {
-		process.kill(pid, "SIGTERM");
+		process.kill(pid, force ? "SIGKILL" : "SIGTERM");
 	} catch {}
 }

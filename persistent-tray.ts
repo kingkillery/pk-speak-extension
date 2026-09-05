@@ -83,7 +83,7 @@ async function main() {
 	const gatewayPort = Number.parseInt(process.env.PI_SPEAK_HTTP_PORT || "", 10)
 		|| Number.parseInt(new URL(baseUrl).port, 10)
 		|| DEFAULT_PORT;
-	const connectUrl = `http://127.0.0.1:${gatewayPort}/connect`;
+	const connectUrl = `http://127.0.0.1:${gatewayPort}/connect?token=${encodeURIComponent(token)}`;
 	const tempDir = mkdtempSync(join(tmpdir(), "pi-speak-persistent-tray-"));
 	const htmlPath = join(tempDir, "pi-speak-setup.html");
 	const logPath = join(tempDir, "pi-speak-tray.log");

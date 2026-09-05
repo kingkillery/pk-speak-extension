@@ -2,13 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	approvalControlType,
+	autoConnectRetryDelay,
 	buildRealtimeWebSocketUrl,
+	conciseRemoteError,
 	decodeLivePcmFrame,
 	encodeLivePcmFrame,
 	isLoopbackHostname,
 	loadPersistedSettings,
 	prepareBargeInDetectorForCapture,
 	persistSettingsSnapshot,
+	routeTargetOptionLabel,
+	routeTargetProviderLabel,
+	sessionProviderLabel,
+	sortRouteTargets,
 	STORAGE_AUDIO,
 	STORAGE_AUTOPLAY,
 	STORAGE_REMEMBER,
@@ -34,6 +40,60 @@ test("desktop loopback hosts bypass remote-token onboarding", () => {
 	assert.equal(isLoopbackHostname("100.64.0.1"), false);
 	assert.equal(isLoopbackHostname("127.0.0.42"), false);
 	assert.equal(isLoopbackHostname("desktop.example.com"), false);
+});
+
+test("remote startup retries quickly and caps reconnect backoff", () => {
+	assert.equal(autoConnectRetryDelay(0), 1_000);
+	assert.equal(autoConnectRetryDelay(1), 2_000);
+	assert.equal(autoConnectRetryDelay(2), 5_000);
+	assert.equal(autoConnectRetryDelay(3), 10_000);
+	assert.equal(autoConnectRetryDelay(20), 10_000);
+});
+
+test("remote errors stay concise and actionable in the mobile status dock", () => {
+	assert.equal(
+		conciseRemoteError(JSON.stringify({
+			error: {
+				code: 404,
+				message: "Publisher model projects/example/locations/us-central1/publishers/google/models/gemini-x was not found.",
+				status: "NOT_FOUND",
+			},
+		})),
+		"Gemini model is unavailable. Check the gateway model setting and try again.",
+	);
+	assert.equal(
+		conciseRemoteError("TypeError: Failed to fetch"),
+		"Gateway connection failed. Check Tailscale or Wi-Fi.",
+	);
+	assert.ok(conciseRemoteError("x".repeat(400)).length <= 160);
+});
+
+test("mobile session labels identify OMPK, Codex, and Claude providers", () => {
+	assert.equal(sessionProviderLabel({ provider: "oh-my-pk" }), "OMPK");
+	assert.equal(sessionProviderLabel({ source: "oh-my-pi" }), "OMPK");
+	assert.equal(sessionProviderLabel({ kind: "background" }), "OMPK");
+	assert.equal(sessionProviderLabel({ provider: "codex" }), "Codex");
+	assert.equal(sessionProviderLabel({ provider: "claude" }), "Claude");
+});
+
+test("mobile route dropdown prioritizes and labels providers before Claude process lists", () => {
+	const targets = sortRouteTargets([
+		"claude:22412",
+		"claude:26496",
+		"codex:41100 features.code_mode_host=true",
+		"oh-my-pk:session-one",
+		"claude:22412",
+	]);
+	assert.deepEqual(targets, [
+		"oh-my-pk:session-one",
+		"codex:41100 features.code_mode_host=true",
+		"claude:22412",
+		"claude:26496",
+	]);
+	assert.equal(routeTargetProviderLabel(targets[0]), "OMPK");
+	assert.equal(routeTargetOptionLabel(""), "OMPK: Current session");
+	assert.equal(routeTargetOptionLabel(targets[0]), "OMPK: session-one");
+	assert.equal(routeTargetOptionLabel(targets[1]), "Codex: 41100 features.code_mode_host=true");
 });
 
 test("realtime PCM framing downsamples mic audio and preserves the sequence header", () => {

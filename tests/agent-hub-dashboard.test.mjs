@@ -140,6 +140,56 @@ test("mergeOhMyPiAgentHubSessions appends background lanes without replacing rou
 	}
 });
 
+test("mergeOhMyPiAgentHubSessions preserves OMPK identity on an existing routed session", () => {
+	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-agent-hub-"));
+	try {
+		const sessionsRoot = join(tmp, "sessions");
+		const projectDir = join(sessionsRoot, "C-dev-repo");
+		mkdirSync(projectDir, { recursive: true });
+		const sessionPath = join(projectDir, "2026-06-23T000000_bg-session.jsonl");
+		writeFileSync(
+			sessionPath,
+			jsonLine({
+				type: "session",
+				version: 3,
+				id: "bg-session",
+				cwd: "C:\\dev\\repo",
+				backgroundInstance: { name: "scout", status: "active", model: "gpt-5" },
+			}),
+		);
+		const baseDashboard = {
+			current: "Voice scout",
+			ready: ["Voice scout"],
+			sessions: [{
+				name: "Voice scout",
+				path: sessionPath,
+				sessionPath,
+				current: true,
+				isCurrent: true,
+				ready: true,
+				isReady: true,
+				activity: "idle",
+				aliases: ["one"],
+			}],
+		};
+
+		const merged = mergeOhMyPiAgentHubSessions(baseDashboard, { sessionsRoots: [sessionsRoot] });
+
+		assert.equal(merged.sessions.length, 1);
+		assert.equal(merged.sessions[0].name, "Voice scout");
+		assert.equal(merged.sessions[0].provider, "oh-my-pk");
+		assert.equal(merged.sessions[0].source, "oh-my-pk");
+		assert.equal(merged.sessions[0].kind, "background");
+		assert.equal(merged.sessions[0].model, "gpt-5");
+		assert.equal(merged.sessions[0].sessionId, "bg-session");
+		assert.deepEqual(merged.sessions[0].aliases, ["one"]);
+		assert.equal(merged.sessions[0].current, true);
+		assert.equal(merged.sessions[0].activity, "idle");
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
 test("archiveOhMyPiBackgroundSession drops an Oh-my-pk lane from later scans", () => {
 	const tmp = mkdtempSync(join(tmpdir(), "pi-speak-agent-hub-"));
 	try {

@@ -47,7 +47,7 @@ async function main() {
 	const gatewayEntry = resolve(args.gateway || join(repoRoot, "dist", "headless-gateway.js"));
 	const port = Number.parseInt(args.port || process.env.PI_SPEAK_HTTP_PORT || "", 10) || DEFAULT_PORT;
 	const token = process.env.PI_SPEAK_HTTP_TOKEN || getOrCreateInstallAuthToken();
-	const connectUrl = `http://127.0.0.1:${port}/connect`;
+	const connectUrl = `http://127.0.0.1:${port}/connect?token=${encodeURIComponent(token)}`;
 
 	if (args.installShortcut || args["install-shortcut"]) {
 		installShortcuts(repoRoot);

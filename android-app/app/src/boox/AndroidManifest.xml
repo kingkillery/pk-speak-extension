@@ -12,6 +12,7 @@
     <application>
         <!-- The standard phone UI is not shipped on the e-ink build. -->
         <activity android:name=".MainActivity" tools:node="remove" />
+        <activity android:name=".OmpkTuiActivity" tools:node="remove" />
 
         <activity
             android:name=".BooxMainActivity"

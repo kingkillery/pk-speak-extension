@@ -1135,10 +1135,7 @@ fun GatewaySessionRow(
                 if (isCurrent) item { GatewaySessionBadge("current", Success) }
                 if (isReady) item { GatewaySessionBadge("ready", Warn) }
                 item { GatewaySessionBadge(if (isCurrent) "current session" else "background lane", InkMuted) }
-                gatewaySessionSourceLabel(entry)?.let { source ->
-                    item { GatewaySessionBadge(source, InkMuted) }
-                }
-                entry.provider?.takeIf { it.isNotBlank() }?.let { provider ->
+                gatewaySessionProviderLabel(entry)?.let { provider ->
                     item { GatewaySessionBadge(provider, InkMuted) }
                 }
                 entry.model?.takeIf { it.isNotBlank() }?.let { model ->
@@ -1515,17 +1512,19 @@ fun gatewaySessionSubtitle(entry: GatewaySessionEntry, dashboard: GatewaySession
         else -> "background session"
     }
     val cwd = gatewayFolderLabel(entry.displayCwd)
-    val provider = entry.provider?.takeIf { it.isNotBlank() }
-    val source = gatewaySessionSourceLabel(entry)
+    val provider = gatewaySessionProviderLabel(entry)
     val model = entry.model?.takeIf { it.isNotBlank() }
     val role = entry.role?.takeIf { it.isNotBlank() }
-    return listOfNotNull(kind, source, provider, model, role, cwd).distinct().joinToString(" | ")
+    return listOfNotNull(kind, provider, model, role, cwd).distinct().joinToString(" | ")
 }
 
-fun gatewaySessionSourceLabel(entry: GatewaySessionEntry): String? = when (entry.source) {
-    "oh-my-pk" -> "Oh-my-pk"
-    "oh-my-pi" -> "Oh-my-pk"
-    else -> entry.source?.takeIf { it.isNotBlank() }
+fun gatewaySessionProviderLabel(entry: GatewaySessionEntry): String? = when {
+    gatewaySessionIsOmpLane(entry) -> "OMPK"
+    entry.provider.equals("codex", ignoreCase = true) -> "Codex"
+    entry.provider.equals("claude", ignoreCase = true) -> "Claude"
+    entry.provider.equals("pi", ignoreCase = true) -> "Pi"
+    else -> entry.provider?.takeIf { it.isNotBlank() }
+        ?: entry.source?.takeIf { it.isNotBlank() }
 }
 
 @Composable

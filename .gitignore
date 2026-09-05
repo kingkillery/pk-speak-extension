@@ -107,3 +107,10 @@ test-rl.js
 
 # Obsidian vault workspace state (wiki/ is browsed as a vault)
 .obsidian/
+
+# Local audit / agent attachment scratch (do not publish)
+.audit-artifacts/
+.codex-remote-attachments/
+
+# Local Moonshine model/cache downloads
+moonshine_voice/

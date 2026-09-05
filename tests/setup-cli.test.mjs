@@ -14,6 +14,33 @@ test("pi-speak-pk help describes setup flow", async () => {
 	});
 	assert.match(stdout, /Usage: pi-speak-pk/);
 	assert.match(stdout, /pk-speak doctor/);
+	assert.match(stdout, /--provider <oh-my-pk\|codex\|claude\|pi>/);
+});
+
+test("pi-speak-pk fresh setup and doctor use the runtime provider default", async () => {
+	const configDir = await mkdtemp(join(tmpdir(), "pi-speak-default-provider-test-"));
+	try {
+		const env = { ...process.env, AGENT_PROVIDER: "", PI_SPEAK_CONFIG_DIR: configDir };
+		const doctor = await execFileAsync(process.execPath, ["dist/pi-speak-pk.js", "doctor"], {
+			cwd: process.cwd(),
+			env,
+		});
+		assert.match(doctor.stdout, /Agent: oh-my-pk/);
+
+		const setup = await execFileAsync(process.execPath, [
+			"dist/pi-speak-pk.js",
+			"setup",
+			"--non-interactive",
+		], {
+			cwd: process.cwd(),
+			env,
+		});
+		assert.match(setup.stdout, /Agent: oh-my-pk/);
+		const config = JSON.parse(await readFile(join(configDir, "setup.json"), "utf8"));
+		assert.equal(config.agentProvider, "oh-my-pk");
+	} finally {
+		await rm(configDir, { recursive: true, force: true });
+	}
 });
 
 test("pi-speak-pk non-interactive setup writes local config", async () => {

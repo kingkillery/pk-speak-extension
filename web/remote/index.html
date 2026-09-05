@@ -3,8 +3,8 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-	<meta name="theme-color" content="#1f3c33">
-	<title>Pi Speak Chat</title>
+	<meta name="theme-color" content="#18181e">
+	<title>OMPK Remote</title>
 	<link rel="manifest" href="/app/app.webmanifest">
 	<link rel="icon" href="/app/icon.svg" type="image/svg+xml">
 	<style>
@@ -762,6 +762,12 @@
 			gap: 2px;
 			min-width: 0;
 		}
+		.session-heading {
+			display: flex;
+			align-items: center;
+			gap: 6px;
+			min-width: 0;
+		}
 		.session-name,
 		.session-cwd {
 			min-width: 0;
@@ -790,6 +796,7 @@
 		.status-badge.current { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
 		.status-badge.ready { background: var(--success); color: #fff; border-color: var(--success); }
 		.status-badge.busy { background: #c9a227; color: #fff; border-color: #c9a227; }
+		.status-badge.provider-badge { flex: 0 0 auto; border-color: var(--primary); color: var(--primary); }
 
 		.agent-section-title {
 			margin-top: 4px;
@@ -1037,12 +1044,829 @@
 		html[data-variant="5"] .tab-bar { gap: 4px; }
 		html[data-variant="5"] .tab { border: 1px solid var(--line); box-shadow: none; }
 	</style>
+	<style id="ompk-terminal-theme">
+		/* OMPK remote shell. Values mirror the upstream terminal's default dark theme. */
+		:root {
+			color-scheme: dark;
+			--canvas: #18181e;
+			--surface: #1e1e24;
+			--surface-tint: #161a1f;
+			--surface-raised: #26262e;
+			--surface-selected: #31363f;
+			--surface-glass: #121212;
+			--surface-card: #1e1e24;
+			--surface-row: #1e1e24;
+			--surface-row-hover: #26262e;
+			--line: #3d424a;
+			--line-strong: #178fb9;
+			--ink: #f4f1ed;
+			--muted: #777d88;
+			--primary: #febc38;
+			--on-primary: #17140d;
+			--accent: #0088fa;
+			--on-accent: #f7fbff;
+			--success: #89d281;
+			--danger: #fc3a4b;
+			--warning: #e4c00f;
+			--on-warning: #17140d;
+			--shadow: none;
+			--shadow-sm: none;
+			--shadow-accent: none;
+			--radius-sm: 2px;
+			--radius-md: 2px;
+			--radius-lg: 2px;
+			--dock-inset: 214px;
+		}
+
+		html,
+		body {
+			background: var(--canvas);
+			font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+			font-variant-ligatures: none;
+		}
+
+		body {
+			font-size: 14px;
+		}
+
+		::selection {
+			background: color-mix(in srgb, var(--accent) 38%, transparent);
+			color: var(--ink);
+		}
+
+		button,
+		select,
+		input,
+		textarea {
+			font-family: inherit;
+		}
+
+		button {
+			min-height: 40px;
+			border-color: var(--line-strong);
+			border-radius: 2px;
+			background: transparent;
+			color: var(--ink);
+			font-size: 12px;
+			font-weight: 700;
+			letter-spacing: 0.04em;
+			box-shadow: none;
+			text-transform: uppercase;
+			transition: background 100ms linear, color 100ms linear, border-color 100ms linear;
+		}
+
+		button:hover:not(:disabled) {
+			background: var(--surface-raised);
+			border-color: var(--accent);
+		}
+
+		button:active:not(:disabled) {
+			transform: none;
+			background: var(--accent);
+			color: #07131d;
+		}
+
+		button.secondary {
+			background: transparent;
+			color: var(--muted);
+			border-color: var(--line);
+		}
+
+		button:focus-visible,
+		select:focus-visible,
+		input:focus-visible,
+		textarea:focus-visible,
+		[tabindex]:focus-visible {
+			outline: 2px solid var(--primary);
+			outline-offset: 2px;
+			box-shadow: none;
+		}
+
+		select,
+		input[type="password"],
+		input[type="text"],
+		input[type="number"],
+		textarea {
+			border-color: var(--line);
+			border-radius: 2px;
+			background: #121217;
+			color: var(--ink);
+		}
+
+		select:focus,
+		input:focus,
+		textarea:focus {
+			border-color: var(--accent);
+			box-shadow: none;
+		}
+
+		.app {
+			width: min(100%, 1180px);
+			min-height: 100dvh;
+			gap: 0;
+			padding: 0 16px 12px;
+		}
+
+		.topbar {
+			top: 0;
+			grid-template-columns: minmax(240px, 1fr) minmax(0, auto);
+			gap: 16px;
+			padding: 10px 0;
+			border: 0;
+			border-bottom: 1px solid var(--line);
+			border-radius: 0;
+			background: color-mix(in srgb, #121212 96%, transparent);
+			backdrop-filter: none;
+			box-shadow: none;
+		}
+
+		.brand {
+			grid-template-columns: auto minmax(0, 1fr);
+			align-items: baseline;
+			gap: 12px;
+		}
+
+		.brand strong {
+			color: var(--primary);
+			font-size: 13px;
+			font-weight: 800;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+		}
+
+		.brand span {
+			color: var(--muted);
+			font-size: 12px;
+		}
+
+		.topbar .connection {
+			gap: 10px;
+			color: var(--muted);
+			font-size: 11px;
+		}
+
+		.topbar .connection .top-actions {
+			gap: 6px;
+			padding-left: 10px;
+		}
+
+		#agent-pill,
+		#auth-pill {
+			padding: 3px 6px;
+			border: 1px solid var(--line);
+			background: var(--surface);
+			color: var(--muted);
+		}
+
+		.status-dot {
+			width: 8px;
+			height: 8px;
+			border-radius: 50%;
+			box-shadow: none;
+		}
+
+		.status-dot.ready,
+		.status-dot.error {
+			box-shadow: none;
+		}
+
+		#target-select {
+			width: clamp(180px, 24vw, 300px);
+			height: 36px;
+			padding: 0 28px 0 10px;
+			border-color: var(--line);
+			background: var(--surface);
+			font-size: 12px;
+		}
+
+		#open-settings-button,
+		#refresh-button {
+			min-width: 38px;
+			height: 36px;
+			min-height: 36px;
+			padding: 0 10px;
+		}
+
+		.tab-bar {
+			gap: 18px;
+			padding: 0;
+			border-bottom: 1px solid var(--line);
+			background: var(--canvas);
+		}
+
+		.tab {
+			position: relative;
+			min-height: 42px;
+			padding: 0 2px;
+			border: 0;
+			border-radius: 0;
+			background: transparent;
+			color: var(--muted);
+			font-size: 12px;
+			letter-spacing: 0.05em;
+		}
+
+		.tab:hover:not(:disabled) {
+			background: transparent;
+			color: var(--ink);
+		}
+
+		.tab.active {
+			border: 0;
+			background: transparent;
+			color: var(--primary);
+		}
+
+		.tab.active::after {
+			position: absolute;
+			left: 0;
+			right: 0;
+			bottom: -1px;
+			height: 2px;
+			background: var(--primary);
+			content: "";
+		}
+
+		.setup-banner {
+			margin: 18px 0;
+			border: 1px solid var(--warning);
+			border-radius: 2px;
+			background: #1d1b13;
+			box-shadow: none;
+			padding: 16px;
+		}
+
+		.setup-banner h2,
+		.session-section h3 {
+			color: var(--primary);
+			font-size: 12px;
+			font-weight: 800;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+		}
+
+		.setup-banner code,
+		code.inline {
+			border: 0;
+			background: var(--surface-raised);
+			color: var(--primary);
+		}
+
+		.chat {
+			min-height: min(620px, calc(100dvh - 108px));
+			border: 0;
+			border-left: 1px solid var(--line);
+			border-right: 1px solid var(--line);
+			border-radius: 0;
+			background: #111116;
+			box-shadow: none;
+		}
+
+		.messages {
+			padding: 20px 0 calc(24px + var(--dock-inset));
+			gap: 0;
+		}
+
+		.message {
+			position: relative;
+			width: 100%;
+			max-width: none;
+			min-height: 42px;
+			padding: 11px 18px 11px 88px;
+			border: 0;
+			border-bottom: 1px solid color-mix(in srgb, var(--line) 58%, transparent);
+			border-radius: 0;
+			background: transparent;
+			color: var(--ink);
+			font-size: 14px;
+			line-height: 1.55;
+			animation: none;
+		}
+
+		.message::before {
+			position: absolute;
+			left: 16px;
+			top: 12px;
+			width: 54px;
+			font-size: 11px;
+			font-weight: 800;
+			letter-spacing: 0.06em;
+			text-align: right;
+			text-transform: uppercase;
+		}
+
+		.message.user,
+		.message.agent,
+		.message.system {
+			align-self: stretch;
+			border-color: color-mix(in srgb, var(--line) 58%, transparent);
+			background: transparent;
+			color: var(--ink);
+		}
+
+		.message.user {
+			background: #221d1a;
+		}
+
+		.message.user::before {
+			content: "you ❯";
+			color: var(--primary);
+		}
+
+		.message.agent {
+			background: #161a1f;
+		}
+
+		.message.agent::before {
+			content: "ompk";
+			color: var(--accent);
+		}
+
+		.message.system {
+			color: var(--muted);
+			font-size: 12px;
+		}
+
+		.message.system::before {
+			content: "status";
+			color: var(--muted);
+		}
+
+		.sessions-panel {
+			min-height: calc(100dvh - 108px);
+			gap: 0;
+			padding: 0 0 calc(var(--dock-inset) + 24px);
+			border: 0;
+			border-left: 1px solid var(--line);
+			border-right: 1px solid var(--line);
+			border-radius: 0;
+			background: #111116;
+			box-shadow: none;
+			overflow-y: auto;
+		}
+
+		.session-section {
+			gap: 10px;
+			padding: 16px 18px 18px;
+			border-bottom: 1px solid var(--line);
+		}
+
+		.session-section h3 {
+			padding-bottom: 8px;
+			border-bottom: 1px solid var(--line);
+		}
+
+		.session-list,
+		.workspace-entries,
+		.event-log {
+			max-height: 240px;
+			gap: 2px;
+		}
+
+		.session-row,
+		.agent-row,
+		button.workspace-entry,
+		.event-item {
+			border: 0;
+			border-left: 2px solid transparent;
+			border-radius: 0;
+			background: transparent;
+			color: var(--ink);
+		}
+
+		.session-row:hover,
+		.agent-row:hover,
+		button.workspace-entry:hover,
+		.workspace-entry:hover {
+			background: var(--surface-raised);
+		}
+
+		.session-row.selected {
+			border-color: var(--primary);
+			background: var(--surface-selected);
+		}
+
+		.session-name,
+		.agent-row-title {
+			font-weight: 700;
+		}
+
+		.session-cwd,
+		.agent-row-meta,
+		.workspace-current,
+		.workspace-entry-size,
+		.event-item .event-meta {
+			color: var(--muted);
+			font-family: inherit;
+		}
+
+		.status-badge {
+			border-radius: 2px;
+			background: transparent;
+			letter-spacing: 0.04em;
+		}
+
+		.status-badge.current {
+			border-color: var(--primary);
+			background: transparent;
+			color: var(--primary);
+		}
+
+		.status-badge.ready {
+			border-color: var(--success);
+			background: transparent;
+			color: var(--success);
+		}
+
+		.status-badge.busy {
+			border-color: var(--warning);
+			background: transparent;
+			color: var(--warning);
+		}
+
+		.approval-card {
+			border-radius: 2px;
+			background: #1d1b13;
+		}
+
+		.dock {
+			border-top: 1px solid var(--line-strong);
+			background: #121212;
+			backdrop-filter: none;
+			padding: 7px 12px calc(7px + env(safe-area-inset-bottom));
+		}
+
+		.dock-inner {
+			width: min(100%, 1148px);
+			gap: 7px;
+		}
+
+		.dock-status {
+			min-height: 22px;
+			padding: 0;
+		}
+
+		.status-note {
+			color: var(--muted);
+			font-size: 11px;
+		}
+
+		.status-note::before {
+			margin-right: 7px;
+			color: var(--success);
+			content: "●";
+		}
+
+		.status-note[data-tone="error"]::before {
+			color: var(--danger);
+		}
+
+		.composer {
+			grid-template-columns: minmax(0, 1fr) auto;
+			gap: 8px;
+		}
+
+		.prompt-shell {
+			display: grid;
+			grid-template-columns: auto minmax(0, 1fr);
+			align-items: start;
+			min-width: 0;
+			border: 1px solid var(--line-strong);
+			background: #0f0f14;
+		}
+
+		.prompt-shell:focus-within {
+			border-color: var(--accent);
+		}
+
+		.prompt-mark {
+			padding: 12px 0 0 12px;
+			color: var(--primary);
+			font-weight: 800;
+		}
+
+		.composer textarea {
+			min-height: 46px;
+			max-height: 144px;
+			padding: 11px 12px;
+			border: 0;
+			background: transparent;
+			font-size: 16px;
+			line-height: 1.45;
+		}
+
+		.composer textarea:focus {
+			outline: 0;
+		}
+
+		.composer-actions {
+			grid-template-columns: repeat(2, auto);
+			gap: 6px;
+		}
+
+		#send-text-button {
+			border-color: var(--primary);
+			background: var(--primary);
+			color: var(--on-primary);
+		}
+
+		#cancel-turn-button {
+			border-color: var(--danger);
+			background: transparent;
+			color: var(--danger);
+		}
+
+		.voice-dock {
+			grid-template-columns: minmax(0, 1fr) auto auto auto;
+			gap: 6px;
+		}
+
+		.voice-mode,
+		.timer {
+			min-height: 38px;
+			border-radius: 2px;
+			background: transparent;
+			box-shadow: none;
+		}
+
+		.voice-mode {
+			border: 0;
+			padding: 0 4px;
+		}
+
+		.talk-button {
+			min-width: 132px;
+			border-color: var(--accent);
+			background: transparent;
+			color: var(--accent);
+		}
+
+		.talk-button.recording {
+			border-color: var(--danger);
+			background: var(--danger);
+			color: #fff;
+		}
+
+		.timer {
+			min-width: 86px;
+			padding: 10px;
+			border-color: var(--line);
+			color: var(--muted);
+		}
+
+		details.settings {
+			position: fixed;
+			top: 18px;
+			right: 18px;
+			bottom: 18px;
+			z-index: var(--z-overlay);
+			display: none;
+			width: min(430px, calc(100vw - 36px));
+			overflow-y: auto;
+			border: 1px solid var(--line-strong);
+			border-radius: 2px;
+			background: #15151b;
+			box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.62);
+		}
+
+		details.settings[open] {
+			display: block;
+		}
+
+		details.settings summary {
+			position: sticky;
+			top: 0;
+			z-index: 1;
+			padding: 14px;
+			border-bottom: 1px solid var(--line);
+			background: #15151b;
+			color: var(--primary);
+			font-size: 12px;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+		}
+
+		.settings-body {
+			padding: 14px;
+		}
+
+		.file-viewer {
+			background: rgba(0, 0, 0, 0.76);
+		}
+
+		.file-viewer-dialog {
+			border-color: var(--line-strong);
+			border-radius: 2px;
+			background: #15151b;
+			box-shadow: none;
+		}
+
+		.file-viewer-body {
+			font-family: inherit;
+			font-size: 13px;
+		}
+
+		@media (max-width: 760px) {
+			:root { --dock-inset: 158px; }
+
+			.app {
+				padding: 0;
+			}
+
+			.topbar {
+				position: sticky;
+				grid-template-columns: 1fr;
+				gap: 6px;
+				padding: 7px 10px;
+			}
+
+			.brand {
+				display: flex;
+				gap: 8px;
+				min-width: 0;
+			}
+
+			.brand span {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+
+			.topbar .connection {
+				display: grid;
+				grid-template-columns: auto minmax(72px, 0.6fr) minmax(0, 1fr) auto auto;
+				gap: 6px;
+				min-width: 0;
+			}
+
+			.topbar .connection .top-actions {
+				display: contents;
+				padding: 0;
+				border: 0;
+			}
+
+			#agent-pill {
+				overflow: hidden;
+				padding: 0;
+				border: 0;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+
+			#auth-pill {
+				display: none;
+			}
+
+			#target-select {
+				width: 100%;
+				height: 44px;
+			}
+
+			#open-settings-button,
+			#refresh-button {
+				width: 48px;
+				height: 44px;
+				min-height: 44px;
+				padding: 0 5px;
+				font-size: 10px;
+			}
+
+			.tab-bar {
+				padding: 0 10px;
+			}
+
+			.tab {
+				min-height: 38px;
+			}
+
+			.chat,
+			.sessions-panel {
+				min-height: calc(100dvh - 122px);
+				border-left: 0;
+				border-right: 0;
+			}
+
+			.messages {
+				padding-top: 4px;
+			}
+
+			.shell-ready {
+				display: none;
+			}
+
+			.message {
+				min-height: 40px;
+				padding: 10px 10px 10px 72px;
+				font-size: 13px;
+			}
+
+			.message::before {
+				left: 8px;
+				top: 11px;
+				width: 54px;
+				text-align: right;
+			}
+
+			.session-section {
+				padding: 14px 12px 16px;
+			}
+
+			.session-row {
+				grid-template-columns: minmax(0, 1fr) auto;
+			}
+
+			.dock {
+				padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+			}
+
+			.dock-status {
+				min-height: 18px;
+				flex-wrap: nowrap;
+			}
+
+			.status-note {
+				overflow: hidden;
+				max-width: 100%;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+
+			.composer {
+				grid-template-columns: minmax(0, 1fr) 86px;
+			}
+
+			.composer-actions {
+				grid-template-columns: 1fr;
+			}
+
+			.composer textarea {
+				min-height: 44px;
+				padding-top: 10px;
+				padding-bottom: 8px;
+			}
+
+			#send-text-button,
+			#cancel-turn-button {
+				min-height: 44px;
+			}
+
+			#clear-text-button {
+				display: none;
+			}
+
+			.voice-dock {
+				grid-template-columns: minmax(0, 1fr) minmax(132px, 1fr) auto;
+				align-items: center;
+			}
+
+			.voice-mode {
+				grid-column: auto;
+				min-height: 44px;
+				padding: 0 2px;
+			}
+
+			#record-label-main {
+				font-size: 11px;
+			}
+
+			#record-subtitle {
+				display: none;
+			}
+
+			.talk-button {
+				width: 100%;
+				min-width: 0;
+				min-height: 44px;
+			}
+
+			.timer {
+				min-width: 54px;
+				min-height: 44px;
+				padding: 10px 6px;
+			}
+
+			details.settings {
+				top: 8px;
+				right: 8px;
+				bottom: 8px;
+				width: calc(100vw - 16px);
+			}
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			*, *::before, *::after {
+				animation-duration: 0.01ms !important;
+				animation-iteration-count: 1 !important;
+				transition-duration: 0.01ms !important;
+			}
+		}
+	</style>
 </head>
 <body>
 	<div class="app" id="app-root">
 		<header class="topbar">
 			<div class="brand">
-				<strong>Pi Speak Chat</strong>
+				<strong>OMPK / remote</strong>
 				<span id="route-pill">Route: current session</span>
 			</div>
 			<div class="connection">
@@ -1051,19 +1875,19 @@
 				<span id="auth-pill">Checking</span>
 				<div class="top-actions v5-controls">
 					<select id="target-select" aria-label="Target session"></select>
-					<button id="open-settings-button" class="secondary" type="button" aria-label="Settings">Settings</button>
-					<button id="refresh-button" class="secondary" type="button" aria-label="Refresh">Refresh</button>
+					<button id="open-settings-button" class="secondary" type="button" aria-label="Settings">CFG</button>
+					<button id="refresh-button" class="secondary" type="button" aria-label="Refresh">Sync</button>
 				</div>
 			</div>
 		</header>
 
-		<nav class="tab-bar" id="tab-bar">
-			<button class="tab active" data-tab="chat" type="button">Chat</button>
-			<button class="tab" data-tab="sessions" type="button">Sessions</button>
+		<nav class="tab-bar" id="tab-bar" role="tablist" aria-label="OMPK remote views">
+			<button class="tab active" data-tab="chat" type="button" role="tab" aria-selected="true" aria-controls="chat-panel">[1] Run</button>
+			<button class="tab" data-tab="sessions" type="button" role="tab" aria-selected="false" aria-controls="sessions-panel">[2] Context</button>
 		</nav>
 
 		<section class="setup-banner" id="setup-banner">
-			<h2>Connect to your computer</h2>
+			<h2>Gateway authentication required</h2>
 			<div id="setup-status">On your computer, run <code>/remote on</code>, then <code>/remote setup</code>. Paste the token below.</div>
 			<label class="field-grid">
 				<span>Remote token</span>
@@ -1080,15 +1904,15 @@
 			<div id="setup-link" class="muted">Once saved, this chat controls your local agent on the computer.</div>
 		</section>
 
-		<main class="chat" aria-live="polite">
+		<main class="chat" id="chat-panel" role="tabpanel" aria-live="polite">
 			<div id="chat-messages" class="messages">
-				<div class="message system">Ready when the gateway is connected.</div>
+				<div class="message system shell-ready">Remote shell ready when the gateway connects. Press / to focus the prompt.</div>
 			</div>
 		</main>
 
-		<section class="sessions-panel" id="sessions-panel" aria-label="Sessions">
+		<section class="sessions-panel" id="sessions-panel" role="tabpanel" aria-label="Session context">
 			<div class="session-section">
-				<h3>Current session</h3>
+				<h3>Route / active session</h3>
 				<div id="session-current">Loading…</div>
 				<div id="session-ready" class="muted">Ready: —</div>
 			</div>
@@ -1097,7 +1921,7 @@
 				<div id="session-slots" class="muted">Loading…</div>
 			</div>
 			<div class="session-section">
-				<h3>Sessions</h3>
+				<h3>OMPK sessions</h3>
 				<div id="session-list" class="session-list">Loading…</div>
 				<div id="session-actions" class="field-grid hidden">
 					<span id="selected-session-name"></span>
@@ -1110,11 +1934,11 @@
 				</div>
 			</div>
 			<div class="session-section">
-				<h3>Events <span id="event-status" class="status-dot" style="display:inline-block;vertical-align:middle;margin-left:6px;"></span></h3>
+				<h3>Runtime events <span id="event-status" class="status-dot" style="display:inline-block;vertical-align:middle;margin-left:6px;"></span></h3>
 				<div id="event-log" class="event-log">Connecting…</div>
 			</div>
 			<div class="session-section">
-				<h3>Discovered agents</h3>
+				<h3>Agent processes</h3>
 				<div id="agent-list" class="muted">Loading…</div>
 				<button id="refresh-agents-button" class="secondary" type="button">Refresh agents</button>
 			</div>
@@ -1135,7 +1959,7 @@
 		<footer id="dock" class="dock" aria-label="Composer">
 			<div class="dock-inner">
 				<div class="dock-status">
-					<div id="status-note" class="status-note">Connecting...</div>
+					<div id="status-note" class="status-note" role="status" aria-live="polite">Connecting...</div>
 					<div id="terminal-approvals" class="terminal-approvals hidden" aria-live="polite"></div>
 					<div class="audio-controls-wrapper hidden" id="audio-controls-wrapper">
 						<div class="audio-controls">
@@ -1146,11 +1970,14 @@
 				</div>
 
 				<section id="composer" class="composer">
-					<textarea id="text-input" placeholder="Message your local agent"></textarea>
+					<label class="prompt-shell" aria-label="OMPK prompt">
+						<span class="prompt-mark" aria-hidden="true">❯</span>
+						<textarea id="text-input" placeholder="Ask OMPK…"></textarea>
+					</label>
 					<div class="composer-actions">
-						<button id="send-text-button" type="button">Send</button>
+						<button id="send-text-button" type="button">Run</button>
 						<button id="cancel-turn-button" class="hidden" type="button">Cancel</button>
-						<button id="clear-text-button" class="secondary" type="button" title="Clear draft">Clear</button>
+						<button id="clear-text-button" class="secondary" type="button" title="Clear draft">Reset</button>
 					</div>
 				</section>
 
@@ -1158,12 +1985,12 @@
 					<label class="voice-mode">
 						<input id="audio-toggle" type="checkbox">
 						<span class="voice-copy">
-							<span id="record-label-main">Speak to local agent</span>
-							<span id="record-subtitle">Text reply is enabled by default</span>
+							<span id="record-label-main">Reply audio</span>
+							<span id="record-subtitle">Off</span>
 						</span>
 					</label>
 					<button id="record-button" class="talk-button" type="button">
-						<span id="record-label">Tap to talk</span>
+					<span id="record-label">Talk</span>
 					</button>
 					<button id="replay-live-button" class="secondary hidden" type="button" aria-label="Replay interrupted assistant audio">Replay</button>
 					<div id="timer" class="timer">Ready</div>
@@ -1172,7 +1999,7 @@
 		</footer>
 
 		<details class="settings" id="settings-panel">
-			<summary>Settings</summary>
+			<summary>Configuration / close</summary>
 			<div class="settings-body">
 				<label class="field-grid">
 					<span>Manual session target</span>

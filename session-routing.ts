@@ -143,6 +143,10 @@ export type SessionDashboardEntry = {
 	path?: string;
 	sessionPath?: string;
 	provider?: string;
+	source?: string;
+	kind?: string;
+	model?: string;
+	role?: string;
 	sessionId?: string;
 	resumable?: boolean;
 	resumeCommand?: string[];
@@ -160,6 +164,17 @@ export type SessionDashboardEntry = {
 	workspaceKey?: string;
 	/** Last activity epoch ms (from runtime snapshot or session mtime). */
 	lastActivity?: number;
+	createdAt?: number;
+	subagents?: Array<{
+		id: string;
+		name: string;
+		status?: string;
+		sessionPath?: string;
+		cwd?: string;
+		activity?: string;
+		createdAt?: number;
+		lastActivity?: number;
+	}>;
 	/** True when the session has been hidden/archived. */
 	archived?: boolean;
 	/** True when the session is stale (no use for >= STALE_SESSION_MS) and not current. */

@@ -99,6 +99,14 @@ class GatewaySessionSelectionTest {
   }
 
   @Test
+  fun gatewaySessionProviderLabel_identifiesOmpkAndCliProviders() {
+    assertEquals("OMPK", gatewaySessionProviderLabel(GatewaySessionEntry(source = "oh-my-pk")))
+    assertEquals("OMPK", gatewaySessionProviderLabel(GatewaySessionEntry(provider = "oh-my-pi")))
+    assertEquals("Codex", gatewaySessionProviderLabel(GatewaySessionEntry(provider = "codex")))
+    assertEquals("Claude", gatewaySessionProviderLabel(GatewaySessionEntry(provider = "claude")))
+  }
+
+  @Test
   fun buildGatewayAgentHubGroups_filtersToOmpkBackgroundLanes() {
     val dashboard = GatewaySessionDashboard(
       current = "Main",

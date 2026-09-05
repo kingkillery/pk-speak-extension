@@ -7,12 +7,12 @@ import { createSimulatedLiveClient, SIMULATED_LIVE_MODEL } from "./gemini-live-s
 
 const DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview";
 const DEFAULT_VERTEX_LIVE_MODEL = "gemini-live-2.5-flash";
-const DEFAULT_TEXT_MODEL = "gemini-3.5-flash";
+const DEFAULT_TEXT_MODEL = "gemini-3.6-flash";
 const DEFAULT_TIMEOUT_MS = 45000;
 // Vertex Live (BidiGenerateContent) wants v1beta1; the developer API wants v1beta.
 const DEFAULT_VERTEX_API_VERSION = "v1beta1";
 // Vertex serves Gemini Live publisher models from the `global` location, not regional ones.
-const DEFAULT_VERTEX_LIVE_LOCATION = "global";
+const DEFAULT_VERTEX_LOCATION = "global";
 
 export const GEMINI_LIVE_MODEL_OPTIONS = [
 	"gemini-live-2.5-flash",
@@ -22,6 +22,7 @@ export const GEMINI_LIVE_MODEL_OPTIONS = [
 ] as const;
 
 export const GEMINI_TEXT_MODEL_OPTIONS = [
+	"gemini-3.6-flash",
 	"gemini-3.5-flash",
 	"9router/ag/gemini-3-5-flash-high",
 	"gemini-3.1-flash-lite",
@@ -61,6 +62,16 @@ export function getGeminiApiVersion(backend: GeminiBackend, env: NodeJS.ProcessE
 	return env.PI_SPEAK_GEMINI_API_VERSION?.trim() || "v1beta";
 }
 
+export function getGeminiVertexLocation(
+	env: NodeJS.ProcessEnv = process.env,
+	mode: "live" | "text" = "text",
+) {
+	const override = mode === "live"
+		? env.PI_SPEAK_VERTEX_LIVE_LOCATION?.trim()
+		: env.PI_SPEAK_VERTEX_TEXT_LOCATION?.trim();
+	return override || DEFAULT_VERTEX_LOCATION;
+}
+
 export function getGeminiBackend(env: NodeJS.ProcessEnv = process.env): GeminiBackend {
 	const configured = (env.PI_SPEAK_GEMINI_BACKEND || env.GOOGLE_GENAI_BACKEND || "").trim().toLowerCase();
 	if (configured === "simulated" || configured === "sim" || configured === "simulator") return "simulated";
@@ -96,11 +107,7 @@ export function createGeminiClient(
 	if (backend === "vertex") {
 		const vertex = getVertexConfig(env);
 		if (vertex) {
-			// Vertex Live publisher models are served from `global`; regional locations
-			// resolve fine for text/generateContent but reject the Live websocket.
-			const location = options.live
-				? env.PI_SPEAK_VERTEX_LIVE_LOCATION?.trim() || DEFAULT_VERTEX_LIVE_LOCATION
-				: vertex.location;
+			const location = getGeminiVertexLocation(env, options.live ? "live" : "text");
 			return {
 				ai: new GoogleGenAI({
 					vertexai: true,

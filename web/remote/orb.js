@@ -31,6 +31,7 @@ const muteBtn = /** @type {HTMLButtonElement} */ ($("#mute-btn"));
 const camBtn = /** @type {HTMLButtonElement} */ ($("#cam-btn"));
 const closeBtn = /** @type {HTMLButtonElement} */ ($("#close-btn"));
 const stopBtn = /** @type {HTMLButtonElement} */ ($("#stop-btn"));
+const cascadeBtn = /** @type {HTMLButtonElement} */ ($("#cascade-btn"));
 const replayBtn = /** @type {HTMLButtonElement} */ ($("#replay-btn"));
 const gateInput = /** @type {HTMLInputElement} */ ($("#gate-db"));
 const gateValue = $("#gate-value");
@@ -394,6 +395,122 @@ function clearPlayback() {
 	document.documentElement.style.setProperty("--ai-audio-level", "0");
 }
 
+// Cascade mode: mic → /v1/cascade/transcribe → text turn into the same live
+// session (full tool set), assistant text → /v1/cascade/speak → TTS playback.
+// Trades full-duplex barge-in for provider independence on both audio legs.
+const CASCADE_KEY = "pi-speak-orb-cascade";
+let cascadeOn = localStorage.getItem(CASCADE_KEY) === "true";
+/** @type {MediaRecorder | null} */
+let cascadeRecorder = null;
+/** @type {Blob[]} */
+let cascadeChunks = [];
+/** @type {MediaStream | null} */
+let cascadeStream = null;
+/** @type {HTMLAudioElement | null} */
+let cascadeAudio = null;
+
+function cascadeAuthHeaders(extra = {}) {
+	const t = token();
+	return t ? { ...extra, "x-pi-speak-token": t } : { ...extra };
+}
+
+function updateCascadeButton() {
+	cascadeBtn.setAttribute("aria-pressed", String(cascadeOn));
+	cascadeBtn.classList.toggle("active", cascadeOn);
+	if (cascadeOn) {
+		cascadeBtn.textContent = "Cascade on";
+		if (liveConnected) caption.textContent = "Tap the orb and speak";
+	} else {
+		cascadeBtn.textContent = "Cascade";
+	}
+}
+
+function stopCascadePlayback() {
+	try { cascadeAudio?.pause(); } catch {}
+	cascadeAudio = null;
+}
+
+function stopCascadeRecording() {
+	try { if (cascadeRecorder && cascadeRecorder.state !== "inactive") cascadeRecorder.stop(); } catch {}
+	cascadeRecorder = null;
+	if (cascadeStream) {
+		for (const t of cascadeStream.getTracks()) t.stop();
+		cascadeStream = null;
+	}
+}
+
+async function toggleCascadeRecording() {
+	if (cascadeRecorder && cascadeRecorder.state === "recording") {
+		cascadeRecorder.stop();
+		return;
+	}
+	stopCascadePlayback();
+	if (!cascadeStream) {
+		cascadeStream = await navigator.mediaDevices.getUserMedia({
+			audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+		});
+	}
+	cascadeChunks = [];
+	const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+	cascadeRecorder = new MediaRecorder(cascadeStream, { mimeType });
+	cascadeRecorder.addEventListener("dataavailable", (ev) => {
+		if (ev.data && ev.data.size > 0) cascadeChunks.push(ev.data);
+	});
+	cascadeRecorder.addEventListener("stop", async () => {
+		cascadeRecorder = null;
+		const blob = new Blob(cascadeChunks, { type: mimeType });
+		if (blob.size === 0) { setState("listening"); return; }
+		setState("processing");
+		try {
+			const res = await fetch("/v1/cascade/transcribe", {
+				method: "POST",
+				headers: cascadeAuthHeaders({ "Content-Type": blob.type || "audio/webm" }),
+				body: blob,
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+			const text = String(data.text || "").trim();
+			if (!text) {
+				subcaption.textContent = "Heard nothing — try again.";
+				setState("listening");
+				return;
+			}
+			if (!liveConnected || !sendJson({ type: "text", text })) throw new Error("Live session is not connected.");
+			pendingTextEchoes.push({ text, echoed: "" });
+			pushBubble("user", text);
+			// State stays "processing" until the assistant reply arrives.
+		} catch (err) {
+			pushBubble("system", `Transcribe failed: ${err?.message || err}`);
+			setState("listening");
+		}
+	});
+	cascadeRecorder.start();
+	setState("user-speaking");
+}
+
+/** @param {string} text */
+async function speakCascade(text) {
+	try {
+		const res = await fetch("/v1/cascade/speak", {
+			method: "POST",
+			headers: cascadeAuthHeaders({ "Content-Type": "application/json" }),
+			body: JSON.stringify({ text }),
+		});
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+		stopCascadePlayback();
+		const t = token();
+		cascadeAudio = new Audio(`${data.audioUrl}${t ? `?token=${encodeURIComponent(t)}` : ""}`);
+		setState("ai-speaking");
+		cascadeAudio.addEventListener("ended", () => setState("listening"));
+		cascadeAudio.addEventListener("error", () => setState("listening"));
+		await cascadeAudio.play();
+	} catch (err) {
+		pushBubble("system", `TTS failed: ${err?.message || err}`);
+		setState("listening");
+	}
+}
+
 function updateReplayButton() {
 	replayBtn.classList.toggle("hidden", !interruptedReplay.hasReplay());
 }
@@ -516,8 +633,10 @@ function stopCapture() {
 async function connect() {
 	if (ws) return;
 	setState("connecting");
-	await ensureAudio();
-	await startCapture();
+	if (!cascadeOn) {
+		await ensureAudio();
+		await startCapture();
+	}
 	ws = new WebSocket(wsUrl());
 	ws.binaryType = "arraybuffer";
 	ws.addEventListener("open", () => {
@@ -526,6 +645,9 @@ async function connect() {
 	});
 	ws.addEventListener("message", async (event) => {
 		if (typeof event.data !== "string") {
+			// Cascade mode speaks replies through /v1/cascade/speak instead of the
+			// provider's live audio stream — ignore the frames entirely.
+			if (cascadeOn) return;
 			const decoded = decodeFrame(event.data);
 			if (!decoded) return;
 			lastServerSeq = Math.max(lastServerSeq, decoded.seq);
@@ -585,7 +707,13 @@ async function connect() {
 		}
 		if (msg.type === "transcript_complete") {
 			if (msg.role === "user") finishUserTranscript();
-			else finishTranscript(msg.role);
+			else {
+				// Cascade TTS leg: speak the completed assistant turn through the
+				// server TTS chain. Grab the buffer before finishTranscript clears it.
+				const spoken = cascadeOn && msg.role === "assistant" ? transcriptBuffers.assistant.trim() : "";
+				finishTranscript(msg.role);
+				if (spoken) void speakCascade(spoken);
+			}
 			if (msg.role === "assistant") interruptedReplay.discardCurrent();
 			return;
 		}
@@ -635,6 +763,8 @@ async function connect() {
 		pendingTextEchoes.length = 0;
 		ws = null;
 		stopCapture();
+		stopCascadeRecording();
+		stopCascadePlayback();
 		clearPlayback();
 		interruptedReplay.clear();
 		updateReplayButton();
@@ -657,6 +787,8 @@ function teardown() {
 	pendingTextEchoes.length = 0;
 	updateComposerAvailability();
 	stopCapture();
+	stopCascadeRecording();
+	stopCascadePlayback();
 	clearPlayback();
 	interruptedReplay.clear();
 	updateReplayButton();
@@ -719,6 +851,7 @@ async function sendCameraFrame(callId, reason) {
 orb.addEventListener("click", async () => {
 	try {
 		if (state === "idle" || state === "error") await connect();
+		else if (cascadeOn) await toggleCascadeRecording();
 		else teardown();
 	} catch (err) {
 		liveConnected = false;
@@ -727,6 +860,16 @@ orb.addEventListener("click", async () => {
 		subcaption.textContent = String(err?.message || err);
 	}
 });
+
+cascadeBtn.addEventListener("click", () => {
+	cascadeOn = !cascadeOn;
+	localStorage.setItem(CASCADE_KEY, String(cascadeOn));
+	updateCascadeButton();
+	// Switching modes mid-session changes the audio path, so force a clean
+	// reconnect on the next orb tap rather than mixing live and cascade audio.
+	if (liveConnected || ws) teardown();
+});
+updateCascadeButton();
 
 stopBtn.addEventListener("click", () => teardown());
 replayBtn.addEventListener("click", () => {

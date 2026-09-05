@@ -777,18 +777,22 @@ What it is good at:
 - requesting the Telegram pair code
 - sending short text turns
 - listing Herdr live sessions and sending focus / prompt / resume actions
+- launching a workspace, retrieving the active Collab collaborator/view-only links, and opening the collaborator link on the PC
 
 What it is not good at:
 
 - full remote voice capture
 - browser-style audio playback
 - low-latency conversational audio
+- opening arbitrary links in the Unified Remote phone client's browser or writing its clipboard (the custom-remote client API exposes neither operation)
 
 Auth and transport:
 
 - All `/v1/*` routes require the install token. The remote reads it from `%LOCALAPPDATA%\pi-speak\http-token` (same file the tray uses) and sends it as `X-Pi-Speak-Token`. If the file cannot be read from the Unified Remote sandbox, paste the token into `CONFIG.token` at the top of `remote.lua` (`/remote token` prints it).
 - Mutating routes are called with `POST`; status routes stay `GET`.
 - The **Sessions** tab drives `/v1/sessions/live`: refresh lists Herdr agent sessions (`*` = focused, `>` = selected), tapping selects, and the Focus / Prompt / Resume buttons act on the selection, sending the current revision plus an `X-Pi-Speak-Idempotency-Key` so phone retries cannot double-submit.
+- The **Collab** tab calls `POST /v1/sessions/launch` with `targetNode: "colab"` and an optional workspace, then reads the active handoff from `GET /v1/collab-link`. **Refresh Link** displays collaborator and view-only URLs in the dedicated link field; **Open on PC** uses the Windows host's default browser and is intentionally not labeled as phone Join. The gateway and remote both reject links outside the exact `https://oh-my-pk.pkking.computer` origin, and the endpoint returns `Cache-Control: no-store`. The custom remote itself keeps accepted links only in Lua memory/UI and never writes or logs them; the gateway still reads the collaboration producer's existing `%LOCALAPPDATA%\pi-speak\collab.json` handoff file.
+- Unified Remote HTTP calls use the documented asynchronous `http.request(request, callback)` API with a 15-second timeout. Collab operations synchronously clear cached links while pending and ignore superseded callbacks; overlapping prompt callbacks update the single reply field only for the latest request.
 
 ## Environment Variables
 

@@ -11,7 +11,8 @@ import { clearRootVoiceDisable, enableRootVoiceDisable, getOrCreateInstallAuthTo
 import Bonjour from "bonjour-service";
 import { WebSocketServer, WebSocket } from "ws";
 import "./realtime-types.js";
-import { abortAllActiveTTS } from "./tts.js";
+import { abortAllActiveTTS, getAudioMimeType, synthesizeToFile } from "./tts.js";
+import { transcribeAudioBuffer } from "./stt.js";
 import { BusyError, type RemoteTurnSource, RemoteTurnResult } from "./remote-turn-manager.js";
 import type { ExecutionTraceOutcome } from "./conversation-execution-trace.js";
 import { readExecutionPlans, readExecutionTraces } from "./conversation-execution-trace.js";
@@ -23,13 +24,23 @@ import { createDiskFallbackBinding } from "./herdr-agent-hub-disk.js";
 import { AgentHubGateway, type AgentHubBinding } from "./herdr-agent-hub-gateway.js";
 import { parseHubAgentId, parseHubChatRequest, parseHubKillConfirm } from "./herdr-agent-hub-schema.js";
 import { buildOhMyPiAgentHubDashboardCached } from "./agent-hub-dashboard.js";
+import { createSessionWorkspaceService, type SessionWorkspaceService } from "./session-workspace.js";
 import { isWebSearchConfigured, runWebSearch } from "./web-search.js";
 import { resolveLiveBackendKind } from "./live-backend.js";
 import { canonicalRealtimeSessionPath } from "./realtime-session-target.js";
 import { discoverTailnetGateways } from "./gateway-discovery.js";
 import { verifyTailscalePeer, type TailscalePeerVerifier } from "./tailscale-peer-auth.js";
+import {
+	HubTaskConflictError,
+	HubTaskNotFoundError,
+	HubTaskRevisionError,
+	HubTaskService,
+	HubTaskValidationError,
+	type CreateHubTaskInput,
+} from "./herdr-task-service.js";
 
 const DEFAULT_WINDOWS_WORKSPACE = "C:\\Dev";
+const COLLAB_LINK_ORIGIN = "https://oh-my-pk.pkking.computer";
 
 export type ControlServerState = {
 
@@ -294,10 +305,14 @@ export type ControlServerOptions = {
 	readHerdrPane?: (paneId: string | undefined, lines: number | undefined) => Promise<HerdrPaneReadResult>;
 	sendHerdrPane?: (payload: HerdrPaneSendPayload | undefined) => Promise<ControlActionResult>;
 	sendHerdrAgent?: (payload: HerdrAgentSendPayload | undefined) => Promise<ControlActionResult>;
+	sessionWorkspace?: SessionWorkspaceService;
 	tailSessionEvents?: (sinceOffset: number) => { events: unknown[]; nextOffset: number };
 	agentHub?: AgentHubBinding;
+	hubTaskService?: HubTaskService;
 	onRealtimeConnection?: (ws: WebSocket) => void;
 	isTrustedTailnetPeer?: TailscalePeerVerifier;
+	/** Trust Tailscale Serve identity headers from the loopback proxy. Off by default because loopback alone cannot attest the proxy. */
+	trustTailscaleServeProxy?: boolean;
 	onBrainstorm?: (
 		buffer: Buffer,
 		mimeType: string | undefined,
@@ -435,8 +450,10 @@ export class ControlServer {
 	private readonly readHerdrPane: NonNullable<ControlServerOptions["readHerdrPane"]>;
 	private readonly sendHerdrPane: NonNullable<ControlServerOptions["sendHerdrPane"]>;
 	private readonly sendHerdrAgent: NonNullable<ControlServerOptions["sendHerdrAgent"]>;
+	private readonly sessionWorkspace: SessionWorkspaceService;
 	private readonly onRealtimeConnection?: ControlServerOptions["onRealtimeConnection"];
 	private readonly isTrustedTailnetPeer: TailscalePeerVerifier;
+	private readonly trustTailscaleServeProxy: boolean;
 	private readonly onBrainstorm?: ControlServerOptions["onBrainstorm"];
 	private wss?: WebSocketServer;
 	private readonly realtimeClients = new Set<WebSocket>();
@@ -447,6 +464,7 @@ export class ControlServer {
 	private readonly portRetries: number;
 	private readonly _agentHubGateway: AgentHubGateway;
 	private readonly agentHubCanMutate: boolean;
+	private readonly hubTaskService?: HubTaskService;
 	private lastRemoteClient?: { at: number; agent?: string; address?: string };
 	private readonly allowedOrigins = parseAllowedOrigins(process.env.PI_SPEAK_HTTP_ALLOWED_ORIGINS || "");
 	private readonly discoveryDiagnostics: DiscoveryDiagnostics = {
@@ -496,11 +514,15 @@ export class ControlServer {
 		this.readHerdrPane = options.readHerdrPane || ((paneId, lines) => readHerdrPane(paneId, lines));
 		this.sendHerdrPane = options.sendHerdrPane || ((payload) => sendHerdrPane(payload));
 		this.sendHerdrAgent = options.sendHerdrAgent || ((payload) => sendHerdrAgent(payload));
+		this.sessionWorkspace = options.sessionWorkspace || createSessionWorkspaceService();
 		this.tailSessionEvents = options.tailSessionEvents;
 		this.onRealtimeConnection = options.onRealtimeConnection;
 		this.isTrustedTailnetPeer = options.isTrustedTailnetPeer ?? verifyTailscalePeer;
+		this.trustTailscaleServeProxy = options.trustTailscaleServeProxy
+			?? process.env.PI_SPEAK_TRUST_TAILSCALE_SERVE_PROXY === "1";
 		this._agentHubGateway = new AgentHubGateway(options.agentHub ?? createDiskFallbackBinding(() => buildOhMyPiAgentHubDashboardCached()));
 		this.agentHubCanMutate = options.agentHub?.canMutate === true;
+		this.hubTaskService = options.hubTaskService;
 		this.onBrainstorm = options.onBrainstorm;
 	}
 
@@ -938,6 +960,48 @@ export class ControlServer {
 			return;
 		}
 
+		{
+			const liveSessionMatch = /^\/v1\/sessions\/live(?:\/([^/]+)(?:\/(stream|prompt|focus|resume))?)?$/.exec(url.pathname);
+			if (liveSessionMatch) {
+				const sessionId = liveSessionMatch[1] ? decodeURIComponent(liveSessionMatch[1]) : undefined;
+				const action = liveSessionMatch[2];
+				if (req.method === "GET" && !sessionId) {
+					this.writeJson(res, 200, { ok: true, workspace: await this.sessionWorkspace.snapshot() });
+					return;
+				}
+				if (!sessionId) {
+					this.writeJson(res, 404, { ok: false, code: "not_found", error: "Unknown session workspace route." });
+					return;
+				}
+				if (req.method === "GET" && !action) {
+					const result = await this.sessionWorkspace.detail(sessionId, parsePositiveInt(url.searchParams.get("lines"), 80));
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+				if (req.method === "GET" && action === "stream") {
+					await this.sessionWorkspace.stream(sessionId, res, parsePositiveInt(url.searchParams.get("lines"), 40));
+					return;
+				}
+				if (req.method === "POST" && (action === "prompt" || action === "focus" || action === "resume")) {
+					const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+					if (!payload) {
+						this.writeJson(res, 400, { ok: false, code: "bad_request", error: "Invalid JSON body." });
+						return;
+					}
+					const idempotencyKey = getPrimaryHeaderValue(req.headers["x-pi-speak-idempotency-key"]);
+					const result = action === "prompt"
+						? await this.sessionWorkspace.prompt(sessionId, payload.text, payload.expectedRevision, idempotencyKey)
+						: action === "focus"
+							? await this.sessionWorkspace.focus(sessionId, payload.expectedRevision, idempotencyKey)
+							: await this.sessionWorkspace.resume(sessionId, payload.expectedRevision, idempotencyKey);
+					this.writeJson(res, result.ok ? 200 : result.status, result);
+					return;
+				}
+				this.writeJson(res, 405, { ok: false, code: "method_not_allowed", error: "Unsupported session workspace method." });
+				return;
+			}
+		}
+
 		if (req.method === "GET" && url.pathname === "/v1/herdr") {
 			this.writeJson(res, 200, { ok: true, herdr: await this.getHerdrSnapshot() });
 			return;
@@ -961,6 +1025,94 @@ export class ControlServer {
 		if (req.method === "GET" && url.pathname === "/v1/herdr/agents") {
 			const snapshot = await this._agentHubGateway.snapshot();
 			this.writeJson(res, 200, { ok: true, generatedAtMs: Date.now(), ...snapshot });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/herdr/service") {
+			if (!this.hubTaskService) {
+				this.writeJson(res, 501, { ok: false, code: "task_service_unavailable", error: "Herdr task service is not available on this server." });
+				return;
+			}
+			this.writeJson(res, 200, { ok: true, service: this.hubTaskService.getServiceInfo() });
+			return;
+		}
+
+		if (req.method === "GET" && url.pathname === "/v1/herdr/tasks") {
+			if (!this.hubTaskService) {
+				this.writeJson(res, 501, { ok: false, code: "task_service_unavailable", error: "Herdr task service is not available on this server." });
+				return;
+			}
+			const snapshot = this.hubTaskService.getSnapshot();
+			this.writeJson(res, 200, {
+				ok: true,
+				apiVersion: 1,
+				serviceId: snapshot.serviceId,
+				executorId: snapshot.executorId,
+				revision: snapshot.revision,
+				tasks: snapshot.tasks,
+			});
+			return;
+		}
+
+		{
+			const taskMatch = /^\/v1\/herdr\/tasks\/([^/]+)$/.exec(url.pathname);
+			if (req.method === "GET" && taskMatch) {
+				if (!this.hubTaskService) {
+					this.writeJson(res, 501, { ok: false, code: "task_service_unavailable", error: "Herdr task service is not available on this server." });
+					return;
+				}
+				try {
+					const task = this.hubTaskService.getTask(decodeURIComponent(taskMatch[1] ?? ""));
+					this.writeJson(res, 200, { ok: true, task });
+				} catch (error) {
+					if (error instanceof HubTaskNotFoundError) {
+						this.writeJson(res, 404, { ok: false, code: "not_found", error: error.message });
+						return;
+					}
+					throw error;
+				}
+				return;
+			}
+		}
+
+		if (req.method === "POST" && url.pathname === "/v1/herdr/tasks") {
+			if (!this.hubTaskService) {
+				this.writeJson(res, 501, { ok: false, code: "task_service_unavailable", error: "Herdr task service is not available on this server." });
+				return;
+			}
+			const payload = await this.readJsonObject(req, TEXT_BODY_LIMIT_BYTES);
+			if (!payload) {
+				this.writeJson(res, 400, { ok: false, code: "bad_request", error: "Invalid JSON body." });
+				return;
+			}
+			try {
+				const result = this.hubTaskService.createTask(
+					payload as CreateHubTaskInput,
+					getPrimaryHeaderValue(req.headers["x-pi-speak-idempotency-key"]) || "",
+				);
+				const service = this.hubTaskService.getServiceInfo();
+				this.writeJson(res, result.created ? 201 : 200, {
+					ok: true,
+					created: result.created,
+					commandId: result.commandId,
+					revision: service.revision,
+					task: result.task,
+				});
+			} catch (error) {
+				if (error instanceof HubTaskValidationError) {
+					this.writeJson(res, 400, { ok: false, code: "bad_request", error: error.message });
+					return;
+				}
+				if (error instanceof HubTaskRevisionError) {
+					this.writeJson(res, 412, { ok: false, code: "revision_mismatch", error: error.message });
+					return;
+				}
+				if (error instanceof HubTaskConflictError) {
+					this.writeJson(res, 409, { ok: false, code: "idempotency_conflict", error: error.message });
+					return;
+				}
+				throw error;
+			}
 			return;
 		}
 
@@ -1048,6 +1200,7 @@ export class ControlServer {
 		}
 
 		if (req.method === "GET" && url.pathname === "/v1/collab-link") {
+			res.setHeader("Cache-Control", "no-store");
 			this.writeJson(res, 200, { ok: true, collab: readCollabLink() });
 			return;
 		}
@@ -1469,10 +1622,16 @@ export class ControlServer {
 
 		if (url.pathname === "/connect" || url.pathname === "/connect/") {
 			// The connect page renders the pairing QR (which embeds the auth token),
-			// so it is strictly loopback-only: the desktop window on this machine.
+			// so it is both loopback-only and token-authenticated. A loopback socket
+			// alone is not proof of locality because Serve, Funnel, and other reverse
+			// proxies also connect to their backend over loopback.
 			const remote = normalizeRemoteAddress(req.socket.remoteAddress || "");
 			if (!isLoopback(remote) || !isLoopbackHost(url.hostname)) {
 				this.writeJson(res, 403, { ok: false, error: "The connect page is only available on this machine (open http://127.0.0.1 locally)." });
+				return true;
+			}
+			if (!(await this.isAuthorized(req, url, true))) {
+				this.writeJson(res, 401, { ok: false, error: "Unauthorized" });
 				return true;
 			}
 			await this.handleConnectPage(req, url, res);
@@ -1760,6 +1919,7 @@ export class ControlServer {
 				workspaceFile: "/v1/workspace/file",
 				collabLink: "/v1/collab-link",
 				sessions: "/v1/sessions",
+				sessionWorkspace: "/v1/sessions/live",
 				sessionLaunch: "/v1/sessions/launch",
 				hubPublish: "/v1/hub/publish",
 				hubResume: "/v1/hub/resume",
@@ -1798,6 +1958,7 @@ export class ControlServer {
 				"pwa",
 				"android-apk",
 				"session-dashboard",
+				"herdr-session-workspace",
 				"route-slots",
 				"session-mutations",
 				"agent-discovery",
@@ -2014,9 +2175,11 @@ export class ControlServer {
 	 * speech mode. Separate from /v1/speak (which drives the extension's
 	 * speakState). Body is raw audio bytes only — never accepts a path —
 	 * to avoid turning the gateway into an arbitrary local-file reader.
+	 * Also hosts the /v1/cascade/* STT/TTS legs for orb cascade mode; the
+	 * transcribe leg never accepts a path either (bytes in, text out).
 	 */
 	private async handleSpeechRoute(req: IncomingMessage, res: ServerResponse, url: URL) {
-		if (!url.pathname.startsWith("/v1/speech/")) return false;
+		if (!url.pathname.startsWith("/v1/speech/") && !url.pathname.startsWith("/v1/cascade/")) return false;
 
 		// GET /v1/speech/staged/:id — orb fetches metadata + audio URL.
 		if (req.method === "GET" && url.pathname.startsWith("/v1/speech/staged/")) {
@@ -2116,6 +2279,85 @@ export class ControlServer {
 			return true;
 		}
 
+		// POST /v1/cascade/transcribe — STT leg of cascade mode: the orb (or any
+		// client) posts one audio clip and gets back its transcript, then injects it
+		// into /v1/live as a text turn. Unlike /v1/turn/voice this never touches the
+		// pi session — it is transcription only, for the realtime cascade.
+		if (req.method === "POST" && url.pathname === "/v1/cascade/transcribe") {
+			const mimeType = (getPrimaryHeaderValue(req.headers["content-type"]) || "").toLowerCase();
+			if (!mimeType.startsWith("audio/")) {
+				this.writeJson(res, 415, { ok: false, error: `Expected an audio/* content type, got: ${mimeType || "unknown"}.` });
+				return true;
+			}
+			const buffer = await this.readBinaryBody(req, SPEECH_ARTIFACT_BODY_LIMIT_BYTES);
+			if (buffer.byteLength === 0) {
+				this.writeJson(res, 400, { ok: false, error: "Empty audio body." });
+				return true;
+			}
+			try {
+				const result = await transcribeAudioBuffer(buffer, mimeType);
+				this.writeJson(res, 200, {
+					ok: true,
+					text: result.text,
+					provider: result.provider,
+					durationMs: result.durationMs,
+					...(result.fallback ? { fallback: result.fallback } : {}),
+				});
+			} catch (error) {
+				this.writeJson(res, 502, { ok: false, error: `Transcription failed: ${getErrorMessage(error)}` });
+			}
+			return true;
+		}
+
+		// POST /v1/cascade/speak — TTS leg of cascade mode: synthesize assistant text
+		// through the configured provider chain and stage it exactly like terminal-
+		// initiated speech, so clients get the same artifact/playback contract.
+		if (req.method === "POST" && url.pathname === "/v1/cascade/speak") {
+			const body = await this.readBinaryBody(req, SPEECH_TEXT_LIMIT_BYTES + 4096);
+			let text = "";
+			try {
+				text = String(JSON.parse(body.toString("utf8"))?.text ?? "");
+			} catch {
+				this.writeJson(res, 400, { ok: false, error: "Expected a JSON body with a text field." });
+				return true;
+			}
+			if (!text.trim()) {
+				this.writeJson(res, 400, { ok: false, error: "Empty text." });
+				return true;
+			}
+			if (Buffer.byteLength(text, "utf8") > SPEECH_TEXT_LIMIT_BYTES) {
+				this.writeJson(res, 400, { ok: false, error: `Speech text exceeds ${SPEECH_TEXT_LIMIT_BYTES}-byte limit.` });
+				return true;
+			}
+			try {
+				const cleanupDir = await mkdtemp(join(tmpdir(), "pi-speak-speech-"));
+				const outputPath = join(cleanupDir, "speech.mp3");
+				const result = await synthesizeToFile({ text, outputPath });
+				const id = randomUUID();
+				const artifact: SpeechArtifact = {
+					id,
+					path: outputPath,
+					mimeType: getAudioMimeType(outputPath),
+					expiresAt: Date.now() + SPEECH_ARTIFACT_TTL_MS,
+					text,
+					createdAt: Date.now(),
+					cleanupDir,
+				};
+				this.speechArtifacts.set(id, artifact);
+				this.writeJson(res, 200, {
+					ok: true,
+					id,
+					provider: result.provider,
+					audioUrl: `/v1/speech/audio/${id}`,
+					stagedUrl: `/v1/speech/staged/${id}`,
+					expiresAt: artifact.expiresAt,
+				});
+			} catch (error) {
+				this.writeJson(res, 502, { ok: false, error: `Speech synthesis failed: ${getErrorMessage(error)}` });
+			}
+			return true;
+		}
+
 		// POST /v1/speech/disable — flips the hard-stop sentinel so future
 		// terminal-initiated TTS no-ops. Idempotent.
 		if (req.method === "POST" && url.pathname === "/v1/speech/disable") {
@@ -2168,7 +2410,6 @@ export class ControlServer {
 	private async isAuthorized(req: IncomingMessage, url: URL, allowQueryToken: boolean) {
 		const token = this.state.authToken || "";
 		if (!token) return true;
-		if (isLocalRequest(req, url)) return true;
 		// Accept any token from PI_SPEAK_EXTRA_TOKEN (comma-separated) in addition to the primary.
 		const extraTokens = (process.env.PI_SPEAK_EXTRA_TOKEN || "")
 			.split(",").map(t => t.trim()).filter(Boolean);
@@ -2189,10 +2430,12 @@ export class ControlServer {
 	private async isTrustedTailnetRequest(req: IncomingMessage) {
 		const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress || "");
 		if (!remoteAddress) return false;
+		if (isTruthy(getPrimaryHeaderValue(req.headers["tailscale-funnel-request"]) || null)) return false;
 		const serveLogin = (getPrimaryHeaderValue(req.headers["tailscale-user-login"]) || "").trim();
 		const requestHost = getPrimaryHeaderValue(req.headers.host) || "";
 		if (
-			serveLogin
+			this.trustTailscaleServeProxy
+			&& serveLogin
 			&& serveLogin.length <= 512
 			&& isLoopback(remoteAddress)
 			&& isLoopbackHost(this.state.host || "")
@@ -2420,7 +2663,7 @@ export class ControlServer {
 		if (!allowed) return;
 		res.setHeader("Access-Control-Allow-Origin", origin);
 		res.setHeader("Vary", "Origin");
-		res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Pi-Speak-Token");
+		res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Pi-Speak-Token, X-Pi-Speak-Idempotency-Key");
 		res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 	}
 
@@ -2838,7 +3081,11 @@ function copySetup() {
 	if (navigator.clipboard) { navigator.clipboard.writeText(text); }
 }
 function poll() {
-	fetch("/v1/pairing/status", { cache: "no-store" })
+	var token = new URLSearchParams(window.location.search).get("token") || "";
+	fetch("/v1/pairing/status", {
+		cache: "no-store",
+		headers: token ? { "X-Pi-Speak-Token": token } : {}
+	})
 		.then(function (res) { return res.json(); })
 		.then(function (data) {
 			var client = data && data.lastRemoteClient;
@@ -3198,6 +3445,24 @@ export function readWorkspaceFile(requestedPath?: string): WorkspaceFileResult {
 	};
 }
 
+function approvedCollabLink(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (!trimmed) return undefined;
+	try {
+		const parsed = new URL(trimmed);
+		if (parsed.protocol !== "https:"
+			|| parsed.origin !== COLLAB_LINK_ORIGIN
+			|| parsed.username
+			|| parsed.password) {
+			return undefined;
+		}
+		return trimmed;
+	} catch {
+		return undefined;
+	}
+}
+
 function readCollabLink(): CollabLinkSnapshot {
 	try {
 		const file = join(getPiSpeakConfigDir(), "collab.json");
@@ -3205,11 +3470,18 @@ function readCollabLink(): CollabLinkSnapshot {
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
 			return { active: false };
 		}
-		const snapshot: CollabLinkSnapshot = { active: !!parsed.active };
-		if (typeof parsed.webLink === "string") snapshot.webLink = parsed.webLink;
-		if (typeof parsed.webViewLink === "string") snapshot.webViewLink = parsed.webViewLink;
-		if (typeof parsed.link === "string") snapshot.link = parsed.link;
-		if (typeof parsed.viewLink === "string") snapshot.viewLink = parsed.viewLink;
+
+		const legacyLink = approvedCollabLink(parsed.link);
+		const legacyViewLink = approvedCollabLink(parsed.viewLink);
+		const webLink = approvedCollabLink(parsed.webLink) ?? legacyLink;
+		const webViewLink = approvedCollabLink(parsed.webViewLink) ?? legacyViewLink;
+		const snapshot: CollabLinkSnapshot = {
+			active: !!parsed.active && !!webLink,
+		};
+		if (webLink) snapshot.webLink = webLink;
+		if (webViewLink) snapshot.webViewLink = webViewLink;
+		if (legacyLink) snapshot.link = legacyLink;
+		if (legacyViewLink) snapshot.viewLink = legacyViewLink;
 		if (typeof parsed.view === "boolean") snapshot.view = parsed.view;
 		if (typeof parsed.startedAt === "string") snapshot.startedAt = parsed.startedAt;
 		return snapshot;

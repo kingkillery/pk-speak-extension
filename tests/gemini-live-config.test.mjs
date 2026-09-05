@@ -30,11 +30,24 @@ test("PI_SPEAK_GEMINI_LIVE_MODEL override wins on either backend", () => {
 
 test("Gemini options put the verified Vertex Live model first", () => {
 	assert.equal(live.GEMINI_LIVE_MODEL_OPTIONS[0], "gemini-live-2.5-flash");
-	assert.equal(live.GEMINI_TEXT_MODEL_OPTIONS[0], "gemini-3.5-flash");
+	assert.equal(live.GEMINI_TEXT_MODEL_OPTIONS[0], "gemini-3.6-flash");
 	assert.ok(live.GEMINI_TEXT_MODEL_OPTIONS.includes("9router/ag/gemini-3-5-flash-high"));
 	assert.ok(live.GEMINI_LIVE_MODEL_OPTIONS.includes("gemini-3.1-flash-live-preview"));
 	assert.ok(live.GEMINI_LIVE_MODEL_OPTIONS.includes("gemini-live-2.5-flash-native-audio"));
 	assert.deepEqual(live.GEMINI_TTS_MODEL_OPTIONS, ["gemini-3.1-flash-tts-preview"]);
+});
+
+test("current Vertex text and live models use global unless explicitly overridden", () => {
+	assert.equal(live.getGeminiVertexLocation(VERTEX_ENV, "text"), "global");
+	assert.equal(live.getGeminiVertexLocation(VERTEX_ENV, "live"), "global");
+	assert.equal(
+		live.getGeminiVertexLocation({ ...VERTEX_ENV, PI_SPEAK_VERTEX_TEXT_LOCATION: "us-east5" }, "text"),
+		"us-east5",
+	);
+	assert.equal(
+		live.getGeminiVertexLocation({ ...VERTEX_ENV, PI_SPEAK_VERTEX_LIVE_LOCATION: "europe-west4" }, "live"),
+		"europe-west4",
+	);
 });
 
 test("apiVersion is backend-aware: vertex v1beta1, developer-api v1beta", () => {

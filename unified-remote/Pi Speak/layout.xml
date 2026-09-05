@@ -41,6 +41,22 @@
 				<button text="Clear" ontap="clear_session_prompt" />
 			</row>
 		</tab>
+		<tab text="Collab">
+			<row weight="wrap">
+				<text id="collabworkspace" hint="Optional workspace path..." onchange="set_collab_workspace" />
+			</row>
+			<row weight="wrap">
+				<button text="Launch Workspace" ontap="collab_launch" />
+				<button text="Refresh Link" ontap="collab_refresh" />
+				<button text="Open on PC" ontap="collab_open_host" />
+			</row>
+			<row weight="wrap">
+				<label id="collabstatus" text="Refresh to check for an active Collab link." />
+			</row>
+			<row weight="2">
+				<text id="collablink" hint="No active Collab link." multiLine="true" />
+			</row>
+		</tab>
 		<tab text="Control">
 			<row>
 				<button text="Mono On" ontap="mono_on" />

@@ -48,10 +48,10 @@ function addressWithoutPrefix(value: unknown): string {
 }
 
 function isFunnelIngress(node: JsonRecord): boolean {
-	if (node.ShareeNode === true) return true;
+	const hostinfo = isRecord(node.Hostinfo) ? node.Hostinfo : undefined;
+	if (node.ShareeNode === true || hostinfo?.ShareeNode === true) return true;
 	const tags = Array.isArray(node.Tags) ? node.Tags : [];
 	if (tags.some((tag) => typeof tag === "string" && tag.toLowerCase() === "tag:ingress")) return true;
-	const hostinfo = isRecord(node.Hostinfo) ? node.Hostinfo : undefined;
 	const names = [node.Name, node.ComputedName, node.ComputedNameWithHost, hostinfo?.Hostname];
 	return names.some((name) => typeof name === "string" && name.toLowerCase().startsWith("funnel-ingress-node"));
 }
